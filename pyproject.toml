@@ -1,0 +1,155 @@
+[project]
+name = "django-guitars"
+version = "0.1.0"
+description = "A reusable Django app for cataloging guitars."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Behnam RK", email = "behnam.rk47@gmail.com" },
+]
+keywords = ["django", "guitars", "reusable-app"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Web Environment",
+    "Framework :: Django",
+    "Framework :: Django :: 5.0",
+    "Framework :: Django :: 5.1",
+    "Framework :: Django :: 5.2",
+    "Framework :: Django :: 6.0",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+dependencies = [
+    "Django>=5.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Behnam-RK/django-guitars"
+Repository = "https://github.com/Behnam-RK/django-guitars"
+Issues = "https://github.com/Behnam-RK/django-guitars/issues"
+Changelog = "https://github.com/Behnam-RK/django-guitars/blob/main/CHANGELOG.md"
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.5.1",
+    "ruff>=0.15.11",
+    "ty>=0.0.34",
+    "bandit[toml]>=1.9",
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.3.0",
+    "pytest-cov>=7.0",
+    "pytest-xdist>=3.8",
+    "pytest-django>=4.9",
+    "psycopg[binary]>=3.2",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# Ship ONLY the app: maps src/guitars -> top-level `guitars` in the wheel.
+# core/, manage.py, and tests/ are excluded from the wheel automatically.
+[tool.hatch.build.targets.wheel]
+packages = ["src/guitars"]
+
+# Explicit sdist allow-list. Without commits hatchling walks the filesystem, so
+# without this it ships session/tooling junk (.remember/, caches). This includes
+# enough to rebuild the wheel AND run the test suite from the sdist.
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/core",
+    "/tests",
+    "/manage.py",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/LICENSE",
+]
+
+# **************************** UV Configuration *************************** #
+
+[tool.uv]
+required-version = ">=0.11.8"
+add-bounds = "major"
+
+# *************************** TY Configuration *************************** #
+
+[tool.ty.src]
+exclude = ["tests"]
+
+[tool.ty.environment]
+python = ".venv/bin/python"
+
+# ************************** Ruff Configuration ************************** #
+
+[tool.ruff]
+line-length = 99
+indent-width = 4
+target-version = "py310"
+src = ["src"]
+exclude = ["tests"]
+
+[tool.ruff.lint]
+fixable = ["I"]
+extend-select = [
+    "UP", # pyupgrade
+    "F", # pyflakes
+    "B", # flake8-bugbear
+    "C4", # flake8-comprehensions
+    "ASYNC", # flake8-async
+    "DJ", # flake8-django
+    "T100", # https://docs.astral.sh/ruff/rules/#flake8-debugger-t10
+    "T2", # https://docs.astral.sh/ruff/rules/#flake8-print-t20
+    "TD", # https://docs.astral.sh/ruff/rules/#flake8-todos-td
+    "UP", # https://docs.astral.sh/ruff/rules/#pyupgrade-up
+    "I", # https://docs.astral.sh/ruff/rules/#isort-i
+    "N", # https://docs.astral.sh/ruff/rules/#pep8-naming-n
+]
+
+[tool.ruff.lint.isort]
+lines-after-imports = 2
+
+[tool.ruff.format]
+line-ending = "auto"
+quote-style = "single"
+indent-style = "space"
+skip-magic-trailing-comma = false
+docstring-code-format = true
+docstring-code-line-length = 92
+
+# ************************* PyTest Configuration ************************* #
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "tests.settings"
+asyncio_mode = "auto"
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+testpaths = ["tests"]
+addopts = "-q --no-header --tb=short -ra --strict-markers --strict-config --junit-xml=.pytest-last.xml"
+xfail_strict = true
+filterwarnings = ["error"]
+
+# ************************ Coverage Configuration ************************ #
+
+[tool.coverage.run]
+source = ["guitars"]
+omit = [
+    "tests/*",
+]
+
+[tool.coverage.report]
+show_missing = true

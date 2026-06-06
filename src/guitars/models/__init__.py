@@ -1,4 +1,11 @@
-from .base import GuitarModel, SetarModel
+from .base import (
+    DatedModel,
+    DutarModel,
+    GuitarModel,
+    HasCachedPropertyModel,
+    SetarModel,
+    UpdatableModel,
+)
 from .soft_deletion import (
     AllObjectsManager,
     ArchiveManager,
@@ -12,10 +19,14 @@ from .soft_deletion import (
 __all__ = [
     'AllObjectsManager',
     'ArchiveManager',
+    'DatedModel',
+    'DutarModel',
     'GuitarModel',
     'HardDeletableQuerySet',
+    'HasCachedPropertyModel',
     'LiveManager',
     'LiveQuerySet',
     'SetarModel',
     'SoftDeletableModel',
+    'UpdatableModel',
 ]

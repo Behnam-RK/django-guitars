@@ -4,7 +4,7 @@ import pytest
 from asgiref.sync import async_to_sync
 from django.db import transaction
 
-from tests.testapp.models import Band, Genre
+from tests.testapp.models import Band, Genre, Riff
 
 
 @pytest.mark.django_db
@@ -143,3 +143,34 @@ def test_expire_cached_properties_directly():
     band.expire_cached_properties()
 
     assert band.shout == 'YES'
+
+
+# --- DutarModel: the lightest rung (update + cached-property invalidation) ---
+
+
+@pytest.mark.django_db
+def test_dutar_update_persists():
+    riff = Riff.objects.create(name='intro')
+
+    riff.update(name='outro')
+
+    riff.refresh_from_db()
+    assert riff.name == 'outro'
+
+
+@pytest.mark.django_db
+def test_dutar_cached_property_invalidated_on_refresh():
+    riff = Riff.objects.create(name='intro')
+    assert riff.shout == 'INTRO'  # caches
+
+    Riff.objects.filter(pk=riff.pk).update(name='outro')  # bypasses the instance
+    riff.refresh_from_db()
+
+    assert riff.shout == 'OUTRO'  # recomputed after refresh
+
+
+def test_dutar_has_no_timestamp_fields():
+    field_names = {f.name for f in Riff._meta.get_fields()}
+    assert '_created_at' not in field_names
+    assert '_updated_at' not in field_names
+    assert '_deleted_at' not in field_names

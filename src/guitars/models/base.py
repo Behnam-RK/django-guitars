@@ -157,11 +157,24 @@ class HasCachedPropertyModel(Model):
         return super().refresh_from_db(*args, **kwargs)
 
 
-class SetarModel(DatedModel, UpdatableModel, HasCachedPropertyModel):
+class DutarModel(UpdatableModel, HasCachedPropertyModel):
+    """The two-string rung: the ``.update()`` helper (``UpdatableModel``) and
+    cached-property invalidation (``HasCachedPropertyModel``), nothing else.
+
+    No timestamps, no soft deletion — the lightest base, for models that just
+    want the ergonomic helpers.
     """
-    Combines timestamps (``DatedModel``), the ``.update()`` helper
-    (``UpdatableModel``), and cached-property invalidation
-    (``HasCachedPropertyModel``).
+
+    class Meta:
+        abstract = True
+
+
+class SetarModel(DatedModel, DutarModel):
+    """The three-string rung: ``DutarModel`` plus database-managed timestamps
+    (``DatedModel``).
+
+    Adds ``_created_at`` / ``_updated_at`` on top of ``.update()`` and
+    cached-property invalidation.
     """
 
     class Meta:
@@ -204,7 +217,7 @@ class SetarModel(DatedModel, UpdatableModel, HasCachedPropertyModel):
 
 
 class GuitarModel(SetarModel, SoftDeletableModel):
-    """``SetarModel`` plus PostgreSQL soft deletion.
+    """The six-string rung: ``SetarModel`` plus PostgreSQL soft deletion.
 
     The recommended base for models that need timestamps, ``.update()``,
     cached-property invalidation, and soft deletion together. ``Meta``

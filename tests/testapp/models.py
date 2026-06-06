@@ -1,7 +1,21 @@
 from django.db.models import CASCADE, CharField, ForeignKey, ManyToManyField
 from django.utils.functional import cached_property
 
-from guitars.models import GuitarModel, SetarModel
+from guitars.models import DutarModel, GuitarModel, SetarModel
+
+
+class Riff(DutarModel):
+    """Basic helpers only (DutarModel) — no timestamps, no soft deletion."""
+
+    name = CharField(max_length=50)
+
+    def __str__(self) -> str:
+        return self.name
+
+    @cached_property
+    def shout(self) -> str:
+        """A cached_property used to test refresh-driven cache invalidation."""
+        return self.name.upper()
 
 
 class Genre(SetarModel):

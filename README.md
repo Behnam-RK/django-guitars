@@ -1,12 +1,16 @@
 # django-guitars
 
-> Django Reinhardt was one of the greatest guitarists who ever lived — so
-> **django-guitars** hands *the other* Django, the web framework, a better set
-> of guitars.
+🎸 *Django object-metadata the **database** enforces — not your `.save()` method.*
 
-A small, focused collection of **reusable Django utilities**: opinionated base
-models, PostgreSQL-enforced soft deletion, and the helpers that make them work.
-Use only the pieces you need.
+Most Django soft-delete and timestamp libraries live in Python: a signal here, a
+`save()` override there. It holds up right until a `bulk_update`, a raw `UPDATE`,
+or a `queryset.delete()` strolls straight past your code — and leaves the
+metadata lying.
+
+**django-guitars pushes that work down into PostgreSQL itself** — rules and
+triggers, not signals. So `_created_at` / `_updated_at` / `_deleted_at` stay
+honest no matter how a row gets touched: ORM, bulk, raw SQL, all of it. The
+database keeps score; you just write models. Use only the pieces you need.
 
 [![PyPI version](https://img.shields.io/pypi/v/django-guitars.svg)](https://pypi.org/project/django-guitars/)
 [![Python versions](https://img.shields.io/pypi/pyversions/django-guitars.svg)](https://pypi.org/project/django-guitars/)
@@ -16,8 +20,11 @@ Use only the pieces you need.
 
 - **Python** ≥ 3.10
 - **Django** ≥ 5.0 — uses `db_default`
-- **PostgreSQL** — soft deletion and the `updated_at` refresh are enforced by
-  PostgreSQL rules and triggers
+- **PostgreSQL** — currently the only supported backend; the soft-delete rule and
+  `_updated_at` trigger live in the database itself. Other backends are on the
+  roadmap.
+
+> **Status:** early days (alpha). The API may still shift between minor versions.
 
 ## Installation
 
@@ -34,15 +41,22 @@ INSTALLED_APPS = [
 ]
 ```
 
-## What's inside
+## Pick your instrument
 
-### Base models
+The base models are named after string instruments, fewest strings to most — and
+the strings *are* the feature ladder. (`du` = two, `se` = three in Persian; `tar`
+= "string". A guitar has six. Django Reinhardt, the jazz guitarist this whole
+package winks at, would approve.)
 
-| Base | What you get |
-| --- | --- |
-| `SetarModel` | `_created_at` / `_updated_at` (DB-default `NOW()`; `_updated_at` kept current by a PostgreSQL statement trigger, so it's accurate even for bulk/raw updates), `.update()` / `.aupdate()`, cached-property invalidation on `refresh_from_db()`, and `app_label()` / `model_name()` / `class_name()` helpers |
-| `GuitarModel` | Everything in `SetarModel` **plus** soft deletion (it is `SetarModel` + `SoftDeletableModel`) |
-| `SoftDeletableModel` | Soft deletion on its own |
+| Base | Strings | What you get |
+| --- | :---: | --- |
+| `DutarModel`  | 2 | `.update()` / `.aupdate()` and cached-property invalidation on `refresh_from_db()`. The featherweight — adds no columns. |
+| `SetarModel`  | 3 | Everything in `DutarModel` **plus** DB-managed `_created_at` / `_updated_at` (default `NOW()`; `_updated_at` is ridden by a statement trigger, so it's right even under bulk/raw updates) and `app_label()` / `model_name()` / `class_name()` helpers. |
+| `GuitarModel` | 6 | Everything in `SetarModel` **plus** PostgreSQL soft deletion. The full kit. |
+
+Prefer to tune your own chord? Each capability is a standalone mixin in
+`guitars.models`: `UpdatableModel`, `HasCachedPropertyModel`, `DatedModel`, and
+`SoftDeletableModel`.
 
 ```python
 from django.db import models
@@ -54,20 +68,25 @@ class Article(GuitarModel):
     title = models.CharField(max_length=200)
 ```
 
-The `.update()` helper sets attributes and saves in one call:
+### `.update()` — set and save in one strum
+
+Available on every rung (it comes from `DutarModel`):
 
 ```python
-article.update(title="New title")        # set fields + save (only changed fields)
+article.update(title="New title")         # set fields + save (only changed fields)
 article.update(title="x", _save=False)    # change in memory only, no DB write
 await article.aupdate(title="async")      # async variant
 ```
 
+> Note: attributes set with `_save=False` are **not** carried into a later
+> `_save=True` call unless you also pass `_save_all_fields=True`.
+
 ### Soft deletion
 
-For models inheriting `SoftDeletableModel` (or `GuitarModel`), `.delete()`
-becomes a **soft delete**: the row stays and `_deleted_at` is set. Because this
-is enforced by a PostgreSQL rule, it holds even for queryset bulk deletes and
-raw SQL. Three managers expose the data:
+For models inheriting `SoftDeletableModel` (or `GuitarModel`), `.delete()` becomes
+a **soft delete**: the row stays and `_deleted_at` is set. Because a PostgreSQL
+rule does the work, it holds even for queryset bulk deletes and raw SQL — there's
+no `.save()` to skip. Three managers expose the data:
 
 ```python
 Article.objects.all()         # live rows only (the default manager)
@@ -78,24 +97,25 @@ article.delete()              # soft delete — sets _deleted_at
 article.is_deleted            # True
 article.is_alive              # False
 
-# Permanently remove rows (and CASCADE-related rows), bypassing the rule:
-Article._all_objects.filter(...).hard_delete()
+# Actually want it gone? hard_delete bypasses the rule (and takes CASCADE kids with it):
+article.hard_delete()                           # this row + CASCADE children
+Article._all_objects.filter(...).hard_delete()  # in bulk
 ```
 
 Soft-deleting a row also soft-deletes rows related by `on_delete=CASCADE`.
 
-> ⚠️ **Required setup.** The soft-delete rule (and the `updated_at` trigger)
-> live in a migration generated by [`makeguitarmigrations`](#makeguitarmigrations).
+> ⚠️ **Required setup.** The soft-delete rule (and the `_updated_at` trigger) live
+> in a migration generated by [`makeguitarmigrations`](#makeguitarmigrations).
 > Until you run that command and `migrate`, **`.delete()` permanently deletes the
-> row** — the protection isn't active yet. Re-run it whenever you add or change a
-> model that uses these bases.
+> row** — the protection isn't wired up yet. Re-run it whenever you add or change
+> a model that uses these bases.
 
 ### `makeguitarmigrations`
 
 `makemigrations` does **not** create the triggers and rules — they live in
-separate migrations generated by this command, and this step is **required** for
-soft deletion and the `updated_at` trigger to work. After your usual
-`makemigrations`, run:
+separate migrations generated by this command, and it's **required** for soft
+deletion and the `_updated_at` trigger to work. After your usual `makemigrations`,
+run:
 
 ```bash
 python manage.py makeguitarmigrations
@@ -147,17 +167,10 @@ uv run pytest            # run the test suite
 uv run pytest --cov=guitars --cov-report=term-missing
 ```
 
-The test suite defines concrete models in `tests/testapp` (the shipped package
-is abstract-only) and runs against a real PostgreSQL database so the rules and
-triggers are actually exercised.
+The test suite defines concrete models in `tests/testapp` (the shipped package is
+abstract-only) and runs against a real PostgreSQL database, so the rules and
+triggers are actually exercised — not mocked.
 
 ## License
 
 [MIT](LICENSE) © 2026 Behnam RK
-
-## Why "guitars"?
-
-Django Reinhardt was a legendary jazz guitarist. This package gives the *other*
-Django — the web framework — some better guitars: a grab-bag of utilities that
-make everyday Django a little nicer. The base models keep the theme going with
-`SetarModel` and `GuitarModel`.

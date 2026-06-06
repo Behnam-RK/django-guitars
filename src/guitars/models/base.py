@@ -175,6 +175,11 @@ class SetarModel(DatedModel, DutarModel):
 
     Adds ``_created_at`` / ``_updated_at`` on top of ``.update()`` and
     cached-property invalidation.
+
+    Naming note: "se-tār" is Persian for "three strings", which is why this
+    rung sits at three. The modern instrument actually has four — a fourth
+    string was added in the 18th century (attributed to Moshtāq Ali Shāh).
+    The ladder follows the etymology, not the current string count.
     """
 
     class Meta:

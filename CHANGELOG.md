@@ -7,11 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.3.0] - 2026-06-11
 
+### Added
+
+- Interactive release tooling under `scripts/` (development only, not shipped
+  in the wheel): `bump.sh` bumps `pyproject.toml` and seeds a changelog
+  section; `release.sh` creates the git tag and GitHub release from the
+  matching changelog notes. Documented in `scripts/README.md`.
+
 ### Changed
 
 - `guitars.__version__` is now read from the installed package metadata
   (`importlib.metadata`) instead of a hardcoded string, making
   `pyproject.toml` the single source of truth for the version.
+
+### Documentation
+
+- `CLAUDE.md` repo guidance for contributors and AI assistants, plus a
+  "Releasing" section in the README.
+- Clarified the setar etymology (three strings by name) versus the model's
+  actual string-count ladder.
 
 ## [0.2.0] - 2026-06-06
 

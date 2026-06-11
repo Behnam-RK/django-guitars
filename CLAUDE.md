@@ -63,6 +63,17 @@ python manage.py makeguitarmigrations          # generate trigger/rule migration
 python manage.py makeguitarmigrations --check  # CI: fail if missing
 ```
 
+Releasing (interactive helpers, see `scripts/README.md`):
+
+```bash
+./scripts/bump.sh minor       # bump pyproject.toml + seed CHANGELOG, commit
+./scripts/release.sh          # git tag + push + GitHub release (gh)
+```
+
+`pyproject.toml` is the single source of truth for the version;
+`guitars.__version__` reads it from installed package metadata
+(`importlib.metadata`) — no second string to bump.
+
 Lint / type / security (configured in `pyproject.toml`, run via pre-commit):
 
 ```bash

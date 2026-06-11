@@ -171,6 +171,20 @@ The test suite defines concrete models in `tests/testapp` (the shipped package i
 abstract-only) and runs against a real PostgreSQL database, so the rules and
 triggers are actually exercised — not mocked.
 
+### Releasing
+
+Two interactive helpers in [`scripts/`](scripts/README.md) drive a release:
+
+```bash
+./scripts/bump.sh minor   # bump pyproject.toml + seed CHANGELOG, then commit
+$EDITOR CHANGELOG.md       # write the release notes
+./scripts/release.sh       # git tag + push + GitHub release (via gh)
+```
+
+`pyproject.toml` is the single source of truth for the version —
+`guitars.__version__` reads it from the installed package metadata. See
+[`scripts/README.md`](scripts/README.md) for details.
+
 ## License
 
 [MIT](LICENSE) © 2026 Behnam RK

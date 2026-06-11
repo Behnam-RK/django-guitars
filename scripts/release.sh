@@ -71,15 +71,9 @@ if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; t
 fi
 
 # --- extract release notes from CHANGELOG -----------------------------------
-# Pulls the body under "## [VERSION] ..." up to the next "## [" header.
-NOTES=""
-if [[ -f "$CHANGELOG" ]]; then
-  NOTES="$(awk -v ver="$VERSION" '
-    $0 ~ "^## \\[" ver "\\]" { capture=1; next }
-    capture && /^## \[/      { exit }
-    capture                  { print }
-  ' "$CHANGELOG" | sed -e '/./,$!d' | awk 'NR>1 || NF')"
-fi
+# Shared with the release.yml workflow via scripts/changelog-notes.sh.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+NOTES="$(bash "$SCRIPT_DIR/changelog-notes.sh" "$VERSION" "$CHANGELOG" || true)"
 
 NOTES_FILE="$(mktemp)"
 trap 'rm -f "$NOTES_FILE"' EXIT

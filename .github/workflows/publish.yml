@@ -1,11 +1,15 @@
 name: Publish to PyPI
 
-# Publishes on every GitHub Release. Uses PyPI Trusted Publishing (OIDC) —
-# no API token is stored anywhere. Bump the version, tag, and publish a
-# Release; this builds and uploads automatically.
+# Publishes on every vX.Y.Z tag push. Uses PyPI Trusted Publishing (OIDC) —
+# no API token is stored anywhere. release.yml creates the GitHub Release from
+# the same tag in parallel.
+#
+# Keyed on the tag push (not the release event) because release.yml creates the
+# release with GITHUB_TOKEN, which does not emit `release: published`.
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - 'v*'
 
 jobs:
   publish:

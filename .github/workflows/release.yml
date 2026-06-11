@@ -1,0 +1,84 @@
+name: Create GitHub Release
+
+# Creates a GitHub Release from a vX.Y.Z tag, using the matching CHANGELOG.md
+# section as the release notes (falling back to auto-generated notes when the
+# version has no changelog entry).
+#
+# Triggers:
+#   - push of a vX.Y.Z tag (the normal path)
+#   - manual run (workflow_dispatch) against an existing tag, to (re)build the
+#     release notes without re-tagging
+#
+# PyPI publishing is handled separately by publish.yml. On a tag push both run
+# in parallel; a manual run here does NOT publish (publish.yml is tag-push only).
+# Note: the release is created with GITHUB_TOKEN, which does not emit
+# `release: published`, so publish.yml keys off the tag push instead.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build the release for (e.g. v0.3.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write  # required to create the release
+
+jobs:
+  release:
+    name: Create release from tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="$GITHUB_REF_NAME"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+
+      - name: Extract release notes from CHANGELOG
+        id: notes
+        run: |
+          notes_file="$(mktemp)"
+          bash scripts/changelog-notes.sh "${{ steps.tag.outputs.version }}" > "$notes_file" || true
+          if [ -s "$notes_file" ]; then
+            echo "have_notes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_notes=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "notes_file=$notes_file" >> "$GITHUB_OUTPUT"
+
+      - name: Determine pre-release flag
+        id: prerelease
+        run: |
+          if printf '%s' "${{ steps.tag.outputs.version }}" | grep -qE '(a|b|rc|alpha|beta|dev)[0-9]*$'; then
+            echo "flag=--prerelease" >> "$GITHUB_OUTPUT"
+          else
+            echo "flag=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.tag.outputs.tag }}"
+          notes_args="--generate-notes"
+          if [ "${{ steps.notes.outputs.have_notes }}" = "true" ]; then
+            notes_args="--notes-file ${{ steps.notes.outputs.notes_file }}"
+          fi
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release edit "$tag" --title "$tag" $notes_args ${{ steps.prerelease.outputs.flag }}
+          else
+            gh release create "$tag" --title "$tag" --verify-tag $notes_args ${{ steps.prerelease.outputs.flag }}
+          fi

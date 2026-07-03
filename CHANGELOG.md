@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `makemigrations` now also generates the advanced trigger/rule migrations that
+  `makeguitarmigrations` produces, so the soft-delete rules and `updated_at`
+  triggers can no longer be silently forgotten. `makemigrations --check`
+  validates both layers. Opt out with `GUITARS_AUTO_MAKE_MIGRATIONS = False` to
+  keep the explicit two-command workflow; the standalone `makeguitarmigrations`
+  command is unchanged.
+
 ## [0.3.0] - 2026-06-11
 
 ### Added
@@ -56,6 +67,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `makeguitarmigrations` management command — generates the PostgreSQL
   trigger/rule migrations behind the timestamps and soft deletion.
 
+[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v0.3.0...HEAD
 [0.3.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v0.3.0
 [0.2.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v0.1.0

@@ -26,6 +26,11 @@ INSTALLED_APPS = [
 # (trigger / rule) migrations. tests/settings.py adds the test app here.
 LOCAL_APPS: list[str] = []
 
+# When True (default), `makemigrations` also generates the advanced trigger/rule
+# migrations, so `makeguitarmigrations` never has to be run by hand. Set to False
+# to keep the explicit two-command workflow.
+GUITARS_AUTO_MAKE_MIGRATIONS = True
+
 MIDDLEWARE: list[str] = []
 
 ROOT_URLCONF = 'core.urls'
@@ -38,7 +43,7 @@ DATABASES = {
         'USER': os.environ.get('POSTGRES_USER', 'postgres'),
         'PASSWORD': os.environ.get('POSTGRES_PASSWORD', 'postgres'),
         'HOST': os.environ.get('POSTGRES_HOST', 'localhost'),
-        'PORT': os.environ.get('POSTGRES_PORT', '5432'),
+        'PORT': os.environ.get('POSTGRES_PORT', '4455'),
     }
 }
 

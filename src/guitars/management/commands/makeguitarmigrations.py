@@ -355,14 +355,57 @@ class Command(BaseCommand):
 
         return operations + deferred
 
+    def _scoped_cascade_gap_notes(self, requested: set[str]) -> list[str]:
+        """Describe cross-app CASCADE soft-delete rules this scoped run will not create.
+
+        A rule like "deleting Band cascades to Album" is generated while
+        ``_build_operations`` processes Band's app (the *parent* holding
+        ``_deleted_at``), not Album's — so if the parent's app is scoped out,
+        the rule is skipped even when the child's app is in scope. This is the
+        intended "pragmatic scope" tradeoff (mirrors Django, which also only
+        touches the apps you name), not a bug; it's closed by a later run that
+        includes the parent's app label (or no labels at all).
+        """
+        if not requested:
+            return []
+
+        notes: list[str] = []
+        for app in django_apps.get_app_configs():
+            if app.name not in settings.LOCAL_APPS or app.label in requested:
+                continue
+            for model in app.get_models():
+                if not hasattr(model, '_deleted_at'):
+                    continue
+                table = model._meta.db_table
+                for related_model, _fk_field, on_delete in self.reverse_relations_mapping[model]:
+                    if on_delete != models.CASCADE or not hasattr(related_model, '_deleted_at'):
+                        continue
+                    related_table = related_model._meta.db_table
+                    if (related_table, table) in self.existing_soft_delete_related:
+                        continue
+                    notes.append(
+                        f"Cascade rule on '{related_table}' related to '{table}' skipped: "
+                        f"parent app '{app.label}' is not in this scoped run."
+                    )
+        return notes
+
     # ------------------------------------------------------------------
     # Main entry point
     # ------------------------------------------------------------------
 
-    def handle(self, *app_labels, **options):  # pragma: no cover
+    def handle(self, *app_labels, **options):
         check_only: bool = options['check_only']
         # Positional app labels scope generation; empty => all local apps.
         requested: set[str] = set(app_labels)
+
+        # Mirror Django's own makemigrations: reject unknown app labels outright
+        # rather than silently matching nothing, which would otherwise let a typo
+        # turn `--check` into a no-op that exits 0 having validated zero apps.
+        for app_label in sorted(requested):
+            try:
+                django_apps.get_app_config(app_label)
+            except LookupError as err:
+                raise CommandError(str(err)) from err
 
         # Step 1: Ensure the singleton trigger-function migration exists,
         # so all subsequent app migrations can safely depend on it. Scoped to the
@@ -374,12 +417,14 @@ class Command(BaseCommand):
             if self._is_in_scope(app, requested)
             for model in app.get_models()
         )
-        # Step 2: Per-app table-specific trigger / rule migrations.
         changes_made = needs_trigger_function and self._ensure_trigger_function_migration(
             check_only=check_only
         )
         check_missing: list[tuple[str, list[str]]] = []
 
+        # Step 2: per-app trigger / soft-delete migrations, scoped to `requested`.
+        # Intentionally skips cross-app CASCADE rules whose parent app isn't in
+        # scope (see `_scoped_cascade_gap_notes`) -- surfaced below, not silent.
         for app in django_apps.get_app_configs():
             if not self._is_in_scope(app, requested):
                 continue
@@ -412,6 +457,11 @@ class Command(BaseCommand):
             )
             self.stdout.write(f'  migrations/{migration_file}')
             changes_made = True
+
+        # Step 3: surface cross-app cascade rules this scoped run intentionally
+        # did not create, so the "pragmatic scope" tradeoff is never silent.
+        for note in self._scoped_cascade_gap_notes(requested):
+            self.stdout.write(self.style.WARNING(note))
 
         if check_missing:
             for app_label, operations in check_missing:

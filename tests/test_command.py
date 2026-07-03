@@ -6,12 +6,17 @@ app's committed advanced migrations applying against Postgres. Here we cover the
 scanning, idempotency, and SQL-operation-building logic directly.
 """
 
+import types
 from io import StringIO
 
+import pytest
 from django.apps import apps
-from django.core.management import call_command
+from django.core.management import CommandError, call_command
+from django.test import override_settings
 
+from guitars.management.commands import makeguitarmigrations as makeguitarmigrations_module
 from guitars.management.commands.makeguitarmigrations import Command
+from tests.testapp.models import Album, Band
 
 
 def test_check_passes_when_advanced_migrations_exist():
@@ -103,7 +108,63 @@ def test_handle_generates_only_for_named_apps(monkeypatch):
     build_command().handle(check_only=False)
     assert created == ['testapp']
 
-    # Scoped to a different label: testapp is skipped, nothing is generated.
+    # Scoped to a different, real app: testapp is skipped, nothing is generated.
     created.clear()
-    build_command().handle('not_testapp', check_only=False)
+    build_command().handle('guitars', check_only=False)
     assert created == []
+
+
+def test_unknown_app_label_raises_command_error():
+    with pytest.raises(CommandError):
+        call_command('makeguitarmigrations', 'not_a_real_app')
+
+
+def test_unknown_app_label_raises_command_error_with_check():
+    # A typo must not let `--check` silently pass having validated nothing.
+    with pytest.raises(CommandError):
+        call_command('makeguitarmigrations', 'not_a_real_app', '--check')
+
+
+def _fake_app_config(name: str, label: str, model_list: list) -> types.SimpleNamespace:
+    return types.SimpleNamespace(name=name, label=label, get_models=lambda: model_list)
+
+
+@override_settings(LOCAL_APPS=['fake.banda', 'fake.albumb'])
+def test_scoped_cascade_gap_reported_when_parent_app_out_of_scope(monkeypatch):
+    # Real, already-related models (Album -> Band, CASCADE), reassigned to two
+    # fake apps so we can scope to one without the other.
+    command = Command()
+    command.existing_soft_delete_related.clear()
+
+    fake_band_app = _fake_app_config('fake.banda', 'banda', [Band])
+    fake_album_app = _fake_app_config('fake.albumb', 'albumb', [Album])
+    monkeypatch.setattr(
+        makeguitarmigrations_module.django_apps,
+        'get_app_configs',
+        lambda: [fake_band_app, fake_album_app],
+    )
+
+    # Album's app ('albumb') is in scope; Band's app ('banda') -- the cascade
+    # rule's parent -- is not, so the Band -> Album cascade rule is skipped.
+    notes = command._scoped_cascade_gap_notes({'albumb'})
+
+    assert len(notes) == 1
+    assert 'banda' in notes[0]
+
+
+@override_settings(LOCAL_APPS=['fake.banda', 'fake.albumb'])
+def test_scoped_cascade_gap_empty_when_parent_app_in_scope(monkeypatch):
+    command = Command()
+    command.existing_soft_delete_related.clear()
+
+    fake_band_app = _fake_app_config('fake.banda', 'banda', [Band])
+    fake_album_app = _fake_app_config('fake.albumb', 'albumb', [Album])
+    monkeypatch.setattr(
+        makeguitarmigrations_module.django_apps,
+        'get_app_configs',
+        lambda: [fake_band_app, fake_album_app],
+    )
+
+    # Both apps in scope, or unscoped entirely: no gap to report.
+    assert command._scoped_cascade_gap_notes({'banda', 'albumb'}) == []
+    assert command._scoped_cascade_gap_notes(set()) == []

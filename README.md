@@ -152,8 +152,15 @@ LOCAL_APPS = ["blog", "shop"]      # apps the command scans
 
 Both commands accept optional app labels to scope generation, mirroring
 Django's own `makemigrations`: `makemigrations blog` (or `makeguitarmigrations
-blog`) only touches `blog`. With no labels, every app in `LOCAL_APPS` is
-scanned.
+blog`) only touches `blog`, and an unknown label is rejected the same way
+Django's is. With no labels, every app in `LOCAL_APPS` is scanned.
+
+> **Cross-app cascade rules:** a soft-delete cascade rule (e.g. "deleting a
+> `Band` cascades to its `Album`s") is written into the *parent* model's
+> migration — `Band`'s app here. If that parent's app isn't named in a scoped
+> run, the cascade rule is skipped even when the child's app is; the command
+> prints a warning naming the skipped rule and the app to include. Run without
+> labels, or name the parent's app, to close the gap.
 
 Use `--check` in CI to fail when advanced migrations are missing. With the
 extension on, `makemigrations --check` validates **both** the core and the

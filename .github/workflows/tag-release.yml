@@ -1,9 +1,11 @@
-name: Tag release
+name: Tag Release
 
 # Auto-tags `main` with `vX.Y.Z` read from pyproject.toml's `version` on every
-# push to main, then fans out to publish.yml (PyPI) and release.yml (GitHub
-# Release), both triggered on `v*` tag pushes -- so merging a version bump to
-# main is all it takes to ship, with no manual `git tag` step.
+# push to main, then fans out to the "Release and Publish" workflow (release.yml,
+# triggered on `v*` tag pushes) to create the GitHub Release -- so merging a
+# version bump to main is all it takes to cut a release, with no manual `git tag`
+# step. (PyPI publishing lives in that same workflow but is manual-only; a tag
+# push never ships to PyPI.)
 #
 # Policy (see CLAUDE.md): merging to main always requires a version bump. The
 # "Validate version was bumped" step below enforces that -- it fails the job

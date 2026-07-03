@@ -82,11 +82,12 @@ Releasing (interactive helpers, see `scripts/README.md`):
 
 **Merging to `main` always requires a version bump.** `.github/workflows/tag-release.yml`
 tags `main` with `v<pyproject version>` on every push and fails the job if that version
-isn't strictly newer than the latest existing tag — which then fans out to the GitHub
-release (`release.yml`). Run `./scripts/bump.sh` (or edit `pyproject.toml` directly) before
-merging `develop` into `main`. PyPI publishing (`publish.yml`) is manual-only
-(`workflow_dispatch`): run it by hand from the Actions tab, picking the tag to publish
-from the "Use workflow from" ref selector.
+isn't strictly newer than the latest existing tag — which then fans out to the
+`Release and Publish` workflow (`release.yml`) to create the GitHub release. Run
+`./scripts/bump.sh` (or edit `pyproject.toml` directly) before merging to `main`.
+PyPI publishing lives in that same `release.yml` but is manual-only: it never runs on a
+tag push. Trigger it from the Actions tab via `workflow_dispatch`, picking the tag from
+the "Use workflow from" ref selector and checking the `publish` input.
 
 Lint / type / security (configured in `pyproject.toml`, run via pre-commit):
 

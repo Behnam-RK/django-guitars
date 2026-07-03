@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-07-03
+
+### Changed
+
+- Merged the separate `publish.yml` workflow into `release.yml`, now named
+  "Release and Publish". A `vX.Y.Z` tag push still only creates the GitHub
+  Release; PyPI publishing remains manual-only, opted into via the `publish`
+  input on a `workflow_dispatch` run.
+- Release/publish `workflow_dispatch` runs now select the tag from the native
+  "Use workflow from" ref selector instead of a free-text input.
+- Restricted CI to the `main` branch and removed the `develop` branch from the
+  development flow.
+
 ## [Unreleased]
 
 ## [0.5.1] - 2026-07-03
@@ -89,6 +102,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   trigger/rule migrations behind the timestamps and soft deletion.
 
 [Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v0.5.1...HEAD
+[0.6.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v0.6.0
 [0.5.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v0.5.1
 [0.3.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v0.3.0
 [0.2.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v0.2.0

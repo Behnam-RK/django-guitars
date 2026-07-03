@@ -1,0 +1,61 @@
+name: Tag release
+
+# Auto-tags `main` with `vX.Y.Z` read from pyproject.toml's `version` whenever
+# that version changes and the tag doesn't already exist on origin. Pushing
+# the tag then fans out to publish.yml (PyPI) and release.yml (GitHub
+# Release), both triggered on `v*` tag pushes -- so a version bump landing on
+# main is all it takes to ship, with no manual `git tag` step.
+#
+# scripts/release.sh remains available for tagging by hand (e.g. to re-tag or
+# to run the interactive flow locally); this workflow is idempotent against
+# it -- if the tag already exists (created locally or by a previous run), it
+# is left alone.
+on:
+  push:
+    branches: [main]
+    paths:
+      - pyproject.toml
+
+permissions:
+  contents: write  # required to push the tag
+
+jobs:
+  tag:
+    name: Tag pyproject.toml version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version from pyproject.toml
+        id: version
+        run: |
+          version="$(grep -m1 -E '^version[[:space:]]*=' pyproject.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+          if [[ -z "$version" ]]; then
+            echo "::error::could not parse version from pyproject.toml"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Check for existing tag
+        id: check
+        run: |
+          tag="${{ steps.version.outputs.tag }}"
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create and push tag
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          tag="${{ steps.version.outputs.tag }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$tag" -m "Release ${tag}"
+          git push origin "$tag"
+
+      - name: Skip notice
+        if: steps.check.outputs.exists == 'true'
+        run: echo "::notice::tag ${{ steps.version.outputs.tag }} already exists on origin, skipping."

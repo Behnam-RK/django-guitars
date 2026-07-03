@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-07-03
+
 ### Added
 
 - `makemigrations` now also generates the advanced trigger/rule migrations that
@@ -28,6 +30,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   *parent* model's app, so scoping to a child app alone skips the rule; the
   command now prints a warning naming the skipped rule and the app to include
   to close the gap.
+- (dev only) `publish.yml` is now `workflow_dispatch`-only instead of firing on
+  every `vX.Y.Z` tag push, so shipping to PyPI is a deliberate manual step.
+  `release.yml` now only creates a GitHub Release for tags reachable from
+  `main`, and its "update an existing release" path no longer breaks (it
+  previously passed `gh release edit` a `--generate-notes` flag that command
+  doesn't support).
 
 ## [0.3.0] - 2026-06-11
 
@@ -80,7 +88,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `makeguitarmigrations` management command — generates the PostgreSQL
   trigger/rule migrations behind the timestamps and soft deletion.
 
-[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v0.5.1
 [0.3.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v0.3.0
 [0.2.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v0.1.0

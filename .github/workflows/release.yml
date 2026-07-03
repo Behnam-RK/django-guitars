@@ -9,6 +9,13 @@ name: Create GitHub Release
 #   - manual run (workflow_dispatch) against an existing tag, to (re)build the
 #     release notes without re-tagging
 #
+# Restricted to main: releases are only ever cut from main (tag-release.yml
+# only auto-tags pushes to main). The "Verify tag is on main" step below
+# rejects any tag/workflow_dispatch input whose commit isn't reachable from
+# main, since a tag push event can't be filtered by branch in `on:` alone,
+# and the workflow_dispatch `tag` input is a free string that could otherwise
+# point at any ref.
+#
 # PyPI publishing is handled separately by publish.yml, which is manual-only
 # (workflow_dispatch) — tagging/releasing here never triggers a PyPI publish.
 on:
@@ -44,6 +51,15 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ steps.tag.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Verify tag is on main
+        run: |
+          git fetch origin main
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "::error::${{ steps.tag.outputs.tag }} is not reachable from main; releases are only cut from main."
+            exit 1
+          fi
 
       - name: Extract release notes from CHANGELOG
         id: notes
@@ -71,12 +87,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="${{ steps.tag.outputs.tag }}"
-          notes_args="--generate-notes"
-          if [ "${{ steps.notes.outputs.have_notes }}" = "true" ]; then
-            notes_args="--notes-file ${{ steps.notes.outputs.notes_file }}"
+          notes_file="${{ steps.notes.outputs.notes_file }}"
+          if [ "${{ steps.notes.outputs.have_notes }}" != "true" ]; then
+            # `--generate-notes` only exists on `release create`, not `release
+            # edit`, so fetch the same auto-generated notes via the API and
+            # write them to notes_file -- one code path for both branches below.
+            gh api "repos/${{ github.repository }}/releases/generate-notes" \
+              -f "tag_name=$tag" --jq .body > "$notes_file"
           fi
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release edit "$tag" --title "$tag" $notes_args ${{ steps.prerelease.outputs.flag }}
+            gh release edit "$tag" --title "$tag" --notes-file "$notes_file" ${{ steps.prerelease.outputs.flag }}
           else
-            gh release create "$tag" --title "$tag" --verify-tag $notes_args ${{ steps.prerelease.outputs.flag }}
+            gh release create "$tag" --title "$tag" --verify-tag --notes-file "$notes_file" ${{ steps.prerelease.outputs.flag }}
           fi

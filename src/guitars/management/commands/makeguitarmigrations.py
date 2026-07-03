@@ -365,9 +365,20 @@ class Command(BaseCommand):
         intended "pragmatic scope" tradeoff (mirrors Django, which also only
         touches the apps you name), not a bug; it's closed by a later run that
         includes the parent's app label (or no labels at all).
+
+        Only reported when the *child* (related) model's app is itself part of
+        this scoped run — otherwise the gap is about two apps neither of which
+        the caller asked to generate migrations for, which is just noise.
         """
         if not requested:
             return []
+
+        model_app_label = {
+            model: app.label
+            for app in django_apps.get_app_configs()
+            if app.name in settings.LOCAL_APPS
+            for model in app.get_models()
+        }
 
         notes: list[str] = []
         for app in django_apps.get_app_configs():
@@ -379,6 +390,8 @@ class Command(BaseCommand):
                 table = model._meta.db_table
                 for related_model, _fk_field, on_delete in self.reverse_relations_mapping[model]:
                     if on_delete != models.CASCADE or not hasattr(related_model, '_deleted_at'):
+                        continue
+                    if model_app_label.get(related_model) not in requested:
                         continue
                     related_table = related_model._meta.db_table
                     if (related_table, table) in self.existing_soft_delete_related:

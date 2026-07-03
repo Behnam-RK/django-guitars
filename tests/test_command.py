@@ -168,3 +168,26 @@ def test_scoped_cascade_gap_empty_when_parent_app_in_scope(monkeypatch):
     # Both apps in scope, or unscoped entirely: no gap to report.
     assert command._scoped_cascade_gap_notes({'banda', 'albumb'}) == []
     assert command._scoped_cascade_gap_notes(set()) == []
+
+
+@override_settings(LOCAL_APPS=['fake.banda', 'fake.albumb', 'fake.otherc'])
+def test_scoped_cascade_gap_silent_when_child_app_also_out_of_scope(monkeypatch):
+    """A cascade rule between two apps neither of which is in the requested
+    scope is not this run's business -- reporting it would just be noise
+    about apps the caller isn't touching right now.
+    """
+    command = Command()
+    command.existing_soft_delete_related.clear()
+
+    fake_band_app = _fake_app_config('fake.banda', 'banda', [Band])
+    fake_album_app = _fake_app_config('fake.albumb', 'albumb', [Album])
+    fake_other_app = _fake_app_config('fake.otherc', 'otherc', [])
+    monkeypatch.setattr(
+        makeguitarmigrations_module.django_apps,
+        'get_app_configs',
+        lambda: [fake_band_app, fake_album_app, fake_other_app],
+    )
+
+    # Requested scope is a third, unrelated app -- neither the cascade's
+    # parent ('banda') nor its child ('albumb') is part of this run.
+    assert command._scoped_cascade_gap_notes({'otherc'}) == []

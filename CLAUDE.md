@@ -80,6 +80,12 @@ Releasing (interactive helpers, see `scripts/README.md`):
 `guitars.__version__` reads it from installed package metadata
 (`importlib.metadata`) — no second string to bump.
 
+**Merging to `main` always requires a version bump.** `.github/workflows/tag-release.yml`
+tags `main` with `v<pyproject version>` on every push and fails the job if that version
+isn't strictly newer than the latest existing tag — which then fans out to PyPI publish +
+GitHub release (`publish.yml`, `release.yml`). Run `./scripts/bump.sh` (or edit
+`pyproject.toml` directly) before merging `develop` into `main`.
+
 Lint / type / security (configured in `pyproject.toml`, run via pre-commit):
 
 ```bash

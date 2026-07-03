@@ -36,7 +36,9 @@ The non-obvious core: **behavior is enforced by Postgres, not Python.** Two piec
 1. **`src/guitars/sql.py`** — raw SQL strings for the `set_updated_at()` trigger function, the per-table `updated_at` statement trigger, the `soft_delete` rule, and `soft_delete_related_*` cascade rules.
 2. **`makeguitarmigrations` management command** (`src/guitars/management/commands/`) — scans `settings.LOCAL_APPS` models for `_updated_at` / `_deleted_at`, then writes `migrations.RunSQL(...)` migrations wiring those SQL strings to each table. It is **idempotent** via two mechanisms: a `[DIGEST:...]` marker on the first line of generated migrations, and regex scans (`_RE_*`) of existing migration files. The shared trigger function gets a single migration in `TRIGGER_FUNCTION_APP` (default `LOCAL_APPS[0]`); other migrations depend on it.
 
-**Consequence:** plain `makemigrations` does NOT create the triggers/rules. Until `makeguitarmigrations` runs and you `migrate`, `.delete()` permanently deletes rows — the soft-delete protection is not wired up. Re-run it whenever a model using these bases is added or changed. `--check` fails (non-zero) when migrations are missing — used in CI.
+3. **`makemigrations` override** (`src/guitars/management/commands/makemigrations.py`) — subclasses Django's command so that, by default, `makemigrations` runs the guitar generation right after the core migrations (via `call_command('makeguitarmigrations', ...)`). Gated by `GUITARS_AUTO_MAKE_MIGRATIONS` (default `True`; set `False` for the explicit two-command workflow). It skips the guitar step on `--empty`/`--dry-run` — the `--empty` guard also prevents infinite recursion, since `makeguitarmigrations` scaffolds its files via `makemigrations --empty`, which re-enters this override. `--check` maps to guitar's `check_only`, so `makemigrations --check` validates both layers.
+
+**Consequence:** with the default `GUITARS_AUTO_MAKE_MIGRATIONS = True`, `makemigrations` creates the triggers/rules for you. If you set it to `False`, plain `makemigrations` does NOT create them — you must run `makeguitarmigrations` yourself, and until it runs and you `migrate`, `.delete()` permanently deletes rows (the soft-delete protection is not wired up). Either way, `--check` fails (non-zero) when migrations are missing — used in CI.
 
 ### Soft deletion mechanics (`src/guitars/models/soft_deletion.py`)
 
@@ -59,9 +61,13 @@ docker compose up -d          # start Postgres on :5432
 uv run pytest                 # full suite (settings: tests.settings, auto via pyproject)
 uv run pytest --cov=guitars --cov-report=term-missing
 uv run pytest tests/test_base.py::TestUpdate::test_x   # single test
-python manage.py makeguitarmigrations          # generate trigger/rule migrations
+python manage.py makemigrations                # core + trigger/rule migrations (default)
+python manage.py makemigrations --check        # CI: fail if either layer is missing
+python manage.py makeguitarmigrations          # trigger/rule migrations only (standalone)
 python manage.py makeguitarmigrations --check  # CI: fail if missing
 ```
+
+Set `GUITARS_AUTO_MAKE_MIGRATIONS = False` to make `makemigrations` skip the guitar step and use the standalone command instead.
 
 Releasing (interactive helpers, see `scripts/README.md`):
 
@@ -89,4 +95,4 @@ uv run bandit -c pyproject.toml -r src
 
 - Metadata fields are underscore-prefixed (`_created_at`, `_updated_at`, `_deleted_at`); non-default managers too (`_archives`, `_all_objects`).
 - Editing SQL behavior means editing `src/guitars/sql.py` **and** verifying `makeguitarmigrations` still emits/matches it (the command's `_RE_*` regexes key off the comment headers in the generated operation templates).
-- After model changes in `tests/testapp/`, regenerate migrations: `makemigrations` then `makeguitarmigrations`.
+- After model changes in `tests/testapp/`, regenerate migrations with `makemigrations` (which now also emits the trigger/rule migrations, since `GUITARS_AUTO_MAKE_MIGRATIONS` defaults to `True`).

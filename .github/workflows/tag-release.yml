@@ -1,0 +1,70 @@
+name: Tag release
+
+# Auto-tags `main` with `vX.Y.Z` read from pyproject.toml's `version` on every
+# push to main, then fans out to publish.yml (PyPI) and release.yml (GitHub
+# Release), both triggered on `v*` tag pushes -- so merging a version bump to
+# main is all it takes to ship, with no manual `git tag` step.
+#
+# Policy (see CLAUDE.md): merging to main always requires a version bump. The
+# "Validate version was bumped" step below enforces that -- it fails the job
+# if pyproject.toml's version isn't strictly newer than the latest existing
+# tag, so a merge to main that forgot to bump the version is caught here
+# rather than silently shipping nothing (or re-tagging an old version).
+#
+# scripts/release.sh remains available for tagging by hand (e.g. to run the
+# interactive flow locally); this workflow is idempotent against it -- if the
+# tag already exists (created locally or by a previous run), that's exactly
+# the "not strictly newer" case the validation step rejects.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write  # required to push the tag
+
+jobs:
+  tag:
+    name: Tag pyproject.toml version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version from pyproject.toml
+        id: version
+        run: |
+          version="$(grep -m1 -E '^version[[:space:]]*=' pyproject.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+          if [[ -z "$version" ]]; then
+            echo "::error::could not parse version from pyproject.toml"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Validate version was bumped
+        id: validate
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          latest="$(git ls-remote --tags origin 'refs/tags/v*' \
+            | sed -E 's#.*refs/tags/v##; s/\^\{\}$//' \
+            | sort -V -u | tail -1)"
+
+          if [[ -z "$latest" ]]; then
+            echo "::notice::no existing vX.Y.Z tags found; treating ${version} as the first release."
+            exit 0
+          fi
+
+          echo "Latest tagged version: ${latest}"
+          echo "pyproject.toml version: ${version}"
+          top="$(printf '%s\n%s\n' "$latest" "$version" | sort -V | tail -1)"
+          if [[ "$version" == "$latest" || "$top" != "$version" ]]; then
+            echo "::error::pyproject.toml version (${version}) is not newer than the latest release (v${latest}). Merging to main always requires a version bump -- run ./scripts/bump.sh first."
+            exit 1
+          fi
+
+      - name: Create and push tag
+        run: |
+          tag="${{ steps.version.outputs.tag }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$tag" -m "Release ${tag}"
+          git push origin "$tag"

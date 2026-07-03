@@ -247,6 +247,7 @@ __marimo__/
 
 .remember/
 .claude/
+.serena/
 
 # Project-local pytest junit output (from addopts --junit-xml)
 .pytest-last.xml

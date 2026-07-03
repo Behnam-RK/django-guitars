@@ -35,8 +35,11 @@ class Command(MakeMigrationsCommand):
             return
 
         # 4. Delegate to the existing command; --check maps to guitar's check_only.
+        #    Forward any positional app labels so a scoped `makemigrations blog`
+        #    only generates guitar migrations for blog (mirrors Django scoping).
         call_command(
             'makeguitarmigrations',
+            *args,
             check_only=options.get('check_changes', False),
             stdout=self.stdout,
             stderr=self.stderr,

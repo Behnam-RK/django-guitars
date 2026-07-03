@@ -14,16 +14,18 @@ from django.test import override_settings
 from guitars.management.commands.makemigrations import Command
 
 
-def _run(**options):
+def _run(*app_labels, **options):
     """Invoke the override's ``handle`` with the parent stubbed out.
 
-    Returns the mocked ``call_command`` so callers can assert on the guitar step.
+    Positional ``app_labels`` are forwarded to ``handle`` just like Django passes
+    scoped app labels. Returns the mocked ``call_command`` so callers can assert
+    on the guitar step.
     """
     with (
         mock.patch.object(DjangoMakeMigrations, 'handle') as parent_handle,
         mock.patch('guitars.management.commands.makemigrations.call_command') as call_command,
     ):
-        Command().handle(**options)
+        Command().handle(*app_labels, **options)
         # The real makemigrations always runs first.
         parent_handle.assert_called_once()
     return call_command
@@ -34,7 +36,17 @@ def test_generates_guitar_migrations_by_default():
 
     call_command.assert_called_once()
     assert call_command.call_args.args[0] == 'makeguitarmigrations'
+    # No app labels passed => none forwarded (guitar scans all LOCAL_APPS).
+    assert call_command.call_args.args[1:] == ()
     assert call_command.call_args.kwargs['check_only'] is False
+
+
+def test_scoped_app_labels_are_forwarded():
+    # `makemigrations blog shop` must scope the guitar step to the same apps.
+    call_command = _run('blog', 'shop')
+
+    call_command.assert_called_once()
+    assert call_command.call_args.args == ('makeguitarmigrations', 'blog', 'shop')
 
 
 @override_settings(GUITARS_AUTO_MAKE_MIGRATIONS=False)

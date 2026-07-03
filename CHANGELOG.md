@@ -16,6 +16,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keep the explicit two-command workflow; the standalone `makeguitarmigrations`
   command is unchanged.
 
+### Changed
+
+- `makeguitarmigrations` now accepts optional app labels to scope generation
+  (e.g. `makeguitarmigrations blog`), and `makemigrations` forwards any app
+  labels it receives, so a scoped `makemigrations blog` only generates guitar
+  migrations for `blog`. With no labels, all `LOCAL_APPS` are scanned as before.
+  An unknown app label is now rejected the same way Django's own
+  `makemigrations` rejects one, so a typo can no longer turn `--check` into a
+  silent no-op. Cross-app CASCADE soft-delete rules are attributed to the
+  *parent* model's app, so scoping to a child app alone skips the rule; the
+  command now prints a warning naming the skipped rule and the app to include
+  to close the gap.
+
 ## [0.3.0] - 2026-06-11
 
 ### Added

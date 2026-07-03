@@ -1,15 +1,17 @@
 name: Publish to PyPI
 
-# Publishes on every vX.Y.Z tag push. Uses PyPI Trusted Publishing (OIDC) —
-# no API token is stored anywhere. release.yml creates the GitHub Release from
-# the same tag in parallel.
+# Manual-only. Uses PyPI Trusted Publishing (OIDC) — no API token is stored
+# anywhere. Publishing is a deliberate, separate step from tagging/releasing:
+# tag-release.yml auto-tags main and release.yml auto-creates the GitHub
+# Release, but shipping to PyPI happens here, by hand.
 #
-# Keyed on the tag push (not the release event) because release.yml creates the
-# release with GITHUB_TOKEN, which does not emit `release: published`.
+# There's no custom "tag" input: workflow_dispatch choice inputs can only list
+# static options, not the repo's actual tags. Instead, pick the version to
+# publish from the "Use workflow from" ref selector on the run form — it's a
+# search box over both branches and tags, i.e. a dropdown that's always
+# current. The guard step below just makes sure a tag was actually selected.
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_dispatch:
 
 jobs:
   publish:
@@ -19,6 +21,13 @@ jobs:
     permissions:
       id-token: write  # required for OIDC trusted publishing
     steps:
+      - name: Require a tag ref
+        run: |
+          if [ "${{ github.ref_type }}" != "tag" ]; then
+            echo "::error::Select a tag in the 'Use workflow from' dropdown above (got ref '${{ github.ref_name }}', a ${{ github.ref_type }})."
+            exit 1
+          fi
+
       - uses: actions/checkout@v4
 
       - name: Install uv

@@ -9,10 +9,8 @@ name: Create GitHub Release
 #   - manual run (workflow_dispatch) against an existing tag, to (re)build the
 #     release notes without re-tagging
 #
-# PyPI publishing is handled separately by publish.yml. On a tag push both run
-# in parallel; a manual run here does NOT publish (publish.yml is tag-push only).
-# Note: the release is created with GITHUB_TOKEN, which does not emit
-# `release: published`, so publish.yml keys off the tag push instead.
+# PyPI publishing is handled separately by publish.yml, which is manual-only
+# (workflow_dispatch) — tagging/releasing here never triggers a PyPI publish.
 on:
   push:
     tags:

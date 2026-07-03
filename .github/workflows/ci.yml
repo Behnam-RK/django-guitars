@@ -1,0 +1,51 @@
+name: CI
+
+# Runs the same two checks CI is meant to gate on:
+#   - pre-commit run --all-files (lint, format, type check, security scan)
+#   - the pytest suite, against a real Postgres (see compose.yaml -- the kit's
+#     soft-delete + updated_at behavior is enforced by Postgres rules/triggers,
+#     so there is no SQLite fallback).
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+jobs:
+  pre-commit:
+    name: pre-commit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Sync dependencies
+        run: uv sync --locked
+
+      - name: Cache pre-commit environments
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
+
+      - name: Run pre-commit on all files
+        run: uv run pre-commit run --all-files
+
+  test:
+    name: Test suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Sync dependencies
+        run: uv sync --locked
+
+      - name: Start Postgres
+        run: docker compose up -d --wait
+
+      - name: Run tests
+        run: uv run pytest

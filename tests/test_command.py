@@ -54,3 +54,56 @@ def test_trigger_function_host_app_resolves_from_settings():
     host = Command()._get_trigger_function_host_app()
 
     assert host.label == 'testapp'
+
+
+def test_is_in_scope_matches_local_apps_and_requested_labels():
+    testapp = apps.get_app_config('testapp')
+    guitars_app = apps.get_app_config('guitars')  # installed but not in LOCAL_APPS
+
+    # Unscoped (empty request): local apps are in scope, non-local apps are not.
+    assert Command._is_in_scope(testapp, set()) is True
+    assert Command._is_in_scope(guitars_app, set()) is False
+
+    # Scoped: only requested labels among the local apps are in scope.
+    assert Command._is_in_scope(testapp, {'testapp'}) is True
+    assert Command._is_in_scope(testapp, {'other'}) is False
+
+
+def test_check_passes_when_scoped_to_named_app():
+    out, err = StringIO(), StringIO()
+
+    call_command('makeguitarmigrations', 'testapp', '--check', stdout=out, stderr=err)
+
+    assert 'Missing advanced migrations' not in err.getvalue()
+
+
+def test_handle_generates_only_for_named_apps(monkeypatch):
+    """The per-app loop must scaffold migrations only for the named app(s)."""
+    created: list[str] = []
+
+    def build_command():
+        command = Command()
+        command.stdout = StringIO()
+        # Pretend nothing exists yet so generation would otherwise fire...
+        command.existing_triggers.clear()
+        command.existing_soft_deletes.clear()
+        command.existing_soft_delete_related.clear()
+        # ...and the shared trigger-function migration is already in place.
+        command.trigger_function_dependency = ('testapp', '0001_pretend')
+        monkeypatch.setattr(command, '_migration_with_digest_exists', lambda *a, **k: False)
+        monkeypatch.setattr(command, '_write_migration_file', lambda **k: None)
+        monkeypatch.setattr(
+            command,
+            '_create_empty_migration_file',
+            lambda app, name='auto_advanced': created.append(app.label) or f'0002_{name}.py',
+        )
+        return command
+
+    # Unscoped: testapp (the only local app with guitar models) is generated.
+    build_command().handle(check_only=False)
+    assert created == ['testapp']
+
+    # Scoped to a different label: testapp is skipped, nothing is generated.
+    created.clear()
+    build_command().handle('not_testapp', check_only=False)
+    assert created == []

@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keep the explicit two-command workflow; the standalone `makeguitarmigrations`
   command is unchanged.
 
+### Changed
+
+- `makeguitarmigrations` now accepts optional app labels to scope generation
+  (e.g. `makeguitarmigrations blog`), and `makemigrations` forwards any app
+  labels it receives, so a scoped `makemigrations blog` only generates guitar
+  migrations for `blog`. With no labels, all `LOCAL_APPS` are scanned as before.
+
 ## [0.3.0] - 2026-06-11
 
 ### Added

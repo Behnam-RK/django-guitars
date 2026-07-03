@@ -150,6 +150,11 @@ LOCAL_APPS = ["blog", "shop"]      # apps the command scans
 # TRIGGER_FUNCTION_APP = "blog"
 ```
 
+Both commands accept optional app labels to scope generation, mirroring
+Django's own `makemigrations`: `makemigrations blog` (or `makeguitarmigrations
+blog`) only touches `blog`. With no labels, every app in `LOCAL_APPS` is
+scanned.
+
 Use `--check` in CI to fail when advanced migrations are missing. With the
 extension on, `makemigrations --check` validates **both** the core and the
 trigger/rule migrations; the standalone form still works too:

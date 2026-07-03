@@ -101,6 +101,12 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):  # pragma: no cover
         parser.add_argument(
+            'args',
+            metavar='app_label',
+            nargs='*',
+            help='Optional app labels to scope generation to (default: all LOCAL_APPS).',
+        )
+        parser.add_argument(
             '--check',
             action='store_true',
             dest='check_only',
@@ -113,6 +119,17 @@ class Command(BaseCommand):
     # ------------------------------------------------------------------
     # Setup helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _is_in_scope(app: AppConfig, requested: set[str]) -> bool:
+        """Return ``True`` if *app* is local and, when scoping, among *requested* labels.
+
+        ``requested`` is the set of positional app labels passed to the command; an
+        empty set means "all local apps" (the default, unscoped behavior). Local-ness
+        is keyed on ``app.name`` (matches ``LOCAL_APPS`` entries like ``tests.testapp``)
+        while scoping is keyed on ``app.label`` (Django's positional args, e.g. ``testapp``).
+        """
+        return app.name in settings.LOCAL_APPS and (not requested or app.label in requested)
 
     def _setup_models_and_reverse_relations(self) -> None:
         """Populate ``all_models`` and ``reverse_relations_mapping`` from installed apps."""
@@ -342,15 +359,19 @@ class Command(BaseCommand):
     # Main entry point
     # ------------------------------------------------------------------
 
-    def handle(self, *args, **options):  # pragma: no cover
+    def handle(self, *app_labels, **options):  # pragma: no cover
         check_only: bool = options['check_only']
+        # Positional app labels scope generation; empty => all local apps.
+        requested: set[str] = set(app_labels)
 
         # Step 1: Ensure the singleton trigger-function migration exists,
-        # so all subsequent app migrations can safely depend on it.
+        # so all subsequent app migrations can safely depend on it. Scoped to the
+        # requested apps, but still hosted in TRIGGER_FUNCTION_APP (a hard
+        # prerequisite) even if that host app itself wasn't named.
         needs_trigger_function = any(
             hasattr(model, '_updated_at')
             for app in django_apps.get_app_configs()
-            if app.name in settings.LOCAL_APPS
+            if self._is_in_scope(app, requested)
             for model in app.get_models()
         )
         # Step 2: Per-app table-specific trigger / rule migrations.
@@ -360,7 +381,7 @@ class Command(BaseCommand):
         check_missing: list[tuple[str, list[str]]] = []
 
         for app in django_apps.get_app_configs():
-            if app.name not in settings.LOCAL_APPS:
+            if not self._is_in_scope(app, requested):
                 continue
 
             operations = self._build_operations(app)

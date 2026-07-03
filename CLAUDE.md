@@ -57,7 +57,7 @@ Requires [uv](https://docs.astral.sh/uv/) and Docker (for Postgres). Tests run a
 
 ```bash
 uv sync                       # install deps + package (editable)
-docker compose up -d          # start Postgres on :5432
+docker compose up -d          # start Postgres on :4455
 uv run pytest                 # full suite (settings: tests.settings, auto via pyproject)
 uv run pytest --cov=guitars --cov-report=term-missing
 uv run pytest tests/test_base.py::TestUpdate::test_x   # single test

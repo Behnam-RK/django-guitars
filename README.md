@@ -182,7 +182,7 @@ Requires [uv](https://docs.astral.sh/uv/) and Docker (for PostgreSQL).
 
 ```bash
 uv sync                  # install dependencies + the package (editable)
-docker compose up -d     # start PostgreSQL (skip if you already run one on :5432)
+docker compose up -d     # start PostgreSQL (skip if you already run one on :4455)
 uv run pytest            # run the test suite
 uv run pytest --cov=guitars --cov-report=term-missing
 ```

@@ -466,3 +466,36 @@ def test_handle_writes_scoped_cascade_gap_warning_to_stdout(monkeypatch):
     command.handle('albumb', check_only=False)
 
     assert "parent app 'banda' is not in this scoped run" in command.stdout.getvalue()
+
+
+def test_function_dependencies_for_only_includes_deps_the_operations_use():
+    """The per-app migration must depend on a function migration only when its operations
+    actually call that function: own-table ``updated_at`` triggers need ``set_updated_at``;
+    MTI parent-propagation triggers need ``set_parent_updated_at``. Soft-delete and cascade
+    rules call no function, so an app emitting only those depends on neither -- avoiding a
+    spurious edge to the (MTI) parent-function migration and its host app's ordering.
+    """
+    command = Command()
+    command.trigger_function_dependency = ('testapp', '0002_trigger_function')
+    command.parent_trigger_function_dependency = ('testapp', '0006_parent_trigger_function')
+
+    own_only = '# Updated at Trigger on "testapp_band" table!\nmigrations.RunSQL(...)'
+    mti_only = (
+        '# MTI Updated at Trigger on "testapp_orchestra" table (parent "testapp_ensemble")!\n'
+        'migrations.RunSQL(...)'
+    )
+    rules_only = (
+        '# Soft Delete Rule on "testapp_band" table!\n'
+        '# MTI Soft Delete Rule on "testapp_orchestra" table (parent "testapp_ensemble")!'
+    )
+
+    assert command._function_dependencies_for(own_only) == [('testapp', '0002_trigger_function')]
+    assert command._function_dependencies_for(mti_only) == [
+        ('testapp', '0006_parent_trigger_function')
+    ]
+    assert command._function_dependencies_for(own_only + '\n' + mti_only) == [
+        ('testapp', '0002_trigger_function'),
+        ('testapp', '0006_parent_trigger_function'),
+    ]
+    # Only soft-delete / cascade rules -> no function migration dependency at all.
+    assert command._function_dependencies_for(rules_only) == []

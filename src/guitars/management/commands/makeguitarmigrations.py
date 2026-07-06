@@ -631,6 +631,24 @@ class Command(BaseCommand):
                     )
         return notes
 
+    def _function_dependencies_for(self, operations_blob: str) -> list[tuple[str, str]]:
+        """Function-migration dependencies an app's operations actually require.
+
+        Only ``updated_at`` triggers call a shared trigger function: own-table triggers use
+        ``set_updated_at`` (the base function migration), MTI parent-propagation triggers use
+        ``set_parent_updated_at`` (the parent function migration). Soft-delete and cascade rules
+        call no function, so an app emitting only those needs neither dependency. Keying off the
+        operation headers (rather than appending both deps unconditionally) keeps an app's
+        migration from being coupled to a function migration -- and its host app's ordering --
+        it never uses.
+        """
+        deps: list[tuple[str, str]] = []
+        if self.trigger_function_dependency and _RE_UPDATED_AT.search(operations_blob):
+            deps.append(self.trigger_function_dependency)
+        if self.parent_trigger_function_dependency and _RE_MTI_UPDATED_AT.search(operations_blob):
+            deps.append(self.parent_trigger_function_dependency)
+        return deps
+
     # ------------------------------------------------------------------
     # Main entry point
     # ------------------------------------------------------------------
@@ -684,8 +702,9 @@ class Command(BaseCommand):
             if not operations:
                 continue
 
+            operations_blob = '\n'.join(operations)
             operations_digest = hashlib.md5(
-                '\n'.join(operations).encode(), usedforsecurity=False
+                operations_blob.encode(), usedforsecurity=False
             ).hexdigest()
             if self._migration_with_digest_exists(app, operations_digest):
                 continue
@@ -700,14 +719,7 @@ class Command(BaseCommand):
                 migration_file=migration_file,
                 operations=operations,
                 operations_digest=operations_digest,
-                dependencies=[
-                    dep
-                    for dep in (
-                        self.trigger_function_dependency,
-                        self.parent_trigger_function_dependency,
-                    )
-                    if dep
-                ],
+                dependencies=self._function_dependencies_for(operations_blob),
             )
 
             self.stdout.write(

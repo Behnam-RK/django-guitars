@@ -49,6 +49,29 @@ def test_build_operations_emits_trigger_rule_and_cascade_ops():
     assert 'Soft Delete Related Rule' in ops  # Album -> Band cascade
 
 
+def test_build_operations_emits_mti_ops_for_child_models():
+    command = Command()
+    command.existing_triggers.clear()
+    command.existing_soft_deletes.clear()
+    command.existing_soft_delete_related.clear()
+    command.existing_mti_triggers.clear()
+    command.existing_mti_soft_deletes.clear()
+
+    ops = '\n'.join(command._build_operations(apps.get_app_config('testapp')))
+
+    # MTI children get a parent-propagation updated-at trigger + a redirect soft-delete rule,
+    # both on the child table but naming the owning ancestor.
+    assert 'MTI Updated at Trigger on "testapp_orchestra" table (parent "testapp_ensemble")' in ops
+    assert 'MTI Soft Delete Rule on "testapp_orchestra" table (parent "testapp_ensemble")' in ops
+    # Cascade INTO an MTI child (Section -> Orchestra) lands on the owner (ensemble) table.
+    assert (
+        'Soft Delete Related Rule on "testapp_section" that is related to "testapp_ensemble"'
+        in ops
+    )
+    # The MTI parent-link is structural, not a user cascade FK: no cascade rule for it.
+    assert 'related to "testapp_orchestra"' not in ops
+
+
 def test_migration_with_digest_returns_false_for_unknown_digest():
     app = apps.get_app_config('testapp')
 

@@ -1,9 +1,12 @@
 """Tests for guitars.models.base (SetarModel / GuitarModel and their mixins)."""
 
+import types
+
 import pytest
 from asgiref.sync import async_to_sync
 from django.db import transaction
 
+from guitars.models.base import SetarModel
 from tests.testapp.models import Band, Genre, Riff
 
 
@@ -104,6 +107,24 @@ def test_class_name():
 def test_app_label_and_model_name():
     assert Band.app_label() == 'testapp'
     assert Band.model_name() == 'band'
+
+
+def test_app_label_raises_when_meta_app_label_missing():
+    fake_cls = types.SimpleNamespace(
+        __name__='Fake', _meta=types.SimpleNamespace(app_label='')
+    )
+
+    with pytest.raises(AttributeError, match='_meta.app_label is not set'):
+        SetarModel.app_label.__func__(fake_cls)
+
+
+def test_model_name_raises_when_meta_model_name_missing():
+    fake_cls = types.SimpleNamespace(
+        __name__='Fake', _meta=types.SimpleNamespace(model_name='')
+    )
+
+    with pytest.raises(AttributeError, match='_meta.model_name is not set'):
+        SetarModel.model_name.__func__(fake_cls)
 
 
 @pytest.mark.django_db

@@ -5,6 +5,31 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-07-06
+
+### Added
+
+- Full **multi-table inheritance (MTI)** support for dated and soft-deletable
+  models. A concrete model subclassing another concrete `GuitarModel` now works
+  end to end: `makeguitarmigrations` detects that a child's `_updated_at` /
+  `_deleted_at` columns live on an ancestor table (via column ownership, not
+  `hasattr`) and generates the right database objects — a redirect soft-delete
+  rule that preserves the child row and marks the parent, a `set_parent_updated_at`
+  trigger so a child-only `update()` still bumps the parent's `_updated_at`, and
+  cascade rules attached to the owning table. `hard_delete()` (instance and
+  queryset) now clears the whole MTI table chain with no orphaned parent row.
+  Works at any inheritance depth via the shared-PK invariant.
+
+### Notes
+
+- MTI children of a soft-deletable base must declare their own `Meta` (an empty
+  `class Meta: pass` suffices) so Django doesn't re-declare the parent's
+  `_deleted_at` partial index against the child's non-local column
+  (`models.E016`).
+- Not yet supported: cascading *into* an MTI child through a FK on the child's
+  own table when its `_deleted_at` lives on a farther ancestor; the command skips
+  it with a warning rather than emitting a broken rule.
+
 ## [0.6.0] - 2026-07-03
 
 ### Changed
@@ -101,7 +126,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `makeguitarmigrations` management command — generates the PostgreSQL
   trigger/rule migrations behind the timestamps and soft deletion.
 
-[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v0.7.0
 [0.6.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v0.6.0
 [0.5.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v0.5.1
 [0.3.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v0.3.0

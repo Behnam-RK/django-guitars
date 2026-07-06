@@ -1,6 +1,6 @@
 [project]
 name = "django-guitars"
-version = "0.6.0"
+version = "0.7.0"
 description = "A kit of reusable Django utilities: base models, PostgreSQL soft deletion, and more."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -54,6 +54,7 @@ dev = [
     "pytest-xdist>=3.8",
     "pytest-django>=4.9",
     "psycopg[binary]>=3.2",
+    "django-stubs>=6.0.6,<7.0.0",
 ]
 
 [build-system]

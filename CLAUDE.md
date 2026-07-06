@@ -46,6 +46,20 @@ The non-obvious core: **behavior is enforced by Postgres, not Python.** Two piec
 - Three managers: `objects` (live only, default), `_archives` (soft-deleted only), `_all_objects` (everything).
 - `hard_delete()` bypasses the rule by setting the PG session var `rules.hard_deletion = 'on'` (see `SWITCH_ON/OFF_HARD_DELETION`). Instance-level `hard_delete()` is two-phase: soft-delete first (cascades), then DFS-collect CASCADE children and bulk-hard-delete child-first — because Django's CASCADE is Python-level (`Collector`), Postgres has no `ON DELETE CASCADE` constraint, so a raw parent DELETE would hit an FK check.
 
+### Multi-table inheritance (MTI)
+
+A concrete model subclassing another concrete `GuitarModel`/`DatedModel`/`SoftDeletableModel` (Django MTI) is fully supported. The metadata columns (`_updated_at`/`_deleted_at`) physically live on the ancestor that declares them, but the shipped models "just work" because of the **shared-PK invariant** (every table in an MTI chain shares one PK value) and column-ownership detection.
+
+- **Detection** — `makeguitarmigrations` resolves the owning table per column via `model._meta.get_field(name).model` (`_column_owner`/`_owns`/`_is_mti_child`), not `hasattr`. Abstract-base concrete models still own their own columns; MTI children resolve to the ancestor.
+- **Soft delete** — each MTI child table gets a redirect rule (`CREATE_MTI_SOFT_DELETE_RULE`): `ON DELETE ... DO INSTEAD` preserves the child row and sets `_deleted_at` on the **owner** table (`WHERE owner_pk = old.<child_pk>`). Django deletes child-before-parent, so the parent's own rule then no-ops via the `_deleted_at IS NULL` guard — cascades fire exactly once, in both delete directions and at any depth.
+- **`_updated_at` propagation** — a child-only `QuerySet.update()` touches only the child table, so each MTI child also gets a `set_parent_updated_at()` trigger that bumps the owner's `_updated_at`. This function is a second singleton (migration `*_auto_advanced_parent_trigger_function`, hosted in `TRIGGER_FUNCTION_APP`), parallel to `set_updated_at()`.
+- **Cascade INTO an MTI child** (a CASCADE FK whose target is an MTI child) attaches its `soft_delete_related_*` rule to the target's **owner** table (the FK column holds the shared PK). The MTI parent-link (a CASCADE `OneToOne`) is skipped — it's structural, handled by the redirect rule, not a user cascade FK.
+- **`hard_delete`** — instance-level starts the DFS from the MTI **root** (the parent-link reverse is itself a CASCADE relation), so every table in the chain is collected child-first and each is deleted via the own-table primitive `_hard_delete_own_table`. Queryset-level `hard_delete()` deletes the whole table chain leaf-to-root by shared PK (`_mti_table_chain`) so no orphaned ancestor row is left.
+- **Required boilerplate** — an MTI child of a soft-deletable base **must declare its own `Meta`** (an empty `class Meta: pass` suffices) so Django doesn't re-declare the parent's `%(class)s_deleted_at` partial index against the child's non-local `_deleted_at` column (`models.E016`). Managers are still inherited.
+- **Known limitation** — cascading *into* an MTI child through a FK declared on the child's **own** table while its `_deleted_at` lives on a farther ancestor is not supported (needs a join form); `makeguitarmigrations` skips it with a warning rather than emitting a broken rule.
+
+See `tests/testapp/models.py` (`Ensemble → Orchestra → ChamberOrchestra`, plus `Section`) and `tests/test_mti.py`.
+
 ### `.update()` and signals
 
 - `UpdatableModel.update(**attrs)` / `aupdate()` set fields + save in one call, writing only changed fields via `update_fields`. M2M handled via `.set(values, clear=True)`, requires `_save=True`. `_save=False` attrs are NOT carried into a later `_save=True` call unless `_save_all_fields=True`.

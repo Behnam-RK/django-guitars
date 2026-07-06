@@ -191,7 +191,7 @@ class Command(BaseCommand):
             self.all_models.extend(app.get_models())
 
         for model in self.all_models:
-            for field in model._meta.get_fields():  # ty: ignore[unresolved-attribute]
+            for field in model._meta.get_fields():
                 if isinstance(field, models.ForeignKey):
                     self.reverse_relations_mapping[field.related_model].add(
                         (model, field, field.remote_field.on_delete)
@@ -213,7 +213,7 @@ class Command(BaseCommand):
         Abstract-base fields are copied onto the concrete model (so they are local and
         *owned*); MTI-inherited fields are not -- they physically live on an ancestor table.
         """
-        return any(field.name == colname for field in model._meta.local_fields)  # ty: ignore[unresolved-attribute]
+        return any(field.name == colname for field in model._meta.local_fields)
 
     @classmethod
     def _column_owner(cls, model: type[models.Model], colname: str) -> type[models.Model]:
@@ -221,13 +221,13 @@ class Command(BaseCommand):
 
         ``self`` for own-table columns; the owning ancestor for MTI-inherited columns.
         """
-        return model._meta.get_field(colname).model  # ty: ignore[unresolved-attribute]
+        return model._meta.get_field(colname).model
 
     @classmethod
     def _is_mti_child(cls, model: type[models.Model], colname: str) -> bool:
         """Return True if *model* inherits *colname* from an MTI ancestor's table."""
         return (
-            bool(model._meta.parents)  # ty: ignore[unresolved-attribute]
+            bool(model._meta.parents)
             and cls._has(model, colname)
             and not cls._owns(model, colname)
         )
@@ -498,8 +498,8 @@ class Command(BaseCommand):
                     MTI_UPDATED_AT_OPERATION.format(
                         child_table=table,
                         child_pk=model._meta.pk.column,
-                        parent_table=owner._meta.db_table,  # ty: ignore[unresolved-attribute]
-                        parent_pk=owner._meta.pk.column,  # ty: ignore[unresolved-attribute]
+                        parent_table=owner._meta.db_table,
+                        parent_pk=owner._meta.pk.column,
                     )
                 )
 
@@ -518,8 +518,8 @@ class Command(BaseCommand):
                     MTI_SOFT_DELETE_OPERATION.format(
                         child_table=table,
                         child_pk=model._meta.pk.column,
-                        parent_table=owner._meta.db_table,  # ty: ignore[unresolved-attribute]
-                        parent_pk=owner._meta.pk.column,  # ty: ignore[unresolved-attribute]
+                        parent_table=owner._meta.db_table,
+                        parent_pk=owner._meta.pk.column,
                     )
                 )
 
@@ -540,8 +540,8 @@ class Command(BaseCommand):
         column holds the shared MTI pk value, so matching it against the owner pk still works.
         """
         owner = self._column_owner(model, '_deleted_at')
-        owner_table = owner._meta.db_table  # ty: ignore[unresolved-attribute]
-        owner_pk = owner._meta.pk.column  # ty: ignore[unresolved-attribute]
+        owner_table = owner._meta.db_table
+        owner_pk = owner._meta.pk.column
 
         ops: list[str] = []
         for related_model, fk_field, on_delete in sorted(
@@ -614,7 +614,7 @@ class Command(BaseCommand):
                     continue
                 # The rule lives on the table that owns _deleted_at (the model itself, or its
                 # MTI ancestor), matching where `_cascade_operations` places it.
-                table = self._column_owner(model, '_deleted_at')._meta.db_table  # ty: ignore[unresolved-attribute]
+                table = self._column_owner(model, '_deleted_at')._meta.db_table
                 for related_model, _fk_field, on_delete in self.reverse_relations_mapping[model]:
                     if on_delete != models.CASCADE or not self._has(related_model, '_deleted_at'):
                         continue

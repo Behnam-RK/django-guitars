@@ -14,11 +14,18 @@ def _mti_table_chain(model: type[Model]) -> list[tuple[str, str]]:
     MTI chain shares the same primary-key value, so the same ``pk`` list filters every level.
     Leaf-first ordering is FK-safe: a child table's parent-link references its parent's row.
     """
-    chain = [(model._meta.db_table, model._meta.pk.column)]  # ty:ignore[unresolved-attribute]
+
+    def _pk_column(m: type[Model]) -> str:
+        column = m._meta.pk.column
+        if column is None:  # pragma: no cover - always set on a concrete model's own pk
+            raise TypeError(f'{m!r} has no primary key column')
+        return column
+
+    chain = [(model._meta.db_table, _pk_column(model))]
     current = model
-    while current._meta.parents:  # ty:ignore[unresolved-attribute]
-        parent = next(iter(current._meta.parents))  # ty:ignore[unresolved-attribute]
-        chain.append((parent._meta.db_table, parent._meta.pk.column))
+    while current._meta.parents:
+        parent = next(iter(current._meta.parents))
+        chain.append((parent._meta.db_table, _pk_column(parent)))
         current = parent
     return chain
 
@@ -37,7 +44,9 @@ class LiveManager(Manager):
     _queryset_class = LiveQuerySet
 
     def get_queryset(self) -> LiveQuerySet:
-        return LiveQuerySet(model=self.model, using=self._db, hints=self._hints).lives
+        # ``_hints`` is a real runtime attribute (set in Manager.__init__) that django-stubs
+        # doesn't declare.
+        return LiveQuerySet(model=self.model, using=self._db, hints=self._hints).lives  # ty: ignore[unresolved-attribute]
 
 
 class HardDeletableQuerySet(LiveQuerySet):
@@ -61,7 +70,7 @@ class HardDeletableQuerySet(LiveQuerySet):
         cascade children -- callers needing that should use instance ``hard_delete()``.
         """
         model = self.model
-        if not model._meta.parents:  # ty:ignore[unresolved-attribute]
+        if not model._meta.parents:
             return self._hard_delete_own_table()
 
         pks = list(self.values_list('pk', flat=True))
@@ -71,7 +80,7 @@ class HardDeletableQuerySet(LiveQuerySet):
         quote = connection.ops.quote_name
         with connection.cursor() as cursor, transaction.atomic():
             cursor.execute(SWITCH_ON_HARD_DELETION)
-            for table, pk_column in _mti_table_chain(model):  # ty:ignore[invalid-argument-type]
+            for table, pk_column in _mti_table_chain(model):
                 # Identifiers come from model._meta (trusted); the PK values are parameterized.
                 sql_stmt = (
                     f'DELETE FROM {quote(table)} WHERE {quote(pk_column)} IN ({placeholders})'  # noqa: E501  # nosec B608
@@ -80,7 +89,9 @@ class HardDeletableQuerySet(LiveQuerySet):
             cursor.execute(SWITCH_OFF_HARD_DELETION)
             return None
 
-    hard_delete.queryset_only = True  # ty:ignore[unresolved-attribute]
+    # Marks `hard_delete` as queryset-only for Manager.from_queryset(); a valid runtime
+    # attribute assignment on a function object that stub-based checkers can't model.
+    hard_delete.queryset_only = True  # ty: ignore[unresolved-attribute]
 
     def _hard_delete_own_table(self):
         """Delete only this queryset's own-table rows (the single-table primitive).
@@ -105,7 +116,11 @@ class ArchiveManager(Manager):
     _queryset_class = HardDeletableQuerySet
 
     def get_queryset(self) -> HardDeletableQuerySet:
-        return HardDeletableQuerySet(model=self.model, using=self._db, hints=self._hints).archives
+        return HardDeletableQuerySet(
+            model=self.model,
+            using=self._db,
+            hints=self._hints,  # ty: ignore[unresolved-attribute]
+        ).archives
 
 
 class AllObjectsManager(Manager):
@@ -114,7 +129,11 @@ class AllObjectsManager(Manager):
     _queryset_class = HardDeletableQuerySet
 
     def get_queryset(self) -> HardDeletableQuerySet:
-        return HardDeletableQuerySet(model=self.model, using=self._db, hints=self._hints)
+        return HardDeletableQuerySet(
+            model=self.model,
+            using=self._db,
+            hints=self._hints,  # ty: ignore[unresolved-attribute]
+        )
 
     @property
     def lives(self):
@@ -199,25 +218,27 @@ class SoftDeletableModel(Model):
         """
         using = self._state.db
         pk = self.pk  # save before Phase 1 resets self.pk to None
-        to_delete: dict[type, set] = defaultdict(set)
-        model_order: list[type] = []
+        to_delete: dict[type[Model], set] = defaultdict(set)
+        model_order: list[type[Model]] = []
 
-        def _collect(model: type, pks: set) -> None:
+        def _collect(model: type[Model], pks: set) -> None:
             new_pks = pks - to_delete[model]
             if not new_pks:
                 return
             to_delete[model].update(new_pks)
-            for relation in model._meta.related_objects:  # ty:ignore[unresolved-attribute]
+            for relation in model._meta.related_objects:
                 if relation.on_delete is not CASCADE:
                     continue
                 related_model = relation.related_model
+                # `_all_objects` is added dynamically by SoftDeletableModel subclasses, so the
+                # hasattr guard's type narrowing doesn't survive into `mgr`'s inferred type.
                 mgr = (
                     related_model._all_objects
                     if hasattr(related_model, '_all_objects')
                     else related_model._default_manager
                 )
                 child_pks = set(
-                    mgr.using(using)
+                    mgr.using(using)  # ty: ignore[unresolved-attribute]
                     .filter(**{f'{relation.field.name}__in': new_pks})
                     .values_list('pk', flat=True)
                 )
@@ -228,8 +249,8 @@ class SoftDeletableModel(Model):
         # Start the DFS from the MTI root so ancestor tables (reachable only via the parent-link
         # reverse CASCADE relation) are collected too; ``root is self.__class__`` for non-MTI.
         root = self.__class__
-        while root._meta.parents:  # ty:ignore[unresolved-attribute]
-            root = next(iter(root._meta.parents))  # ty:ignore[unresolved-attribute]
+        while root._meta.parents:
+            root = next(iter(root._meta.parents))
 
         with transaction.atomic():
             # Phase 1 — soft-delete first (idempotent; PG rules cascade to related objects).
@@ -243,9 +264,14 @@ class SoftDeletableModel(Model):
 
             for model in model_order:
                 pks = list(to_delete[model])
+                # `_all_objects` is added dynamically by SoftDeletableModel subclasses, so a
+                # static checker can't see it -- or `_hard_delete_own_table` on its queryset --
+                # through the hasattr guard.
                 if hasattr(model, '_all_objects'):
                     # Own-table primitive: each MTI table is a separate ``model_order`` entry,
                     # so this must not reach into ancestor tables (which ``hard_delete`` would).
-                    model._all_objects.using(using).filter(pk__in=pks)._hard_delete_own_table()  # ty:ignore[unresolved-attribute]
+                    model._all_objects.using(using).filter(  # ty: ignore[unresolved-attribute]
+                        pk__in=pks
+                    )._hard_delete_own_table()
                 else:
-                    model._default_manager.using(using).filter(pk__in=pks).delete()  # ty:ignore[unresolved-attribute]
+                    model._default_manager.using(using).filter(pk__in=pks).delete()

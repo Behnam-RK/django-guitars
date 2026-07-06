@@ -5,7 +5,6 @@ from django.db import transaction
 from django.db.models import DateTimeField
 from django.db.models.base import Model
 from django.db.models.functions import Now
-from django.db.models.options import Options
 from django.utils.functional import cached_property
 
 from .soft_deletion import SoftDeletableModel
@@ -33,8 +32,6 @@ class UpdatableModel(Model):
     Sets attributes and saves in one call with fine-grained control.
     """
 
-    _meta: Options
-
     class Meta:
         abstract = True
 
@@ -43,7 +40,9 @@ class UpdatableModel(Model):
         fields = set()
         for field in self._meta._get_fields(reverse=False, include_hidden=True):
             fields.add(field.name)
-            fields.add(field.column)  # To accept foreign keys in fk_id format!
+            column = getattr(field, 'column', None)
+            if column:  # To accept foreign keys in fk_id format! (relations have no column)
+                fields.add(column)
 
         return fields
 

@@ -6,10 +6,12 @@ These exercise the PG triggers and rules generated for MTI children, whose ``_up
 ``Section`` (a soft-deletable model with a CASCADE FK into the MTI child ``Orchestra``).
 """
 
-from django.db import connection
+import types
 
 import pytest
+from django.db import connection
 
+from guitars.models.soft_deletion import _mti_table_chain
 from tests.testapp.models import ChamberOrchestra, Ensemble, Orchestra, Section
 
 
@@ -138,6 +140,33 @@ def test_queryset_hard_delete_removes_ancestor_rows():
     for pk in pks:
         assert not _row_exists(Orchestra, pk)
         assert not _row_exists(Ensemble, pk)  # no orphaned parent rows
+
+
+class _FakeMTIModel:
+    """Minimal stand-in for a Django model class, exposing only what
+    ``_mti_table_chain`` reads off ``_meta``. Plain identity hash/eq (unlike
+    ``types.SimpleNamespace``, which is unhashable) so it can go in the
+    traversal's ``seen`` set.
+    """
+
+    def __init__(self, db_table, related_objects=()):
+        self._meta = types.SimpleNamespace(
+            parents={},
+            related_objects=list(related_objects),
+            pk=types.SimpleNamespace(column='id'),
+            db_table=db_table,
+        )
+
+
+def test_mti_table_chain_dedupes_a_child_reachable_via_two_parent_links():
+    """Defensive guard: a child reachable more than once from the same parent (which
+    real Django MTI never produces, since it's a tree, but the traversal still guards
+    against it) must appear exactly once, after being fully visited (post-order)."""
+    child = _FakeMTIModel('child')
+    child_link = types.SimpleNamespace(parent_link=True, related_model=child)
+    root = _FakeMTIModel('root', related_objects=[child_link, child_link])
+
+    assert _mti_table_chain(root) == [('child', 'id'), ('root', 'id')]
 
 
 @pytest.mark.django_db(transaction=True)

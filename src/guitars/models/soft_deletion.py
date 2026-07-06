@@ -297,5 +297,12 @@ class SoftDeletableModel(Model):
                     model._all_objects.using(using).filter(  # ty: ignore[unresolved-attribute]
                         pk__in=pks
                     )._hard_delete_own_table()
-                else:
+                else:  # pragma: no cover - unreachable: see note below
+                    # A CASCADE-related model with no soft-delete rule of its own is always
+                    # already gone by this point -- Django's Collector (triggered by Phase 1's
+                    # plain ``self.delete()``) walks the *entire* CASCADE graph reachable from
+                    # any level of the MTI chain (ancestors' own dependents included, since it
+                    # also recurses into ``_meta.parents``) and issues a real, unintercepted
+                    # DELETE for any table without a rule. Kept for symmetry with the
+                    # ``_all_objects`` branch above and as a defensive fallback.
                     model._default_manager.using(using).filter(pk__in=pks).delete()

@@ -2,7 +2,7 @@
 
 import pytest
 
-from tests.testapp.models import Album, Band, Genre
+from tests.testapp.models import Album, Band, Genre, Orchestra, Riff
 
 
 @pytest.mark.django_db
@@ -80,3 +80,37 @@ def test_queryset_hard_delete_removes_rows():
     Band._all_objects.all().hard_delete()
 
     assert Band._all_objects.count() == 0
+
+
+@pytest.mark.django_db(transaction=True)
+def test_mti_queryset_hard_delete_no_op_on_empty_queryset():
+    """The MTI branch of QuerySet.hard_delete short-circuits when nothing matches,
+    without ever opening a cursor to switch hard-deletion on."""
+    assert Orchestra._all_objects.filter(name='does-not-exist').hard_delete() is None
+
+
+@pytest.mark.django_db(transaction=True)
+def test_hard_delete_does_not_cascade_through_non_cascade_relations():
+    """Album.producer is a SET_NULL (not CASCADE) FK to Band -- deleting the producer
+    band must not hard-delete the album, only null out the FK."""
+    producer = Band.objects.create(name='Geddy Co')
+    band = Band.objects.create(name='Rush')
+    album = Album.objects.create(title='Hemispheres', band=band, producer=producer)
+
+    producer.hard_delete()
+
+    assert Album._all_objects.filter(pk=album.pk).exists()
+    album.refresh_from_db()
+    assert album.producer_id is None
+
+
+@pytest.mark.django_db(transaction=True)
+def test_hard_delete_hard_deletes_non_soft_deletable_cascade_children():
+    """Riff.band is a CASCADE FK from a plain (non-soft-deletable) model -- its rows
+    must be genuinely removed, not merely soft-deleted, when the band is hard-deleted."""
+    band = Band.objects.create(name='Rush')
+    riff = Riff.objects.create(name='Working Man', band=band)
+
+    band.hard_delete()
+
+    assert not Riff.objects.filter(pk=riff.pk).exists()

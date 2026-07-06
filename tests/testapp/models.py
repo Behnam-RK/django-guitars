@@ -1,5 +1,6 @@
 from django.db.models import (
     CASCADE,
+    SET_NULL,
     CharField,
     ForeignKey,
     IntegerField,
@@ -11,9 +12,15 @@ from guitars.models import DutarModel, GuitarModel, SetarModel
 
 
 class Riff(DutarModel):
-    """Basic helpers only (DutarModel) — no timestamps, no soft deletion."""
+    """Basic helpers only (DutarModel) — no timestamps, no soft deletion.
+
+    ``band`` is a CASCADE FK to a soft-deletable model from a model that is
+    itself NOT soft-deletable — exercises the plain (non-``_all_objects``)
+    hard-delete path for cascade children.
+    """
 
     name = CharField(max_length=50)
+    band = ForeignKey('Band', on_delete=CASCADE, null=True, blank=True, related_name='riffs')
 
     def __str__(self) -> str:
         return self.name
@@ -50,6 +57,11 @@ class Band(GuitarModel):
 class Album(GuitarModel):
     title = CharField(max_length=100)
     band = ForeignKey(Band, on_delete=CASCADE, related_name='albums')
+    # SET_NULL (not CASCADE) to a soft-deletable model -- exercises the "skip non-CASCADE
+    # relation" branches in cascade-rule generation and instance hard_delete's DFS collection.
+    producer = ForeignKey(
+        Band, on_delete=SET_NULL, null=True, blank=True, related_name='produced_albums'
+    )
 
     def __str__(self) -> str:
         return self.title

@@ -7,12 +7,23 @@ from django.db.models.base import Model
 from guitars.sql import SWITCH_OFF_HARD_DELETION, SWITCH_ON_HARD_DELETION
 
 
-def _mti_table_chain(model: type[Model]) -> list[tuple[str, str]]:
-    """Return ``(db_table, pk_column)`` for *model* and each MTI ancestor, leaf-first.
+def _is_mti_model(model: type[Model]) -> bool:
+    """Whether *model* participates in multi-table inheritance (as a child or a parent)."""
+    return bool(model._meta.parents) or any(
+        getattr(rel, 'parent_link', False) for rel in model._meta.related_objects
+    )
 
-    Empty ancestor list for a single-table model (``[(own_table, own_pk)]``). Every table in an
-    MTI chain shares the same primary-key value, so the same ``pk`` list filters every level.
-    Leaf-first ordering is FK-safe: a child table's parent-link references its parent's row.
+
+def _mti_table_chain(model: type[Model]) -> list[tuple[str, str]]:
+    """Return ``(db_table, pk_column)`` for every table in *model*'s MTI tree, leaf-first.
+
+    Walks up to the inheritance **root** (via ``_meta.parents``) then DFS-descends through every
+    MTI child (the ``parent_link`` reverse relations), emitting each table child-before-parent.
+    Every table in an MTI chain shares the same primary-key value, so the same ``pk`` list filters
+    every level. Leaf-first ordering is FK-safe: a child table's parent-link references its parent's
+    row. Covering the whole tree (not just ancestors) means ``hard_delete`` on *any* level -- root,
+    middle, or leaf -- clears the entire chain with no orphaned row left in either direction. A
+    single-table model yields ``[(own_table, own_pk)]``.
     """
 
     def _pk_column(m: type[Model]) -> str:
@@ -21,12 +32,23 @@ def _mti_table_chain(model: type[Model]) -> list[tuple[str, str]]:
             raise TypeError(f'{m!r} has no primary key column')
         return column
 
-    chain = [(model._meta.db_table, _pk_column(model))]
-    current = model
-    while current._meta.parents:
-        parent = next(iter(current._meta.parents))
-        chain.append((parent._meta.db_table, _pk_column(parent)))
-        current = parent
+    root = model
+    while root._meta.parents:
+        root = next(iter(root._meta.parents))
+
+    chain: list[tuple[str, str]] = []
+    seen: set[type[Model]] = set()
+
+    def _visit(m: type[Model]) -> None:
+        if m in seen:
+            return
+        seen.add(m)
+        for rel in m._meta.related_objects:
+            if getattr(rel, 'parent_link', False):
+                _visit(rel.related_model)  # a more-derived MTI child table
+        chain.append((m._meta.db_table, _pk_column(m)))
+
+    _visit(root)  # post-order from the root -> children appended before their parent
     return chain
 
 
@@ -65,12 +87,14 @@ class HardDeletableQuerySet(LiveQuerySet):
         """Permanently remove matching rows from the database.
 
         For a multi-table-inheritance model this also removes the corresponding rows from every
-        ancestor table (leaf-to-root, by shared PK) so no orphaned parent row is left behind.
-        Like the single-table path, this is a blunt instrument: it does not walk reverse-FK
-        cascade children -- callers needing that should use instance ``hard_delete()``.
+        other table in the inheritance chain (descendants and ancestors, leaf-to-root by shared PK)
+        so no orphaned row is left behind, regardless of which level the queryset is on. Like the
+        single-table path, this is a blunt instrument: it does not walk reverse-FK cascade children
+        (other than the MTI chain itself) -- callers needing that should use instance
+        ``hard_delete()``.
         """
         model = self.model
-        if not model._meta.parents:
+        if not _is_mti_model(model):
             return self._hard_delete_own_table()
 
         pks = list(self.values_list('pk', flat=True))

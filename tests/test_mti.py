@@ -138,3 +138,21 @@ def test_queryset_hard_delete_removes_ancestor_rows():
     for pk in pks:
         assert not _row_exists(Orchestra, pk)
         assert not _row_exists(Ensemble, pk)  # no orphaned parent rows
+
+
+@pytest.mark.django_db(transaction=True)
+def test_queryset_hard_delete_from_parent_removes_descendant_rows():
+    # hard_delete on a *parent/root* queryset must clear descendant tables too, otherwise the
+    # child row's parent-link FK would be orphaned (deferred FK check -> IntegrityError at commit).
+    chamber = ChamberOrchestra.objects.create(name='ASMF', conductor='Marriner', seats=40)
+    plain = Ensemble.objects.create(name='Plain')
+    pk, plain_pk = chamber.pk, plain.pk
+
+    Ensemble._all_objects.all().hard_delete()
+
+    assert Ensemble._all_objects.count() == 0
+    # The whole chain under the deleted parent row is gone -- no orphaned descendant rows.
+    assert not _row_exists(ChamberOrchestra, pk)
+    assert not _row_exists(Orchestra, pk)
+    assert not _row_exists(Ensemble, pk)
+    assert not _row_exists(Ensemble, plain_pk)

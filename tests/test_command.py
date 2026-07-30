@@ -885,6 +885,41 @@ def test_unforced_policy_tables_bounds_a_replacement_operation_too():
     assert unforced_policy_tables(with_replacement) == {'table_b'}
 
 
+def test_a_replacement_carrying_force_takes_a_table_off_the_backlog(tmp_path, monkeypatch):
+    """The scan is last-write-wins per table, not a union across every migration file.
+
+    The shape that matters is a finished retrofit: ``table_b``'s policy shipped inert under
+    ``GUITARS_RLS_FORCE = False``, then the model changed and the replacement was generated
+    with the setting back on. That replacement inlines FORCE, so it writes no
+    ``# Tenant FORCE RLS`` header for ``tenant_forces`` to find -- and if the scan merely
+    unioned every ``force=False`` it ever saw, ``table_b`` would stay on the backlog forever
+    and ``--force-rls`` would keep emitting a migration for a table that is already forced.
+    That is the same redundant-migration bug the flag was fixed for once already, one file
+    further along.
+    """
+    migrations_dir = tmp_path / 'migrations'
+    migrations_dir.mkdir()
+    # Both tables ship inert first, so the assertion below distinguishes "came off the
+    # backlog" from "the scan found nothing at all".
+    (migrations_dir / '0001_initial.py').write_text(
+        _TWO_POLICY_OPERATIONS.replace('force=True', 'force=False')
+    )
+    (migrations_dir / '0002_replacement.py').write_text(
+        '# Tenant RLS replaced on "table_b" table! [POLICY:cccccccccccc]\n'
+        "sql.replace_table_rls(table='table_b', columns={'l': 'l_id'}, force=True),\n"
+    )
+
+    app = django_apps.get_app_config('testapp')
+    monkeypatch.setattr(app, 'path', str(tmp_path))
+
+    command = Command()
+
+    # Both are recorded as policied; only the one whose latest operation is still inert
+    # remains something --force-rls has to act on.
+    assert {'table_a', 'table_b'} <= command.existing.tenant_policies
+    assert command.existing.unforced_policies == {'table_a'}
+
+
 def test_the_real_migrations_ship_every_policy_forced():
     """GUITARS_RLS_FORCE defaults to True, so this repo's own migrations carry FORCE inline.
 

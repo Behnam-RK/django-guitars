@@ -58,6 +58,31 @@ class TestPolicySqlRefusals:
             sql.create_tenant_policy(table='t', columns={}, owner_columns={'label': 'label_id'})
 
 
+class TestForceIsSeparableFromTheRest:
+    """``force=False`` is the whole staged-retrofit workflow, so the shape it emits is pinned.
+
+    ``GUITARS_RLS_FORCE = False`` exists to ship policies *inert* onto a populated database:
+    the app role owns its tables and an owner bypasses non-``FORCE`` RLS silently, so the
+    policy can be soaked before it binds. Nothing asserted that the flag actually removes the
+    statement, and statement coverage could not notice -- ``if force:`` runs either way.
+    """
+
+    def test_force_false_omits_the_alter_and_changes_nothing_else(self):
+        forced = sql.create_table_rls(table='t', columns={'label': 'label_id'}, force=True)
+        inert = sql.create_table_rls(table='t', columns={'label': 'label_id'}, force=False)
+
+        assert forced[-1] == sql.force_rls(table='t')
+        assert inert == forced[:-1], 'force=False must drop the ALTER and nothing more'
+        # Still ENABLE'd: a policy that is not enabled constrains nobody, forced or not.
+        assert sql.enable_rls(table='t') in inert
+
+    def test_the_default_is_forced(self):
+        """A library must not ship a security feature that is inert by default -- ADR 0002."""
+        assert sql.force_rls(table='t') in sql.create_table_rls(
+            table='t', columns={'label': 'label_id'}
+        )
+
+
 # ────────────────────── model shapes that cannot be covered ────────────── #
 
 
@@ -407,6 +432,26 @@ class TestGeneratorSettings:
         output = out.getvalue()
 
         assert 'already emit FORCE' in output
+        assert 'No changes detected' in output
+
+    def test_force_rls_is_quiet_in_the_configuration_it_exists_for(self, db):
+        """``GUITARS_RLS_FORCE = False`` is the retrofit the flag was built for.
+
+        Its sibling above covers the *finished* retrofit, where the setting is back on and the
+        warning is the point. Here the setting is still off, so there is nothing to warn about
+        -- and a stage that lectured the operator every time they ran it in the intended
+        configuration is a stage they learn to ignore. This repo's own policies all shipped
+        forced, so there is still no backlog to act on; what is asserted is the absence of the
+        notice, not the absence of work.
+        """
+        from io import StringIO
+
+        out = StringIO()
+        with override_settings(GUITARS_RLS_FORCE=False):
+            call_command('makeguitarmigrations', '--force-rls', stdout=out, stderr=out)
+        output = out.getvalue()
+
+        assert 'already emit FORCE' not in output
         assert 'No changes detected' in output
 
     def test_force_rls_says_so_when_policies_are_off(self, db):

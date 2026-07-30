@@ -138,6 +138,22 @@ def test_every_frozen_constant_is_a_usable_sql_string():
         assert value.strip(), f'sql.{name} is empty'
 
 
+def test_every_rule_is_created_or_replace():
+    """A rule must be redefinable without an instant in which the table has none.
+
+    That instant is not cosmetic: with no ``soft_delete`` rule a ``DELETE`` destroys the
+    row, so the documented way to replace a rule (re-running these constants in a one-off
+    migration) is only safe because PostgreSQL swaps the definition in place. Dropping and
+    re-creating instead would open the window between the two statements.
+    """
+    rule_constants = sorted(name for name in FROZEN_SQL_CONSTANTS if name.startswith('CREATE_'))
+    creating_rules = [name for name in rule_constants if ' RULE ' in getattr(sql, name)]
+
+    assert creating_rules, 'found no rule-creating constants -- has a name changed?'
+    plain = [name for name in creating_rules if 'CREATE OR REPLACE RULE' not in getattr(sql, name)]
+    assert not plain, f'these create a rule without OR REPLACE, so replacing one is unsafe: {plain}'
+
+
 def test_every_frozen_callable_is_callable():
     """Migrations *call* these, so a constant shadowing one fails at migrate time."""
     for name in sorted(FROZEN_SQL_CALLABLES):

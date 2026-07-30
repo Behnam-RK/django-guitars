@@ -85,15 +85,18 @@ carry the old SQL — see *Fixed* below for why that matters and how to replace 
 
   **Existing databases need one action.** The rules were created by migrations
   that call these SQL constants by name, so a database migrated before 1.0.0 still
-  carries the old guard. Replace them by re-applying the enforcement migration:
+  carries the old guard, and no new migration is generated for it — the idempotency
+  digest covers the operation source, not the SQL it expands to. Write a one-off
+  migration that re-runs the same constants; they are now created `OR REPLACE`, so
+  each definition is swapped in place inside one transaction, never leaving the
+  table without a rule. See [`docs/soft-deletion.md`](docs/soft-deletion.md) for the
+  shape.
 
-  ```bash
-  python manage.py migrate <app> <previous_migration>   # reverse_sql drops the rules
-  python manage.py migrate <app>                        # forward re-creates them
-  ```
-
-  New databases are correct on first `migrate`. No new migration is generated —
-  the idempotency digest covers the operation source, not the SQL it expands to.
+  Do **not** reverse the enforcement migration and re-apply it. Its `reverse_sql`
+  drops the rules, so between the two `migrate` commands every `.delete()` on those
+  tables is a permanent delete — and reversing to a previous migration unapplies
+  everything after it, not just the enforcement one. New databases are correct on
+  first `migrate`.
 - Role names in `GUITARS_RLS_EXEMPT_ROLES` were interpolated into policy SQL
   **unquoted**, so `metabase-ro` was a syntax error and `BI_Reader` silently bound
   `bi_reader`. Role-derived names are now quoted at both nesting levels, and every
@@ -147,6 +150,10 @@ carry the old SQL — see *Fixed* below for why that matters and how to replace 
 
 ### Changed
 
+- The three soft-delete rules are created `OR REPLACE`, so a rule can be redefined
+  without an instant in which the table has none — and an instant without a
+  `soft_delete` rule is an instant in which `DELETE` destroys rows. Output on a fresh
+  database is otherwise unchanged.
 - `sql.py` became the `sql/` package (`triggers`, `soft_delete`, `policy`), still
   re-exported flat — `from guitars import sql` is unchanged, and every name in it
   remains a frozen interface that generated migrations read by name.

@@ -350,3 +350,22 @@ class TestOptions:
 
         assert 'testapp_track' in output
         assert 'not found in the database' in output
+
+    def test_a_database_with_no_policies_at_all_is_reported_table_by_table(self, _execute, db):
+        """The state before the very first ``migrate``, and the other reason to run this.
+
+        Worth its own test because the column lookup is skipped entirely when nothing is
+        policied -- there are no policy oids to ask about -- so this is the one path where the
+        second query never runs. It has to report every expected table as unprotected rather
+        than sail through on an empty result set.
+        """
+        from guitars.tenancy.discovery import expected_coverage
+
+        tables = sorted(expected_coverage().tables)
+        _execute(*[sql.drop_tenant_policy(table=table) for table in tables])
+
+        output = _audit_failure()
+
+        assert f'{len(tables)} table(s) expected, 0 enforced' in output
+        for table in tables:
+            assert f"'{table}': no {sql.TENANT_POLICY} policy" in output

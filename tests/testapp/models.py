@@ -203,10 +203,11 @@ class Booking(SetarModel):
     """Hand-declared `TenantedManager` over `LiveManager`, tenant FK declared by hand.
 
     The composition path a project takes when it wants scoping without the `GuitarModel`
-    rung -- a nullable tenant, its own `on_delete`, and `GUITARS_TENANT_AUTOFILL` honoured
-    rather than overridden. Only `objects` is scoped, so `_archives` and `_all_objects`
-    stay unscoped here: that asymmetry is the point, and it is what `GuitarModel` exists to
-    stop you having to get right.
+    rung -- a tenant FK it declares itself (so `editable=False` and the templated
+    `related_name` are its own choice, not the rung's) and `GUITARS_TENANT_AUTOFILL`
+    honoured rather than overridden. Only `objects` is scoped, so `_archives` and
+    `_all_objects` stay unscoped here: that asymmetry is the point, and it is what
+    `GuitarModel` exists to stop you having to get right.
     """
 
     venue = CharField(max_length=100)

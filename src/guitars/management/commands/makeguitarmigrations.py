@@ -382,7 +382,10 @@ class Command(BaseCommand):
         existing_mti_soft_deletes: set[str] = set()
         existing_tenant_policies: set[str] = set()
         existing_policy_identities: dict[str, str] = {}
-        existing_unforced_policies: set[str] = set()
+        #: Table -> whether its *most recent* policy operation was written ``force=False``.
+        #: A mapping rather than a set so a later operation can take a table back off the
+        #: FORCE backlog; see where it is filled.
+        existing_policy_force: dict[str, bool] = {}
         existing_tenant_forces: set[str] = set()
         trigger_function_dep: tuple[str, str] | None = None
         parent_trigger_function_dep: tuple[str, str] | None = None
@@ -407,12 +410,20 @@ class Command(BaseCommand):
                 existing_mti_soft_deletes.update(
                     m.group(1) for m in _RE_MTI_SOFT_DELETE.finditer(content)
                 )
+                unforced_in_file = unforced_policy_tables(content)
                 for match in _RE_TENANT_POLICY.finditer(content):
-                    existing_tenant_policies.add(match.group(1))
+                    table = match.group(1)
+                    existing_tenant_policies.add(table)
                     # Last write wins, within a file and across them -- files arrive in
                     # filename order, which is application order.
-                    existing_policy_identities[match.group(1)] = match.group('identity')
-                existing_unforced_policies.update(unforced_policy_tables(content))
+                    existing_policy_identities[table] = match.group('identity')
+                    # Last write wins here too, and for the same reason. Accumulating these
+                    # by union instead left a table on the backlog forever once any migration
+                    # had written it ``force=False``: a later replacement carrying
+                    # ``force=True`` inlines FORCE and so emits no FORCE header for
+                    # ``tenant_forces`` to find, and ``--force-rls`` then wrote a redundant
+                    # migration for a table that was already forced.
+                    existing_policy_force[table] = table in unforced_in_file
                 existing_tenant_forces.update(
                     m.group(1) for m in _RE_TENANT_FORCE.finditer(content)
                 )
@@ -425,7 +436,9 @@ class Command(BaseCommand):
             mti_soft_deletes=existing_mti_soft_deletes,
             tenant_policies=existing_tenant_policies,
             tenant_policy_identities=existing_policy_identities,
-            unforced_policies=existing_unforced_policies,
+            unforced_policies={
+                table for table, unforced in existing_policy_force.items() if unforced
+            },
             tenant_forces=existing_tenant_forces,
             trigger_function_dependency=trigger_function_dep,
             parent_trigger_function_dependency=parent_trigger_function_dep,
@@ -805,10 +818,10 @@ class Command(BaseCommand):
                 # The rule lives on the table that owns _deleted_at (the model itself, or its
                 # MTI ancestor), matching where `_cascade_operations` places it.
                 table = column_owner(model, '_deleted_at')._meta.db_table
-                for related_model, _fk_field, on_delete in self.reverse_relations_mapping[model]:
+                for related_model, fk_field, on_delete in self.reverse_relations_mapping[model]:
                     if on_delete != models.CASCADE or not has_column(related_model, '_deleted_at'):
                         continue
-                    if getattr(_fk_field.remote_field, 'parent_link', False):
+                    if getattr(fk_field.remote_field, 'parent_link', False):
                         continue
                     if model_app_label.get(related_model) not in requested:
                         continue

@@ -20,6 +20,15 @@ long as the connection lived. ``<> 'on'`` inverts the default, so anything other
 an explicit opt-in preserves the row. The failure direction has to be "keep the
 data".
 
+**Every rule is created ``OR REPLACE``**, which is what makes replacing one safe.
+PostgreSQL swaps the definition in place inside the transaction, so there is no
+instant at which the table has no ``soft_delete`` rule -- and an instant without it
+is an instant in which ``DELETE`` means what it says. The alternative, reversing the
+enforcement migration and re-applying it, opens exactly that window between two
+commands (and reverses every migration after it besides). A database carrying the
+pre-1.0.0 ``= 'off'`` guard is upgraded by re-running these statements, nothing
+more; see ``docs/soft-deletion.md``.
+
 The MTI redirect rule at the bottom preserves the child row and stamps the *owner*
 instead -- see the package docstring for the shared-PK invariant it relies on.
 """
@@ -40,7 +49,7 @@ CHECK_RULE_EXISTS_ON_TABLE = """
 """
 
 CREATE_SOFT_DELETE_RULE = """
-    CREATE RULE soft_delete
+    CREATE OR REPLACE RULE soft_delete
         AS ON DELETE TO {table}
         WHERE COALESCE(current_setting('rules.hard_deletion', true), '') <> 'on'
         DO INSTEAD (
@@ -55,7 +64,7 @@ DROP_SOFT_DELETE_RULE = """
 """
 
 CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE = """
-    CREATE RULE soft_delete_related_{related_table}
+    CREATE OR REPLACE RULE soft_delete_related_{related_table}
         AS ON UPDATE TO {table}
         WHERE old._deleted_at IS NULL AND new._deleted_at IS NOT NULL AND
               COALESCE(current_setting('rules.hard_deletion', true), '') <> 'on'
@@ -76,7 +85,7 @@ DROP_SOFT_DELETE_RELATED_OBJECTS_RULE = """
 # Django issues for an MTI chain, so the owner's cascade rules fire exactly once.
 
 CREATE_MTI_SOFT_DELETE_RULE = """
-    CREATE RULE soft_delete
+    CREATE OR REPLACE RULE soft_delete
         AS ON DELETE TO {child_table}
         WHERE COALESCE(current_setting('rules.hard_deletion', true), '') <> 'on'
         DO INSTEAD (

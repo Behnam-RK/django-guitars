@@ -138,15 +138,24 @@ class HardDeletableQuerySet(LiveQuerySet):
         Used both for non-MTI models and, per model, by instance-level ``hard_delete`` -- which
         collects the whole MTI chain into its own child-first ``model_order`` and deletes each
         table separately, so this must never reach into ancestor tables.
+
+        Three statements, three ``execute`` calls -- like the MTI path above, and not
+        splice-able back into one string: a parameterised multi-statement ``execute`` only
+        works under client-side binding, so one call would break the moment a consumer sets
+        psycopg's ``server_side_binding`` option. ``atomic()`` is what keeps the split safe:
+        the switch is transaction-local, and in autocommit each statement would otherwise be
+        its own transaction -- the switch expiring before the DELETE it exists to unlock,
+        which then archives instead of deleting.
         """
         with connection.cursor() as cursor:
             query = self.query.clone()
             query.__class__ = sql.DeleteQuery
             compiled, params = query.sql_with_params()
             with transaction.atomic():
-                return cursor.execute(
-                    f'{SWITCH_ON_HARD_DELETION}\n{compiled};\n{SWITCH_OFF_HARD_DELETION}', params
-                )
+                cursor.execute(SWITCH_ON_HARD_DELETION)
+                result = cursor.execute(compiled, params)
+                cursor.execute(SWITCH_OFF_HARD_DELETION)
+                return result
 
 
 class ArchiveManager(Manager):

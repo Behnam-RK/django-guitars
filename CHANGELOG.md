@@ -75,6 +75,15 @@ carry the old SQL — see *Fixed* below for why that matters and how to replace 
 
 ### Fixed
 
+- `refresh_from_db()` (via `HasCachedPropertyModel`) only expired
+  `cached_property`s declared on the concrete class itself — one inherited from a
+  mixin or an abstract base stayed stale after a refresh, and naming it explicitly
+  in `expire_cached_properties()` raised `KeyError`. The scan now walks the MRO.
+- `queryset.hard_delete()` on a non-MTI model spliced the hard-deletion switch and
+  the `DELETE` into one parameterised multi-statement `execute`, which only works
+  under psycopg's client-side binding (Django's default). It now issues three
+  statements inside the same transaction, like the MTI path always did, so
+  `server_side_binding = True` no longer breaks it.
 - **A rolled-back `hard_delete()` turned every later `.delete()` on that
   connection into a permanent delete.** `hard_delete()` sets
   `rules.hard_deletion` transaction-locally; PostgreSQL reverts that on rollback,

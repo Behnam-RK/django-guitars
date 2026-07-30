@@ -69,22 +69,10 @@ from .triggers import (
 )
 
 
+# One flat sorted list -- frozen names, so a reviewer diffing a release should see an
+# insertion, never a reshuffle. tests/test_sql_interface.py compares the set.
 __all__ = [
     'CHECK_PARENT_TRIGGER_FUNCTION_EXISTS',
-    'EXEMPT_POLICY_PREFIX',
-    'TENANT_POLICY',
-    'create_exempt_policy',
-    'create_table_rls',
-    'create_tenant_policy',
-    'disable_rls',
-    'drop_all_exempt_policies',
-    'drop_exempt_policy',
-    'drop_table_rls',
-    'drop_tenant_policy',
-    'enable_rls',
-    'force_rls',
-    'no_force_rls',
-    'replace_table_rls',
     'CHECK_RULE_EXISTS_ON_TABLE',
     'CHECK_TRIGGER_EXISTS_ON_TABLE',
     'CHECK_TRIGGER_FUNCTION_EXISTS',
@@ -102,6 +90,20 @@ __all__ = [
     'DROP_SOFT_DELETE_RULE',
     'DROP_UPDATED_AT_TRIGGER',
     'DROP_UPDATED_AT_TRIGGER_FUNCTION',
+    'EXEMPT_POLICY_PREFIX',
     'SWITCH_OFF_HARD_DELETION',
     'SWITCH_ON_HARD_DELETION',
+    'TENANT_POLICY',
+    'create_exempt_policy',
+    'create_table_rls',
+    'create_tenant_policy',
+    'disable_rls',
+    'drop_all_exempt_policies',
+    'drop_exempt_policy',
+    'drop_table_rls',
+    'drop_tenant_policy',
+    'enable_rls',
+    'force_rls',
+    'no_force_rls',
+    'replace_table_rls',
 ]

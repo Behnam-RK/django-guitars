@@ -162,6 +162,28 @@ def test_expire_cached_properties_directly():
     assert band.shout == 'YES'
 
 
+@pytest.mark.django_db
+def test_inherited_cached_property_invalidated_on_refresh():
+    """``whisper`` lives on WhisperMixin's __dict__, not Band's -- a leaf-only scan skips it."""
+    band = Band.objects.create(name='RUSH')
+    assert band.whisper == 'rush'  # caches on the instance
+
+    Band.objects.filter(pk=band.pk).update(name='YES')  # bypasses the instance
+    band.refresh_from_db()
+
+    assert band.whisper == 'yes'  # stale 'rush' when only Band.__dict__ was searched
+
+
+def test_expire_cached_properties_accepts_an_inherited_name():
+    band = Band(name='RUSH')
+    assert band.whisper == 'rush'
+
+    band.name = 'YES'
+    band.expire_cached_properties('whisper')  # KeyError before the MRO walk
+
+    assert band.whisper == 'yes'
+
+
 # --- TarModel: the lightest rung (update + cached-property invalidation) ---
 
 

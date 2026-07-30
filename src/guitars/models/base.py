@@ -165,11 +165,17 @@ class HasCachedPropertyModel(Model):
         abstract = True
 
     def expire_cached_properties(self, *properties):
-        obj_dict = self.__class__.__dict__
-        properties = properties or obj_dict.keys()
-        for key in properties:
-            if isinstance(obj_dict[key], cached_property):
-                self.__dict__.pop(key, None)
+        # The whole MRO, not just this class's own __dict__: a cached_property declared on
+        # a mixin or an abstract base lives in *that* class's __dict__ (Python copies
+        # nothing down), while its cached value still lands in self.__dict__ -- so reading
+        # only the leaf class silently skipped every inherited one, and refresh_from_db()
+        # handed back an instance whose inherited properties were still stale.
+        for klass in type(self).__mro__:
+            for key, value in vars(klass).items():
+                if properties and key not in properties:
+                    continue
+                if isinstance(value, cached_property):
+                    self.__dict__.pop(key, None)
 
     def refresh_from_db(self, *args, **kwargs):
         self.expire_cached_properties()

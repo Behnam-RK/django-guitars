@@ -41,7 +41,21 @@ class Genre(DutarModel):
         return self.name
 
 
-class Band(SetarModel):
+class WhisperMixin:
+    """A plain (non-model) mixin contributing a ``cached_property``.
+
+    Exists to prove refresh-driven invalidation reaches properties inherited from any
+    class in the MRO -- Python copies nothing down, so this property lives in the mixin's
+    ``__dict__`` while its cached value lands on the instance. Invisible to migrations:
+    ``ModelState`` records only model bases.
+    """
+
+    @cached_property
+    def whisper(self) -> str:
+        return self.name.lower()
+
+
+class Band(WhisperMixin, SetarModel):
     name = CharField(max_length=100)
     nickname = CharField(max_length=100, null=True, blank=True)
     genres = ManyToManyField(Genre, related_name='bands', blank=True)

@@ -10,8 +10,9 @@ changelog-notes.sh →  print one version's CHANGELOG section (shared helper)
 ```
 
 `changelog-notes.sh <version>` prints the `## [version]` section of
-`CHANGELOG.md` to stdout. Both `release.sh` and the `release.yml` GitHub
-workflow use it, so the release-notes extraction lives in exactly one place.
+`CHANGELOG.md` to stdout. Both `release.sh` and the `_create-release.yml`
+GitHub workflow use it, so the release-notes extraction lives in exactly one
+place.
 
 `pyproject.toml` is the **single source of truth** for the version;
 `src/guitars/__init__.py` reads `__version__` from the installed package

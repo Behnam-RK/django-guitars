@@ -1,47 +1,30 @@
 name: Release and Publish
 
-# Creates a GitHub Release from a vX.Y.Z tag, using the matching CHANGELOG.md
-# section as the release notes (falling back to auto-generated notes when the
-# version has no changelog entry). Can also publish to PyPI via Trusted
-# Publishing (OIDC), but only as an explicit opt-in on a manual run --
-# tagging/releasing alone never ships to PyPI.
+# The manual and tag-push face of releasing. The release itself is cut by
+# _create-release.yml, which this calls -- see that file for why it is separate
+# (short version: a called workflow's permissions are validated statically, so
+# the `publish` job below would otherwise force OIDC onto the automated path).
 #
 # Triggers:
-#   - called by tag-release.yml (`workflow_call`) right after it pushes the tag
-#     -- the normal path. It has to be a call and not the tag push below,
-#     because GitHub suppresses workflow triggers for events created with the
-#     default GITHUB_TOKEN (the recursion guard), and that is the token
-#     tag-release.yml pushes with. A reusable-workflow call runs inside the
-#     caller's run, emits no event, and so is not suppressed. Before this,
-#     every release here was cut by hand -- see that file.
-#   - push of a vX.Y.Z tag -- for a tag pushed by a human (scripts/release.sh)
-#     rather than by tag-release.yml. Harmless if both ever fire: the release
-#     step below creates or edits, whichever is needed.
+#   - push of a vX.Y.Z tag -- for a tag pushed by a human (scripts/release.sh).
+#     A tag pushed by tag-release.yml does NOT arrive here: GitHub suppresses
+#     workflow triggers for events created with the default GITHUB_TOKEN, which
+#     is why that workflow calls _create-release.yml directly instead of relying
+#     on this trigger. Harmless if both ever reach the same tag -- the release
+#     step creates or edits, whichever is needed.
 #   - manual run (workflow_dispatch) against an existing tag, picked from the
 #     "Use workflow from" ref selector above (a dropdown/search box over
 #     branches and tags -- there's no free-text `tag` input, so it's always
 #     current). Rebuilds the release notes, and additionally publishes to
 #     PyPI if the `publish` input is checked.
 #
-# The tag being released is `inputs.tag` when called, and `github.ref_name`
-# otherwise -- resolved once into $TAG below, because under `workflow_call` the
-# ref *is the caller's* (main), so GITHUB_REF_NAME would name a branch.
-#
-# Restricted to main: releases are only ever cut from main (tag-release.yml
-# only auto-tags pushes to main). The "Verify tag is on main" step rejects any
-# tag whose commit isn't reachable from main, since a tag push event can't be
-# filtered by branch in `on:` alone, and workflow_dispatch could otherwise be
-# run against any tag.
+# Publishing to PyPI is manual-only and always has been: it lives in a job
+# gated on `workflow_dispatch` *and* the opt-in input, and the automated path
+# reaches this file not at all.
 on:
   push:
     tags:
       - 'v*'
-  workflow_call:
-    inputs:
-      tag:
-        description: 'The vX.Y.Z tag to cut the release from'
-        type: string
-        required: true
   workflow_dispatch:
     inputs:
       publish:
@@ -54,85 +37,22 @@ permissions:
 
 jobs:
   release:
-    name: Create release from tag
-    runs-on: ubuntu-latest
-    env:
-      # The one place the tag is resolved. `inputs.tag` is set only on a
-      # workflow_call; on a tag push and on workflow_dispatch it is empty and
-      # the ref is the tag itself.
-      TAG: ${{ inputs.tag || github.ref_name }}
-    steps:
-      - name: Require a tag ref
-        if: github.event_name == 'workflow_dispatch'
-        run: |
-          if [ "${{ github.ref_type }}" != "tag" ]; then
-            echo "::error::Select a tag in the 'Use workflow from' dropdown above (got ref '${{ github.ref_name }}', a ${{ github.ref_type }})."
-            exit 1
-          fi
-
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          # Explicit, because on a workflow_call the caller's ref is main and
-          # the default checkout would build notes for the wrong commit.
-          ref: ${{ inputs.tag || github.ref_name }}
-
-      - name: Verify tag is on main
-        run: |
-          git fetch origin main
-          if ! git merge-base --is-ancestor HEAD origin/main; then
-            echo "::error::$TAG is not reachable from main; releases are only cut from main."
-            exit 1
-          fi
-
-      - name: Extract release notes from CHANGELOG
-        id: notes
-        run: |
-          notes_file="$(mktemp)"
-          bash scripts/changelog-notes.sh "${TAG#v}" > "$notes_file" || true
-          if [ -s "$notes_file" ]; then
-            echo "have_notes=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "have_notes=false" >> "$GITHUB_OUTPUT"
-          fi
-          echo "notes_file=$notes_file" >> "$GITHUB_OUTPUT"
-
-      - name: Determine pre-release flag
-        id: prerelease
-        run: |
-          if printf '%s' "${TAG#v}" | grep -qE '(a|b|rc|alpha|beta|dev)[0-9]*$'; then
-            echo "flag=--prerelease" >> "$GITHUB_OUTPUT"
-          else
-            echo "flag=" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Create or update the release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          tag="$TAG"
-          notes_file="${{ steps.notes.outputs.notes_file }}"
-          if [ "${{ steps.notes.outputs.have_notes }}" != "true" ]; then
-            # `--generate-notes` only exists on `release create`, not `release
-            # edit`, so fetch the same auto-generated notes via the API and
-            # write them to notes_file -- one code path for both branches below.
-            gh api "repos/${{ github.repository }}/releases/generate-notes" \
-              -f "tag_name=$tag" --jq .body > "$notes_file"
-          fi
-          if gh release view "$tag" >/dev/null 2>&1; then
-            gh release edit "$tag" --title "$tag" --notes-file "$notes_file" ${{ steps.prerelease.outputs.flag }}
-          else
-            gh release create "$tag" --title "$tag" --verify-tag --notes-file "$notes_file" ${{ steps.prerelease.outputs.flag }}
-          fi
+    name: Cut the GitHub release
+    # `github.ref_name` is the tag on both triggers: a tag push, and a manual
+    # run whose ref selector was pointed at one (enforced inside).
+    uses: ./.github/workflows/_create-release.yml
+    with:
+      tag: ${{ github.ref_name }}
+    permissions:
+      contents: write
 
   publish:
     name: Build and publish to PyPI (Trusted Publishing)
     needs: release
-    # Manual runs only, and only with the box ticked. A workflow_call from
-    # tag-release.yml reports ``github.event_name`` as the caller's ``push``
-    # and carries no ``publish`` input, so the automated path can never reach
-    # here -- which is the "a tag push never ships to PyPI" rule, kept intact
-    # now that tagging actually does cut a release on its own.
+    # Manual runs only, and only with the box ticked. This job is the reason
+    # _create-release.yml is a separate file: `id-token: write` is granted
+    # statically, so a caller that cannot grant OIDC cannot call a workflow
+    # containing it, `if:` or no `if:`.
     if: github.event_name == 'workflow_dispatch' && inputs.publish
     runs-on: ubuntu-latest
     environment: pypi

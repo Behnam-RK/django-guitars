@@ -122,16 +122,26 @@ Releasing (interactive helpers, see `scripts/README.md`):
 
 **Merging to `main` always requires a version bump.** `.github/workflows/tag-release.yml`
 tags `main` with `v<pyproject version>` on every push and fails the job if that version
-isn't strictly newer than the latest existing tag — then **calls** the
-`Release and Publish` workflow (`release.yml`) as a reusable workflow to create the
-GitHub release. A call, not `release.yml`'s own `on: push: tags` trigger, because
-GitHub suppresses workflow triggers for events created with the default `GITHUB_TOKEN`
-— which is what pushes the tag, so the push trigger never fires. That was silently the
-case through v1.0.0 (every release up to it was cut by hand); don't "simplify" the two
-jobs back into one trigger. Run
+isn't strictly newer than the latest existing tag — then **calls**
+`_create-release.yml` as a reusable workflow to create the GitHub release. Run
 `./scripts/bump.sh` (or edit `pyproject.toml` directly) before merging to `main`.
-PyPI publishing lives in that same `release.yml` but is manual-only: it never runs on a
-tag push. Trigger it from the Actions tab via `workflow_dispatch`, picking the tag from
+
+Two things about that wiring are load-bearing and look like they could be simplified:
+
+- **A call, not a tag-push trigger.** GitHub suppresses workflow triggers for events
+  created with the default `GITHUB_TOKEN` — which is what pushes the tag — so
+  `release.yml`'s `on: push: tags` never fires for an auto-tag. That was silently true
+  through v1.0.0: every release up to it was cut by hand from the Actions tab while both
+  workflows documented the fan-out as automatic.
+- **It calls `_create-release.yml`, not `release.yml`.** A called workflow's `permissions`
+  are validated *statically*, across every job in it, `if:` ignored. `release.yml` holds
+  the PyPI `publish` job with `id-token: write`, so calling it would fail startup unless
+  the push-to-main run were granted OIDC — privilege the automated path must not have.
+  Splitting the release half out means it *cannot* publish, rather than being trusted not
+  to. Folding the three files back into two reintroduces one of these.
+
+PyPI publishing lives in `release.yml` and is manual-only: it never runs on a tag push.
+Trigger it from the Actions tab via `workflow_dispatch`, picking the tag from
 the "Use workflow from" ref selector and checking the `publish` input.
 
 Lint / type / security (configured in `pyproject.toml`, run via pre-commit):

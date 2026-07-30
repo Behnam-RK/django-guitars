@@ -85,11 +85,16 @@ jobs:
   release:
     name: Cut the GitHub release
     needs: tag
-    # `./` resolves against this repo at the caller's ref, so the two files
-    # always move together.
-    uses: ./.github/workflows/release.yml
+    # _create-release.yml, not release.yml: a called workflow's permissions are
+    # validated statically across every job in it, `if:` ignored, so calling
+    # release.yml would mean granting this push-triggered run the
+    # `id-token: write` its PyPI job declares. The automated path has no
+    # business holding an OIDC token, so it calls the half that cannot publish.
+    #
+    # `./` resolves against this repo at the caller's ref, so the files always
+    # move together.
+    uses: ./.github/workflows/_create-release.yml
     with:
       tag: ${{ needs.tag.outputs.tag }}
     permissions:
-      contents: write  # required to create the release; a called workflow
-                       # cannot exceed what the caller grants.
+      contents: write  # a called workflow cannot exceed what the caller grants

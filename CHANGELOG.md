@@ -20,7 +20,13 @@ No package changes — release automation only.
   dispatched manually. `tag-release.yml` now *calls* `release.yml` as a
   reusable workflow, which runs inside the same run, emits no event, and is
   therefore not suppressed — no PAT, and no recursion risk reintroduced.
-  Publishing to PyPI is unaffected and stays manual-only.
+
+  The release job moved to its own `_create-release.yml` for that call, because
+  a called workflow's permissions are validated statically across all of its
+  jobs regardless of `if:` — so calling `release.yml` would have meant granting
+  every push to main the `id-token: write` its PyPI job declares. Split, the
+  automated path *cannot* publish rather than being trusted not to. Publishing
+  to PyPI is otherwise unchanged and stays manual-only.
 
 ## [1.0.0] - 2026-07-30
 

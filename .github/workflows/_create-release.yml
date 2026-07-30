@@ -1,0 +1,110 @@
+name: Create release from tag
+
+# Creates (or updates) the GitHub Release for a vX.Y.Z tag, using the matching
+# CHANGELOG.md section as the notes and falling back to auto-generated ones.
+#
+# Callable only -- it has no trigger of its own. Two workflows call it:
+#
+#   - tag-release.yml, immediately after it pushes the tag on a merge to main.
+#     This is the automated path.
+#   - release.yml, on a tag pushed by hand and on a manual run.
+#
+# It exists as a separate file rather than living in release.yml, and that is a
+# privilege boundary rather than tidiness. A called workflow is validated
+# *statically*: every job's `permissions` must be within the caller's grant,
+# whether or not that job's `if:` could ever be true. release.yml's `publish`
+# job requests `id-token: write` for PyPI Trusted Publishing, so calling
+# release.yml from tag-release.yml would mean granting OIDC to every push to
+# main -- inert today only because of an `if:` on a job nobody would think to
+# re-read before loosening it. Splitting the release half out means the
+# automated path cannot publish because there is nothing there to publish
+# with, which is a guarantee rather than a comment.
+#
+# Restricted to main: releases are only ever cut from main, and the "Verify tag
+# is on main" step below rejects any tag whose commit is not reachable from it.
+# A tag push cannot be filtered by branch in `on:` alone, and a manual run could
+# otherwise be aimed at any tag.
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: 'The vX.Y.Z tag to cut the release from'
+        type: string
+        required: true
+
+permissions:
+  contents: write  # required to create the release
+
+jobs:
+  release:
+    name: Create release from tag
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.tag }}
+    steps:
+      - name: Require a tag ref
+        # Only meaningful on a manual run of release.yml, where the tag comes
+        # from the "Use workflow from" ref selector and could be a branch.
+        # ``github.event_name`` is the event that started the *outermost* run,
+        # so on the automated path this is a push and the check is skipped.
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          if [ "${{ github.ref_type }}" != "tag" ]; then
+            echo "::error::Select a tag in the 'Use workflow from' dropdown above (got ref '${{ github.ref_name }}', a ${{ github.ref_type }})."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # Explicit: on the automated path the caller's ref is main, and the
+          # default checkout would build notes for the wrong commit.
+          ref: ${{ inputs.tag }}
+
+      - name: Verify tag is on main
+        run: |
+          git fetch origin main
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "::error::$TAG is not reachable from main; releases are only cut from main."
+            exit 1
+          fi
+
+      - name: Extract release notes from CHANGELOG
+        id: notes
+        run: |
+          notes_file="$(mktemp)"
+          bash scripts/changelog-notes.sh "${TAG#v}" > "$notes_file" || true
+          if [ -s "$notes_file" ]; then
+            echo "have_notes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_notes=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "notes_file=$notes_file" >> "$GITHUB_OUTPUT"
+
+      - name: Determine pre-release flag
+        id: prerelease
+        run: |
+          if printf '%s' "${TAG#v}" | grep -qE '(a|b|rc|alpha|beta|dev)[0-9]*$'; then
+            echo "flag=--prerelease" >> "$GITHUB_OUTPUT"
+          else
+            echo "flag=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$TAG"
+          notes_file="${{ steps.notes.outputs.notes_file }}"
+          if [ "${{ steps.notes.outputs.have_notes }}" != "true" ]; then
+            # `--generate-notes` only exists on `release create`, not `release
+            # edit`, so fetch the same auto-generated notes via the API and
+            # write them to notes_file -- one code path for both branches below.
+            gh api "repos/${{ github.repository }}/releases/generate-notes" \
+              -f "tag_name=$tag" --jq .body > "$notes_file"
+          fi
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release edit "$tag" --title "$tag" --notes-file "$notes_file" ${{ steps.prerelease.outputs.flag }}
+          else
+            gh release create "$tag" --title "$tag" --verify-tag --notes-file "$notes_file" ${{ steps.prerelease.outputs.flag }}
+          fi

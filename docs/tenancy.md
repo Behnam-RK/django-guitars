@@ -311,21 +311,30 @@ It catches, in descending order of danger:
   constrains nothing.
 - **A missing policy or missing `ENABLE`** — a migration that never ran, or drift.
 - **A policy that no longer says what the models say** — the table has a healthy
-  `tenant_scope` policy that scopes on the *wrong* dimensions, or on a renamed
-  column. Every existence check passes while each statement is filtered by a
-  weaker predicate than the Python layer believes. The usual cause is a
-  replacement migration that was generated but never applied. Fatal only under
-  `--require-match`, since a run that precedes the deploy's own `migrate` is
-  legitimately in this state.
+  `tenant_scope` policy that scopes on the *wrong* dimensions, on a renamed
+  column, or on nothing at all in its `WITH CHECK` half. Every existence check
+  passes while each statement is filtered by a weaker predicate than the Python
+  layer believes. The usual cause is a replacement migration that was generated
+  but never applied. Fatal only under `--require-match`, since a run that
+  precedes the deploy's own `migrate` is legitimately in this state.
 - **Unexpected coverage** — a policy on a table the models no longer consider
   tenanted. Harmless to reads, but the database and the models disagree.
 
-The third is compared by the two facts a *stored* policy preserves, not by its
-text: PostgreSQL rewrites a policy expression when it saves it (casts made
-explicit, columns parenthesised), so the text it hands back never equals what
-was emitted, however correct the policy is. What survives intact is the set of
-`tenant.*` settings the predicate reads, and — from `pg_depend`, which records a
-real dependency per column a policy touches — the set of columns it references.
+The third is compared by the facts a *stored* policy preserves, not by its text:
+PostgreSQL rewrites a policy expression when it saves it (casts made explicit,
+columns parenthesised), so the text it hands back never equals what was emitted,
+however correct the policy is. What survives intact is the set of `tenant.*`
+settings the predicate reads, and — from `pg_depend`, which records a real
+dependency per column a policy touches — the set of columns it references.
+
+The settings are read from **both halves of the policy separately**. `USING`
+governs reads and `WITH CHECK` governs writes, they are independently editable,
+and a policy left as `USING (<tenant match>) WITH CHECK (true)` reads as fully
+scoped while accepting every cross-tenant write. Nothing else notices it: the
+`USING` half's settings are exactly right, and `true` records no `pg_depend`
+rows, so the column set is exactly right too. A `WITH CHECK` that PostgreSQL
+stores as `NULL` — what a `FOR ALL` policy written without one gets — is read as
+the `USING` expression, which is PostgreSQL's own rule.
 
 Both commands share one definition of what coverage *should* be
 (`guitars.tenancy.discovery`), so the build gate and the live audit cannot

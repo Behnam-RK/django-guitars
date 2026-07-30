@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING
 
 from django.db.models import QuerySet
 
+from guitars.gucs import VALUE_SEPARATOR
+
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -81,6 +83,50 @@ def _reject_lazy(dimension: str, value: object) -> None:
         )
 
 
+def reject_separator(value: object, *, dimension: str | None = None) -> None:
+    """Refuse a dimension value the GUC encoding could not carry unambiguously.
+
+    A value containing :data:`~guitars.gucs.VALUE_SEPARATOR` is **refused**, and that is a
+    security guard rather than tidiness. The policy predicate splits the published GUC on that
+    separator (``= ANY(string_to_array(..., ','))``), so a single pk of ``'acme,globex'``
+    encodes byte-for-byte identically to the two-tenant scope ``['acme', 'globex']`` -- and
+    PostgreSQL then reads it as "tenant acme OR tenant globex". The Python manager meanwhile
+    filters on the exact string and matches neither, so the database half would be strictly
+    *wider* than the Python half, on exactly the paths (raw SQL, ``_base_manager``, cascades)
+    where the policy is the only guard. That is the one direction this kit must never fail in.
+
+    Refusing rather than escaping is deliberate. ``guitars.sql``'s emitted SQL is a frozen
+    interface -- generated migrations already checked into consuming projects call
+    ``create_tenant_policy`` by name -- so changing the predicate to carry an escape scheme
+    would change SQL those migrations reproduce on a fresh database. Naming the mistake costs a
+    tenant model nothing that a sane primary key wanted, in the same spirit as
+    :func:`_reject_lazy` and ``sql.policy._bare``.
+
+    **Called from two places, and neither is redundant.** :func:`tenant` calls it at scope
+    entry, where the dimension is known and the traceback therefore points at the scope the
+    caller opened rather than at whichever query happened to publish it first. ``guc._scalar``
+    calls it at publish time, which is the actual boundary: a value whose ``pk`` is ``None`` at
+    scope entry -- an unsaved instance -- passes the eager check and can still acquire a
+    separator before anything publishes it.
+
+    A ``None`` pk is skipped by both, because it publishes as the empty string, which the
+    policy reads as an empty array and therefore denies.
+    """
+    values = value if isinstance(value, MULTI_VALUE_TYPES) else [value]
+    for item in values:
+        pk = getattr(item, 'pk', item)
+        if pk is not None and VALUE_SEPARATOR in str(pk):
+            # The eager call knows which dimension it was handed; the publish-time one does
+            # not, and saying "tenant value" there beats inventing a name for it.
+            subject = f'tenant({dimension}=...) value' if dimension else 'tenant value'
+            raise TenantScopeError(
+                f'{subject} {str(pk)!r} contains {VALUE_SEPARATOR!r}, which separates the '
+                f'values of one dimension when the scope is published to PostgreSQL -- a '
+                f'row-level-security policy would read it as several tenants and match all '
+                f'of them. Use a primary key without {VALUE_SEPARATOR!r}.'
+            )
+
+
 @contextmanager
 def tenant(**dimensions: object) -> Iterator[None]:
     """Activate tenant ``dimensions`` (e.g. ``shop=instance``) for the block.
@@ -92,9 +138,16 @@ def tenant(**dimensions: object) -> Iterator[None]:
     A ``None`` value is treated as *absent*, not "match everything" -- see
     ``TenantedManager.get_queryset``. A deliberate unfiltered read must say so with
     :func:`tenancy_bypassed`.
+
+    Both guards below run before the frame is entered, so a value that could never be
+    published fails at the ``with`` statement rather than inside an unrelated query.
     """
     for dimension, value in dimensions.items():
+        # Order is load-bearing: reject_separator reads ``pk`` and falls back to str() on the
+        # value itself, and str() on a QuerySet runs a query. _reject_lazy has to have said no
+        # first, or the mistake it exists to name would resurface here instead.
         _reject_lazy(dimension, value)
+        reject_separator(value, dimension=dimension)
     merged = dict(_state.get() or {})
     merged[BYPASS] = False
     merged.update(dimensions)

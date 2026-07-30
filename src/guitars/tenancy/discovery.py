@@ -139,7 +139,19 @@ class Coverage(NamedTuple):
 
 
 def is_local(app: AppConfig) -> bool:
-    """Whether *app* is one of the project's own, per ``settings.LOCAL_APPS``."""
+    """Whether *app* is one of the project's own, per ``settings.LOCAL_APPS``.
+
+    Keyed on ``app.name``, because ``LOCAL_APPS`` holds dotted module paths
+    (``tests.testapp``) rather than Django's short labels.
+
+    ``guitars.management._generator.is_local`` is the same one-liner, and the duplication is
+    **deliberate** -- do not collapse the two. This package is documented as importing only
+    the standard library and Django so that it can move as a unit, while ``_generator`` lives
+    in the management layer and imports ``django.core.management``. Importing either from the
+    other inverts a layer: the management commands already depend on this package (they call
+    :func:`app_coverage`), so the dependency may not also run the other way. One shared line
+    is the cheaper price.
+    """
     return app.name in settings.LOCAL_APPS
 
 

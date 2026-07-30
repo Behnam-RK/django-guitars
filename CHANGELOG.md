@@ -133,6 +133,17 @@ carry the old SQL — see *Fixed* below for why that matters and how to replace 
   `--require-match` — and counts only clean tables as enforced. It also resolves a
   table name through the search path in the order PostgreSQL does, so two same-named
   tables in two schemas no longer collide.
+- The settings are compared for **both halves of a policy separately**. `USING`
+  governs reads and `WITH CHECK` governs writes, and they are independently
+  editable: a policy left as `USING (<tenant match>) WITH CHECK (true)` reads as
+  fully scoped while accepting every cross-tenant write, and neither the `USING`
+  settings nor the `pg_depend` columns give it away (`true` references nothing).
+- `makeguitarmigrations` interpolated the primary-key *field name* into the
+  timestamp trigger and soft-delete rule where PostgreSQL needs the *column*. The
+  two agree for an ordinary `id`, so this only bit a model whose primary key sets
+  `db_column` or is a `OneToOneField(primary_key=True)` — where the generated rule
+  named a column that does not exist and failed at `migrate`. The MTI forms already
+  used the column.
 
 ### Changed
 

@@ -163,7 +163,12 @@ class ArchiveManager(Manager):
 
 
 class AllObjectsManager(Manager):
-    """ """
+    """Manager that returns every record, live and soft-deleted alike.
+
+    The unfiltered view, exposed as ``_all_objects``. ``.lives`` and ``.archives`` are
+    mirrored onto the manager so either half is reachable without going through
+    ``get_queryset()`` first.
+    """
 
     _queryset_class = HardDeletableQuerySet
 
@@ -195,7 +200,7 @@ class SoftDeletableModel(Model):
 
     - ``objects`` (``LiveManager``) — only live records (default).
     - ``_archives`` (``ArchiveManager``) — only soft-deleted records.
-    - ``_all_objects`` (``AllObjectManager``) — everything.
+    - ``_all_objects`` (``AllObjectsManager``) — everything.
     """
 
     _deleted_at = DateTimeField(

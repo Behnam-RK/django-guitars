@@ -16,6 +16,7 @@ from django.core.management import CommandError, call_command
 from django.db import connection
 
 from guitars import sql
+from guitars.tenancy import tenant
 from tests.testapp.models import Release
 
 
@@ -238,6 +239,54 @@ class TestAPolicyThatNoLongerMatchesTheModels:
             assert '1 not matching the models' in output
         finally:
             _execute(
+                sql.drop_tenant_policy(table=table),
+                *sql.create_table_rls(table=table, columns={'label': 'label_id'}),
+            )
+
+    def test_a_with_check_that_does_not_scope_is_caught(self, _execute, tenants):
+        """The write half, checked in its own right -- and the reason it has to be.
+
+        ``USING`` governs reads and ``WITH CHECK`` governs writes, and the two are
+        independently editable. A policy left as ``USING (<tenant match>) WITH CHECK (true)``
+        therefore scopes every read while accepting every cross-tenant *write*, which is the
+        more dangerous direction. Neither of the other two comparisons sees it: the GUC set of
+        the ``USING`` half is exactly right, and ``true`` records no ``pg_depend`` rows, so the
+        column set is exactly right too.
+
+        The insert below is raw SQL on purpose. The Python guard would refuse it long before
+        the database saw it, which is precisely why an audit of the database layer cannot lean
+        on Python having been in the call path.
+        """
+        table = Release._meta.db_table
+        predicate = (
+            f"(SELECT current_setting('tenant.bypass', true)) = 'on' OR "
+            f'({table}.label_id::text = ANY(string_to_array('
+            f"(SELECT current_setting('tenant.label', true)), ',')))"
+        )
+        _execute(
+            sql.drop_tenant_policy(table=table),
+            f'CREATE POLICY {sql.TENANT_POLICY} ON {table} FOR ALL TO PUBLIC '
+            f'USING ({predicate}) WITH CHECK (true)',
+        )
+        try:
+            output = _audit_failure(require_match=True)
+
+            assert 'scopes writes on' in output
+            assert 'a cross-tenant write is accepted' in output
+            assert 'audit failed' in output
+            # Not merely reported: the write really does land, so the finding is not academic.
+            with tenant(label=tenants.a), connection.cursor() as cursor:
+                cursor.execute(
+                    f'INSERT INTO {table} (title, label_id, _created_at, _updated_at) '
+                    f'VALUES (%s, %s, NOW(), NOW())',
+                    ['smuggled', tenants.b.pk],
+                )
+        finally:
+            _execute(
+                # Django declares foreign keys DEFERRABLE INITIALLY DEFERRED, and PostgreSQL
+                # refuses ALTER TABLE while a row inserted in this transaction still has
+                # pending trigger events. Firing them now is what lets the restore run.
+                'SET CONSTRAINTS ALL IMMEDIATE',
                 sql.drop_tenant_policy(table=table),
                 *sql.create_table_rls(table=table, columns={'label': 'label_id'}),
             )

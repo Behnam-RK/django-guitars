@@ -36,7 +36,13 @@ from django.db.backends.signals import connection_created
 
 from guitars.gucs import BYPASS_GUC, VALUE_SEPARATOR, guc_name
 
-from .scope import BYPASS, MULTI_VALUE_TYPES, TenantScopeError, get_tenant
+from .scope import (
+    BYPASS,
+    MULTI_VALUE_TYPES,
+    TenantScopeError,
+    get_tenant,
+    reject_separator,
+)
 
 
 __all__ = [
@@ -70,35 +76,15 @@ def _scalar(value: object) -> str:
     Accepts a model instance, a pk, or anything ``str()``-able -- mirroring what ``tenant()``
     already accepts and what the manager filters on.
 
-    A value containing :data:`~guitars.gucs.VALUE_SEPARATOR` is **refused**, and that is a
-    security guard rather than tidiness. The policy predicate splits the GUC on that
-    separator (``= ANY(string_to_array(..., ','))``), so a single pk of ``'acme,globex'``
-    encodes byte-for-byte identically to the two-tenant scope ``['acme', 'globex']`` -- and
-    PostgreSQL then reads it as "tenant acme OR tenant globex". The Python manager
-    meanwhile filters on the exact string and matches neither, so the database half would be
-    strictly *wider* than the Python half, on exactly the paths (raw SQL, ``_base_manager``,
-    cascades) where the policy is the only guard. That is the one direction this kit must
-    never fail in.
-
-    Refusing rather than escaping is deliberate. ``guitars.sql``'s emitted SQL is a frozen
-    interface -- generated migrations already checked into consuming projects call
-    ``create_tenant_policy`` by name -- so changing the predicate to carry an escape scheme
-    would change SQL those migrations reproduce on a fresh database. Naming the mistake here
-    costs a tenant model nothing that a sane primary key wanted, in the same spirit as
-    ``_reject_lazy`` above and ``sql.policy._bare``.
+    The refusal itself lives in :func:`~guitars.tenancy.scope.reject_separator`, which
+    ``tenant()`` also calls at scope entry. See it for why a separator is refused rather than
+    escaped, and why this later call is not redundant with the earlier one -- in short, a pk
+    that was ``None`` when the scope opened can still acquire one before it is published, and
+    this is the boundary the policy actually reads.
     """
+    reject_separator(value)
     pk = getattr(value, 'pk', value)
-    if pk is None:
-        return ''
-    text = str(pk)
-    if VALUE_SEPARATOR in text:
-        raise TenantScopeError(
-            f'tenant value {text!r} contains {VALUE_SEPARATOR!r}, which separates the '
-            f'values of one dimension when the scope is published to PostgreSQL -- a '
-            f'row-level-security policy would read it as several tenants and match all of '
-            f'them. Use a primary key without {VALUE_SEPARATOR!r}.'
-        )
-    return text
+    return '' if pk is None else str(pk)
 
 
 def encode_value(value: object) -> str:

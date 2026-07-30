@@ -22,7 +22,15 @@ from django.test import override_settings
 from guitars.management import _generator
 from guitars.models import GuitarModel
 from guitars.sql import policy
-from guitars.tenancy import TenantScopeError, guc, manager, reporting, tenancy_bypassed, tenant
+from guitars.tenancy import (
+    TenantScopeError,
+    get_tenant,
+    guc,
+    manager,
+    reporting,
+    tenancy_bypassed,
+    tenant,
+)
 from guitars.tenancy.checks import TENANT_MODEL_ID, check_guitar_models_have_a_tenant
 from guitars.tenancy.discovery import _classify
 from tests.testapp.models import Booking, Label, Release, Track
@@ -225,8 +233,9 @@ class TestTheEncodingRefusesWhatItCannotCarry:
     strictly *wider* than the managers, on exactly the paths (raw SQL, ``_base_manager``,
     cascades) where RLS is the only guard.
 
-    That is the one direction this kit must never fail in, so the value is refused at the
-    single chokepoint both the scalar and collection paths pass through.
+    That is the one direction this kit must never fail in, so the value is refused twice: at
+    ``tenant()`` entry, where the dimension can be named, and again at publish time, which is
+    the boundary the policy actually reads.
     """
 
     def test_a_scalar_containing_the_separator_is_refused(self):
@@ -239,15 +248,42 @@ class TestTheEncodingRefusesWhatItCannotCarry:
         with pytest.raises(TenantScopeError, match='contains'):
             guc.encode_value(['acme', 'globex,initech'])
 
-    def test_the_refusal_reaches_the_published_frame(self):
-        """Not merely a helper-level guard.
+    def test_the_scope_refuses_it_at_entry_and_names_the_dimension(self):
+        """The eager half. The traceback points at the ``with`` the caller wrote.
 
-        ``desired_state()`` is what the execute wrapper calls before every statement, so a
-        scope carrying such a value cannot reach the database at all -- it fails closed
-        instead of publishing something the policy would read as several tenants.
+        Left to the publish-time guard alone, the error surfaced from inside whichever query
+        happened to publish the frame first -- a cursor several frames away from the mistake,
+        which is the same complaint ``_reject_lazy`` exists to answer.
         """
-        with tenant(shop='acme,globex'), pytest.raises(TenantScopeError, match='contains'):
-            guc.desired_state()
+        with pytest.raises(TenantScopeError, match=r'tenant\(shop=\.\.\.\) value'):
+            with tenant(shop='acme,globex'):
+                pytest.fail('the scope should not have opened')
+
+        # And it did not leave a frame behind on the way out.
+        assert get_tenant() == {}
+
+    def test_a_collection_is_checked_at_entry_too(self):
+        with pytest.raises(TenantScopeError, match='contains'):
+            with tenant(shop=['acme', 'globex,initech']):
+                pytest.fail('the scope should not have opened')
+
+    def test_a_pk_acquired_after_entry_is_still_refused(self):
+        """Why the publish-time guard stays, rather than being replaced by the eager one.
+
+        A value whose ``pk`` is ``None`` when the scope opens -- an unsaved instance -- has
+        nothing to refuse yet, so it passes the eager check honestly. It can still acquire a
+        separator before anything publishes the frame, and ``guc._scalar`` is the boundary that
+        has to catch it.
+        """
+
+        class _Unsaved:
+            pk = None
+
+        instance = _Unsaved()
+        with tenant(shop=instance):  # passes: pk is None, which publishes as empty and denies
+            instance.pk = 'acme,globex'
+            with pytest.raises(TenantScopeError, match='contains'):
+                guc.desired_state()
 
     def test_an_ordinary_value_still_encodes(self):
         """The guard must not have made every scope unusable."""

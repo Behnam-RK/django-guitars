@@ -333,8 +333,14 @@ def _untenanted_queryset_class(base: type[models.QuerySet]) -> type[models.Query
             raise TenantScopeError(self._message('write'))
 
         def _plain(self) -> models.QuerySet:
-            """A non-denying queryset over the same model, of the manager's own type."""
-            return base(model=self.model, using=self._db)
+            """A non-denying queryset over the same model, of the manager's own type.
+
+            ``hints`` is carried over, not dropped: it is what a database router reads to
+            route a query, so losing it here would send the audit-mode write (and the empty
+            queryset ``none()`` hands back) to a different database than the scoped path
+            would have used.
+            """
+            return base(model=self.model, using=self._db, hints=self._hints)
 
         def none(self) -> models.QuerySet:
             # Plain (non-denying) empty queryset so framework-level empties still resolve.
@@ -461,6 +467,10 @@ def TenantedManager(  # noqa: N802 - returns a manager instance; PascalCase read
                 return denying(
                     self.model,
                     using=self._db,
+                    # Carried over for the same reason the soft-delete managers pass it: a
+                    # database router reads hints to route, and this queryset stands in for
+                    # the one ``super().get_queryset()`` would have built.
+                    hints=self._hints,
                     # The denying subclass's own kwarg; the checker only sees the declared
                     # type[QuerySet], which a dynamic class cannot refine.
                     missing=missing,  # ty: ignore[unknown-argument]

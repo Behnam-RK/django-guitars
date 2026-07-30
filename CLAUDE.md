@@ -61,7 +61,7 @@ Decisions that were hard to reverse and are surprising without context are ADRs:
 - [`0002`](docs/adr/0002-force-rls-by-default.md) — why `FORCE ROW LEVEL SECURITY` is the default.
 - [`0003`](docs/adr/0003-mti-owner-join-policy.md) — why MTI children get their own policy; includes the "RLS with no policy is default-DENY" finding.
 - [`0004`](docs/adr/0004-unscoped-base-manager.md) — why `base_manager_name` is left unset, with the evidence.
-- [`0005`](docs/adr/0005-trigger-based-tenant-autofill.md) — **proposed, not implemented.** Moving tenant autofill into a `BEFORE INSERT` trigger and demoting the `pre_save` guard to diagnostics. Describes work planned in [`.claude/plans/trigger-based-tenant-autofill.md`](.claude/plans/trigger-based-tenant-autofill.md), *not* current behaviour — autofill today is the `pre_save` receiver in `tenancy/manager.py`.
+- [`0005`](docs/adr/0005-trigger-based-tenant-autofill.md) — **proposed, not implemented.** Moving tenant autofill into a `BEFORE INSERT` trigger and demoting the `pre_save` guard to diagnostics. Describes planned work, *not* current behaviour — autofill today is the `pre_save` receiver in `tenancy/manager.py`.
 
 **Load-bearing details that are easy to break, kept here as a checklist:**
 
@@ -70,7 +70,7 @@ Decisions that were hard to reverse and are surprising without context are ADRs:
 - Column ownership is resolved via `model._meta.get_field(name).model` (`guitars.introspection`), never `hasattr`.
 - `guitars.gucs` must import nothing and live outside `tenancy/`, so a generated migration's `from guitars import sql` does not drag in the tenancy runtime.
 - The GUC cache key in `tenancy/guc.py` is deliberately more than the values. A stale cache leaves the *previous* tenant live, which fails **open**. Do not simplify it without a test that fails first.
-- A tenant value containing `VALUE_SEPARATOR` (`,`) is **refused** in `guc._scalar`, not escaped. The policy splits the GUC on it, so `'a,b'` would otherwise read as two tenants and match both — the database half becoming wider than the Python half. Escaping instead would change the SQL frozen migrations reproduce.
+- A tenant value containing `VALUE_SEPARATOR` (`,`) is **refused**, not escaped. The policy splits the GUC on it, so `'a,b'` would otherwise read as two tenants and match both — the database half becoming wider than the Python half. Escaping instead would change the SQL frozen migrations reproduce. The guard is `tenancy.scope.reject_separator`, called from **two** places and redundant at neither: `tenant()` at scope entry, so the traceback names the dimension and the `with` that opened it, and `guc._scalar` at publish time, because a pk that was `None` at entry can still acquire a separator before the frame is published.
 - The tenant policy is the one enforcement operation whose SQL depends on more than the table name, so its header carries a `[POLICY:<digest>]` identity and a changed shape emits `sql.replace_table_rls`. Dedupe on the table name alone let a model gain a tenant dimension while the database kept the old predicate, with `--check` green. `force` is excluded from that identity on purpose — it has its own `--force-rls` stage.
 - `audittenancy` compares a live policy by its `tenant.*` GUCs and its `pg_depend` column references, never by SQL text: PostgreSQL rewrites a stored policy expression, so text equality can never hold.
 

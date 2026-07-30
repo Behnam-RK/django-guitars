@@ -72,6 +72,9 @@ def is_local(app: AppConfig) -> bool:
 
     Keyed on ``app.name``, because ``LOCAL_APPS`` holds dotted module paths
     (``tests.testapp``) rather than Django's short labels.
+
+    Duplicated as ``guitars.tenancy.discovery.is_local`` on purpose -- see that copy for why
+    neither module may import the other.
     """
     return app.name in settings.LOCAL_APPS
 

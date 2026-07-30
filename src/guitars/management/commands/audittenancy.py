@@ -18,9 +18,12 @@ Four findings it exists to catch, in descending order of danger:
   tenant dimension, or its tenant column was renamed, and the replacement migration was
   generated but never applied (or was applied and then hand-edited). Existence checks pass
   and the table looks protected, while every statement is filtered by a strictly weaker
-  predicate than the Python layer believes. Compared by the two facts a stored policy
-  preserves: the ``tenant.*`` settings it reads, and the columns ``pg_depend`` records it
-  referencing. See ``TableCoverage.policy_gucs`` / ``policy_columns``.
+  predicate than the Python layer believes. Compared by the facts a stored policy preserves:
+  the ``tenant.*`` settings its ``USING`` and ``WITH CHECK`` halves each read, and the
+  columns ``pg_depend`` records it referencing. Both halves, because they are independently
+  editable and only ``WITH CHECK`` governs writes -- ``USING (<tenant match>) WITH CHECK
+  (true)`` reads as fully scoped and accepts every cross-tenant write. See
+  ``TableCoverage.policy_gucs`` / ``policy_columns``.
 
   Reported but not fatal unless ``--require-match``, for the same reason ``--require-force``
   is opt-in: a run that happens before the deploy's ``migrate`` step is legitimately in this
@@ -69,6 +72,16 @@ class TableState(NamedTuple):
     #: the only way to catch a policy that exists but enforces the wrong scope.
     policy_gucs: frozenset[str]
     policy_columns: frozenset[tuple[str, str]]
+    #: The same settings, read off the policy's ``WITH CHECK`` half -- the one that governs
+    #: *writes*. Tracked separately rather than merged into ``policy_gucs`` because the two
+    #: halves are independently editable and a union would hide the dangerous direction: a
+    #: policy left with ``USING (<tenant match>) WITH CHECK (true)`` reads as perfectly
+    #: scoped while permitting every cross-tenant write, and the ``pg_depend`` column set
+    #: cannot give it away either (``true`` references no columns, so the USING half's
+    #: dependencies are all that remain). Falls back to the USING expression when
+    #: ``polwithcheck`` is NULL, which is PostgreSQL's own rule for a ``FOR ALL`` policy
+    #: written without an explicit ``WITH CHECK``.
+    policy_check_gucs: frozenset[str]
 
 
 #: Live enforcement state for every regular table in the search path. ``relrowsecurity`` is
@@ -87,7 +100,8 @@ SELECT
     c.relrowsecurity,
     c.relforcerowsecurity,
     p.oid,
-    pg_get_expr(p.polqual, p.polrelid)
+    pg_get_expr(p.polqual, p.polrelid),
+    pg_get_expr(p.polwithcheck, p.polrelid)
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 LEFT JOIN pg_policy p ON p.polrelid = c.oid AND p.polname = %s
@@ -115,6 +129,17 @@ WHERE d.classid = 'pg_policy'::regclass
 #: PostgreSQL's rewrite of a stored policy expression, so this one extraction is reliable
 #: where matching the whole predicate as text is impossible.
 _RE_GUC = re.compile(r"current_setting\('([^']+)'")
+
+
+def _tenant_gucs(expression: str | None) -> frozenset[str]:
+    """The kit's own session settings a stored policy expression reads.
+
+    Restricted to :data:`~guitars.gucs.GUC_PREFIX`, so a hand-tuned policy that also
+    consults, say, ``statement_timeout`` is not reported as drift for it.
+    """
+    return frozenset(
+        guc for guc in _RE_GUC.findall(expression or '') if guc.startswith(GUC_PREFIX)
+    )
 
 
 class Command(BaseCommand):
@@ -173,18 +198,19 @@ class Command(BaseCommand):
                     columns.setdefault(oid, set()).add((table, column))
 
             state: dict[str, TableState] = {}
-            for name, schema, enabled, forced, oid, qual in rows:
+            for name, schema, enabled, forced, oid, qual, with_check in rows:
                 state[name] = TableState(
                     schema=schema,
                     has_policy=oid is not None,
                     rls_enabled=enabled,
                     rls_forced=forced,
-                    # Restricted to the kit's own namespace, so a hand-tuned policy also
-                    # reading, say, ``statement_timeout`` is not reported as drift for it.
-                    policy_gucs=frozenset(
-                        guc for guc in _RE_GUC.findall(qual or '') if guc.startswith(GUC_PREFIX)
-                    ),
+                    policy_gucs=_tenant_gucs(qual),
                     policy_columns=frozenset(columns.get(oid, ())),
+                    # NULL ``polwithcheck`` means "use the USING expression for writes too",
+                    # which is what a ``FOR ALL`` policy written without an explicit
+                    # ``WITH CHECK`` gets. Mirroring that here keeps a correct hand-written
+                    # policy from reading as drift.
+                    policy_check_gucs=_tenant_gucs(qual if with_check is None else with_check),
                 )
             return state
 
@@ -192,18 +218,31 @@ class Command(BaseCommand):
     def _predicate_drift(table: str, coverage: TableCoverage, state: TableState) -> str | None:
         """Describe how the live policy differs from the one the models describe, if it does.
 
-        Compared as two sets rather than as SQL text because PostgreSQL rewrites a policy
+        Compared as sets rather than as SQL text because PostgreSQL rewrites a policy
         expression when it stores it -- casts made explicit, columns parenthesised,
         ``current_setting(...) AS current_setting`` -- so the text it hands back never equals
         the text ``sql.policy`` emitted, however correct the policy is.
+
+        The two halves of the policy are checked separately. ``USING`` governs reads,
+        ``WITH CHECK`` governs writes, and they are independently editable -- so a policy left
+        as ``USING (<tenant match>) WITH CHECK (true)`` scopes every read while accepting
+        every cross-tenant write. That state is invisible to the column comparison below
+        (``true`` records no ``pg_depend`` rows, leaving the USING half's dependencies as the
+        whole answer), which is exactly why the write half needs its own test.
         """
         expected_gucs = coverage.policy_gucs()
         expected_columns = coverage.policy_columns(table)
         differences = []
         if state.policy_gucs != expected_gucs:
             differences.append(
-                f'scopes on {sorted(state.policy_gucs)} where the models imply '
+                f'scopes reads on {sorted(state.policy_gucs)} where the models imply '
                 f'{sorted(expected_gucs)}'
+            )
+        if state.policy_check_gucs != expected_gucs:
+            differences.append(
+                f'scopes writes on {sorted(state.policy_check_gucs)} where the models imply '
+                f'{sorted(expected_gucs)} -- its WITH CHECK half does not constrain the '
+                f'tenant, so a cross-tenant write is accepted'
             )
         if state.policy_columns != expected_columns:
             differences.append(

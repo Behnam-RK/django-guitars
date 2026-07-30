@@ -230,8 +230,8 @@ class ExistingOperations(NamedTuple):
 
     Scanned once at construction, by comment header, so a partially covered app receives
     only the operations it is genuinely missing. Named rather than a positional tuple: this
-    grew to seven fields while it was one, and a caller unpacking seven anonymous sets in
-    the right order is a bug waiting to happen.
+    is ten fields and was once an anonymous one, and a caller unpacking ten sets in the right
+    order is a bug waiting to happen.
     """
 
     triggers: set[str]
@@ -247,7 +247,7 @@ class ExistingOperations(NamedTuple):
     #: ``_generator.iter_migration_files`` yields in filename order.
     tenant_policy_identities: dict[str, str]
     #: Tables whose policy operation was written with ``force=False`` -- see
-    #: ``_RE_TENANT_POLICY_UNFORCED``. These are the only ones a second FORCE stage can act on.
+    #: :func:`unforced_policy_tables`. These are the only ones a second FORCE stage can act on.
     unforced_policies: set[str]
     tenant_forces: set[str]
     trigger_function_dependency: tuple[str, str] | None
@@ -388,7 +388,7 @@ class Command(BaseCommand):
         parent_trigger_function_dep: tuple[str, str] | None = None
 
         for app in django_apps.get_app_configs():
-            if app.name not in settings.LOCAL_APPS:
+            if not _generator.is_local(app):
                 continue
             for path, content in _generator.iter_migration_files(app):
                 if _RE_TRIGGER_FUNCTION.search(content):
@@ -659,7 +659,12 @@ class Command(BaseCommand):
 
         for model in app.get_models():
             table = model._meta.db_table
-            primary_key = model._meta.pk.name
+            # The *column*, not the field name. The two agree for the ordinary ``id`` primary
+            # key, which is why this went unnoticed -- but a model whose pk sets ``db_column``,
+            # or is a ``OneToOneField(primary_key=True)`` (name ``owner``, column
+            # ``owner_id``), would have produced a rule referencing a column that does not
+            # exist and failed at ``migrate``. The MTI branches below already used ``.column``.
+            primary_key = model._meta.pk.column
 
             # --- updated_at trigger: own table vs. MTI parent-propagation ---
             if owns_column(model, '_updated_at'):
@@ -786,13 +791,13 @@ class Command(BaseCommand):
         model_app_label = {
             model: app.label
             for app in django_apps.get_app_configs()
-            if app.name in settings.LOCAL_APPS
+            if _generator.is_local(app)
             for model in app.get_models()
         }
 
         notes: list[str] = []
         for app in django_apps.get_app_configs():
-            if app.name not in settings.LOCAL_APPS or app.label in requested:
+            if not _generator.is_local(app) or app.label in requested:
                 continue
             for model in app.get_models():
                 if not has_column(model, '_deleted_at'):

@@ -23,6 +23,16 @@ repos:
     hooks:
       - id: uv-lock  # keep uv.lock in sync with pyproject.toml
 
+  # Workflow linting. Note what this does NOT catch: actionlint models one file
+  # at a time, so it passed cleanly on the reusable-workflow call that failed at
+  # startup with "the nested job 'publish' is requesting 'id-token: write'"
+  # (see CLAUDE.md on the release wiring). Cross-workflow permission validation
+  # is GitHub's alone, and is still only reachable by pushing.
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.12
+    hooks:
+      - id: actionlint
+
   - repo: local
     hooks:
       - id: ruff-check

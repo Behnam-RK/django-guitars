@@ -5,6 +5,23 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2026-07-31
+
+No package changes — release automation only.
+
+### Fixed
+
+- **Merging a version bump to `main` never actually cut a release.**
+  `tag-release.yml` pushes the tag with the default `GITHUB_TOKEN`, and GitHub
+  suppresses workflow triggers for events created with that token, so
+  `release.yml`'s `on: push: tags` never fired. Every release from v0.5.0 to
+  v1.0.0 was cut by hand from the Actions tab while both workflows documented
+  the fan-out as automatic; v1.0.0 sat tagged with no release until it was
+  dispatched manually. `tag-release.yml` now *calls* `release.yml` as a
+  reusable workflow, which runs inside the same run, emits no event, and is
+  therefore not suppressed — no PAT, and no recursion risk reintroduced.
+  Publishing to PyPI is unaffected and stays manual-only.
+
 ## [1.0.0] - 2026-07-30
 
 First stable release. Adds multi-tenancy as a database-enforced capability, and

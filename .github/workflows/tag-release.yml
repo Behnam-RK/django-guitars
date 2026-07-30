@@ -1,11 +1,20 @@
 name: Tag Release
 
 # Auto-tags `main` with `vX.Y.Z` read from pyproject.toml's `version` on every
-# push to main, then fans out to the "Release and Publish" workflow (release.yml,
-# triggered on `v*` tag pushes) to create the GitHub Release -- so merging a
-# version bump to main is all it takes to cut a release, with no manual `git tag`
-# step. (PyPI publishing lives in that same workflow but is manual-only; a tag
-# push never ships to PyPI.)
+# push to main, then *calls* the "Release and Publish" workflow (release.yml) to
+# create the GitHub Release -- so merging a version bump to main is all it takes
+# to cut a release, with no manual `git tag` step. (PyPI publishing lives in that
+# same workflow but is manual-only; a tag push never ships to PyPI.)
+#
+# It has to be a `workflow_call` rather than release.yml's own `on: push: tags`
+# trigger. GitHub suppresses workflow triggers for events created with the
+# default GITHUB_TOKEN -- the guard against a workflow endlessly retriggering
+# itself -- and that is the token the tag push below uses. So the tag lands and
+# nothing observes it. This was silently true from the day this file was
+# written: v0.5.0 through v1.0.0 all read as auto-released, and every one of
+# their releases was in fact cut by hand from the Actions tab. A reusable
+# workflow runs inside this run and emits no event, so it is not suppressed --
+# and unlike a PAT it needs no secret and reintroduces no recursion risk.
 #
 # Policy (see CLAUDE.md): merging to main always requires a version bump. The
 # "Validate version was bumped" step below enforces that -- it fails the job
@@ -28,6 +37,8 @@ jobs:
   tag:
     name: Tag pyproject.toml version
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
 
@@ -70,3 +81,15 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "$tag" -m "Release ${tag}"
           git push origin "$tag"
+
+  release:
+    name: Cut the GitHub release
+    needs: tag
+    # `./` resolves against this repo at the caller's ref, so the two files
+    # always move together.
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.tag.outputs.tag }}
+    permissions:
+      contents: write  # required to create the release; a called workflow
+                       # cannot exceed what the caller grants.

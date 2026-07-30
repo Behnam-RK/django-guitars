@@ -122,8 +122,13 @@ Releasing (interactive helpers, see `scripts/README.md`):
 
 **Merging to `main` always requires a version bump.** `.github/workflows/tag-release.yml`
 tags `main` with `v<pyproject version>` on every push and fails the job if that version
-isn't strictly newer than the latest existing tag — which then fans out to the
-`Release and Publish` workflow (`release.yml`) to create the GitHub release. Run
+isn't strictly newer than the latest existing tag — then **calls** the
+`Release and Publish` workflow (`release.yml`) as a reusable workflow to create the
+GitHub release. A call, not `release.yml`'s own `on: push: tags` trigger, because
+GitHub suppresses workflow triggers for events created with the default `GITHUB_TOKEN`
+— which is what pushes the tag, so the push trigger never fires. That was silently the
+case through v1.0.0 (every release up to it was cut by hand); don't "simplify" the two
+jobs back into one trigger. Run
 `./scripts/bump.sh` (or edit `pyproject.toml` directly) before merging to `main`.
 PyPI publishing lives in that same `release.yml` but is manual-only: it never runs on a
 tag push. Trigger it from the Actions tab via `workflow_dispatch`, picking the tag from

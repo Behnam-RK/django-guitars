@@ -417,6 +417,39 @@ def test_scoped_cascade_gap_silent_when_child_app_also_out_of_scope(monkeypatch)
     assert command._scoped_cascade_gap_notes({'otherc'}) == []
 
 
+@override_settings(LOCAL_APPS=['fake.banda', 'fake.orchestrab'])
+def test_scoped_cascade_gap_silent_for_a_rule_the_generator_would_refuse(monkeypatch):
+    """A relation the writer skips is not a gap *scoping* created, so it must not be named.
+
+    Same synthetic shape as
+    ``test_cascade_operation_warns_when_related_model_is_mti_child_without_own_deleted_at``:
+    an FK on an MTI child's own table while its ``_deleted_at`` lives on an ancestor. A full
+    unscoped run emits no rule for it either -- only a warning -- so reporting it here would
+    promise that naming the parent's app closes a gap that nothing closes.
+    """
+    command = Command()
+    command.existing.soft_delete_related.clear()
+
+    class _FakeFKField:
+        column = 'sponsor_id'
+        model = Orchestra
+        remote_field = types.SimpleNamespace(parent_link=False)
+
+    command.reverse_relations_mapping[Band] = {(Orchestra, _FakeFKField(), CASCADE)}
+    monkeypatch.setattr(
+        makeguitarmigrations_module.django_apps,
+        'get_app_configs',
+        lambda: [
+            _fake_app_config('fake.banda', 'banda', [Band]),
+            _fake_app_config('fake.orchestrab', 'orchestrab', [Orchestra]),
+        ],
+    )
+
+    # Orchestra's app is in scope and Band's -- the cascade's parent -- is not, which is
+    # exactly the shape the note exists for. It is still silent, because there is no rule.
+    assert command._scoped_cascade_gap_notes({'orchestrab'}) == []
+
+
 @override_settings(LOCAL_APPS=['fake.ensemblea', 'fake.orchestrab'])
 def test_scoped_cascade_gap_skips_mti_parent_link(monkeypatch):
     """The MTI parent-link (Orchestra -> Ensemble) is structural, not a user cascade FK --

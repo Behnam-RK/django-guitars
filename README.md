@@ -261,7 +261,9 @@ Two things worth knowing before you adopt it:
 - **`migrate` runs bypassed**, because a `RunPython` backfill has no tenant
   scope and would otherwise match zero rows and be marked applied. guitars
   overrides `migrate` to do this, which means `guitars` must come *before* any
-  other app providing that command in `INSTALLED_APPS`.
+  other app providing that command in `INSTALLED_APPS`. Losing that race is
+  silent, so it is checked: `guitars.tenancy.W001` resolves the `migrate` that
+  would actually run and warns when it is not guitars'.
 
 | Setting | Default | Effect |
 | --- | --- | --- |
@@ -280,8 +282,13 @@ python manage.py audittenancy --require-force --require-match
 ```
 
 It compares every policy-eligible table against `pg_class` / `pg_policy` and
-exits non-zero on a missing policy, a missing `ENABLE`, or — with
-`--require-force` — a table where the owner would silently bypass the policy.
+exits non-zero on a missing policy or a missing `ENABLE`; with
+`--require-force`, also on a table where the owner would silently bypass the
+policy, and with `--require-match`, also on a policy that exists but no longer
+scopes on what the models say — a dimension added, or a tenant column renamed,
+where existence checks pass while every statement is filtered by a weaker
+predicate. Both flags are opt-in because a run that happens *before* the
+deploy's `migrate` step is legitimately in either state.
 
 ### `DisableSignals`
 

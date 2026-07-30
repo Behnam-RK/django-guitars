@@ -734,6 +734,28 @@ class Command(BaseCommand):
         # policy references neither), so they sort to the end where they read as a group.
         return operations + deferred + self._tenant_operations(app, force_rls=False)
 
+    @staticmethod
+    def _is_cascade_candidate(related_model, fk_field, on_delete) -> bool:
+        """Whether this reverse relation is one a cascade soft-delete rule is written for.
+
+        Shared by :meth:`_cascade_operations`, which writes the rules, and
+        :meth:`_scoped_cascade_gap_notes`, which reports the ones a scoped run left out.
+        Shared rather than restated, for the same reason ``tenancy.discovery`` is: the two
+        had drifted, and a gap note for a relation the generator would never write a rule
+        for promises the reader that naming the parent's app closes it, which is false.
+        Only the remaining ``owns_column`` test is left to the callers, because the writer
+        warns about it and the reporter must simply stay quiet.
+        """
+        return (
+            on_delete == models.CASCADE
+            and has_column(related_model, '_deleted_at')
+            # The MTI parent-link (a CASCADE OneToOne) is structural, not a user cascade FK.
+            and not getattr(fk_field.remote_field, 'parent_link', False)
+            # An FK reached through MTI is not a second FK: it is the *same physical column*
+            # on the ancestor's table, which appears in the caller's loop in its own right.
+            and fk_field.model is related_model
+        )
+
     def _cascade_operations(self, model: type[models.Model]) -> list[str]:
         """Cascade soft-delete rules for ``on_delete=CASCADE`` FKs pointing at *model*.
 
@@ -752,22 +774,14 @@ class Command(BaseCommand):
             self.reverse_relations_mapping[model],
             key=lambda t: (t[0]._meta.db_table, t[1].column),
         ):
-            if on_delete != models.CASCADE or not has_column(related_model, '_deleted_at'):
-                continue
-            # The MTI parent-link (a CASCADE OneToOne) is structural, not a user cascade FK --
-            # the MTI redirect rule already ties the child's deletion to the owner, so no
-            # soft-delete-related rule is needed (or valid) for it.
-            if getattr(fk_field.remote_field, 'parent_link', False):
+            # Structural parent-links and MTI-inherited FKs are both excluded there: the MTI
+            # redirect rule already ties a child's deletion to the owner, and an inherited FK
+            # is the ancestor's own column, whose rule this same loop emits -- and because
+            # every table in an MTI chain shares one ``_deleted_at``, that rule already
+            # archives the children.
+            if not self._is_cascade_candidate(related_model, fk_field, on_delete):
                 continue
             related_table = related_model._meta.db_table
-            # An FK reached through MTI is not a second FK: it is the *same physical column*
-            # on the ancestor's table. The ancestor appears in this same loop with that
-            # column local to it, so its rule is emitted -- and because every table in an
-            # MTI chain shares one ``_deleted_at``, that one rule already archives the
-            # children too. Emitting anything here would be a duplicate, and warning about
-            # it would report a covered case as a limitation.
-            if fk_field.model is not related_model:
-                continue
             # The flat cascade rule does ``UPDATE related_table SET _deleted_at`` -- only valid
             # when the related child owns ``_deleted_at`` on the very table its FK lives on.
             # An FK declared on an MTI child's *own* table while its ``_deleted_at`` lives on a
@@ -835,9 +849,13 @@ class Command(BaseCommand):
                     self.reverse_relations_mapping[model],
                     key=lambda t: (t[0]._meta.db_table, t[1].column),
                 ):
-                    if on_delete != models.CASCADE or not has_column(related_model, '_deleted_at'):
+                    # Same predicate the writer uses, plus its ``owns_column`` test: a
+                    # relation it would refuse anyway is not a gap this run *created*, and
+                    # saying "closed by a later run naming the parent's app" about one would
+                    # be a promise nothing keeps.
+                    if not self._is_cascade_candidate(related_model, fk_field, on_delete):
                         continue
-                    if getattr(fk_field.remote_field, 'parent_link', False):
+                    if not owns_column(related_model, '_deleted_at'):
                         continue
                     if model_app_label.get(related_model) not in requested:
                         continue

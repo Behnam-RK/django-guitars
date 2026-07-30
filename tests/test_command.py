@@ -19,7 +19,7 @@ from django.test import override_settings
 
 from guitars.management import _generator
 from guitars.management.commands import makeguitarmigrations as makeguitarmigrations_module
-from guitars.management.commands.makeguitarmigrations import Command
+from guitars.management.commands.makeguitarmigrations import Command, unforced_policy_tables
 from tests.testapp.models import Album, Band, Ensemble, Orchestra
 
 
@@ -726,3 +726,55 @@ def test_force_rls_stage_skips_an_operation_set_already_written(monkeypatch):
     command.handle(check_only=False, force_rls=True)
 
     assert 'No changes detected' in command.stdout.getvalue()
+
+
+# --- Which policies shipped inert -----------------------------------------------
+
+_TWO_POLICY_OPERATIONS = """
+        # Tenant RLS on "table_a" table!
+        migrations.RunSQL(
+            sql=sql.create_table_rls(table='table_a', columns={'l': 'l_id'}, force=True),
+            reverse_sql=sql.drop_table_rls(table='table_a'),
+        ),
+        # Tenant RLS on "table_b" table!
+        migrations.RunSQL(
+            sql=sql.create_table_rls(table='table_b', columns={'l': 'l_id'}, force=False),
+            reverse_sql=sql.drop_table_rls(table='table_b'),
+        ),
+"""
+
+
+def test_unforced_policy_tables_reads_each_operation_in_isolation():
+    """Two adjacent operations, one forced and one not -- which is every real file.
+
+    A regex spanning a few lines after the header cannot do this: operations are about that
+    long, so a lazy match from the ``force=True`` operation reaches into the next one, claims
+    *its* ``force=False``, and consumes the header on the way. The result is exactly backwards
+    -- the already-forced table gets flagged and the inert one is missed -- so `--force-rls`
+    would force what needs nothing and leave the unprotected table unprotected.
+    """
+    assert unforced_policy_tables(_TWO_POLICY_OPERATIONS) == {'table_b'}
+
+
+def test_unforced_policy_tables_is_empty_when_everything_shipped_forced():
+    forced_only = _TWO_POLICY_OPERATIONS.replace('force=False', 'force=True')
+
+    assert unforced_policy_tables(forced_only) == set()
+
+
+def test_unforced_policy_tables_handles_the_last_operation_in_a_file():
+    """The final operation has no following header to bound it, so it is bounded by EOF."""
+    only_unforced = _TWO_POLICY_OPERATIONS.replace('force=True', 'force=False')
+
+    assert unforced_policy_tables(only_unforced) == {'table_a', 'table_b'}
+
+
+def test_the_real_migrations_ship_every_policy_forced():
+    """GUITARS_RLS_FORCE defaults to True, so this repo's own migrations carry FORCE inline.
+
+    Pinned because it is the precondition for `--force-rls` correctly finding nothing to do.
+    """
+    command = Command()
+
+    assert command.existing.tenant_policies
+    assert command.existing.unforced_policies == set()

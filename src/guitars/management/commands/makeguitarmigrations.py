@@ -161,15 +161,32 @@ _RE_MTI_SOFT_DELETE = re.compile(r'# MTI Soft Delete Rule on "([^"]+)" table')
 # The FORCE header carries an extra token, so the plain RLS pattern can never match it.
 _RE_TENANT_POLICY = re.compile(r'# Tenant RLS on "([^"]+)" table!')
 _RE_TENANT_FORCE = re.compile(r'# Tenant FORCE RLS on "([^"]+)" table!')
-# A policy operation that shipped *without* inline FORCE -- the only kind `--force-rls` has
-# anything to do for. `force` is written into the operation as a literal by
-# `_tenant_policy_operation`, so the migration text is the record of what was decided when it
-# was generated. Without this the flag emitted a redundant FORCE migration for every tenanted
-# table on any project using the default GUITARS_RLS_FORCE = True.
-_RE_TENANT_POLICY_UNFORCED = re.compile(
-    r'# Tenant RLS on "([^"]+)" table!\n(?:.*\n){0,6}?.*force=False', re.MULTILINE
-)
 # The [DIGEST:...] marker is matched by _generator.RE_DIGEST.
+
+
+def unforced_policy_tables(content: str) -> set[str]:
+    """Tables whose policy operation in *content* was written with ``force=False``.
+
+    The only kind ``--force-rls`` has anything to do for: ``force`` is written into the
+    operation as a literal by ``_tenant_policy_operation``, so the migration text is the record
+    of what was decided when it was generated. Without this the flag emitted a redundant FORCE
+    migration for every tenanted table on any project using the default
+    ``GUITARS_RLS_FORCE = True``.
+
+    Each operation is inspected **only within its own text**, bounded by the next policy header.
+    A single regex spanning a few lines after the header cannot do this: operations are about
+    that long, so a lazy match from a ``force=True`` operation reaches into the next one, claims
+    *its* ``force=False``, and consumes the header on the way -- flagging the table that is
+    already forced and missing the one that is not. Exactly backwards, and only on a file with
+    two adjacent operations, which is every real file.
+    """
+    matches = list(_RE_TENANT_POLICY.finditer(content))
+    unforced = set()
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(content)
+        if 'force=False' in content[match.end() : end]:
+            unforced.add(match.group(1))
+    return unforced
 
 
 def _literal(value: object) -> str:
@@ -366,9 +383,7 @@ class Command(BaseCommand):
                 existing_tenant_policies.update(
                     m.group(1) for m in _RE_TENANT_POLICY.finditer(content)
                 )
-                existing_unforced_policies.update(
-                    m.group(1) for m in _RE_TENANT_POLICY_UNFORCED.finditer(content)
-                )
+                existing_unforced_policies.update(unforced_policy_tables(content))
                 existing_tenant_forces.update(
                     m.group(1) for m in _RE_TENANT_FORCE.finditer(content)
                 )

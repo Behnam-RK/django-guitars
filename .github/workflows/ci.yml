@@ -1,10 +1,19 @@
 name: CI
 
-# Runs the same two checks CI is meant to gate on:
+# Runs the checks CI is meant to gate on:
 #   - pre-commit run --all-files (lint, format, type check, security scan)
-#   - the pytest suite, against a real Postgres (see compose.yaml -- the kit's
-#     soft-delete + updated_at behavior is enforced by Postgres rules/triggers,
-#     so there is no SQLite fallback).
+#   - the pytest suite at 100% coverage, against a real Postgres (see compose.yaml --
+#     the kit's soft-delete, updated_at and tenancy behavior is enforced by Postgres
+#     rules, triggers and row-level security, so there is no SQLite fallback).
+#   - `makemigrations --check`, so a model change cannot land without the enforcement
+#     migrations that make its behaviour real, and `audittenancy --require-force`, so
+#     the policies are proven to actually bind on a migrated database.
+#
+# NOTE: DJANGO_SETTINGS_MODULE is exported for the management commands, and that is
+# load-bearing. manage.py uses os.environ.setdefault('DJANGO_SETTINGS_MODULE',
+# 'core.settings'), and core.settings has LOCAL_APPS = [] -- so without it
+# `makemigrations --check` reports "No changes detected" and `audittenancy` reports
+# "0 table(s) expected ... passed", both green having examined nothing.
 on:
   push:
     branches: [main]
@@ -48,4 +57,16 @@ jobs:
         run: docker compose up -d --wait
 
       - name: Run tests
-        run: uv run pytest
+        run: uv run pytest --cov=guitars --cov-report=term-missing
+
+      - name: Check migrations are up to date
+        env:
+          DJANGO_SETTINGS_MODULE: tests.settings
+        run: uv run python manage.py makemigrations --check
+
+      - name: Check the tenancy policies bind on a migrated database
+        env:
+          DJANGO_SETTINGS_MODULE: tests.settings
+        run: |
+          uv run python manage.py migrate
+          uv run python manage.py audittenancy --require-force

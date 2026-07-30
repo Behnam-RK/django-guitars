@@ -1,19 +1,35 @@
 # Local Postgres for development and the test suite.
 # The kit's soft-delete + updated_at behavior is enforced by PostgreSQL rules
-# and triggers, so a real Postgres is required to run/test it.
+# and triggers, and its tenancy feature by row-level-security policies, so a real
+# Postgres is required to run/test it.
 #
 #   docker compose up -d
 #   uv run pytest
+#
+# POSTGRES_USER is the image's superuser and is used only to run
+# scripts/postgres-init.sql, which creates the non-superuser `guitars` role the
+# suite actually connects as. A superuser bypasses RLS unconditionally, so the
+# tenancy tests would pass vacuously if they ran as one -- see that file.
+#
+# Switching from an older checkout requires recreating the volume, because the
+# init script only runs against an empty data directory:
+#
+#   docker compose down -v && docker compose up -d --wait
 services:
   db:
     image: postgres:18-alpine
     environment:
-      POSTGRES_USER: guitars
-      POSTGRES_PASSWORD: guitars
-      POSTGRES_DB: guitars
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    volumes:
+      - ./scripts/postgres-init.sql:/docker-entrypoint-initdb.d/10-role.sql:ro
     ports:
       - "4455:5432"
     healthcheck:
+      # Checks the application role and its database, not the superuser's: the
+      # init script runs after the server first accepts connections, so probing
+      # `postgres` would report ready before `guitars` exists.
       test: ["CMD-SHELL", "pg_isready -U guitars -d guitars"]
       interval: 2s
       timeout: 3s

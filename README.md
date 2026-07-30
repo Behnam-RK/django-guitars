@@ -223,6 +223,21 @@ The test suite defines concrete models in `tests/testapp` (the shipped package i
 abstract-only) and runs against a real PostgreSQL database, so the rules and
 triggers are actually exercised — not mocked.
 
+The suite connects as a deliberately **non-superuser** role, provisioned by
+[`scripts/postgres-init.sql`](scripts/postgres-init.sql). A superuser bypasses
+row-level security unconditionally, so tenancy policies could never be proven
+against one. If you have a checkout from before that script existed, recreate the
+volume once so the role gets created:
+
+```bash
+docker compose down -v && docker compose up -d --wait
+```
+
+Running your own PostgreSQL on `:4455` instead? Create the equivalent role there:
+`CREATE ROLE guitars LOGIN CREATEDB PASSWORD 'guitars';` — `CREATEDB` is what lets
+the test runner build its own database, which also makes the role the owner of
+every table in it.
+
 ### Releasing
 
 Two interactive helpers in [`scripts/`](scripts/README.md) drive a release:

@@ -69,9 +69,12 @@ See `tests/testapp/models.py` (`Ensemble → Orchestra → ChamberOrchestra`, pl
 
 Requires [uv](https://docs.astral.sh/uv/) and Docker (for Postgres). Tests run against a **real** Postgres — there is no SQLite fallback.
 
+The suite connects as a **non-superuser** role created by `scripts/postgres-init.sql` (mounted into the container's `docker-entrypoint-initdb.d`). This is load-bearing, not hygiene: a superuser — and separately, any role with `BYPASSRLS` — bypasses row-level security unconditionally, so every RLS assertion would pass vacuously. The role has `CREATEDB` so the test runner builds its own database and therefore *owns* its tables, which is the exact condition `FORCE ROW LEVEL SECURITY` exists to constrain. Since the init script only runs against an empty data directory, an older checkout needs `docker compose down -v` once.
+
 ```bash
 uv sync                       # install deps + package (editable)
 docker compose up -d          # start Postgres on :4455
+docker compose down -v && docker compose up -d --wait   # once, if upgrading an old volume
 uv run pytest                 # full suite (settings: tests.settings, auto via pyproject)
 uv run pytest --cov=guitars --cov-report=term-missing
 uv run pytest tests/test_base.py::TestUpdate::test_x   # single test

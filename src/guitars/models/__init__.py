@@ -4,6 +4,7 @@ from .base import (
     GuitarModel,
     HasCachedPropertyModel,
     SetarModel,
+    TarModel,
     UpdatableModel,
 )
 from .soft_deletion import (
@@ -28,5 +29,6 @@ __all__ = [
     'LiveQuerySet',
     'SetarModel',
     'SoftDeletableModel',
+    'TarModel',
     'UpdatableModel',
 ]

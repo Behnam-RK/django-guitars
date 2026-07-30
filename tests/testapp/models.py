@@ -8,11 +8,11 @@ from django.db.models import (
 )
 from django.utils.functional import cached_property
 
-from guitars.models import DutarModel, GuitarModel, SetarModel
+from guitars.models import DutarModel, SetarModel, TarModel
 
 
-class Riff(DutarModel):
-    """Basic helpers only (DutarModel) — no timestamps, no soft deletion.
+class Riff(TarModel):
+    """Basic helpers only (TarModel) — no timestamps, no soft deletion.
 
     ``band`` is a CASCADE FK to a soft-deletable model from a model that is
     itself NOT soft-deletable — exercises the plain (non-``_all_objects``)
@@ -31,8 +31,8 @@ class Riff(DutarModel):
         return self.name.upper()
 
 
-class Genre(SetarModel):
-    """Timestamps only (SetarModel) — no soft deletion. Also the m2m target."""
+class Genre(DutarModel):
+    """Timestamps only (DutarModel) — no soft deletion. Also the m2m target."""
 
     name = CharField(max_length=50)
 
@@ -40,7 +40,7 @@ class Genre(SetarModel):
         return self.name
 
 
-class Band(GuitarModel):
+class Band(SetarModel):
     name = CharField(max_length=100)
     nickname = CharField(max_length=100, null=True, blank=True)
     genres = ManyToManyField(Genre, related_name='bands', blank=True)
@@ -54,7 +54,7 @@ class Band(GuitarModel):
         return self.name.upper()
 
 
-class Album(GuitarModel):
+class Album(SetarModel):
     title = CharField(max_length=100)
     band = ForeignKey(Band, on_delete=CASCADE, related_name='albums')
     # SET_NULL (not CASCADE) to a soft-deletable model -- exercises the "skip non-CASCADE
@@ -67,7 +67,7 @@ class Album(GuitarModel):
         return self.title
 
 
-class Ensemble(GuitarModel):
+class Ensemble(SetarModel):
     """MTI parent (full kit) — owns _updated_at / _deleted_at on its own table."""
 
     name = CharField(max_length=100)
@@ -102,7 +102,7 @@ class ChamberOrchestra(Orchestra):
         pass
 
 
-class Section(GuitarModel):
+class Section(SetarModel):
     """Soft-deletable model with a CASCADE FK to an MTI child (the FK target).
 
     Exercises that the cascade soft-delete rule lands on the owner (Ensemble) table.

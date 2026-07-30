@@ -358,3 +358,143 @@ class TestPolicyTeardown:
         # And with enforcement gone the rows are readable again, proving the drop took
         # effect rather than the assertions above merely reading stale catalog state.
         assert _scalar(f'SELECT count(*) FROM {_OWNER_TABLE}') == 2  # noqa: S608
+
+
+class TestIdentifierSafety:
+    """Identifiers reaching policy SQL are proven bare, or quoted -- never assumed.
+
+    Nothing untrusted arrives here: tables and columns come from Django's ``model._meta``
+    and role names from ``settings``. So this is not an injection boundary, and these tests
+    do not pretend to be penetration tests. What they pin is *correctness* -- SQL that is
+    valid and binds the object actually named -- and the loudness of the failure when it
+    cannot be.
+    """
+
+    #: One case per interpolation site, so a new site added without a guard shows up here
+    #: rather than at some consumer's `migrate`.
+    BARE_SITES = [
+        pytest.param(lambda name: sql.enable_rls(table=name), id='enable_rls'),
+        pytest.param(lambda name: sql.disable_rls(table=name), id='disable_rls'),
+        pytest.param(lambda name: sql.force_rls(table=name), id='force_rls'),
+        pytest.param(lambda name: sql.no_force_rls(table=name), id='no_force_rls'),
+        pytest.param(lambda name: sql.drop_tenant_policy(table=name), id='drop_tenant_policy'),
+        pytest.param(
+            lambda name: sql.create_tenant_policy(table=name, columns={'tenant': 'tenant_id'}),
+            id='create_tenant_policy-table',
+        ),
+        pytest.param(
+            lambda name: sql.create_tenant_policy(table='t', columns={'tenant': name}),
+            id='create_tenant_policy-column',
+        ),
+        pytest.param(
+            lambda name: sql.create_tenant_policy(
+                table='t',
+                columns={},
+                owner_table=name,
+                owner_pk='id',
+                child_pk='t_ptr_id',
+                owner_columns={'tenant': 'tenant_id'},
+            ),
+            id='create_tenant_policy-owner_table',
+        ),
+        pytest.param(
+            lambda name: sql.create_tenant_policy(
+                table='t',
+                columns={},
+                owner_table='o',
+                owner_pk='id',
+                child_pk='t_ptr_id',
+                owner_columns={'tenant': name},
+            ),
+            id='create_tenant_policy-owner_column',
+        ),
+        pytest.param(lambda name: sql.create_exempt_policy(table=name, role='r'), id='exempt'),
+        pytest.param(lambda name: sql.drop_exempt_policy(table=name, role='r'), id='drop_exempt'),
+    ]
+
+    @pytest.mark.parametrize('build', BARE_SITES)
+    @pytest.mark.parametrize(
+        'name',
+        [
+            'Order Items',  # a legal db_table that is not a bare identifier
+            'MixedCase',  # would silently fold to lower case and bind another table
+            'has-a-hyphen',  # a syntax error, unquoted
+            'tenant_id; DROP TABLE x',  # the shape a linter worries about
+        ],
+    )
+    def test_an_unquotable_identifier_is_refused_at_build_time(self, build, name):
+        """Loudly, and naming the culprit -- not emitted as SQL that fails later.
+
+        Emitting it would surface as a PostgreSQL syntax error inside `migrate`, pointing at
+        a generated file rather than at the field or setting that caused it.
+        """
+        with pytest.raises(ValueError, match='not a plain lower-case SQL identifier'):
+            build(name)
+
+    def test_an_empty_table_name_is_refused(self):
+        """Kept separate: on the owner-join sites an empty name trips the
+        join-arguments guard in ``_predicate`` first, which is its own correct error."""
+        with pytest.raises(ValueError, match='not a plain lower-case SQL identifier'):
+            sql.enable_rls(table='')
+
+    @pytest.mark.parametrize(
+        'role',
+        [
+            'metabase_ro',  # ordinary
+            'metabase-ro',  # legal role, syntax error unquoted
+            'BI_Reader',  # legal role, silently folds to bi_reader unquoted
+            "quote'in'name",  # escaping, at both nesting levels
+        ],
+    )
+    def test_a_role_name_needing_quotes_still_produces_valid_sql(self, role, db):
+        """Round-tripped through PostgreSQL, because the escaping is nested twice.
+
+        The ``DO`` block's ``EXECUTE`` takes a *string literal* containing a statement that
+        itself quotes the role, so every quote is escaped once at each level. That is easy
+        to get wrong in a way no string assertion would catch -- only the parser will.
+        Running it also proves the ``pg_roles`` guard works: none of these roles exist here,
+        so each block must compile, find nothing, and do nothing.
+        """
+        _execute('CREATE TABLE IF NOT EXISTS guitars_ident_probe (id serial PRIMARY KEY)')
+        try:
+            _execute(sql.create_exempt_policy(table='guitars_ident_probe', role=role))
+            _execute(sql.drop_exempt_policy(table='guitars_ident_probe', role=role))
+        finally:
+            _execute('DROP TABLE IF EXISTS guitars_ident_probe')
+
+    def test_the_create_and_drop_agree_on_the_policy_name(self):
+        """Or a dropped exemption would leave a policy nothing knows how to remove."""
+        role = 'BI_Reader'
+
+        created = sql.create_exempt_policy(table='t', role=role)
+        dropped = sql.drop_exempt_policy(table='t', role=role)
+
+        assert f'"{sql.EXEMPT_POLICY_PREFIX}{role}"' in created
+        assert f'"{sql.EXEMPT_POLICY_PREFIX}{role}"' in dropped
+
+    def test_an_exempt_role_actually_reads_across_tenants(self, probe_tables):
+        """The BI-exemption feature, end to end.
+
+        Uses the connecting role, because creating one would need CREATEROLE -- which this
+        suite's role deliberately lacks: before PostgreSQL 16, CREATEROLE could grant
+        BYPASSRLS, and a role able to hand itself that would undermine every other assertion
+        in this file.
+
+        Functional rather than structural. A mis-quoted role name, or one attached to the
+        folded spelling of the name, would leave this read at zero rows -- so the count is
+        what proves the binding, not a ``pg_policy`` lookup that would pass either way.
+        """
+        role = _scalar('SELECT current_user')
+
+        # Precondition: unscoped, the tenant policy shows nothing.
+        assert _scalar(f'SELECT count(*) FROM {_OWNER_TABLE}') == 0  # noqa: S608
+
+        _execute(sql.create_exempt_policy(table=_OWNER_TABLE, role=role))
+        try:
+            # Policies are permissive, so the exemption ORs with tenant_scope: full read.
+            assert _scalar(f'SELECT count(*) FROM {_OWNER_TABLE}') == 2  # noqa: S608
+        finally:
+            _execute(sql.drop_exempt_policy(table=_OWNER_TABLE, role=role))
+
+        # And the drop puts it back -- SELECT-only exemptions must not outlive their removal.
+        assert _scalar(f'SELECT count(*) FROM {_OWNER_TABLE}') == 0  # noqa: S608

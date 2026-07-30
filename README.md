@@ -50,9 +50,10 @@ package winks at, would approve.)
 
 | Base | Strings | What you get |
 | --- | :---: | --- |
-| `DutarModel`  | 2 | `.update()` / `.aupdate()` and cached-property invalidation on `refresh_from_db()`. The featherweight — adds no columns. |
-| `SetarModel`  | 3 | Everything in `DutarModel` **plus** DB-managed `_created_at` / `_updated_at` (default `NOW()`; `_updated_at` is ridden by a statement trigger, so it's right even under bulk/raw updates) and `app_label()` / `model_name()` / `class_name()` helpers. |
-| `GuitarModel` | 6 | Everything in `SetarModel` **plus** PostgreSQL soft deletion. The full kit. |
+| `TarModel`    | — | `.update()` / `.aupdate()` and cached-property invalidation on `refresh_from_db()`. The featherweight — adds no columns and no database behaviour. (`tār` = "string": the root every rung is counted from.) |
+| `DutarModel`  | 2 | Everything in `TarModel` **plus** DB-managed `_created_at` / `_updated_at` (default `NOW()`; `_updated_at` is ridden by a statement trigger, so it's right even under bulk/raw updates) and `app_label()` / `model_name()` / `class_name()` helpers. |
+| `SetarModel`  | 3 | Everything in `DutarModel` **plus** PostgreSQL soft deletion. **The one to reach for by default.** |
+| `GuitarModel` | 6 | Everything in `SetarModel` **plus** [multi-tenancy](#multi-tenancy): a tenant FK, tenant-scoped managers, and a row-level-security policy. The full kit. |
 
 Prefer to tune your own chord? Each capability is a standalone mixin in
 `guitars.models`: `UpdatableModel`, `HasCachedPropertyModel`, `DatedModel`, and
@@ -61,16 +62,22 @@ Prefer to tune your own chord? Each capability is a standalone mixin in
 ```python
 from django.db import models
 
-from guitars.models import GuitarModel
+from guitars.models import SetarModel
 
 
-class Article(GuitarModel):
+class Article(SetarModel):
     title = models.CharField(max_length=200)
 ```
 
+> ⚠️ **Renamed in 1.0.0.** Every rung shifted down one to make room for
+> tenancy: 0.7's `DutarModel` is now `TarModel`, `SetarModel` is now
+> `DutarModel`, and `GuitarModel` is now `SetarModel` — all three
+> behaviour-identical. `GuitarModel` keeps its name but now means
+> "`SetarModel` + tenancy". See [`CHANGELOG.md`](CHANGELOG.md).
+
 ### `.update()` — set and save in one strum
 
-Available on every rung (it comes from `DutarModel`):
+Available on every rung (it comes from `TarModel`):
 
 ```python
 article.update(title="New title")         # set fields + save (only changed fields)
@@ -83,7 +90,7 @@ await article.aupdate(title="async")      # async variant
 
 ### Soft deletion
 
-For models inheriting `SoftDeletableModel` (or `GuitarModel`), `.delete()` becomes
+For models inheriting `SoftDeletableModel` (or `SetarModel` / `GuitarModel`), `.delete()` becomes
 a **soft delete**: the row stays and `_deleted_at` is set. Because a PostgreSQL
 rule does the work, it holds even for queryset bulk deletes and raw SQL — there's
 no `.save()` to skip. Three managers expose the data:
@@ -106,10 +113,10 @@ Soft-deleting a row also soft-deletes rows related by `on_delete=CASCADE`.
 
 #### Multi-table inheritance
 
-Subclassing a concrete `GuitarModel` (Django [multi-table inheritance](https://docs.djangoproject.com/en/stable/topics/db/models/#multi-table-inheritance)) works: the child gets its own table, but timestamps and soft deletion still resolve to the parent — deleting a child soft-deletes it (child row preserved), a child-only `update()` still bumps the parent's `_updated_at`, and `hard_delete()` clears the whole table chain with no orphaned parent row.
+Subclassing a concrete `SetarModel` (Django [multi-table inheritance](https://docs.djangoproject.com/en/stable/topics/db/models/#multi-table-inheritance)) works: the child gets its own table, but timestamps and soft deletion still resolve to the parent — deleting a child soft-deletes it (child row preserved), a child-only `update()` still bumps the parent's `_updated_at`, and `hard_delete()` clears the whole table chain with no orphaned parent row.
 
 ```python
-class Ensemble(GuitarModel):
+class Ensemble(SetarModel):
     name = models.CharField(max_length=100)
 
 class Orchestra(Ensemble):          # own table; metadata lives on Ensemble's
@@ -190,6 +197,77 @@ trigger/rule migrations; the standalone form still works too:
 python manage.py makemigrations --check       # checks both layers
 python manage.py makeguitarmigrations --check # checks the trigger/rule layer only
 ```
+
+### Multi-tenancy
+
+`GuitarModel` is `SetarModel` plus tenancy, enforced in **two** layers. Point it
+at your tenant model:
+
+```python
+# settings.py
+GUITARS_TENANT_MODEL = "accounts.Organization"
+GUITARS_TENANT_FIELD = "org"            # optional; the FK's name and the scope
+                                        # dimension. Defaults to "tenant".
+```
+
+```python
+from guitars.models import GuitarModel
+from guitars.tenancy import tenancy_bypassed, tenant
+
+
+class Invoice(GuitarModel):             # gains a non-null org FK (CASCADE, editable=False)
+    amount = models.IntegerField()
+
+
+with tenant(org=acme):
+    Invoice.objects.all()               # acme's invoices
+    Invoice.objects.create(amount=10)   # org filled in from the scope
+
+Invoice.objects.all()                   # TenantScopeError — no scope, no rows
+
+with tenancy_bypassed():                # the one explicit cross-tenant path
+    Invoice.objects.count()             # every tenant
+```
+
+The **Python layer** is the loud one: all three managers refuse to run without
+an active scope, and a write that contradicts it raises rather than landing in
+the wrong tenant. The **PostgreSQL layer** is the complete one — a
+`tenant_scope` row-level-security policy, generated by `makeguitarmigrations`
+and driven by session settings, enforces the same scope on paths no manager sees:
+joins, cascades, `_base_manager`, `instance.save()` and raw SQL. Neither is
+redundant; without the database there are holes, without Python a missing scope
+is silent.
+
+Two things worth knowing before you adopt it:
+
+- **The policy binds only if your app role does not own its tables — or the
+  table is `FORCE`d.** guitars emits `FORCE ROW LEVEL SECURITY` by default for
+  exactly this reason. A superuser or a `BYPASSRLS` role bypasses policies
+  unconditionally, so don't run your app as one.
+- **`migrate` runs bypassed**, because a `RunPython` backfill has no tenant
+  scope and would otherwise match zero rows and be marked applied. guitars
+  overrides `migrate` to do this, which means `guitars` must come *before* any
+  other app providing that command in `INSTALLED_APPS`.
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `GUITARS_TENANT_MODEL` | *(required for `GuitarModel`)* | Tenant model, `"app.Model"`. Missing it is a `guitars.tenancy.E003` system-check error. |
+| `GUITARS_TENANT_FIELD` | `"tenant"` | Name of the FK, and of the scope dimension. |
+| `GUITARS_TENANT_ENFORCE` | `"strict"` | `"audit"` reports a write violation once per distinct finding and proceeds — for rolling enforcement onto a live deployment. |
+| `GUITARS_TENANT_AUTOFILL` | `False` | Fill a missing tenant from the active scope. `GuitarModel` passes `True` for its own FK regardless. |
+| `GUITARS_TENANT_POLICIES` | `True` | `False` keeps the Python layer and leaves the database alone. |
+| `GUITARS_RLS_FORCE` | `True` | `False` ships policies inert, for a staged retrofit; `makeguitarmigrations --force-rls` lands `FORCE` later. |
+| `GUITARS_RLS_EXEMPT_ROLES` | `[]` | Roles granted a `SELECT`-only exemption policy (reporting, BI), guarded on the role existing. |
+
+Auditing a live database, as a deploy step:
+
+```bash
+python manage.py audittenancy --require-force
+```
+
+It compares every policy-eligible table against `pg_class` / `pg_policy` and
+exits non-zero on a missing policy, a missing `ENABLE`, or — with
+`--require-force` — a table where the owner would silently bypass the policy.
 
 ### `DisableSignals`
 

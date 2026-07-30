@@ -35,6 +35,8 @@ same value, NULL included -- so the fail-closed reasoning above is untouched.
 
 from __future__ import annotations
 
+import re
+
 from guitars.gucs import BYPASS_GUC, VALUE_SEPARATOR, guc_name
 
 
@@ -62,6 +64,59 @@ EXEMPT_POLICY_PREFIX = 'rls_exempt_'
 #: Alias for the ancestor table in an MTI owner-join policy. Prefixed so it cannot collide
 #: with a real table or alias in the statement being filtered.
 _OWNER_ALIAS = '_guitars_owner'
+
+#: A bare SQL identifier: safe to interpolate unquoted, and case-stable because PostgreSQL
+#: folds an unquoted identifier to lower case. Anything outside this is either a mistake or
+#: something that has to be quoted to work at all.
+_BARE_IDENTIFIER = re.compile(r'^[a-z_][a-z0-9_$]*$')
+
+
+def _bare(kind: str, name: str) -> str:
+    """Return *name* unchanged, having proved it needs no quoting.
+
+    Nothing untrusted reaches these functions -- tables, columns and primary keys are
+    resolved from Django's ``model._meta``, and the result is written into a migration file
+    for review -- so this is not an injection boundary. It is a *correctness* one:
+    ``db_table = 'Order Items'`` is legal Django, and interpolating it bare produces SQL
+    that fails at ``migrate`` time or, worse, binds a different table than the one named.
+
+    Raising here moves that from a puzzling migrate-time error to a build-time one that
+    names the setting or field responsible. Bare rather than auto-quoted on purpose:
+    quoting would change the SQL every existing generated migration already contains, for
+    the sake of a shape the kit does not otherwise support.
+    """
+    if not _BARE_IDENTIFIER.match(name):
+        raise ValueError(
+            f'{kind} {name!r} is not a plain lower-case SQL identifier, so it cannot be '
+            f'used in a policy definition unquoted. Rename it, or set an explicit '
+            f'db_table / db_column that is one.'
+        )
+    return name
+
+
+def _quote_ident(name: str) -> str:
+    """Double-quote an identifier, PostgreSQL's ``quote_ident``.
+
+    Used for role-derived names, which -- unlike tables and columns -- are free-form
+    ``settings`` text rather than something Django derived. ``BI_Reader`` and
+    ``metabase-ro`` are both perfectly ordinary PostgreSQL roles that only bind when
+    quoted; bare, the first silently becomes ``bi_reader`` and the second is a syntax
+    error.
+    """
+    if '\x00' in name:
+        raise ValueError('SQL identifiers cannot contain a NUL byte.')
+    return '"' + name.replace('"', '""') + '"'
+
+
+def _quote_literal(value: str) -> str:
+    """Single-quote a string literal, PostgreSQL's ``quote_literal``.
+
+    Applied to the whole ``EXECUTE`` payload as well as to individual values, so the two
+    nesting levels inside the ``DO`` block below each get escaped exactly once.
+    """
+    if '\x00' in value:
+        raise ValueError('SQL string literals cannot contain a NUL byte.')
+    return "'" + value.replace("'", "''") + "'"
 
 
 def _setting(name: str) -> str:
@@ -112,8 +167,11 @@ def _owner_exists(
     the same tenant and denies for any other -- the two layers agree instead of one
     quietly widening the other.
     """
+    owner_table = _bare('owner table', owner_table)
+    owner_pk = _bare('owner primary key', owner_pk)
+    child_pk = _bare('child primary key', child_pk)
     matches = ' AND '.join(
-        _match(f'{_OWNER_ALIAS}.{column}', dimension)
+        _match(f'{_OWNER_ALIAS}.{_bare("owner tenant column", column)}', dimension)
         for dimension, column in sorted(owner_columns.items())
     )
     # nosec B608 - DDL, not a query: every identifier here is resolved from Django's
@@ -143,8 +201,10 @@ def _predicate(
     value -- those held on this table directly, and those held on an MTI ancestor through
     the correlated subquery. A model may legitimately have both.
     """
+    table = _bare('table', table)
     terms = [
-        _match(f'{table}.{column}', dimension) for dimension, column in sorted(columns.items())
+        _match(f'{table}.{_bare("tenant column", column)}', dimension)
+        for dimension, column in sorted(columns.items())
     ]
     if owner_columns:
         if not (owner_table and owner_pk and child_pk):
@@ -174,14 +234,14 @@ def create_tenant_policy(
     """``CREATE POLICY tenant_scope`` -- both reads (USING) and writes (WITH CHECK)."""
     predicate = _predicate(table, columns, owner_table, owner_pk, child_pk, owner_columns)
     return (
-        f'CREATE POLICY {TENANT_POLICY} ON {table} FOR ALL TO PUBLIC\n'
+        f'CREATE POLICY {TENANT_POLICY} ON {_bare("table", table)} FOR ALL TO PUBLIC\n'
         f'    USING ({predicate})\n'
         f'    WITH CHECK ({predicate})'
     )
 
 
 def drop_tenant_policy(table: str) -> str:
-    return f'DROP POLICY IF EXISTS {TENANT_POLICY} ON {table}'
+    return f'DROP POLICY IF EXISTS {TENANT_POLICY} ON {_bare("table", table)}'
 
 
 def create_exempt_policy(table: str, role: str) -> str:
@@ -195,30 +255,49 @@ def create_exempt_policy(table: str, role: str) -> str:
     make ``CREATE POLICY ... TO <missing role>`` fail migrate everywhere else -- so local
     and CI databases skip the exemption instead of erroring.
     """
-    policy = f'{EXEMPT_POLICY_PREFIX}{role}'
-    # nosec B608 - DDL, not a query. The role name comes from GUITARS_RLS_EXEMPT_ROLES, a
-    # settings value the project author controls, and lands in a migration file for review.
+    table = _bare('table', table)
+    # Every role-derived name is quoted rather than trusted to be bare, and the inner
+    # statement is escaped as a whole because EXECUTE takes a string literal -- so the two
+    # nesting levels are each escaped once, by the same rules PostgreSQL's own
+    # quote_ident/quote_literal use.
+    statement = (
+        f'CREATE POLICY {_exempt_policy_name(role)} ON {table} '
+        f'FOR SELECT TO {_quote_ident(role)} USING (true)'
+    )
+    # nosec B608 - DDL, not a query, and not an injection boundary: the role name comes from
+    # GUITARS_RLS_EXEMPT_ROLES, a settings value the project author controls, and the result
+    # lands in a migration file for review. PostgreSQL accepts no bind parameters in a
+    # policy definition, so quoting above is the available defence and it is applied.
     return (  # noqa: S608
         'DO $$\n'  # nosec B608
         'BEGIN\n'
-        f"    IF EXISTS (SELECT FROM pg_roles WHERE rolname = '{role}') THEN\n"
-        f"        EXECUTE 'CREATE POLICY {policy} ON {table} "
-        f"FOR SELECT TO {role} USING (true)';\n"
+        f'    IF EXISTS (SELECT FROM pg_roles WHERE rolname = {_quote_literal(role)}) THEN\n'
+        f'        EXECUTE {_quote_literal(statement)};\n'
         '    END IF;\n'
         'END $$'
     )
 
 
+def _exempt_policy_name(role: str) -> str:
+    """The exemption policy's identifier, quoted.
+
+    One function so the ``CREATE`` and the ``DROP`` can never disagree about how a role
+    name was spelled -- a mismatch would leave an exemption policy behind that nothing
+    knows how to remove.
+    """
+    return _quote_ident(f'{EXEMPT_POLICY_PREFIX}{role}')
+
+
 def drop_exempt_policy(table: str, role: str) -> str:
-    return f'DROP POLICY IF EXISTS {EXEMPT_POLICY_PREFIX}{role} ON {table}'
+    return f'DROP POLICY IF EXISTS {_exempt_policy_name(role)} ON {_bare("table", table)}'
 
 
 def enable_rls(table: str) -> str:
-    return f'ALTER TABLE {table} ENABLE ROW LEVEL SECURITY'
+    return f'ALTER TABLE {_bare("table", table)} ENABLE ROW LEVEL SECURITY'
 
 
 def disable_rls(table: str) -> str:
-    return f'ALTER TABLE {table} DISABLE ROW LEVEL SECURITY'
+    return f'ALTER TABLE {_bare("table", table)} DISABLE ROW LEVEL SECURITY'
 
 
 def force_rls(table: str) -> str:
@@ -232,11 +311,11 @@ def force_rls(table: str) -> str:
 
     Emitted by default. Rollback is ``NO FORCE`` -- seconds, not a migration rewrite.
     """
-    return f'ALTER TABLE {table} FORCE ROW LEVEL SECURITY'
+    return f'ALTER TABLE {_bare("table", table)} FORCE ROW LEVEL SECURITY'
 
 
 def no_force_rls(table: str) -> str:
-    return f'ALTER TABLE {table} NO FORCE ROW LEVEL SECURITY'
+    return f'ALTER TABLE {_bare("table", table)} NO FORCE ROW LEVEL SECURITY'
 
 
 def create_table_rls(

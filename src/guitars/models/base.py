@@ -1,13 +1,32 @@
+"""The instrument ladder: abstract bases named by string count, one rung per capability.
+
+Each rung is a capability the **database** enforces, not a bag of helpers::
+
+    TarModel          "tar" = string. The shared root: .update() and cached-property
+                      invalidation. Adds no columns and no database behaviour.
+    DutarModel   (2)  + DB-managed _created_at / _updated_at, kept honest by a
+                      statement-level trigger.
+    SetarModel   (3)  + PostgreSQL soft deletion: a rule, three managers, cascades.
+    GuitarModel  (6)  + tenancy: a tenant FK, tenant-scoped managers, and an RLS policy.
+
+Pick the rung whose *guarantees* you want; every capability is also available as a
+standalone mixin (``UpdatableModel``, ``HasCachedPropertyModel``, ``DatedModel``,
+``SoftDeletableModel``) for models that need one without the ones below it.
+"""
+
 from contextlib import nullcontext
 
 from asgiref.sync import sync_to_async
+from django.conf import settings
 from django.db import transaction
-from django.db.models import DateTimeField
+from django.db.models import CASCADE, DateTimeField, ForeignKey
 from django.db.models.base import Model
 from django.db.models.functions import Now
 from django.utils.functional import cached_property
 
-from .soft_deletion import SoftDeletableModel
+from guitars.tenancy import TenantedManager
+
+from .soft_deletion import AllObjectsManager, ArchiveManager, LiveManager, SoftDeletableModel
 
 
 class DatedModel(Model):
@@ -156,29 +175,34 @@ class HasCachedPropertyModel(Model):
         return super().refresh_from_db(*args, **kwargs)
 
 
-class DutarModel(UpdatableModel, HasCachedPropertyModel):
-    """The two-string rung: the ``.update()`` helper (``UpdatableModel``) and
-    cached-property invalidation (``HasCachedPropertyModel``), nothing else.
+class TarModel(UpdatableModel, HasCachedPropertyModel):
+    """The root: the ``.update()`` helper (``UpdatableModel``) and cached-property
+    invalidation (``HasCachedPropertyModel``), nothing else.
 
-    No timestamps, no soft deletion — the lightest base, for models that just
-    want the ergonomic helpers.
+    "Tār" is Persian for *string* — the thing every rung above is counted in. It has no
+    number of its own because it carries no database capability: no columns, no triggers,
+    no rules. The lightest base, for a model that wants the two ergonomic mixins and
+    nothing else.
+
+    (The introspection helpers — ``app_label()``, ``model_name()``, ``class_name()`` and
+    the field-listing ``__repr__`` — stay one rung up on ``DutarModel``, where they have
+    always been. Nothing about them needs timestamps; they are left in place so the rung
+    shift is a pure rename for existing consumers rather than a rename *and* a
+    redistribution.)
     """
 
     class Meta:
         abstract = True
 
 
-class SetarModel(DatedModel, DutarModel):
-    """The three-string rung: ``DutarModel`` plus database-managed timestamps
+class DutarModel(DatedModel, TarModel):
+    """The two-string rung: ``TarModel`` plus database-managed timestamps
     (``DatedModel``).
 
-    Adds ``_created_at`` / ``_updated_at`` on top of ``.update()`` and
-    cached-property invalidation.
-
-    Naming note: "se-tār" is Persian for "three strings", which is why this
-    rung sits at three. The modern instrument actually has four — a fourth
-    string was added in the 18th century (attributed to Moshtāq Ali Shāh).
-    The ladder follows the etymology, not the current string count.
+    Adds ``_created_at`` / ``_updated_at`` — both defaulting to ``NOW()`` in the database,
+    with ``_updated_at`` ridden by a statement-level trigger so it stays honest under
+    ``bulk_update`` and raw SQL — on top of ``.update()`` and cached-property
+    invalidation. Two columns, two strings.
     """
 
     class Meta:
@@ -220,13 +244,135 @@ class SetarModel(DatedModel, DutarModel):
         return representation + '>'
 
 
-class GuitarModel(SetarModel, SoftDeletableModel):
-    """The six-string rung: ``SetarModel`` plus PostgreSQL soft deletion.
+class SetarModel(DutarModel, SoftDeletableModel):
+    """The three-string rung: ``DutarModel`` plus PostgreSQL soft deletion.
 
-    The recommended base for models that need timestamps, ``.update()``,
-    cached-property invalidation, and soft deletion together. ``Meta``
-    inherits ``SoftDeletableModel``'s soft-delete index and default manager.
+    Adds ``_deleted_at`` and the three managers (``objects`` / ``_archives`` /
+    ``_all_objects``); ``.delete()`` becomes a soft delete, cascading to related
+    soft-deletable models, because a PostgreSQL rule does the work rather than a
+    ``save()`` override. ``Meta`` inherits ``SoftDeletableModel``'s soft-delete partial
+    index and default manager.
+
+    The right base for most models: everything the kit enforces about a *row*, without
+    committing to multi-tenancy. Reach for ``GuitarModel`` only when rows belong to a
+    tenant.
+
+    Naming note: "se-tār" is Persian for "three strings", which is why this rung sits at
+    three. The modern instrument actually has four — a fourth string was added in the 18th
+    century (attributed to Moshtāq Ali Shāh). The ladder follows the etymology, not the
+    current string count.
     """
 
     class Meta(SoftDeletableModel.Meta):
         abstract = True
+
+
+#: The tenant model to point at, ``'app_label.ModelName'``. No default: there is no
+#: sensible one, and guessing would wire a project to the wrong table silently.
+TENANT_MODEL = getattr(settings, 'GUITARS_TENANT_MODEL', None)
+
+#: Name of the foreign key ``GuitarModel`` contributes — and, by construction, the name of
+#: the scope dimension. One setting for both, because two would be two things to keep in
+#: step for no gain: ``tenant(shop=s)`` has to reach ``Model.objects.filter(shop=s)``.
+TENANT_FIELD = getattr(settings, 'GUITARS_TENANT_FIELD', 'tenant')
+
+
+class GuitarModel(SetarModel):
+    """The six-string rung: ``SetarModel`` plus multi-tenancy. The full kit.
+
+    On top of soft deletion and timestamps, a concrete subclass gets:
+
+    * a non-null ``ForeignKey`` to ``settings.GUITARS_TENANT_MODEL``, named
+      ``settings.GUITARS_TENANT_FIELD`` (default ``'tenant'``), ``on_delete=CASCADE`` and
+      ``editable=False``;
+    * all three managers wrapped in :func:`~guitars.tenancy.TenantedManager`, so a read
+      without an active scope raises ``TenantScopeError`` instead of returning every
+      tenant's rows;
+    * a ``tenant_scope`` row-level-security policy, generated by
+      ``makeguitarmigrations``, which enforces the same frame on *every* statement —
+      joins, cascades, ``_base_manager``, ``instance.save()`` and raw SQL included.
+
+    ``autofill=True`` is passed explicitly, overriding ``GUITARS_TENANT_AUTOFILL``: this
+    field is framework-owned and ``editable=False``, so making every call site name it
+    would be ceremony with no payoff. It is refused for a collection scope
+    (``tenant(tenant=[a, b])`` names no single value) — pass the tenant explicitly there.
+
+    **Without ``GUITARS_TENANT_MODEL`` this rung is inert**, and deliberately so rather
+    than an import-time crash: ``guitars.models`` must stay importable for the projects
+    that use the lower rungs. Subclassing it in that state is caught by the
+    ``guitars.tenancy.E003`` system check, which ``manage.py check``, ``runserver``,
+    ``migrate`` and ``makemigrations`` all run.
+
+    **Cascade consequence.** The tenant FK is ``CASCADE``, so if the tenant model is itself
+    soft-deletable, ``makeguitarmigrations`` writes one ``soft_delete_related_*`` ``DO
+    ALSO`` rule per tenanted model onto the tenant table. Soft-deleting one tenant then
+    fires N ``UPDATE``s in a single statement. Correct, and cheap next to the alternative
+    of orphaned rows — but it scales with the number of tenanted models, not with rows.
+    """
+
+    #: Whether the tenant FK and the scoped managers were actually installed below.
+    #: Read by the system check, which cannot import this class at module scope (the
+    #: tenancy package is imported *by* this module) and must not re-derive the condition.
+    _guitars_tenancy_installed = False
+
+    class Meta(SetarModel.Meta):
+        abstract = True
+
+        # base_manager_name is deliberately left unset, so ``_base_manager`` stays
+        # Django's auto-created plain Manager.
+        #
+        # Pointing it at a tenant-scoped manager is tempting -- ``_base_manager`` is what
+        # fetches related objects, so scoping it would filter ``select_related`` too -- and
+        # it is wrong for three reasons:
+        #
+        # 1. Django's own rule is that a base manager must not filter rows. A FK pointing
+        #    at a row the filter hides raises RelatedObjectDoesNotExist, which names the
+        #    wrong problem.
+        # 2. ``_base_manager`` is on the ``save()`` path (``Model._do_insert`` /
+        #    ``_do_update``), and ``QuerySet._insert`` / ``_update`` are ``queryset_only =
+        #    False``, so they are not on the deny-list a missing scope raises from. Writes
+        #    would pass while reads denied: enforcement that is partial in a way nobody
+        #    could predict from the outside.
+        # 3. ``_base_manager`` is the canonical example of a path no manager guards, and
+        #    the row-level-security policy covers it completely. Half-covering it in Python
+        #    would add a failure mode without closing a hole.
+
+
+if TENANT_MODEL:
+    # Contributed after the class body rather than declared in it, because the field's
+    # *name* comes from a setting and a class body cannot bind a computed attribute name.
+    # ``add_to_class`` is the same entry point Django's own metaclass uses, and abstract
+    # bases have their ``local_fields`` and ``local_managers`` copied down when a concrete
+    # subclass is defined -- which happens later, at consumer import time -- so a field
+    # added here reaches every subclass exactly as a declared one would.
+    GuitarModel.add_to_class(
+        TENANT_FIELD,
+        ForeignKey(
+            TENANT_MODEL,
+            on_delete=CASCADE,
+            # CASCADE, not PROTECT: a tenant's rows are meaningless without it, and the
+            # database-level soft delete means "cascade" archives rather than destroys.
+            related_name='%(app_label)s_%(class)s_set',
+            # Templated, because every tenanted model in every app would otherwise collide
+            # on the same reverse accessor.
+            editable=False,
+            # Framework-owned: kept out of ModelForms and the admin, and filled from the
+            # active scope by the write guard.
+        ),
+    )
+    for _name, _manager_class in (
+        ('objects', LiveManager),
+        ('_archives', ArchiveManager),
+        ('_all_objects', AllObjectsManager),
+    ):
+        # All three, not just the default: ``_archives`` and ``_all_objects`` exist to see
+        # rows ``objects`` hides, and an unscoped one would see every tenant's.
+        GuitarModel.add_to_class(
+            _name,
+            TenantedManager(
+                _manager_class=_manager_class,
+                autofill=True,
+                **{TENANT_FIELD: TENANT_FIELD},
+            ),
+        )
+    GuitarModel._guitars_tenancy_installed = True

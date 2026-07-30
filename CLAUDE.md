@@ -23,11 +23,14 @@ When editing source, work in `src/guitars/`. When changing test models or harnes
 
 Abstract bases named by string count, each rung adds capability via mixins:
 
-- `DutarModel` (2) = `UpdatableModel` + `HasCachedPropertyModel`. Adds no columns.
-- `SetarModel` (3) = `DatedModel` + `DutarModel`. Adds DB-managed `_created_at` / `_updated_at` + `app_label()` / `model_name()` / `class_name()` helpers.
-- `GuitarModel` (6) = `SetarModel` + `SoftDeletableModel`. Full kit; its `Meta` inherits `SoftDeletableModel.Meta` (soft-delete index + default manager).
+- `TarModel` = `UpdatableModel` + `HasCachedPropertyModel`. Adds no columns and no DB behaviour — the root, unnumbered ("tār" = string).
+- `DutarModel` (2) = `DatedModel` + `TarModel`. Adds DB-managed `_created_at` / `_updated_at` + `app_label()` / `model_name()` / `class_name()` helpers and the field-listing `__repr__`.
+- `SetarModel` (3) = `DutarModel` + `SoftDeletableModel`. Its `Meta` inherits `SoftDeletableModel.Meta` (soft-delete index + default manager). **The default rung** for a model that isn't tenanted.
+- `GuitarModel` (6) = `SetarModel` + tenancy. Full kit; see "Tenancy" below.
 
 Each capability is also a standalone mixin exported from `guitars.models`: `UpdatableModel`, `HasCachedPropertyModel`, `DatedModel`, `SoftDeletableModel`.
+
+**The rungs shifted down one in 1.0.0** to make room for tenancy: 0.7's `DutarModel` → `TarModel`, `SetarModel` → `DutarModel`, `GuitarModel` → `SetarModel`, all behaviour-identical; `GuitarModel` kept its name and took the new meaning. This is why the release is 1.0.0 and not 0.8.0 — `ganje` pins `>=0.7,<1.0`, so shipping it as a minor would silently shift every model there by one capability.
 
 ### Database-enforced behavior is the whole design
 
@@ -59,6 +62,19 @@ A concrete model subclassing another concrete `GuitarModel`/`DatedModel`/`SoftDe
 - **Known limitation** — cascading *into* an MTI child through a FK declared on the child's **own** table while its `_deleted_at` lives on a farther ancestor is not supported (needs a join form); `makeguitarmigrations` skips it with a warning rather than emitting a broken rule.
 
 See `tests/testapp/models.py` (`Ensemble → Orchestra → ChamberOrchestra`, plus `Section`) and `tests/test_mti.py`.
+
+### Tenancy (`src/guitars/tenancy/`)
+
+Same thesis as soft deletion, applied to *which rows a caller may see*: a Python layer that fails **loudly** and a PostgreSQL layer that is actually **complete**.
+
+- **Frame** — `scope.py` holds a `ContextVar` of `{dimension: value}`. `tenant(**dims)` enters one, `tenancy_bypassed()` is the single greppable cross-tenant path, `@tenanted` reads a value off a function argument (`arg` = which parameter, `dimension` = which scope key; separable on purpose). A `None` value counts as *absent*, not "match everything".
+- **Python enforcement** — `manager.py`. `TenantedManager(_manager_class=..., autofill=..., **dimensions)` returns a manager instance; missing scope yields a *denying* queryset built from the manager's own queryset class, so custom methods still resolve and raise `TenantScopeError` rather than `AttributeError`. Writes are guarded by a `pre_save` receiver (covers `instance.save()` and `_base_manager`) plus a `bulk_create` override on the **queryset** (chaining leaves the manager behind). The deny-list must stay exhaustive — `tests/test_tenancy_denylist.py` fails if any queryset method is unclassified.
+- **PostgreSQL enforcement** — `guc.py` mirrors the frame into `tenant.*` session settings inside a `connection.execute_wrappers` entry, lazily and cached. **The cache key is deliberately more than the values** (`in_atomic_block`, the savepoint stack, and a per-transaction `run_on_commit` marker): a stale cache leaves the *previous* tenant live, which fails **open**. Do not simplify it without a test that fails first. Publishing is skipped on SQLSTATE 25P02 — an aborted transaction refuses every statement including the `ROLLBACK TO SAVEPOINT` that recovers it, so raising there wedges the connection permanently.
+- **Policies** — `sql/policy.py` (settings-free; `force` and `exempt_roles` are baked into the migration as literals so one migration history always yields one database). The predicate is list-tolerant (`col::text = ANY(string_to_array(current_setting(...), ','))`) so one form serves scalar and collection scopes, every NULL path denies, and `current_setting` sits in a scalar subquery so the planner hoists it to an InitPlan. **RLS enabled with no policy is default-DENY**, not default-allow.
+- **MTI** — an MTI child gets an **owner-join** policy (correlated `EXISTS` on the shared PK) rather than relying on the ancestor's, because a child-only statement never touches the ancestor. Same gap `set_parent_updated_at` closes for timestamps, from the other side.
+- **Coverage** — `discovery.py` is the single answer shared by the generator and `audittenancy`, so the build gate and the live audit cannot disagree. It reports rather than covers: multi-hop dimensions, and dimensions spread across two ancestors. A model can be *partially* covered; the note names what is and isn't enforced.
+- **Three silent bypasses** to remember: SUPERUSER, the `BYPASSRLS` attribute, and the table OWNER without `FORCE`. The last is why `GUITARS_RLS_FORCE` defaults to `True` and why the test suite runs as a non-superuser role that owns its tables.
+- `base_manager_name` is deliberately **left unset** on `GuitarModel` — see the reasoning in its `Meta`. Django's rule is that a base manager must not filter, `_base_manager` is on the `save()` path where `_insert`/`_update` are not deny-listed, and it is precisely the path RLS covers completely.
 
 ### `.update()` and signals
 

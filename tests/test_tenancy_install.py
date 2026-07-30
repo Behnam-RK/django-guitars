@@ -13,14 +13,16 @@ against an unset GUC matches no rows, so the failure is a silent, total denial.
 """
 
 import ast
+import subprocess
+import sys
 import weakref
 from pathlib import Path
 
 from django.db.models.signals import pre_save
 
 import guitars
+from guitars import gucs as names
 from guitars import tenancy
-from guitars.tenancy import names
 from guitars.tenancy.manager import _WRITE_GUARD_UID, _on_pre_save
 
 
@@ -117,15 +119,9 @@ class TestGucNames:
         assert names.guc_name(BYPASS) != names.BYPASS_GUC
 
 
-def test_names_module_imports_only_the_standard_library():
-    """The constraint that justifies this module existing separately.
-
-    ``guitars.sql`` is imported by every generated migration, and it needs these names. If
-    they lived with the runtime, ``from guitars import sql`` would drag connection
-    handling, signal receivers and a ContextVar into every ``migrate`` -- so the split is
-    load-bearing, and this test is what keeps it that way.
-    """
-    source = Path(guitars.__file__).parent / 'tenancy' / 'names.py'
+def test_gucs_module_imports_nothing_at_all():
+    """Half of the constraint that justifies this module existing separately."""
+    source = Path(guitars.__file__).parent / 'gucs.py'
     tree = ast.parse(source.read_text(encoding='utf-8'))
 
     imported = set()
@@ -138,6 +134,40 @@ def test_names_module_imports_only_the_standard_library():
             imported.add('.')
 
     assert imported == set(), (
-        f'guitars/tenancy/names.py must import nothing at all, but imports {sorted(imported)}. '
+        f'guitars/gucs.py must import nothing at all, but imports {sorted(imported)}. '
         f'Anything imported here is pulled into every generated migration via guitars.sql.'
     )
+
+
+def test_gucs_lives_outside_the_tenancy_package():
+    """The other half, and the one that is easy to get wrong.
+
+    Being import-free is not sufficient. Importing a submodule executes its package's
+    ``__init__`` first, so while these names lived at ``guitars.tenancy.names`` every
+    generated migration's ``from guitars import sql`` pulled in the entire tenancy
+    runtime -- connection handling, a signal receiver and a ContextVar -- in order to read
+    four strings. Moving the module to the top level is what actually delivers the
+    property; this test is what stops it drifting back.
+    """
+    # A subprocess, not a sys.modules purge. Purging would make every later test file
+    # re-import guitars and get *different* class objects -- a second TenantScopeError,
+    # a re-registered signal receiver -- so the test would corrupt the session it runs in.
+    # A clean interpreter is the only honest way to observe a first import.
+    probe = (
+        'import sys; from guitars import sql; '
+        "print(','.join(sorted(m for m in sys.modules if m.startswith('guitars'))))"
+    )
+    result = subprocess.run(  # noqa: S603 - fixed argv, no shell
+        [sys.executable, '-c', probe],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    imported = set(result.stdout.strip().split(','))
+
+    leaked = sorted(m for m in imported if m.startswith('guitars.tenancy'))
+    assert not leaked, (
+        f'`from guitars import sql` pulled in {leaked}. Generated migrations do exactly '
+        f'this import, so the tenancy runtime must not be reachable from it.'
+    )
+    assert 'guitars.gucs' in imported, 'expected guitars.sql to reach the GUC names'

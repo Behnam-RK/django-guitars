@@ -1,13 +1,18 @@
 """The names of the PostgreSQL session settings the tenant frame is published as.
 
-A leaf module on purpose: **standard library only, no Django, no imports from the rest
-of the package.** Two very different consumers need these strings.
+A leaf module on purpose: **it imports nothing at all**, and it sits at the top level of
+the package rather than inside ``tenancy/``. Both halves of that matter, because two very
+different consumers need these strings.
 
 * :mod:`guitars.tenancy.guc` publishes the values at runtime.
-* :mod:`guitars.sql.policy` bakes the names into policy SQL at migration-generation
-  time -- and ``guitars.sql`` is imported by every generated migration file. If the
-  names lived alongside the runtime, ``from guitars import sql`` would drag connection
-  handling, signal receivers and a ContextVar into every ``migrate``.
+* :mod:`guitars.sql.policy` bakes the names into policy SQL at migration-generation time
+  -- and ``guitars.sql`` is imported by every generated migration file.
+
+Importing a submodule executes its package's ``__init__`` first, so had these names stayed
+at ``guitars.tenancy.names``, every generated migration's ``from guitars import sql`` would
+have pulled in the whole tenancy runtime -- connection handling, a signal receiver and a
+ContextVar -- to read four strings. Being import-free is not enough on its own; the module
+also has to live somewhere whose package is import-free.
 
 The namespace mirrors the kit's existing ``rules.hard_deletion`` convention: the prefix
 names the mechanism, the key names the knob.

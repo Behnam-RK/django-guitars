@@ -20,10 +20,11 @@ import guitars
 from guitars import sql
 
 
-#: Every public name ``guitars.sql`` has ever exported. Append-only: add to this
-#: set when a feature adds SQL, never remove from it. A removal here is the one
-#: change that silently breaks already-applied migrations elsewhere.
-FROZEN_SQL_NAMES = frozenset(
+#: Every public *constant* ``guitars.sql`` has ever exported -- format strings that
+#: migrations call ``.format()`` on. Append-only: add when a feature adds SQL, never
+#: remove. A removal here is the one change that silently breaks already-applied
+#: migrations elsewhere.
+FROZEN_SQL_CONSTANTS = frozenset(
     {
         # _updated_at trigger function + per-table statement trigger
         'CHECK_TRIGGER_FUNCTION_EXISTS',
@@ -48,8 +49,31 @@ FROZEN_SQL_NAMES = frozenset(
         'DROP_PARENT_UPDATED_AT_TRIGGER',
         'CREATE_MTI_SOFT_DELETE_RULE',
         'DROP_MTI_SOFT_DELETE_RULE',
+        # row-level security: policy names, not statements
+        'TENANT_POLICY',
+        'EXEMPT_POLICY_PREFIX',
     }
 )
+
+#: Every public *callable* ``guitars.sql`` has ever exported. Row-level-security SQL is
+#: composed from a variable-length {dimension: column} mapping, so it cannot be a format
+#: string. Same append-only rule, same reason: generated migrations call these by name.
+FROZEN_SQL_CALLABLES = frozenset(
+    {
+        'create_tenant_policy',
+        'drop_tenant_policy',
+        'create_exempt_policy',
+        'drop_exempt_policy',
+        'enable_rls',
+        'disable_rls',
+        'force_rls',
+        'no_force_rls',
+        'create_table_rls',
+        'drop_table_rls',
+    }
+)
+
+FROZEN_SQL_NAMES = FROZEN_SQL_CONSTANTS | FROZEN_SQL_CALLABLES
 
 #: Matches ``sql.SOME_NAME``. The ``\b`` matters: without it this also matches the
 #: ``sql.`` inside ``reverse_sql=sql.X`` twice, and inside any ``*_sql`` kwarg.
@@ -81,7 +105,14 @@ def test_all_is_exhaustive_and_matches_the_frozen_set():
     tooling; a name in ``__all__`` that does not exist raises on ``import *``.
     """
     exported = set(sql.__all__)
-    public = {name for name in dir(sql) if name.isupper() and not name.startswith('_')}
+    public = {
+        name
+        for name in dir(sql)
+        if not name.startswith('_')
+        # Submodules are reachable as attributes once imported but are not part of the
+        # flat interface migrations use.
+        and name not in {'policy', 'soft_delete', 'triggers'}
+    }
 
     assert exported == public, (
         f'__all__ and the module contents disagree. '
@@ -97,12 +128,23 @@ def test_all_is_exhaustive_and_matches_the_frozen_set():
     )
 
 
-def test_every_public_name_is_a_usable_sql_string():
+def test_every_frozen_constant_is_a_usable_sql_string():
     """Migrations call ``.format(...)`` on these, so a non-string fails at migrate time."""
-    for name in sorted(FROZEN_SQL_NAMES):
+    for name in sorted(FROZEN_SQL_CONSTANTS):
         value = getattr(sql, name)
         assert isinstance(value, str), f'sql.{name} is {type(value).__name__}, not str'
         assert value.strip(), f'sql.{name} is empty'
+
+
+def test_every_frozen_callable_is_callable():
+    """Migrations *call* these, so a constant shadowing one fails at migrate time."""
+    for name in sorted(FROZEN_SQL_CALLABLES):
+        assert callable(getattr(sql, name)), f'sql.{name} is not callable'
+
+
+def test_the_constant_and_callable_sets_do_not_overlap():
+    """A name cannot be both, and the two tests above would disagree about which it is."""
+    assert not (FROZEN_SQL_CONSTANTS & FROZEN_SQL_CALLABLES)
 
 
 def test_generator_templates_reference_only_names_that_resolve():

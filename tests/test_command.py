@@ -1,7 +1,7 @@
 """Tests for the makeguitarmigrations management command.
 
 ``_create_empty_migration_file`` (which shells out to ``makemigrations --empty``) is
-exercised in practice by the test app's committed advanced migrations applying against
+exercised in practice by the test app's committed enforcement migrations applying against
 Postgres, since running it for real would scaffold a new migration file on disk. Here we
 cover the scanning, idempotency, and SQL-operation-building logic directly, including
 ``_write_migration_file`` against a throwaway ``tmp_path`` migrations directory.
@@ -22,12 +22,12 @@ from guitars.management.commands.makeguitarmigrations import Command
 from tests.testapp.models import Album, Band, Ensemble, Orchestra
 
 
-def test_check_passes_when_advanced_migrations_exist():
+def test_check_passes_when_enforcement_migrations_exist():
     out, err = StringIO(), StringIO()
 
     call_command('makeguitarmigrations', '--check', stdout=out, stderr=err)
 
-    assert 'Missing advanced migrations' not in err.getvalue()
+    assert 'Missing enforcement migrations' not in err.getvalue()
 
 
 def test_run_is_idempotent_when_nothing_changed():
@@ -41,9 +41,9 @@ def test_run_is_idempotent_when_nothing_changed():
 def test_build_operations_emits_trigger_rule_and_cascade_ops():
     command = Command()
     # Pretend nothing has been generated yet so every operation is produced.
-    command.existing_triggers.clear()
-    command.existing_soft_deletes.clear()
-    command.existing_soft_delete_related.clear()
+    command.existing.triggers.clear()
+    command.existing.soft_deletes.clear()
+    command.existing.soft_delete_related.clear()
 
     ops = '\n'.join(command._build_operations(apps.get_app_config('testapp')))
 
@@ -54,11 +54,11 @@ def test_build_operations_emits_trigger_rule_and_cascade_ops():
 
 def test_build_operations_emits_mti_ops_for_child_models():
     command = Command()
-    command.existing_triggers.clear()
-    command.existing_soft_deletes.clear()
-    command.existing_soft_delete_related.clear()
-    command.existing_mti_triggers.clear()
-    command.existing_mti_soft_deletes.clear()
+    command.existing.triggers.clear()
+    command.existing.soft_deletes.clear()
+    command.existing.soft_delete_related.clear()
+    command.existing.mti_triggers.clear()
+    command.existing.mti_soft_deletes.clear()
 
     ops = '\n'.join(command._build_operations(apps.get_app_config('testapp')))
 
@@ -80,7 +80,7 @@ def test_cascade_operations_skip_non_cascade_and_non_deletable_relations():
     (SET_NULL -- skipped, wrong on_delete) and Riff.band (CASCADE, but Riff has no
     _deleted_at -- skipped, nothing to cascade to)."""
     command = Command()
-    command.existing_soft_delete_related.clear()
+    command.existing.soft_delete_related.clear()
 
     ops = '\n'.join(command._cascade_operations(Band))
 
@@ -99,7 +99,7 @@ def test_cascade_operation_warns_when_related_model_is_mti_child_without_own_del
     """
     command = Command()
     command._mti_cascade_warnings.clear()
-    command.existing_soft_delete_related.clear()
+    command.existing.soft_delete_related.clear()
 
     class _FakeFKField:
         column = 'sponsor_id'
@@ -168,7 +168,7 @@ class Migration(migrations.Migration):
 '''
 
 
-def _write_empty_migration(tmp_path, filename='0002_auto_advanced.py'):
+def _write_empty_migration(tmp_path, filename='0002_auto_enforcement.py'):
     migrations_dir = tmp_path / 'migrations'
     migrations_dir.mkdir()
     (migrations_dir / filename).write_text(_EMPTY_MIGRATION_SCAFFOLD)
@@ -251,11 +251,11 @@ def test_write_migration_file_skips_self_referential_dependency(tmp_path):
         operations=[],
         operations_digest='digest123',
         # The migration's own stem -- must not depend on itself.
-        dependencies=[('testapp', '0002_auto_advanced')],
+        dependencies=[('testapp', '0002_auto_enforcement')],
     )
 
     content = (tmp_path / 'migrations' / migration_file).read_text()
-    assert content.count('0002_auto_advanced') == 0
+    assert content.count('0002_auto_enforcement') == 0
 
 
 def test_write_migration_file_skips_dependency_already_present(tmp_path):
@@ -298,7 +298,7 @@ def test_check_passes_when_scoped_to_named_app():
 
     call_command('makeguitarmigrations', 'testapp', '--check', stdout=out, stderr=err)
 
-    assert 'Missing advanced migrations' not in err.getvalue()
+    assert 'Missing enforcement migrations' not in err.getvalue()
 
 
 def test_handle_generates_only_for_named_apps(monkeypatch):
@@ -309,9 +309,9 @@ def test_handle_generates_only_for_named_apps(monkeypatch):
         command = Command()
         command.stdout = StringIO()
         # Pretend nothing exists yet so generation would otherwise fire...
-        command.existing_triggers.clear()
-        command.existing_soft_deletes.clear()
-        command.existing_soft_delete_related.clear()
+        command.existing.triggers.clear()
+        command.existing.soft_deletes.clear()
+        command.existing.soft_delete_related.clear()
         # ...and the shared trigger-function migration is already in place.
         command.trigger_function_dependency = ('testapp', '0001_pretend')
         monkeypatch.setattr(_generator, 'migration_with_digest_exists', lambda *a, **k: False)
@@ -319,7 +319,7 @@ def test_handle_generates_only_for_named_apps(monkeypatch):
         monkeypatch.setattr(
             _generator,
             'create_empty_migration_file',
-            lambda app, name='auto_advanced': created.append(app.label) or f'0002_{name}.py',
+            lambda app, name='auto_enforcement': created.append(app.label) or f'0002_{name}.py',
         )
         return command
 
@@ -353,7 +353,7 @@ def test_scoped_cascade_gap_reported_when_parent_app_out_of_scope(monkeypatch):
     # Real, already-related models (Album -> Band, CASCADE), reassigned to two
     # fake apps so we can scope to one without the other.
     command = Command()
-    command.existing_soft_delete_related.clear()
+    command.existing.soft_delete_related.clear()
 
     fake_band_app = _fake_app_config('fake.banda', 'banda', [Band])
     fake_album_app = _fake_app_config('fake.albumb', 'albumb', [Album])
@@ -374,7 +374,7 @@ def test_scoped_cascade_gap_reported_when_parent_app_out_of_scope(monkeypatch):
 @override_settings(LOCAL_APPS=['fake.banda', 'fake.albumb'])
 def test_scoped_cascade_gap_empty_when_parent_app_in_scope(monkeypatch):
     command = Command()
-    command.existing_soft_delete_related.clear()
+    command.existing.soft_delete_related.clear()
 
     fake_band_app = _fake_app_config('fake.banda', 'banda', [Band])
     fake_album_app = _fake_app_config('fake.albumb', 'albumb', [Album])
@@ -396,7 +396,7 @@ def test_scoped_cascade_gap_silent_when_child_app_also_out_of_scope(monkeypatch)
     about apps the caller isn't touching right now.
     """
     command = Command()
-    command.existing_soft_delete_related.clear()
+    command.existing.soft_delete_related.clear()
 
     fake_band_app = _fake_app_config('fake.banda', 'banda', [Band])
     fake_album_app = _fake_app_config('fake.albumb', 'albumb', [Album])
@@ -417,7 +417,7 @@ def test_scoped_cascade_gap_skips_mti_parent_link(monkeypatch):
     """The MTI parent-link (Orchestra -> Ensemble) is structural, not a user cascade FK --
     it must never be reported as a skipped cascade rule, even when scoped out."""
     command = Command()
-    command.existing_soft_delete_related.clear()
+    command.existing.soft_delete_related.clear()
 
     fake_ensemble_app = _fake_app_config('fake.ensemblea', 'ensemblea', [Ensemble])
     fake_orchestra_app = _fake_app_config('fake.orchestrab', 'orchestrab', [Orchestra])
@@ -443,7 +443,7 @@ def test_scoped_cascade_gap_skipped_when_rule_already_exists(monkeypatch):
         'get_app_configs',
         lambda: [fake_band_app, fake_album_app],
     )
-    command.existing_soft_delete_related.add((Album._meta.db_table, Band._meta.db_table))
+    command.existing.soft_delete_related.add((Album._meta.db_table, Band._meta.db_table))
 
     assert command._scoped_cascade_gap_notes({'albumb'}) == []
 
@@ -454,9 +454,9 @@ def test_handle_skips_app_when_digest_already_exists(monkeypatch):
     no new migration file gets created."""
     command = Command()
     command.stdout = StringIO()
-    command.existing_triggers.clear()
-    command.existing_soft_deletes.clear()
-    command.existing_soft_delete_related.clear()
+    command.existing.triggers.clear()
+    command.existing.soft_deletes.clear()
+    command.existing.soft_delete_related.clear()
     command.trigger_function_dependency = ('testapp', '0001_pretend')
     monkeypatch.setattr(_generator, 'migration_with_digest_exists', lambda *a, **k: True)
     created: list[str] = []
@@ -473,11 +473,11 @@ def test_handle_check_only_reports_missing_migrations_and_mti_warnings(monkeypat
     command = Command()
     command.stdout = StringIO()
     command.stderr = StringIO()
-    command.existing_triggers.clear()
-    command.existing_soft_deletes.clear()
-    command.existing_soft_delete_related.clear()
-    command.existing_mti_triggers.clear()
-    command.existing_mti_soft_deletes.clear()
+    command.existing.triggers.clear()
+    command.existing.soft_deletes.clear()
+    command.existing.soft_delete_related.clear()
+    command.existing.mti_triggers.clear()
+    command.existing.mti_soft_deletes.clear()
     command.trigger_function_dependency = ('testapp', '0001_pretend')
     command.parent_trigger_function_dependency = ('testapp', '0001_pretend_parent')
     monkeypatch.setattr(_generator, 'migration_with_digest_exists', lambda *a, **k: False)
@@ -488,7 +488,7 @@ def test_handle_check_only_reports_missing_migrations_and_mti_warnings(monkeypat
     with pytest.raises(CommandError, match='Run `manage.py makeguitarmigrations`'):
         command.handle('testapp', check_only=True)
 
-    assert 'Missing advanced migrations' in command.stderr.getvalue()
+    assert 'Missing enforcement migrations' in command.stderr.getvalue()
     assert 'some skipped MTI cascade rule' in command.stderr.getvalue()
 
 
@@ -497,7 +497,7 @@ def test_handle_writes_scoped_cascade_gap_warning_to_stdout(monkeypatch):
     command = Command()
     command.stdout = StringIO()
     command.stderr = StringIO()
-    command.existing_soft_delete_related.clear()
+    command.existing.soft_delete_related.clear()
     # Both singleton function migrations already exist, so the per-app loop is the only
     # thing left to exercise.
     command.trigger_function_dependency = ('albumb', '0001_pretend')

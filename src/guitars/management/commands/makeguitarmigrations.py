@@ -1,10 +1,41 @@
+"""Generate the kit's **enforcement migrations**.
+
+Vocabulary, used consistently here and in the docs:
+
+* An **enforcement migration** is a generated migration of ``RunSQL`` operations. Django's
+  own migrations describe *schema* -- which tables and columns exist. These describe what
+  the database *guarantees about the rows*, for every code path including the ones that
+  never call ``save()``.
+* An **enforcement operation** is one ``RunSQL`` entry inside such a migration.
+
+There are four kinds, and each already has a precise name of its own:
+
+============================  ===============================================
+timestamp trigger             keeps ``_updated_at`` current on any ``UPDATE``
+soft-delete rule              rewrites ``DELETE`` into a ``_deleted_at`` stamp
+MTI redirect rule / trigger   applies both to a multi-table-inheritance child
+tenant policy                 row-level security scoping rows to a tenant
+============================  ===============================================
+
+All four ship from one command because they share every mechanic that is actually
+difficult: model discovery, MTI column-ownership resolution, dedupe against operations
+already written, ``--empty`` scaffolding, digest stamping and app scoping.
+
+**Idempotency has two layers**, and both matter. A ``[DIGEST:...]`` marker on the first
+line identifies an unchanged operation set; per-operation comment headers
+(``# Updated at Trigger on "x" table!``) identify which tables are already covered, so a
+*partially* covered app gets only the genuinely new operations. Those header strings are
+therefore **frozen**: reword one and every existing migration stops being recognised, and
+the next run emits duplicates.
+"""
+
 from __future__ import annotations
 
 import re
 import textwrap
 from collections import defaultdict
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from django.apps import apps as django_apps
 from django.conf import settings
@@ -14,10 +45,13 @@ from django.db import models
 
 from guitars.introspection import column_owner, has_column, is_mti_child, owns_column
 from guitars.management import _generator
+from guitars.tenancy.discovery import app_coverage
 
 
 if TYPE_CHECKING:
     from django.apps import AppConfig
+
+    from guitars.tenancy.discovery import TableCoverage
 
 
 TRIGGER_FUNCTION_OPERATION = """\
@@ -95,7 +129,24 @@ migrations.RunSQL(
 ),
 """
 
-# Regex patterns for scanning existing custom operations in migration files.
+TENANT_POLICY_OPERATION = """\
+# Tenant RLS on "{table}" table!
+migrations.RunSQL(
+    sql=sql.create_table_rls({arguments}),
+    reverse_sql=sql.drop_table_rls(table='{table}'{exempt_argument}),
+),
+"""
+
+TENANT_FORCE_OPERATION = """\
+# Tenant FORCE RLS on "{table}" table!
+migrations.RunSQL(
+    sql=sql.force_rls(table='{table}'),
+    reverse_sql=sql.no_force_rls(table='{table}'),
+),
+"""
+
+# Regex patterns for recognising enforcement operations already written to migration files.
+# These headers are the dedupe keys -- see the module docstring on why they are frozen.
 _RE_TRIGGER_FUNCTION = re.compile(r'CREATE_UPDATED_AT_TRIGGER_FUNCTION')
 _RE_PARENT_TRIGGER_FUNCTION = re.compile(r'CREATE_PARENT_UPDATED_AT_TRIGGER_FUNCTION')
 _RE_UPDATED_AT = re.compile(r'# Updated at Trigger on "([^"]+)" table!')
@@ -107,28 +158,72 @@ _RE_SOFT_DELETE_RELATED = re.compile(
 # patterns above (which anchor on ``# Updated`` / ``# Soft`` immediately after the comment mark).
 _RE_MTI_UPDATED_AT = re.compile(r'# MTI Updated at Trigger on "([^"]+)" table')
 _RE_MTI_SOFT_DELETE = re.compile(r'# MTI Soft Delete Rule on "([^"]+)" table')
-# The [DIGEST:...] marker is matched by _generator.RE_DIGEST, shared with
-# maketenantmigrations -- one pattern, so the two can't drift on what a stamp looks like.
+# The FORCE header carries an extra token, so the plain RLS pattern can never match it.
+_RE_TENANT_POLICY = re.compile(r'# Tenant RLS on "([^"]+)" table!')
+_RE_TENANT_FORCE = re.compile(r'# Tenant FORCE RLS on "([^"]+)" table!')
+# The [DIGEST:...] marker is matched by _generator.RE_DIGEST.
+
+
+def _literal(value: object) -> str:
+    """Render a value into a generated migration, deterministically.
+
+    Dicts and sets are emitted in sorted order so the content digest is stable. An unstable
+    rendering produces a new digest -- and therefore a new migration -- on every run.
+    """
+    if isinstance(value, dict):
+        items = ', '.join(f'{_literal(k)}: {_literal(v)}' for k, v in sorted(value.items()))
+        return '{' + items + '}'
+    if isinstance(value, (list, tuple)):
+        return '[' + ', '.join(_literal(item) for item in value) + ']'
+    if isinstance(value, str):
+        return f"'{value}'"
+    return repr(value)
+
+
+class ExistingOperations(NamedTuple):
+    """Which enforcement operations the migration files already contain.
+
+    Scanned once at construction, by comment header, so a partially covered app receives
+    only the operations it is genuinely missing. Named rather than a positional tuple: this
+    grew to seven fields while it was one, and a caller unpacking seven anonymous sets in
+    the right order is a bug waiting to happen.
+    """
+
+    triggers: set[str]
+    soft_deletes: set[str]
+    soft_delete_related: set[tuple[str, str]]
+    mti_triggers: set[str]
+    mti_soft_deletes: set[str]
+    tenant_policies: set[str]
+    tenant_forces: set[str]
+    trigger_function_dependency: tuple[str, str] | None
+    parent_trigger_function_dependency: tuple[str, str] | None
 
 
 class Command(BaseCommand):
-    """Generates migrations for PostgreSQL triggers and rules.
+    """Generates the enforcement migrations: triggers, rules and tenant policies.
 
-    Scans all local app models for ``_updated_at`` (creates statement-level
-    update trigger) and ``_deleted_at`` (creates soft-delete rule + cascade
-    rules for related soft-deletable models with ``on_delete=CASCADE``).
+    Each kind is driven by the shape of the model, so declaring the thing *is* the opt-in
+    and there is no registry to keep in step:
 
-    Multi-table-inheritance children are handled too: because their metadata
-    columns physically live on an ancestor table, each column's owning table is
-    resolved via ``_column_owner`` (not ``hasattr``), and MTI children get a
-    parent-propagation updated-at trigger and a redirect soft-delete rule instead
-    of own-table objects. See the "Multi-table inheritance" section in CLAUDE.md.
+    * ``_updated_at`` -> a statement-level timestamp trigger.
+    * ``_deleted_at`` -> a soft-delete rule, plus cascade rules for related
+      soft-deletable models whose FK is ``on_delete=CASCADE``.
+    * a ``TenantedManager`` -> a row-level-security tenant policy.
 
-    Run after ``makemigrations`` whenever models inheriting ``DatedModel``
-    or ``SoftDeletableModel`` are added or changed.
+    Multi-table inheritance is handled throughout: because the relevant columns physically
+    live on an ancestor's table, each column's owner is resolved via
+    ``guitars.introspection`` rather than ``hasattr``, and an MTI child gets the
+    parent-propagating trigger, the redirect rule, and the owner-join policy instead of the
+    own-table forms. See ``docs/mti.md``.
+
+    Run after ``makemigrations`` when models change -- or let ``makemigrations`` run it for
+    you, which is the default.
     """
 
-    help = 'Creates Custom Migration Files (Triggers, Rules, etc.)'
+    help = (
+        'Creates enforcement migrations (timestamp triggers, soft-delete rules, tenant policies).'
+    )
 
     def __init__(self, *args, **kwargs):  # pragma: no cover
         super().__init__(*args, **kwargs)
@@ -143,17 +238,12 @@ class Command(BaseCommand):
 
         # Cross-app / MTI cascade rules skipped this run, surfaced as warnings (not silent).
         self._mti_cascade_warnings: list[str] = []
+        # Tables tenancy discovery could not cover, with the reason. Also surfaced.
+        self._tenancy_notes: list[str] = []
 
-        # Scan existing migration files to discover already-defined custom operations.
-        (
-            self.existing_triggers,
-            self.existing_soft_deletes,
-            self.existing_soft_delete_related,
-            self.existing_mti_triggers,
-            self.existing_mti_soft_deletes,
-            self.trigger_function_dependency,
-            self.parent_trigger_function_dependency,
-        ) = self._scan_existing_custom_operations()
+        self.existing = self._scan_existing_operations()
+        self.trigger_function_dependency = self.existing.trigger_function_dependency
+        self.parent_trigger_function_dependency = self.existing.parent_trigger_function_dependency
 
     def add_arguments(self, parser):  # pragma: no cover
         parser.add_argument(
@@ -171,6 +261,39 @@ class Command(BaseCommand):
                 "and don't actually write them."
             ),
         )
+        parser.add_argument(
+            '--force-rls',
+            action='store_true',
+            dest='force_rls',
+            help=(
+                'Generate FORCE ROW LEVEL SECURITY migrations for tables whose tenant '
+                'policies already exist, and nothing else. Only needed when '
+                'GUITARS_RLS_FORCE is False, which defers FORCE to a second stage for a '
+                'retrofit onto a populated database.'
+            ),
+        )
+
+    # ------------------------------------------------------------------
+    # Settings
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _tenant_policies_enabled() -> bool:
+        """Whether to emit tenant policies at all.
+
+        ``False`` keeps the Python enforcement layer while leaving the database alone --
+        for adopting the loud layer first, or for a database where the application role
+        cannot own its tables and so could never be constrained by RLS anyway.
+        """
+        return bool(getattr(settings, 'GUITARS_TENANT_POLICIES', True))
+
+    @staticmethod
+    def _rls_force_enabled() -> bool:
+        return bool(getattr(settings, 'GUITARS_RLS_FORCE', True))
+
+    @staticmethod
+    def _rls_exempt_roles() -> list[str]:
+        return list(getattr(settings, 'GUITARS_RLS_EXEMPT_ROLES', []))
 
     # ------------------------------------------------------------------
     # Setup helpers
@@ -192,24 +315,19 @@ class Command(BaseCommand):
     # Migration-file scanning
     # ------------------------------------------------------------------
 
-    def _scan_existing_custom_operations(self):
-        """
-        Scan all local apps' migration files to discover already-defined custom operations.
+    def _scan_existing_operations(self) -> ExistingOperations:
+        """Scan every local app's migration files for enforcement operations already written.
 
-        Returns a 7-tuple of:
-            - existing_triggers:          set of table names with updated_at triggers
-            - existing_soft_deletes:      set of table names with soft-delete rules
-            - existing_soft_delete_related: set of ``(related_table, table)`` tuples
-            - existing_mti_triggers:      set of child table names with MTI parent updated-at triggers
-            - existing_mti_soft_deletes:  set of child table names with MTI soft-delete rules
-            - trigger_function_dep:       ``(app_label, migration_stem)`` or ``None``
-            - parent_trigger_function_dep: ``(app_label, migration_stem)`` or ``None``
+        Recognition is by comment header, per operation, so an app that is partially covered
+        receives exactly the operations it lacks rather than a duplicate of the whole set.
         """
         existing_triggers: set[str] = set()
         existing_soft_deletes: set[str] = set()
         existing_soft_delete_related: set[tuple[str, str]] = set()
         existing_mti_triggers: set[str] = set()
         existing_mti_soft_deletes: set[str] = set()
+        existing_tenant_policies: set[str] = set()
+        existing_tenant_forces: set[str] = set()
         trigger_function_dep: tuple[str, str] | None = None
         parent_trigger_function_dep: tuple[str, str] | None = None
 
@@ -233,15 +351,23 @@ class Command(BaseCommand):
                 existing_mti_soft_deletes.update(
                     m.group(1) for m in _RE_MTI_SOFT_DELETE.finditer(content)
                 )
+                existing_tenant_policies.update(
+                    m.group(1) for m in _RE_TENANT_POLICY.finditer(content)
+                )
+                existing_tenant_forces.update(
+                    m.group(1) for m in _RE_TENANT_FORCE.finditer(content)
+                )
 
-        return (
-            existing_triggers,
-            existing_soft_deletes,
-            existing_soft_delete_related,
-            existing_mti_triggers,
-            existing_mti_soft_deletes,
-            trigger_function_dep,
-            parent_trigger_function_dep,
+        return ExistingOperations(
+            triggers=existing_triggers,
+            soft_deletes=existing_soft_deletes,
+            soft_delete_related=existing_soft_delete_related,
+            mti_triggers=existing_mti_triggers,
+            mti_soft_deletes=existing_mti_soft_deletes,
+            tenant_policies=existing_tenant_policies,
+            tenant_forces=existing_tenant_forces,
+            trigger_function_dependency=trigger_function_dep,
+            parent_trigger_function_dependency=parent_trigger_function_dep,
         )
 
     # ------------------------------------------------------------------
@@ -303,7 +429,7 @@ class Command(BaseCommand):
         host_app = self._get_trigger_function_host_app()
         operations_digest = _generator.digest_of([TRIGGER_FUNCTION_OPERATION])
         migration_file = _generator.create_empty_migration_file(
-            host_app, name='auto_advanced_trigger_function'
+            host_app, name='auto_enforcement_trigger_function'
         )
         self._write_migration_file(
             app=host_app,
@@ -316,7 +442,7 @@ class Command(BaseCommand):
         self.trigger_function_dependency = (host_app.label, migration_stem)
 
         self.stdout.write(
-            self.style.MIGRATE_HEADING(f"Advanced migrations for '{host_app.label}':")
+            self.style.MIGRATE_HEADING(f"Enforcement migrations for '{host_app.label}':")
         )
         self.stdout.write(f'  migrations/{migration_file}')
         return True
@@ -345,7 +471,7 @@ class Command(BaseCommand):
         host_app = self._get_trigger_function_host_app()
         operations_digest = _generator.digest_of([PARENT_TRIGGER_FUNCTION_OPERATION])
         migration_file = _generator.create_empty_migration_file(
-            host_app, name='auto_advanced_parent_trigger_function'
+            host_app, name='auto_enforcement_parent_trigger_function'
         )
         self._write_migration_file(
             app=host_app,
@@ -361,7 +487,7 @@ class Command(BaseCommand):
         self.parent_trigger_function_dependency = (host_app.label, migration_stem)
 
         self.stdout.write(
-            self.style.MIGRATE_HEADING(f"Advanced migrations for '{host_app.label}':")
+            self.style.MIGRATE_HEADING(f"Enforcement migrations for '{host_app.label}':")
         )
         self.stdout.write(f'  migrations/{migration_file}')
         return True
@@ -369,6 +495,52 @@ class Command(BaseCommand):
     # ------------------------------------------------------------------
     # Per-app operations
     # ------------------------------------------------------------------
+
+    def _tenant_policy_operation(self, table: str, coverage: TableCoverage) -> str:
+        """One ``tenant_scope`` policy operation, with the environment decisions baked in.
+
+        ``force`` and ``exempt_roles`` are written into the migration as literals rather
+        than read from settings at migrate time, so the same migration history always
+        produces the same database -- see ``guitars.sql.policy``.
+        """
+        exempt_roles = self._rls_exempt_roles()
+        arguments = {
+            'table': table,
+            **coverage.as_kwargs(),
+            'force': self._rls_force_enabled(),
+        }
+        if exempt_roles:
+            arguments['exempt_roles'] = exempt_roles
+        return TENANT_POLICY_OPERATION.format(
+            table=table,
+            arguments=', '.join(f'{key}={_literal(value)}' for key, value in arguments.items()),
+            # The reverse has to drop the same exemption policies the forward created, so the
+            # role list is repeated rather than left to a default.
+            exempt_argument=f', exempt_roles={_literal(exempt_roles)}' if exempt_roles else '',
+        )
+
+    def _tenant_operations(self, app: AppConfig, *, force_rls: bool) -> list[str]:
+        """Tenant-policy operations *app* is missing, for the requested stage."""
+        if not self._tenant_policies_enabled():
+            return []
+
+        coverage = app_coverage(app)
+        self._tenancy_notes.extend(coverage.notes)
+
+        operations: list[str] = []
+        for table, table_coverage in sorted(coverage.tables.items()):
+            if force_rls:
+                # FORCE presumes the policy stage already shipped; a table with no policy
+                # operation yet is a coverage gap FORCE must not paper over.
+                if (
+                    table in self.existing.tenant_forces
+                    or table not in self.existing.tenant_policies
+                ):
+                    continue
+                operations.append(TENANT_FORCE_OPERATION.format(table=table))
+            elif table not in self.existing.tenant_policies:
+                operations.append(self._tenant_policy_operation(table, table_coverage))
+        return operations
 
     def _build_operations(self, app: AppConfig) -> list[str]:
         """Return a list of SQL operation snippets needed for *app*'s models."""
@@ -381,11 +553,11 @@ class Command(BaseCommand):
 
             # --- updated_at trigger: own table vs. MTI parent-propagation ---
             if owns_column(model, '_updated_at'):
-                if table not in self.existing_triggers:
+                if table not in self.existing.triggers:
                     operations.append(
                         UPDATED_AT_OPERATION.format(table=table, primary_key=primary_key)
                     )
-            elif is_mti_child(model, '_updated_at') and table not in self.existing_mti_triggers:
+            elif is_mti_child(model, '_updated_at') and table not in self.existing.mti_triggers:
                 owner = column_owner(model, '_updated_at')
                 operations.append(
                     MTI_UPDATED_AT_OPERATION.format(
@@ -398,12 +570,12 @@ class Command(BaseCommand):
 
             # --- soft-delete rule: own table vs. MTI redirect-to-owner ---
             if owns_column(model, '_deleted_at'):
-                if table not in self.existing_soft_deletes:
+                if table not in self.existing.soft_deletes:
                     operations.append(
                         SOFT_DELETE_OPERATION.format(table=table, primary_key=primary_key)
                     )
             elif (
-                is_mti_child(model, '_deleted_at') and table not in self.existing_mti_soft_deletes
+                is_mti_child(model, '_deleted_at') and table not in self.existing.mti_soft_deletes
             ):
                 owner = column_owner(model, '_deleted_at')
                 operations.append(
@@ -420,7 +592,9 @@ class Command(BaseCommand):
             if has_column(model, '_deleted_at'):
                 deferred.extend(self._cascade_operations(model))
 
-        return operations + deferred
+        # Tenant policies last: they are independent of the triggers and rules above (a
+        # policy references neither), so they sort to the end where they read as a group.
+        return operations + deferred + self._tenant_operations(app, force_rls=False)
 
     def _cascade_operations(self, model: type[models.Model]) -> list[str]:
         """Cascade soft-delete rules for ``on_delete=CASCADE`` FKs pointing at *model*.
@@ -463,7 +637,7 @@ class Command(BaseCommand):
                     'inheritance; cascading into an MTI child is not supported yet.'
                 )
                 continue
-            if (related_table, owner_table) in self.existing_soft_delete_related:
+            if (related_table, owner_table) in self.existing.soft_delete_related:
                 continue
             ops.append(
                 SOFT_DELETE_RELATED_OPERATION.format(
@@ -518,7 +692,7 @@ class Command(BaseCommand):
                     if model_app_label.get(related_model) not in requested:
                         continue
                     related_table = related_model._meta.db_table
-                    if (related_table, table) in self.existing_soft_delete_related:
+                    if (related_table, table) in self.existing.soft_delete_related:
                         continue
                     notes.append(
                         f"Cascade rule on '{related_table}' related to '{table}' skipped: "
@@ -550,10 +724,14 @@ class Command(BaseCommand):
 
     def handle(self, *app_labels, **options):
         check_only: bool = options['check_only']
+        force_rls: bool = options.get('force_rls', False)
         # Positional app labels scope generation; empty => all local apps.
         requested: set[str] = set(app_labels)
 
         _generator.validate_app_labels(requested)
+
+        if force_rls:
+            return self._handle_force_rls_stage(requested, check_only=check_only)
 
         # Step 1: Ensure the singleton function migration(s) exist, so all subsequent app
         # migrations can safely depend on them. Scoped to the requested apps, but still hosted
@@ -599,7 +777,7 @@ class Command(BaseCommand):
                 check_missing.append((app.label, operations))
                 continue
 
-            migration_file = _generator.create_empty_migration_file(app, 'auto_advanced')
+            migration_file = _generator.create_empty_migration_file(app, 'auto_enforcement')
             self._write_migration_file(
                 app=app,
                 migration_file=migration_file,
@@ -609,7 +787,7 @@ class Command(BaseCommand):
             )
 
             self.stdout.write(
-                self.style.MIGRATE_HEADING(f"Advanced migrations for '{app.label}':")
+                self.style.MIGRATE_HEADING(f"Enforcement migrations for '{app.label}':")
             )
             self.stdout.write(f'  migrations/{migration_file}')
             changes_made = True
@@ -623,16 +801,85 @@ class Command(BaseCommand):
         for note in self._mti_cascade_warnings:
             self.stderr.write(self.style.WARNING(note))
 
+        # Tables tenancy could not cover, and why. Skips are design, never silent.
+        for note in self._tenancy_notes:
+            self.stdout.write(self.style.WARNING(note))
+
         if check_missing:
-            for app_label, operations in check_missing:
-                self.stderr.write(
-                    self.style.ERROR(f"Missing advanced migrations for '{app_label}':")
-                )
-                for op in operations:
-                    self.stderr.write(textwrap.indent(op, '    '))
-            raise CommandError(
-                'Run `manage.py makeguitarmigrations` to create missing migrations.'
+            self._report_missing(check_missing)
+
+        if not changes_made and not check_only:
+            self.stdout.write('No changes detected')
+
+    def _report_missing(self, check_missing: list[tuple[str, list[str]]]) -> None:
+        """Print what ``--check`` found and exit non-zero."""
+        for app_label, operations in check_missing:
+            self.stderr.write(
+                self.style.ERROR(f"Missing enforcement migrations for '{app_label}':")
             )
+            for operation in operations:
+                self.stderr.write(textwrap.indent(operation, '    '))
+        raise CommandError('Run `manage.py makeguitarmigrations` to create missing migrations.')
+
+    def _handle_force_rls_stage(self, requested: set[str], *, check_only: bool) -> None:
+        """Emit only ``FORCE ROW LEVEL SECURITY`` migrations, for tables already policied.
+
+        A separate stage rather than part of the main run, because it exists for exactly one
+        situation: a retrofit onto a populated database that set ``GUITARS_RLS_FORCE = False``
+        so policies could be shipped inert, soaked, and only then made binding. Mixing it
+        into the normal run would defeat the staging it exists to provide.
+        """
+        if self._rls_force_enabled():
+            self.stdout.write(
+                self.style.WARNING(
+                    '--force-rls is redundant while GUITARS_RLS_FORCE is True: the policy '
+                    'migrations already emit FORCE, so there is no second stage to run.'
+                )
+            )
+        if not self._tenant_policies_enabled():
+            self.stdout.write(
+                self.style.WARNING(
+                    'GUITARS_TENANT_POLICIES is False, so no tenant policies exist to force.'
+                )
+            )
+            return
+
+        changes_made = False
+        check_missing: list[tuple[str, list[str]]] = []
+        for app in django_apps.get_app_configs():
+            if not _generator.is_in_scope(app, requested):
+                continue
+
+            operations = self._tenant_operations(app, force_rls=True)
+            if not operations:
+                continue
+
+            operations_digest = _generator.digest_of(operations)
+            if _generator.migration_with_digest_exists(app, operations_digest):
+                continue
+
+            if check_only:
+                check_missing.append((app.label, operations))
+                continue
+
+            migration_file = _generator.create_empty_migration_file(app, 'auto_tenant_force')
+            self._write_migration_file(
+                app=app,
+                migration_file=migration_file,
+                operations=operations,
+                operations_digest=operations_digest,
+            )
+            self.stdout.write(
+                self.style.MIGRATE_HEADING(f"Enforcement migrations for '{app.label}':")
+            )
+            self.stdout.write(f'  migrations/{migration_file}')
+            changes_made = True
+
+        for note in self._tenancy_notes:
+            self.stdout.write(self.style.WARNING(note))
+
+        if check_missing:
+            self._report_missing(check_missing)
 
         if not changes_made and not check_only:
             self.stdout.write('No changes detected')

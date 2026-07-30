@@ -11,6 +11,9 @@ Organised by concern:
 * :mod:`.triggers` -- the DB-managed ``_updated_at`` column.
 * :mod:`.soft_delete` -- the ``ON DELETE`` rules, cascades, and the hard-deletion
   session switch.
+* :mod:`.policy` -- row-level-security policies for tenant scoping. These are
+  *functions*, not format-string constants, because the tenant predicate is composed from
+  a variable-length ``{dimension: column}`` mapping.
 
 Multi-table inheritance (the ``*_MTI_*`` and ``*_PARENT_*`` names) spans both,
 because it needs the same treatment for timestamps and for deletion. It rests on
@@ -24,6 +27,20 @@ one invariant, stated once here rather than in each submodule:
     row directly via ``owner_pk = old.<child_pk>``.
 """
 
+from .policy import (
+    EXEMPT_POLICY_PREFIX,
+    TENANT_POLICY,
+    create_exempt_policy,
+    create_table_rls,
+    create_tenant_policy,
+    disable_rls,
+    drop_exempt_policy,
+    drop_table_rls,
+    drop_tenant_policy,
+    enable_rls,
+    force_rls,
+    no_force_rls,
+)
 from .soft_delete import (
     CHECK_RULE_EXISTS_ON_TABLE,
     CREATE_MTI_SOFT_DELETE_RULE,
@@ -52,6 +69,18 @@ from .triggers import (
 
 __all__ = [
     'CHECK_PARENT_TRIGGER_FUNCTION_EXISTS',
+    'EXEMPT_POLICY_PREFIX',
+    'TENANT_POLICY',
+    'create_exempt_policy',
+    'create_table_rls',
+    'create_tenant_policy',
+    'disable_rls',
+    'drop_exempt_policy',
+    'drop_table_rls',
+    'drop_tenant_policy',
+    'enable_rls',
+    'force_rls',
+    'no_force_rls',
     'CHECK_RULE_EXISTS_ON_TABLE',
     'CHECK_TRIGGER_EXISTS_ON_TABLE',
     'CHECK_TRIGGER_FUNCTION_EXISTS',

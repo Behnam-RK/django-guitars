@@ -22,11 +22,11 @@ INSTALLED_APPS = [
     'guitars',
 ]
 
-# First-party apps the `makeguitarmigrations` command scans for advanced
+# First-party apps the `makeguitarmigrations` command scans for enforcement
 # (trigger / rule) migrations. tests/settings.py adds the test app here.
 LOCAL_APPS: list[str] = []
 
-# When True (default), `makemigrations` also generates the advanced trigger/rule
+# When True (default), `makemigrations` also generates the enforcement
 # migrations, so `makeguitarmigrations` never has to be run by hand. Set to False
 # to keep the explicit two-command workflow.
 GUITARS_AUTO_MAKE_MIGRATIONS = True

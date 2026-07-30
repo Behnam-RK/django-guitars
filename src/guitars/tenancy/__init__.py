@@ -27,7 +27,11 @@ See ``docs/tenancy.md``.
 
 from __future__ import annotations
 
+from guitars.gucs import BYPASS_GUC, GUC_PREFIX, VALUE_SEPARATOR, guc_name
+
 from .checks import register_checks
+from .guc import install as install_tenant_guc
+from .guc import uninstall as uninstall_tenant_guc
 from .manager import (
     TenantedManager,
     TenantEnforcement,
@@ -36,7 +40,6 @@ from .manager import (
     tenant_spec,
     uninstall_write_guards,
 )
-from .names import BYPASS_GUC, GUC_PREFIX, VALUE_SEPARATOR, guc_name
 from .reporting import Reporter, set_reporter
 from .scope import (
     TenantScopeError,
@@ -59,6 +62,7 @@ __all__ = [
     'get_tenant',
     'guc_name',
     'install',
+    'install_tenant_guc',
     'install_write_guards',
     'is_bypassed',
     'local_tenant_fields',
@@ -69,6 +73,7 @@ __all__ = [
     'tenant_spec',
     'tenanted',
     'uninstall',
+    'uninstall_tenant_guc',
     'uninstall_write_guards',
 ]
 
@@ -83,10 +88,12 @@ def install() -> None:
     models scoping their own reads while the write guards and the database layer silently
     did nothing -- enforcement that looks present and is not.
     """
+    install_tenant_guc()
     install_write_guards()
     register_checks()
 
 
 def uninstall() -> None:
     """Deactivate enforcement. For tests."""
+    uninstall_tenant_guc()
     uninstall_write_guards()

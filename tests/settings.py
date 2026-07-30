@@ -1,7 +1,7 @@
 """Test settings: the dev harness (core.settings) plus the concrete test app.
 
 The kit ships only abstract models, so the suite defines real models in
-``tests.testapp`` and points the advanced-migrations command at it via
+``tests.testapp`` and points the enforcement-migrations command at it via
 ``LOCAL_APPS`` / ``TRIGGER_FUNCTION_APP`` (so generated migrations land under
 ``tests/``, never inside the shipped ``guitars`` package).
 """

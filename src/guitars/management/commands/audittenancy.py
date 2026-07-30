@@ -25,15 +25,19 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, NamedTuple
 
+from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 from django.db import DEFAULT_DB_ALIAS, connections
 
 from guitars.management import _generator
 from guitars.sql.policy import TENANT_POLICY
+from guitars.tenancy import TenantEnforcement
 from guitars.tenancy.discovery import expected_coverage
 
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from django.db.backends.base.base import BaseDatabaseWrapper
 
 
@@ -98,6 +102,42 @@ class Command(BaseCommand):
                 for name, enabled, forced, has_policy in cursor.fetchall()
             }
 
+    @staticmethod
+    def _enforcement_mode_notes(
+        live: Mapping[str, TableState], expected: Mapping[str, object]
+    ) -> list[str]:
+        """Warn when ``GUITARS_TENANT_ENFORCE = 'audit'`` on a database whose policies bind.
+
+        This command is the only place that can see both halves at once: it knows the setting
+        and it has just asked the database whether the policies are enforced. The combination
+        is worth naming because it does not do what it looks like -- ``'audit'`` softens the
+        *Python* guard so a bad write is reported and proceeds, and there is no session
+        variable that makes a policy lenient. So the write is reported and then rejected
+        anyway, and a team that set ``'audit'`` specifically to avoid 500s during a rollout
+        gets them from one layer lower.
+
+        A warning rather than an error: it is a legitimate end state (strict is what you want
+        eventually, and the reverse order is merely awkward), and only the operator knows
+        which stage of a rollout they are in.
+        """
+        mode = str(getattr(settings, 'GUITARS_TENANT_ENFORCE', TenantEnforcement.STRICT))
+        if mode != TenantEnforcement.AUDIT.value:
+            return []
+        binding = sorted(
+            table
+            for table in expected
+            if (state := live.get(table)) and state.has_policy and state.rls_enabled
+        )
+        if not binding:
+            return []
+        return [
+            f"GUITARS_TENANT_ENFORCE is 'audit', but {len(binding)} table(s) already enforce a "
+            f'{TENANT_POLICY} policy. Audit mode only softens the Python write guard -- the '
+            f'policy still rejects a cross-tenant write, so those writes are reported *and* '
+            f'refused. Audit mode belongs before the policies land (GUITARS_TENANT_POLICIES = '
+            f"False); once they bind, 'strict' is the honest setting."
+        ]
+
     def handle(self, *app_labels, **options):
         connection = connections[options['database']]
         require_force = options['require_force']
@@ -143,6 +183,9 @@ class Command(BaseCommand):
         )
 
         for note in expected.notes:
+            self.stdout.write(self.style.WARNING(note))
+
+        for note in self._enforcement_mode_notes(live, expected.tables):
             self.stdout.write(self.style.WARNING(note))
 
         self.stdout.write(

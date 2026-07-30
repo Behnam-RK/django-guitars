@@ -161,6 +161,14 @@ _RE_MTI_SOFT_DELETE = re.compile(r'# MTI Soft Delete Rule on "([^"]+)" table')
 # The FORCE header carries an extra token, so the plain RLS pattern can never match it.
 _RE_TENANT_POLICY = re.compile(r'# Tenant RLS on "([^"]+)" table!')
 _RE_TENANT_FORCE = re.compile(r'# Tenant FORCE RLS on "([^"]+)" table!')
+# A policy operation that shipped *without* inline FORCE -- the only kind `--force-rls` has
+# anything to do for. `force` is written into the operation as a literal by
+# `_tenant_policy_operation`, so the migration text is the record of what was decided when it
+# was generated. Without this the flag emitted a redundant FORCE migration for every tenanted
+# table on any project using the default GUITARS_RLS_FORCE = True.
+_RE_TENANT_POLICY_UNFORCED = re.compile(
+    r'# Tenant RLS on "([^"]+)" table!\n(?:.*\n){0,6}?.*force=False', re.MULTILINE
+)
 # The [DIGEST:...] marker is matched by _generator.RE_DIGEST.
 
 
@@ -195,6 +203,9 @@ class ExistingOperations(NamedTuple):
     mti_triggers: set[str]
     mti_soft_deletes: set[str]
     tenant_policies: set[str]
+    #: Tables whose policy operation was written with ``force=False`` -- see
+    #: ``_RE_TENANT_POLICY_UNFORCED``. These are the only ones a second FORCE stage can act on.
+    unforced_policies: set[str]
     tenant_forces: set[str]
     trigger_function_dependency: tuple[str, str] | None
     parent_trigger_function_dependency: tuple[str, str] | None
@@ -327,6 +338,7 @@ class Command(BaseCommand):
         existing_mti_triggers: set[str] = set()
         existing_mti_soft_deletes: set[str] = set()
         existing_tenant_policies: set[str] = set()
+        existing_unforced_policies: set[str] = set()
         existing_tenant_forces: set[str] = set()
         trigger_function_dep: tuple[str, str] | None = None
         parent_trigger_function_dep: tuple[str, str] | None = None
@@ -354,6 +366,9 @@ class Command(BaseCommand):
                 existing_tenant_policies.update(
                     m.group(1) for m in _RE_TENANT_POLICY.finditer(content)
                 )
+                existing_unforced_policies.update(
+                    m.group(1) for m in _RE_TENANT_POLICY_UNFORCED.finditer(content)
+                )
                 existing_tenant_forces.update(
                     m.group(1) for m in _RE_TENANT_FORCE.finditer(content)
                 )
@@ -365,6 +380,7 @@ class Command(BaseCommand):
             mti_triggers=existing_mti_triggers,
             mti_soft_deletes=existing_mti_soft_deletes,
             tenant_policies=existing_tenant_policies,
+            unforced_policies=existing_unforced_policies,
             tenant_forces=existing_tenant_forces,
             trigger_function_dependency=trigger_function_dep,
             parent_trigger_function_dependency=parent_trigger_function_dep,
@@ -526,11 +542,16 @@ class Command(BaseCommand):
         operations: list[str] = []
         for table, table_coverage in sorted(coverage.tables.items()):
             if force_rls:
-                # FORCE presumes the policy stage already shipped; a table with no policy
-                # operation yet is a coverage gap FORCE must not paper over.
+                # Three ways there is nothing to do, and each would otherwise write a
+                # migration that changes nothing:
+                #   * FORCE already has its own operation;
+                #   * no policy operation exists yet -- a coverage gap FORCE must not paper
+                #     over by forcing a table that nothing scopes;
+                #   * the policy shipped with FORCE inline, which is the default.
                 if (
                     table in self.existing.tenant_forces
                     or table not in self.existing.tenant_policies
+                    or table not in self.existing.unforced_policies
                 ):
                     continue
                 operations.append(TENANT_FORCE_OPERATION.format(table=table))

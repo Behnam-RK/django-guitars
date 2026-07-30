@@ -203,8 +203,14 @@ RLS has three, and each returns rows unfiltered with no error and no log line:
    application role owns its tables, because it runs the migrations.
 
 The third is why `GUITARS_RLS_FORCE` defaults to `True`. Do not run your
-application as a superuser or with `BYPASSRLS`; `audittenancy` cannot detect
-either, because a bypassing role sees a database that looks perfectly protected.
+application as a superuser or with `BYPASSRLS`.
+
+Every catalog-based check is blind to the first two — `pg_class` and `pg_policy`
+report the same "enforced" whoever is asking — so `audittenancy` reads the
+connecting role's attributes as well, and says plainly that its other findings
+prove nothing when that role bypasses. It warns rather than fails, because this
+describes *who connected*, not the database: a pipeline may legitimately audit
+as an administrative role while the application does not.
 
 ### Multi-table inheritance
 
@@ -307,6 +313,8 @@ python manage.py audittenancy billing            # scope to an app
 
 It catches, in descending order of danger:
 
+- **A connecting role that bypasses RLS outright** — `SUPERUSER` or `BYPASSRLS`.
+  Warned, never fatal: it describes the connection rather than the database.
 - **`ENABLE` without `FORCE`** — the table looks protected in `pg_policies` and
   constrains nothing.
 - **A missing policy or missing `ENABLE`** — a migration that never ran, or drift.

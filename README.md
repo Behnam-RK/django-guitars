@@ -257,7 +257,8 @@ Two things worth knowing before you adopt it:
 - **The policy binds only if your app role does not own its tables — or the
   table is `FORCE`d.** guitars emits `FORCE ROW LEVEL SECURITY` by default for
   exactly this reason. A superuser or a `BYPASSRLS` role bypasses policies
-  unconditionally, so don't run your app as one.
+  unconditionally, so don't run your app as one — `audittenancy` warns when the
+  role it connected as is one of those, since no catalog check can see it.
 - **`migrate` runs bypassed**, because a `RunPython` backfill has no tenant
   scope and would otherwise match zero rows and be marked applied. guitars
   overrides `migrate` to do this, which means `guitars` must come *before* any

@@ -64,7 +64,12 @@ carry the old SQL — see *Fixed* below for why that matters and how to replace 
 - New commands: `audittenancy` (asks a live database whether the policies bind,
   with `--require-force` for a deploy gate) and a `migrate` override that runs
   inside `tenancy_bypassed()` — without it a `RunPython` backfill under RLS
-  matches no rows and is silently marked applied.
+  matches no rows and is silently marked applied. `audittenancy` also reports
+  when the role it connected as holds `SUPERUSER` or `BYPASSRLS`: every other
+  check reads the catalog, which shows the same "enforced" whoever is asking, so
+  those two would otherwise leave the audit passing over a connection no policy
+  constrains. A warning, never fatal — it describes the connection, not the
+  database.
 - `makeguitarmigrations --force-rls`, the second stage of a staged retrofit.
 - System checks `guitars.tenancy.E001`–`E003` and `W001`, registered at import of
   `guitars.models` so they fire even when guitars is used as a pure library.

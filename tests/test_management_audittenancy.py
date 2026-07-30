@@ -11,11 +11,14 @@ only the happy path would prove the command runs, not that it audits.
 
 from __future__ import annotations
 
+import types
+
 import pytest
 from django.core.management import CommandError, call_command
 from django.db import connection
 
 from guitars import sql
+from guitars.management.commands.audittenancy import Command as AuditCommand
 from guitars.tenancy import tenant
 from tests.testapp.models import Release
 
@@ -69,6 +72,67 @@ class TestAGoodDatabasePasses:
     def test_it_reports_the_uncoverable_table(self, db):
         """The multi-hop model. A named gap, on every run, not a one-off build-time note."""
         assert 'testapp_review' in _audit()
+
+    def test_the_suite_role_is_not_a_bypassing_one(self, db):
+        """Load-bearing, not hygiene: a SUPERUSER or BYPASSRLS role would make every RLS
+        assertion in the suite pass vacuously. ``scripts/postgres-init.sql`` exists to
+        prevent it, and this is the assertion that would notice if it stopped working."""
+        assert 'bypasses every tenant_scope policy' not in _audit()
+
+
+class TestABypassingRoleIsReported:
+    """The two conditions the catalog cannot show: they are attributes of the *connection*.
+
+    Stubbed rather than exercised for real, because granting SUPERUSER or BYPASSRLS to the
+    suite's role is exactly what ``scripts/postgres-init.sql`` refuses to do -- and doing it
+    mid-run would silently disarm every other RLS assertion in the session.
+    """
+
+    @staticmethod
+    def _notes(role: str, superuser: bool, bypassrls: bool) -> list[str]:
+        class _Cursor:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def execute(self, *_):
+                return None
+
+            def fetchone(self):
+                return (role, superuser, bypassrls)
+
+        return AuditCommand._bypassing_role_notes(types.SimpleNamespace(cursor=_Cursor))
+
+    def test_an_ordinary_role_says_nothing(self):
+        assert self._notes('app', False, False) == []
+
+    @pytest.mark.parametrize(
+        ('superuser', 'bypassrls', 'expected'),
+        [
+            (True, False, 'SUPERUSER'),
+            (False, True, 'BYPASSRLS'),
+            (True, True, 'SUPERUSER and BYPASSRLS'),
+        ],
+    )
+    def test_it_names_the_attribute_that_bypasses(self, superuser, bypassrls, expected):
+        (note,) = self._notes('admin', superuser, bypassrls)
+
+        assert f"Audited as 'admin', which holds {expected} --" in note
+        assert 'prove nothing about whether enforcement binds' in note
+
+    def test_it_is_printed_ahead_of_the_heading_and_does_not_fail_the_run(self, db, monkeypatch):
+        """It qualifies every line that follows, so it has to come first -- and a role the
+        pipeline chose is not a reason to fail a database that is correctly configured."""
+        monkeypatch.setattr(
+            AuditCommand, '_bypassing_role_notes', lambda self, connection: ['BYPASS WARNING']
+        )
+
+        output = _audit(require_force=True, require_match=True)
+
+        assert 'audit passed' in output
+        assert output.index('BYPASS WARNING') < output.index('table(s) expected')
 
 
 class TestItCatchesRealDamage:

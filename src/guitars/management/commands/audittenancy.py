@@ -4,8 +4,13 @@
 cannot prove they ran, that nobody dropped a policy by hand, or that enforcement actually
 binds -- so this command asks the database directly, and is the gate to run after a deploy.
 
-Four findings it exists to catch, in descending order of danger:
+Five findings it exists to catch, in descending order of danger:
 
+* **A connecting role that bypasses RLS outright** -- ``SUPERUSER`` or ``BYPASSRLS``. Every
+  other check here reads the catalog, which is bypass-blind and reports the same "enforced"
+  either way, so without this the audit's success message is the misleading part. Reported
+  as a warning and never fatal, because it describes the connection rather than the
+  database; see ``_bypassing_role_notes``.
 * **ENABLE without FORCE.** The app role owns its tables (it runs migrations), and an owner
   bypasses non-``FORCE`` RLS *silently* -- no error, no log, rows simply come back
   unfiltered. A table in this state looks protected in ``pg_policies`` and constrains
@@ -125,6 +130,15 @@ WHERE d.classid = 'pg_policy'::regclass
   AND d.refobjsubid > 0
 """
 
+#: The two role attributes that bypass row-level security *unconditionally* -- policy,
+#: ENABLE and FORCE alike. ``current_user`` is by definition a row in ``pg_roles`` (a view
+#: over ``pg_authid`` readable by everyone), so this always returns exactly one row.
+_ROLE_SQL = """
+SELECT current_user, r.rolsuper, r.rolbypassrls
+FROM pg_roles r
+WHERE r.rolname = current_user
+"""
+
 #: ``current_setting('tenant.x', true)`` keeps its literal argument verbatim through
 #: PostgreSQL's rewrite of a stored policy expression, so this one extraction is reliable
 #: where matching the whole predicate as text is impossible.
@@ -213,6 +227,39 @@ class Command(BaseCommand):
                     policy_check_gucs=_tenant_gucs(qual if with_check is None else with_check),
                 )
             return state
+
+    @staticmethod
+    def _bypassing_role_notes(connection: BaseDatabaseWrapper) -> list[str]:
+        """Warn when the connecting role bypasses RLS whatever the catalog says.
+
+        The module docstring ranks ``ENABLE`` without ``FORCE`` as the most dangerous
+        finding, but two conditions outrank it: a ``SUPERUSER`` and a ``BYPASSRLS`` role
+        ignore policies unconditionally. Every other check in this command reads the
+        *catalog*, which is bypass-blind -- it reports the same "6 enforced" either way, so
+        the audit's own success message is the misleading part. One extra query removes that
+        blind spot, and it is the difference between a gate that proves enforcement binds
+        and one that proves a policy exists.
+
+        A warning rather than a failure, even under ``--require-force``. Everything else
+        here describes the *database*, which is the same for everyone who connects to it;
+        this describes **who is connecting**, and a pipeline legitimately runs its audit as
+        an administrative role while the application itself does not. Failing on that would
+        be a false positive on a correct deployment -- so it says the one thing it can say
+        honestly: these findings prove nothing about the role that saw them.
+        """
+        with connection.cursor() as cursor:
+            cursor.execute(_ROLE_SQL)
+            role, superuser, bypassrls = cursor.fetchone()
+
+        held = [name for name, has in (('SUPERUSER', superuser), ('BYPASSRLS', bypassrls)) if has]
+        if not held:
+            return []
+        return [
+            f"Audited as '{role}', which holds {' and '.join(held)} -- that role bypasses "
+            f'every {TENANT_POLICY} policy unconditionally, FORCE included. The findings '
+            f'below describe the catalog correctly and prove nothing about whether '
+            f'enforcement binds for this connection. Re-run as the application role.'
+        ]
 
     @staticmethod
     def _predicate_drift(table: str, coverage: TableCoverage, state: TableState) -> str | None:
@@ -349,6 +396,10 @@ class Command(BaseCommand):
             if not requested
             else []
         )
+
+        # First, and before the heading: it qualifies every line that follows.
+        for note in self._bypassing_role_notes(connection):
+            self.stdout.write(self.style.WARNING(note))
 
         for note in expected.notes:
             self.stdout.write(self.style.WARNING(note))

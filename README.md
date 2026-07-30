@@ -276,7 +276,7 @@ Two things worth knowing before you adopt it:
 Auditing a live database, as a deploy step:
 
 ```bash
-python manage.py audittenancy --require-force
+python manage.py audittenancy --require-force --require-match
 ```
 
 It compares every policy-eligible table against `pg_class` / `pg_policy` and

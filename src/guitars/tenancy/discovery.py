@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING, NamedTuple
 from django.apps import apps as django_apps
 from django.conf import settings
 
+from guitars.gucs import BYPASS_GUC, guc_name
 from guitars.introspection import column_owner, owns_column
 
 from .manager import _meta, local_tenant_fields, tenant_spec
@@ -82,6 +83,48 @@ class TableCoverage(NamedTuple):
             kwargs['child_pk'] = self.child_pk
             kwargs['owner_columns'] = dict(self.owner_columns)
         return kwargs
+
+    # ``audittenancy`` compares a *live* policy against the two facts below rather than
+    # against the SQL text: PostgreSQL rewrites a policy expression when it stores it
+    # (``current_setting('tenant.x'::text, true) AS current_setting``, columns parenthesised
+    # and casts made explicit), so string equality against what ``sql.policy`` emitted can
+    # never hold. These two sets survive that rewrite intact -- and they live here, beside
+    # ``as_kwargs`` which the generator uses, so the audit and the generator read one
+    # description of the same policy. That is the whole reason this module exists.
+
+    def policy_gucs(self) -> frozenset[str]:
+        """Session-setting names the emitted predicate reads.
+
+        Recoverable from a stored policy because ``current_setting('tenant.x', true)`` keeps
+        its literal argument verbatim through PostgreSQL's rewrite. A dimension added to or
+        removed from a model changes this set, which is what makes the drift visible.
+        """
+        dimensions = set(self.columns) | set(self.owner_columns or {})
+        return frozenset({BYPASS_GUC, *(guc_name(dimension) for dimension in dimensions)})
+
+    def policy_columns(self, table: str) -> frozenset[tuple[str, str]]:
+        """``(table, column)`` pairs the emitted predicate references.
+
+        Read back from ``pg_depend`` rather than parsed: creating a policy records a real
+        dependency on every column its expression touches, so this is the catalog's own
+        answer and needs no regex. A renamed tenant column changes this set even when the
+        dimension names are untouched.
+
+        *table* is a parameter rather than a field because it is this coverage's key in
+        ``Coverage.tables``, and duplicating it here would let the two drift apart.
+        """
+        pairs = {(table, column) for column in self.columns.values()}
+        owner_table, owner_pk, child_pk = self.owner_table, self.owner_pk, self.child_pk
+        # The three-way check is the same invariant ``sql.policy._predicate`` enforces (it
+        # raises when ``owner_columns`` arrives without them), so a coverage that failed it
+        # could never have produced a policy for this table to be compared against. Spelling
+        # it out here rather than asserting keeps the optional fields narrowed for the checker.
+        if self.owner_columns and owner_table and owner_pk and child_pk:
+            # The correlated subquery joins on both keys and reads the ancestor's columns.
+            pairs.add((table, child_pk))
+            pairs.add((owner_table, owner_pk))
+            pairs |= {(owner_table, column) for column in self.owner_columns.values()}
+        return frozenset(pairs)
 
 
 class Coverage(NamedTuple):

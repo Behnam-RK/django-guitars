@@ -215,6 +215,50 @@ class TestAsyncTwins:
 # ──────────────────────────── the GUC publisher ────────────────────────────── #
 
 
+class TestTheEncodingRefusesWhatItCannotCarry:
+    """A tenant value containing the separator would make the *database* layer wider.
+
+    The policy predicate splits the published GUC on ``,`` and tests membership, so one pk
+    of ``'acme,globex'`` is indistinguishable from the two-tenant scope ``['acme', 'globex']``
+    -- PostgreSQL reads it as "tenant acme OR tenant globex" and returns both tenants' rows.
+    The Python manager filters on the exact string and matches neither, so RLS would be
+    strictly *wider* than the managers, on exactly the paths (raw SQL, ``_base_manager``,
+    cascades) where RLS is the only guard.
+
+    That is the one direction this kit must never fail in, so the value is refused at the
+    single chokepoint both the scalar and collection paths pass through.
+    """
+
+    def test_a_scalar_containing_the_separator_is_refused(self):
+        with pytest.raises(TenantScopeError, match='contains'):
+            guc.encode_value('acme,globex')
+
+    def test_a_collection_member_containing_the_separator_is_refused(self):
+        """The collection path encodes each member through the same helper, so it cannot be
+        the loophole -- ``['a', 'b,c']`` would otherwise publish as three values."""
+        with pytest.raises(TenantScopeError, match='contains'):
+            guc.encode_value(['acme', 'globex,initech'])
+
+    def test_the_refusal_reaches_the_published_frame(self):
+        """Not merely a helper-level guard.
+
+        ``desired_state()`` is what the execute wrapper calls before every statement, so a
+        scope carrying such a value cannot reach the database at all -- it fails closed
+        instead of publishing something the policy would read as several tenants.
+        """
+        with tenant(shop='acme,globex'), pytest.raises(TenantScopeError, match='contains'):
+            guc.desired_state()
+
+    def test_an_ordinary_value_still_encodes(self):
+        """The guard must not have made every scope unusable."""
+        assert guc.encode_value('acme') == 'acme'
+        assert guc.encode_value(['b', 'a']) == 'a,b'
+
+    def test_a_none_pk_still_encodes_as_empty(self):
+        """Unchanged: an empty GUC yields an empty array, which denies."""
+        assert guc.encode_value(None) == ''
+
+
 class TestPublisherGuards:
     def test_a_non_postgresql_connection_is_left_alone(self):
         """The policies are PostgreSQL-only, so there is nothing to publish elsewhere -- and

@@ -64,11 +64,13 @@ FROZEN_SQL_CALLABLES = frozenset(
         'drop_tenant_policy',
         'create_exempt_policy',
         'drop_exempt_policy',
+        'drop_all_exempt_policies',
         'enable_rls',
         'disable_rls',
         'force_rls',
         'no_force_rls',
         'create_table_rls',
+        'replace_table_rls',
         'drop_table_rls',
     }
 )

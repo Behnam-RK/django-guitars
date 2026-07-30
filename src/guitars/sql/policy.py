@@ -47,12 +47,14 @@ __all__ = [
     'create_table_rls',
     'create_tenant_policy',
     'disable_rls',
+    'drop_all_exempt_policies',
     'drop_exempt_policy',
     'drop_table_rls',
     'drop_tenant_policy',
     'enable_rls',
     'force_rls',
     'no_force_rls',
+    'replace_table_rls',
 ]
 
 TENANT_POLICY = 'tenant_scope'
@@ -292,6 +294,38 @@ def drop_exempt_policy(table: str, role: str) -> str:
     return f'DROP POLICY IF EXISTS {_exempt_policy_name(role)} ON {_bare("table", table)}'
 
 
+def drop_all_exempt_policies(table: str) -> str:
+    """Drop every exemption policy on *table*, whatever roles it was created for.
+
+    :func:`drop_exempt_policy` can only drop a role it is told about, and the caller
+    replacing a policy knows the roles configured *now* -- not the ones configured when the
+    policy was written. A role removed from ``GUITARS_RLS_EXEMPT_ROLES`` would therefore
+    keep its ``USING (true)`` exemption forever, which is a cross-tenant read the settings
+    say was revoked.
+
+    Discovering them from ``pg_policy`` instead of a list is what makes
+    :func:`replace_table_rls` converge on the configured set rather than accumulate.
+    ``starts_with`` rather than ``LIKE``: the prefix ends in ``_``, which ``LIKE`` would
+    read as a single-character wildcard.
+    """
+    table = _bare('table', table)
+    # nosec B608 - DDL, not a query: *table* is proved bare above and the prefix is a module
+    # constant. The policy names are read from the catalog and quoted by format(%I).
+    return (  # noqa: S608
+        'DO $$\n'  # nosec B608
+        'DECLARE\n'
+        '    exempt_policy text;\n'
+        'BEGIN\n'
+        '    FOR exempt_policy IN\n'
+        f"        SELECT polname FROM pg_policy WHERE polrelid = '{table}'::regclass\n"
+        f'          AND starts_with(polname, {_quote_literal(EXEMPT_POLICY_PREFIX)})\n'
+        '    LOOP\n'
+        f"        EXECUTE format('DROP POLICY %I ON {table}', exempt_policy);\n"
+        '    END LOOP;\n'
+        'END $$'
+    )
+
+
 def enable_rls(table: str) -> str:
     return f'ALTER TABLE {_bare("table", table)} ENABLE ROW LEVEL SECURITY'
 
@@ -341,6 +375,46 @@ def create_table_rls(
     if force:
         statements.append(force_rls(table))
     return statements
+
+
+def replace_table_rls(
+    table: str,
+    columns: dict[str, str],
+    owner_table: str | None = None,
+    owner_pk: str | None = None,
+    child_pk: str | None = None,
+    owner_columns: dict[str, str] | None = None,
+    force: bool = True,
+    exempt_roles: list[str] | None = None,
+) -> list[str]:
+    """Redefine an existing table's policies in place, for a coverage shape that changed.
+
+    PostgreSQL has no ``CREATE OR REPLACE POLICY`` and no ``CREATE POLICY IF NOT EXISTS``, so
+    a table whose tenant dimensions, tenant column or exempt roles changed cannot simply be
+    re-``create_table_rls``'d -- that fails with "policy tenant_scope already exists". The
+    generator emits this instead once it sees a policy whose recorded shape no longer matches
+    the models.
+
+    ``ENABLE`` and ``FORCE`` are deliberately left alone rather than cycled: both are
+    idempotent ``ALTER TABLE``s that :func:`create_table_rls` re-issues below, and dropping
+    them would leave the table briefly unprotected for no gain. Only the policies are
+    replaced, so at no point in the transaction is the table enabled-but-unpolicied (which is
+    default-DENY) or policied-but-disabled (which is no protection at all).
+    """
+    return [
+        drop_tenant_policy(table),
+        drop_all_exempt_policies(table),
+        *create_table_rls(
+            table,
+            columns,
+            owner_table,
+            owner_pk,
+            child_pk,
+            owner_columns,
+            force=force,
+            exempt_roles=exempt_roles,
+        ),
+    ]
 
 
 def drop_table_rls(table: str, exempt_roles: list[str] | None = None) -> list[str]:

@@ -103,6 +103,36 @@ carry the old SQL — see *Fixed* below for why that matters and how to replace 
 - `makeguitarmigrations` reported a cascade foreign key reached through MTI as an
   unsupported limitation, when the ancestor's own rule already covers the whole
   chain through the shared `_deleted_at`.
+- **A tenant policy was never regenerated once it existed**, so a model that gained
+  a tenant dimension — or had its tenant column renamed, or its
+  `GUITARS_RLS_EXEMPT_ROLES` edited — kept the *old, weaker* predicate in the
+  database. Dedupe was keyed on the table name alone, and the comment header carried
+  none of the predicate, so the generator emitted nothing and
+  `makemigrations --check` reported nothing to do: the Python layer enforced the new
+  dimension while row-level security enforced only the old one, silently, on exactly
+  the paths (raw SQL, `_base_manager`, cascades) where the policy is the only guard.
+
+  Policy headers now carry a `[POLICY:<digest>]` identity covering everything that
+  determines what the policy says, and a changed shape emits `sql.replace_table_rls`
+  — PostgreSQL has no `CREATE OR REPLACE POLICY`, so re-emitting the `CREATE` form
+  would fail `migrate`. `force` is excluded from the identity, keeping the
+  `--force-rls` retrofit workflow unchanged. See
+  [`docs/migrations.md`](docs/migrations.md).
+- **A tenant primary key containing a comma silently widened the policy to several
+  tenants.** The predicate splits the published GUC on `,` and tests membership, so a
+  single pk of `acme,globex` encoded identically to the two-tenant scope
+  `['acme', 'globex']` and PostgreSQL read it as "tenant acme OR tenant globex" —
+  while the Python manager filtered on the exact string and matched neither. The
+  database half was therefore strictly *wider* than the Python half. Such a value is
+  now refused when the scope is published, so it fails closed. Only reachable with a
+  non-integer tenant primary key.
+- `audittenancy` could not see a policy that existed but enforced the **wrong
+  scope**, and counted a table without `FORCE` as "enforced" in its summary. It now
+  compares each live policy's `tenant.*` settings and its `pg_depend` column
+  references against what the models imply — warned by default, fatal under the new
+  `--require-match` — and counts only clean tables as enforced. It also resolves a
+  table name through the search path in the order PostgreSQL does, so two same-named
+  tables in two schemas no longer collide.
 
 ### Changed
 

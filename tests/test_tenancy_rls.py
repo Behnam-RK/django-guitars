@@ -19,7 +19,7 @@ assertion below pass vacuously, so that precondition is asserted first.
 """
 
 import pytest
-from django.db import connection, transaction
+from django.db import ProgrammingError, connection, transaction
 
 from guitars import sql
 from guitars.tenancy import TenantScopeError, tenancy_bypassed, tenant
@@ -336,6 +336,96 @@ class TestForceIsWhatMakesItBind:
         _execute(sql.force_rls(_OWNER_TABLE))
         with tenant(tenant=TENANT_A):
             assert _scalar(f'SELECT count(*) FROM {_OWNER_TABLE}') == 1  # noqa: S608
+
+
+class TestReplacingAPolicyInPlace:
+    """What a changed coverage shape has to do, and why re-creating cannot.
+
+    PostgreSQL has no ``CREATE OR REPLACE POLICY`` and no ``CREATE POLICY IF NOT EXISTS``, so
+    a table whose tenant dimensions or tenant column changed cannot simply be
+    ``create_table_rls``'d again. The generator emits the replacement form once it sees a
+    recorded policy shape that no longer matches the models.
+    """
+
+    def test_re_creating_a_policy_that_exists_fails(self, probe_tables):
+        """The reason ``replace_table_rls`` exists at all. Pinned so that if a future
+        PostgreSQL gains ``CREATE OR REPLACE POLICY``, this test says so.
+
+        Inside its own ``atomic()`` because the failed statement aborts the transaction, and
+        PostgreSQL then refuses everything until a rollback -- including the fixture's own
+        teardown. The savepoint is what contains that.
+        """
+        with pytest.raises(ProgrammingError, match='already exists'), transaction.atomic():
+            _execute(sql.create_tenant_policy(table=_OWNER_TABLE, columns={'tenant': 'tenant_id'}))
+
+    def test_replacing_swaps_the_predicate_and_keeps_the_table_enforced(self, probe_tables):
+        """The new predicate binds, and ENABLE/FORCE are never dropped on the way.
+
+        Cycling them would leave the table momentarily unprotected -- or, worse, enabled with
+        no policy, which is default-DENY -- so the replacement touches only the policies.
+        """
+        _execute(
+            *sql.replace_table_rls(
+                table=_OWNER_TABLE, columns={'other': 'tenant_id'}, force=True
+            )
+        )
+
+        # Still enabled and still forced, without an intervening drop.
+        assert _rows(
+            'SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = %s',
+            [_OWNER_TABLE],
+        ) == [(True, True)]
+        # Exactly one tenant_scope policy -- a replacement, not an accumulation.
+        assert (
+            _scalar(
+                'SELECT count(*) FROM pg_policies WHERE tablename = %s AND policyname = %s',
+                [_OWNER_TABLE, sql.TENANT_POLICY],
+            )
+            == 1
+        )
+        # And it is the NEW predicate that binds: the old dimension no longer grants access.
+        with tenant(tenant=TENANT_A):
+            assert _scalar(f'SELECT count(*) FROM {_OWNER_TABLE}') == 0  # noqa: S608
+        with tenant(other=TENANT_A):
+            assert _scalar(f'SELECT count(*) FROM {_OWNER_TABLE}') == 1  # noqa: S608
+
+    def test_replacing_drops_an_exemption_for_a_role_no_longer_configured(self, probe_tables):
+        """A role removed from ``GUITARS_RLS_EXEMPT_ROLES`` must lose its exemption.
+
+        ``drop_exempt_policy`` can only drop a role it is told about, and the caller knows the
+        roles configured *now* -- not the ones the policy was written with. Discovering them
+        from ``pg_policy`` is what makes the replacement converge on the configured set instead
+        of accumulating exemptions nobody asked for.
+        """
+        _execute(sql.create_exempt_policy(table=_OWNER_TABLE, role='guitars'))
+        assert _scalar(
+            'SELECT count(*) FROM pg_policies WHERE tablename = %s AND policyname LIKE %s',
+            [_OWNER_TABLE, f'{sql.EXEMPT_POLICY_PREFIX}%'],
+        ) == 1
+
+        # Replaced with no exempt_roles at all, as if the setting had been emptied.
+        _execute(
+            *sql.replace_table_rls(
+                table=_OWNER_TABLE, columns={'tenant': 'tenant_id'}, force=True
+            )
+        )
+
+        assert _scalar(
+            'SELECT count(*) FROM pg_policies WHERE tablename = %s AND policyname LIKE %s',
+            [_OWNER_TABLE, f'{sql.EXEMPT_POLICY_PREFIX}%'],
+        ) == 0
+
+    def test_dropping_all_exemptions_leaves_the_tenant_policy_alone(self, probe_tables):
+        """It is prefix-scoped, so it must not take the policy that does the actual work."""
+        _execute(sql.drop_all_exempt_policies(table=_OWNER_TABLE))
+
+        assert (
+            _scalar(
+                'SELECT count(*) FROM pg_policies WHERE tablename = %s AND policyname = %s',
+                [_OWNER_TABLE, sql.TENANT_POLICY],
+            )
+            == 1
+        )
 
 
 class TestPolicyTeardown:

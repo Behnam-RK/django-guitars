@@ -107,11 +107,19 @@ def validate_app_labels(requested: set[str]) -> None:
 
 
 def iter_migration_files(app: AppConfig) -> Iterator[tuple[Path, str]]:
-    """Yield ``(path, content)`` for every migration file in *app*."""
+    """Yield ``(path, content)`` for every migration file in *app*, in filename order.
+
+    Sorted, not in ``glob`` order, and that is load-bearing rather than tidiness. Django
+    numbers migrations ``NNNN_name.py``, so filename order is application order -- and a
+    scanner that records the *last* value it saw for something (which is how the tenant
+    policy's recorded shape is recovered) gets the currently-applied one only if it reads
+    them in that order. ``glob`` yields in directory order, which is filesystem-dependent
+    and would make the answer differ between machines.
+    """
     migrations_dir = Path(app.path) / 'migrations'
     if not migrations_dir.is_dir():
         return
-    for path in migrations_dir.glob('*.py'):
+    for path in sorted(migrations_dir.glob('*.py')):
         yield path, path.read_text()
 
 

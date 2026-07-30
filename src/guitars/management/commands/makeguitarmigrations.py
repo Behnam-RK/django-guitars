@@ -130,9 +130,20 @@ migrations.RunSQL(
 """
 
 TENANT_POLICY_OPERATION = """\
-# Tenant RLS on "{table}" table!
+# Tenant RLS on "{table}" table! [POLICY:{identity}]
 migrations.RunSQL(
     sql=sql.create_table_rls({arguments}),
+    reverse_sql=sql.drop_table_rls(table='{table}'{exempt_argument}),
+),
+"""
+
+# A policy whose *shape* changed, rather than one that did not exist. PostgreSQL has no
+# CREATE OR REPLACE POLICY, so re-emitting the CREATE form would fail migrate with "policy
+# tenant_scope already exists" -- see ``sql.replace_table_rls``.
+TENANT_POLICY_REPLACEMENT_OPERATION = """\
+# Tenant RLS replaced on "{table}" table! [POLICY:{identity}]
+migrations.RunSQL(
+    sql=sql.replace_table_rls({arguments}),
     reverse_sql=sql.drop_table_rls(table='{table}'{exempt_argument}),
 ),
 """
@@ -158,8 +169,17 @@ _RE_SOFT_DELETE_RELATED = re.compile(
 # patterns above (which anchor on ``# Updated`` / ``# Soft`` immediately after the comment mark).
 _RE_MTI_UPDATED_AT = re.compile(r'# MTI Updated at Trigger on "([^"]+)" table')
 _RE_MTI_SOFT_DELETE = re.compile(r'# MTI Soft Delete Rule on "([^"]+)" table')
-# The FORCE header carries an extra token, so the plain RLS pattern can never match it.
-_RE_TENANT_POLICY = re.compile(r'# Tenant RLS on "([^"]+)" table!')
+# Matches both policy forms -- the initial CREATE and a later replacement -- because for
+# every purpose here they mean the same thing: "this table's policy is recorded in a
+# migration, and this is the shape it was written with". The ``[POLICY:...]`` identity is
+# what makes a *changed* shape detectable at all; without it the table name alone said only
+# that some policy existed, so a model gaining a tenant dimension silently kept the old,
+# weaker predicate while --check reported nothing to do.
+#
+# The FORCE header carries an extra token before "RLS", so it can never match this pattern.
+_RE_TENANT_POLICY = re.compile(
+    r'# Tenant RLS (?:replaced )?on "([^"]+)" table! \[POLICY:(?P<identity>\w+)\]'
+)
 _RE_TENANT_FORCE = re.compile(r'# Tenant FORCE RLS on "([^"]+)" table!')
 # The [DIGEST:...] marker is matched by _generator.RE_DIGEST.
 
@@ -220,6 +240,12 @@ class ExistingOperations(NamedTuple):
     mti_triggers: set[str]
     mti_soft_deletes: set[str]
     tenant_policies: set[str]
+    #: Table -> the ``[POLICY:...]`` identity its **most recent** policy operation was written
+    #: with. Compared against the identity the models imply now, so a coverage shape that
+    #: changed produces a replacement instead of being mistaken for already covered. Most
+    #: recent, not any: a shape taken A -> B -> A must match the migration applied last, so
+    #: ``_generator.iter_migration_files`` yields in filename order.
+    tenant_policy_identities: dict[str, str]
     #: Tables whose policy operation was written with ``force=False`` -- see
     #: ``_RE_TENANT_POLICY_UNFORCED``. These are the only ones a second FORCE stage can act on.
     unforced_policies: set[str]
@@ -355,6 +381,7 @@ class Command(BaseCommand):
         existing_mti_triggers: set[str] = set()
         existing_mti_soft_deletes: set[str] = set()
         existing_tenant_policies: set[str] = set()
+        existing_policy_identities: dict[str, str] = {}
         existing_unforced_policies: set[str] = set()
         existing_tenant_forces: set[str] = set()
         trigger_function_dep: tuple[str, str] | None = None
@@ -380,9 +407,11 @@ class Command(BaseCommand):
                 existing_mti_soft_deletes.update(
                     m.group(1) for m in _RE_MTI_SOFT_DELETE.finditer(content)
                 )
-                existing_tenant_policies.update(
-                    m.group(1) for m in _RE_TENANT_POLICY.finditer(content)
-                )
+                for match in _RE_TENANT_POLICY.finditer(content):
+                    existing_tenant_policies.add(match.group(1))
+                    # Last write wins, within a file and across them -- files arrive in
+                    # filename order, which is application order.
+                    existing_policy_identities[match.group(1)] = match.group('identity')
                 existing_unforced_policies.update(unforced_policy_tables(content))
                 existing_tenant_forces.update(
                     m.group(1) for m in _RE_TENANT_FORCE.finditer(content)
@@ -395,6 +424,7 @@ class Command(BaseCommand):
             mti_triggers=existing_mti_triggers,
             mti_soft_deletes=existing_mti_soft_deletes,
             tenant_policies=existing_tenant_policies,
+            tenant_policy_identities=existing_policy_identities,
             unforced_policies=existing_unforced_policies,
             tenant_forces=existing_tenant_forces,
             trigger_function_dependency=trigger_function_dep,
@@ -523,12 +553,45 @@ class Command(BaseCommand):
     # Per-app operations
     # ------------------------------------------------------------------
 
-    def _tenant_policy_operation(self, table: str, coverage: TableCoverage) -> str:
+    def _policy_identity(self, table: str, coverage: TableCoverage) -> str:
+        """Digest of everything that determines what the ``tenant_scope`` policy *says*.
+
+        Stamped into the operation's comment header so a later run can tell "this table has a
+        policy" from "this table has the policy the models currently imply" -- the distinction
+        the header lacked, which let a model gain a tenant dimension while the database kept
+        predicating on the old one, with ``--check`` reporting nothing to do.
+
+        ``force`` is deliberately **excluded**. It is an ``ALTER TABLE``, not part of the
+        policy definition, and it already has a staged mechanism of its own
+        (``--force-rls`` reading ``unforced_policies``). Folding it in would make flipping
+        ``GUITARS_RLS_FORCE`` emit a full policy replacement for every table and defeat the
+        retrofit workflow that setting exists for.
+
+        Rendered through ``_literal``, so dicts are sorted and the digest is stable across
+        runs -- an unstable identity would write a new migration every time.
+        """
+        identity = {
+            'table': table,
+            **coverage.as_kwargs(),
+            'exempt_roles': self._rls_exempt_roles(),
+        }
+        return _generator.digest_of([_literal(identity)])[:12]
+
+    def _tenant_policy_operation(
+        self, table: str, coverage: TableCoverage, *, replacing: bool
+    ) -> str:
         """One ``tenant_scope`` policy operation, with the environment decisions baked in.
 
         ``force`` and ``exempt_roles`` are written into the migration as literals rather
         than read from settings at migrate time, so the same migration history always
         produces the same database -- see ``guitars.sql.policy``.
+
+        *replacing* picks the ``replace_table_rls`` form, for a table that already has a
+        policy of a different shape. Its ``reverse_sql`` drops RLS rather than restoring the
+        previous predicate, which the generator does not know: reversing past this migration
+        therefore leaves the table unpolicied, and rolling forward again rebuilds the current
+        shape. That is the honest reverse -- the alternative is a reverse that claims to
+        restore a policy it cannot reconstruct.
         """
         exempt_roles = self._rls_exempt_roles()
         arguments = {
@@ -538,8 +601,10 @@ class Command(BaseCommand):
         }
         if exempt_roles:
             arguments['exempt_roles'] = exempt_roles
-        return TENANT_POLICY_OPERATION.format(
+        template = TENANT_POLICY_REPLACEMENT_OPERATION if replacing else TENANT_POLICY_OPERATION
+        return template.format(
             table=table,
+            identity=self._policy_identity(table, coverage),
             arguments=', '.join(f'{key}={_literal(value)}' for key, value in arguments.items()),
             # The reverse has to drop the same exemption policies the forward created, so the
             # role list is repeated rather than left to a default.
@@ -547,7 +612,7 @@ class Command(BaseCommand):
         )
 
     def _tenant_operations(self, app: AppConfig, *, force_rls: bool) -> list[str]:
-        """Tenant-policy operations *app* is missing, for the requested stage."""
+        """Tenant-policy operations *app* is missing or has outdated, for the requested stage."""
         if not self._tenant_policies_enabled():
             return []
 
@@ -570,8 +635,21 @@ class Command(BaseCommand):
                 ):
                     continue
                 operations.append(TENANT_FORCE_OPERATION.format(table=table))
-            elif table not in self.existing.tenant_policies:
-                operations.append(self._tenant_policy_operation(table, table_coverage))
+                continue
+
+            recorded = self.existing.tenant_policy_identities.get(table)
+            if recorded is None:
+                operations.append(
+                    self._tenant_policy_operation(table, table_coverage, replacing=False)
+                )
+            elif recorded != self._policy_identity(table, table_coverage):
+                # The table is policied, but not with the policy the models now describe --
+                # a dimension added or dropped, a tenant column renamed, or the exempt-role
+                # list changed. Emitting nothing here is how the database and the models
+                # used to diverge silently.
+                operations.append(
+                    self._tenant_policy_operation(table, table_coverage, replacing=True)
+                )
         return operations
 
     def _build_operations(self, app: AppConfig) -> list[str]:
@@ -850,10 +928,15 @@ class Command(BaseCommand):
             self.stdout.write('No changes detected')
 
     def _report_missing(self, check_missing: list[tuple[str, list[str]]]) -> None:
-        """Print what ``--check`` found and exit non-zero."""
+        """Print what ``--check`` found and exit non-zero.
+
+        "or outdated" is not padding: an operation here may be a *replacement* for a policy
+        whose shape no longer matches the models, which is a migration the app needs despite
+        already having one for that table.
+        """
         for app_label, operations in check_missing:
             self.stderr.write(
-                self.style.ERROR(f"Missing enforcement migrations for '{app_label}':")
+                self.style.ERROR(f"Missing or outdated enforcement migrations for '{app_label}':")
             )
             for operation in operations:
                 self.stderr.write(textwrap.indent(operation, '    '))

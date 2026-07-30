@@ -429,7 +429,7 @@ class TestGeneratorSettings:
         coverage = app_coverage(django_apps.get_app_config('testapp'))
         with override_settings(GUITARS_RLS_EXEMPT_ROLES=['metabase_ro']):
             operation = Command()._tenant_policy_operation(
-                'testapp_release', coverage.tables['testapp_release']
+                'testapp_release', coverage.tables['testapp_release'], replacing=False
             )
 
         assert "exempt_roles=['metabase_ro']" in operation

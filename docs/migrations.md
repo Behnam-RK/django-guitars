@@ -153,6 +153,50 @@ depended on the settings in force when it ran would produce different databases
 from the same migration history — and would silently change an already-reviewed
 migration's meaning when someone edited a setting.
 
+### A policy whose shape changes gets replaced
+
+A tenant policy is the one enforcement operation whose SQL is not a function of
+the table name alone: its predicate comes from a *variable* `{dimension: column}`
+mapping. So its comment header carries a `[POLICY:<digest>]` identity covering
+everything that determines what the policy says — the dimensions, the columns,
+the owner join, and `exempt_roles`:
+
+```python
+# Tenant RLS on "billing_invoice" table! [POLICY:57ff74989db7]
+```
+
+A run that finds a recorded identity different from the one the models now imply
+emits a **replacement** rather than nothing:
+
+```python
+# Tenant RLS replaced on "billing_invoice" table! [POLICY:0b7c94cc2edc]
+migrations.RunSQL(
+    sql=sql.replace_table_rls(table='billing_invoice', columns={...}, force=True),
+    reverse_sql=sql.drop_table_rls(table='billing_invoice'),
+)
+```
+
+Three ordinary changes take that path: a model gaining or losing a tenant
+dimension, a renamed tenant column, and an edited `GUITARS_RLS_EXEMPT_ROLES`.
+Without the identity, the header recorded only that *some* policy existed, so a
+model that gained a dimension kept the old, weaker predicate in the database
+while `makemigrations --check` reported nothing to do.
+
+`force` is deliberately **not** part of the identity. It is an `ALTER TABLE`
+rather than part of the policy, and it has its own staged mechanism above —
+folding it in would make flipping `GUITARS_RLS_FORCE` replace every policy and
+defeat the retrofit that setting exists for.
+
+`replace_table_rls` drops and recreates the policies but leaves `ENABLE` and
+`FORCE` alone, so at no point in the transaction is the table enabled-but-
+unpolicied (which is default-DENY) or policied-but-disabled (which is no
+protection). Its `reverse_sql` drops RLS rather than restoring the previous
+predicate, which the generator does not know: reversing past the migration leaves
+the table unpolicied, and rolling forward rebuilds the current shape.
+
+`audittenancy` covers the other half — a replacement that was generated but never
+applied. See [`tenancy.md`](tenancy.md#auditing).
+
 ## Migrate runs bypassed
 
 `migrate` is overridden to run inside `tenancy_bypassed()`. Without it a

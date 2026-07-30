@@ -132,6 +132,140 @@ class TestItCatchesRealDamage:
             _execute(*sql.drop_table_rls(table='testapp_band'))
 
 
+class TestAPolicyThatNoLongerMatchesTheModels:
+    """The finding existence checks cannot make: a healthy policy scoping on the wrong thing.
+
+    Every other check here asks "is there a ``tenant_scope`` policy, is RLS on, is it FORCE'd".
+    All three pass for a table whose policy predicates on a dimension the model dropped, or on
+    a column it renamed -- the table looks protected while every statement is filtered by a
+    weaker predicate than the Python layer believes. Nothing else in the kit sees it: the
+    generator now emits a replacement, but a replacement that was generated and never applied
+    leaves exactly this state.
+
+    Compared by the two facts a *stored* policy preserves, because PostgreSQL rewrites the
+    expression when it saves it and the text never matches what was emitted: the ``tenant.*``
+    settings it reads, and the columns ``pg_depend`` records it referencing.
+    """
+
+    def test_drift_is_a_warning_by_default(self, _execute):
+        """Reported, but not fatal without ``--require-match``.
+
+        A run that happens *before* the deploy's own ``migrate`` step is legitimately in this
+        state, and only the operator knows their ordering -- the same reason ``--require-force``
+        is opt-in. Warned rather than silent, because the table looks protected.
+        """
+        table = Release._meta.db_table
+        _execute(
+            sql.drop_tenant_policy(table=table),
+            sql.create_tenant_policy(table=table, columns={'somethingelse': 'label_id'}),
+        )
+        try:
+            output = _audit()
+
+            assert 'audit passed' in output
+            assert 'not by the scope the models describe' in output
+            # Still not counted as enforced: it is protected by the wrong scope.
+            assert '5 enforced' in output
+        finally:
+            _execute(
+                sql.drop_tenant_policy(table=table),
+                *sql.create_table_rls(table=table, columns={'label': 'label_id'}),
+            )
+
+    def test_a_policy_scoping_on_the_wrong_dimension_is_caught(self, _execute):
+        """The model scopes on ``label``; this policy reads ``tenant.somethingelse``."""
+        table = Release._meta.db_table
+        _execute(
+            sql.drop_tenant_policy(table=table),
+            sql.create_tenant_policy(table=table, columns={'somethingelse': 'label_id'}),
+        )
+        try:
+            output = _audit_failure(require_match=True)
+
+            assert 'tenant.somethingelse' in output
+            assert 'not by the scope the models describe' in output
+            assert 'audit failed' in output
+        finally:
+            _execute(
+                sql.drop_tenant_policy(table=table),
+                *sql.create_table_rls(table=table, columns={'label': 'label_id'}),
+            )
+
+    def test_a_policy_on_the_wrong_column_is_caught(self, _execute):
+        """Same dimension name, different column -- so the GUC set matches and only the
+        ``pg_depend`` column set gives it away. This is the half a regex over the predicate
+        text could not do reliably, since PostgreSQL stores columns as ``(label_id)::text``."""
+        table = Release._meta.db_table
+        _execute(
+            sql.drop_tenant_policy(table=table),
+            # `id` is a real column on the table, so the policy is valid SQL -- just wrong.
+            sql.create_tenant_policy(table=table, columns={'label': 'id'}),
+        )
+        try:
+            output = _audit_failure(require_match=True)
+
+            assert 'references columns' in output
+            assert 'label_id' in output
+            assert 'audit failed' in output
+        finally:
+            _execute(
+                sql.drop_tenant_policy(table=table),
+                *sql.create_table_rls(table=table, columns={'label': 'label_id'}),
+            )
+
+    def test_an_mti_child_policy_is_compared_through_its_owner_join(self, db):
+        """The owner-join form references four columns across two tables, and the audit has to
+        expect all of them or every MTI child would read as drifted on a healthy database."""
+        assert 'audit passed' in _audit()
+
+    def test_drift_and_a_missing_force_are_both_reported(self, _execute):
+        """A table can be both, and counting the summary by subtracting each list would
+        double-subtract it -- so "enforced" is counted from the set of unhealthy tables."""
+        table = Release._meta.db_table
+        _execute(
+            sql.drop_tenant_policy(table=table),
+            sql.create_tenant_policy(table=table, columns={'somethingelse': 'label_id'}),
+            sql.no_force_rls(table=table),
+        )
+        try:
+            output = _audit_failure(require_force=True, require_match=True)
+
+            assert 'not by the scope the models describe' in output
+            assert 'bypasses it' in output
+            # Six expected tables, one of them unhealthy for two reasons -> five enforced.
+            assert '5 enforced' in output
+            assert '1 enabled without FORCE' in output
+            assert '1 not matching the models' in output
+        finally:
+            _execute(
+                sql.drop_tenant_policy(table=table),
+                *sql.create_table_rls(table=table, columns={'label': 'label_id'}),
+            )
+
+    def test_a_policy_reading_an_unrelated_setting_is_not_reported_as_drift(self, _execute):
+        """Only ``tenant.*`` settings are compared.
+
+        A policy hand-tuned to also consult, say, ``statement_timeout`` is not what this check
+        is about, and reporting it would make the check something operators learn to ignore.
+        """
+        table = Release._meta.db_table
+        _execute(
+            sql.drop_tenant_policy(table=table),
+            f'CREATE POLICY {sql.TENANT_POLICY} ON {table} FOR ALL TO PUBLIC USING ('
+            f"(SELECT current_setting('tenant.bypass', true)) = 'on' OR ("
+            f"current_setting('statement_timeout', true) IS NOT NULL AND "
+            f'{table}.label_id::text = ANY(string_to_array('
+            f"(SELECT current_setting('tenant.label', true)), ','))))",
+        )
+        try:
+            assert 'audit passed' in _audit()
+        finally:
+            _execute(
+                sql.drop_tenant_policy(table=table),
+                *sql.create_table_rls(table=table, columns={'label': 'label_id'}),
+            )
+
+
 class TestScoping:
     def test_a_scoped_run_audits_only_that_app(self, db):
         assert 'audit passed' in _audit('testapp')

@@ -6,7 +6,7 @@ name: CI
 #     the kit's soft-delete, updated_at and tenancy behavior is enforced by Postgres
 #     rules, triggers and row-level security, so there is no SQLite fallback).
 #   - `makemigrations --check`, so a model change cannot land without the enforcement
-#     migrations that make its behaviour real, and `audittenancy --require-force`, so
+#     migrations that make its behaviour real, and `audittenancy --require-force --require-match`, so
 #     the policies are proven to actually bind on a migrated database.
 #
 # NOTE: DJANGO_SETTINGS_MODULE is exported for the management commands, and that is
@@ -69,4 +69,4 @@ jobs:
           DJANGO_SETTINGS_MODULE: tests.settings
         run: |
           uv run python manage.py migrate
-          uv run python manage.py audittenancy --require-force
+          uv run python manage.py audittenancy --require-force --require-match

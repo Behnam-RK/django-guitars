@@ -65,10 +65,40 @@ def _sqlstate(exc: BaseException) -> str | None:
 
 
 def _scalar(value: object) -> str:
-    # Accept a model instance, a pk, or anything str()-able -- mirroring what tenant()
-    # already accepts and what the manager filters on.
+    """One dimension value as its GUC text, refusing anything the encoding cannot carry.
+
+    Accepts a model instance, a pk, or anything ``str()``-able -- mirroring what ``tenant()``
+    already accepts and what the manager filters on.
+
+    A value containing :data:`~guitars.gucs.VALUE_SEPARATOR` is **refused**, and that is a
+    security guard rather than tidiness. The policy predicate splits the GUC on that
+    separator (``= ANY(string_to_array(..., ','))``), so a single pk of ``'acme,globex'``
+    encodes byte-for-byte identically to the two-tenant scope ``['acme', 'globex']`` -- and
+    PostgreSQL then reads it as "tenant acme OR tenant globex". The Python manager
+    meanwhile filters on the exact string and matches neither, so the database half would be
+    strictly *wider* than the Python half, on exactly the paths (raw SQL, ``_base_manager``,
+    cascades) where the policy is the only guard. That is the one direction this kit must
+    never fail in.
+
+    Refusing rather than escaping is deliberate. ``guitars.sql``'s emitted SQL is a frozen
+    interface -- generated migrations already checked into consuming projects call
+    ``create_tenant_policy`` by name -- so changing the predicate to carry an escape scheme
+    would change SQL those migrations reproduce on a fresh database. Naming the mistake here
+    costs a tenant model nothing that a sane primary key wanted, in the same spirit as
+    ``_reject_lazy`` above and ``sql.policy._bare``.
+    """
     pk = getattr(value, 'pk', value)
-    return '' if pk is None else str(pk)
+    if pk is None:
+        return ''
+    text = str(pk)
+    if VALUE_SEPARATOR in text:
+        raise TenantScopeError(
+            f'tenant value {text!r} contains {VALUE_SEPARATOR!r}, which separates the '
+            f'values of one dimension when the scope is published to PostgreSQL -- a '
+            f'row-level-security policy would read it as several tenants and match all of '
+            f'them. Use a primary key without {VALUE_SEPARATOR!r}.'
+        )
+    return text
 
 
 def encode_value(value: object) -> str:

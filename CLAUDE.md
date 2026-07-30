@@ -69,6 +69,9 @@ Decisions that were hard to reverse and are surprising without context are ADRs:
 - Column ownership is resolved via `model._meta.get_field(name).model` (`guitars.introspection`), never `hasattr`.
 - `guitars.gucs` must import nothing and live outside `tenancy/`, so a generated migration's `from guitars import sql` does not drag in the tenancy runtime.
 - The GUC cache key in `tenancy/guc.py` is deliberately more than the values. A stale cache leaves the *previous* tenant live, which fails **open**. Do not simplify it without a test that fails first.
+- A tenant value containing `VALUE_SEPARATOR` (`,`) is **refused** in `guc._scalar`, not escaped. The policy splits the GUC on it, so `'a,b'` would otherwise read as two tenants and match both — the database half becoming wider than the Python half. Escaping instead would change the SQL frozen migrations reproduce.
+- The tenant policy is the one enforcement operation whose SQL depends on more than the table name, so its header carries a `[POLICY:<digest>]` identity and a changed shape emits `sql.replace_table_rls`. Dedupe on the table name alone let a model gain a tenant dimension while the database kept the old predicate, with `--check` green. `force` is excluded from that identity on purpose — it has its own `--force-rls` stage.
+- `audittenancy` compares a live policy by its `tenant.*` GUCs and its `pg_depend` column references, never by SQL text: PostgreSQL rewrites a stored policy expression, so text equality can never hold.
 
 ### `.update()` and signals
 

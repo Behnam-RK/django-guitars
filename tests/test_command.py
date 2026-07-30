@@ -20,6 +20,7 @@ from django.test import override_settings
 from guitars.management import _generator
 from guitars.management.commands import makeguitarmigrations as makeguitarmigrations_module
 from guitars.management.commands.makeguitarmigrations import Command, unforced_policy_tables
+from guitars.tenancy.discovery import app_coverage
 from tests.testapp.models import Album, Band, Ensemble, Orchestra
 
 
@@ -28,7 +29,7 @@ def test_check_passes_when_enforcement_migrations_exist():
 
     call_command('makeguitarmigrations', '--check', stdout=out, stderr=err)
 
-    assert 'Missing enforcement migrations' not in err.getvalue()
+    assert 'Missing or outdated enforcement migrations' not in err.getvalue()
 
 
 def test_run_is_idempotent_when_nothing_changed():
@@ -302,7 +303,7 @@ def test_check_passes_when_scoped_to_named_app():
 
     call_command('makeguitarmigrations', 'testapp', '--check', stdout=out, stderr=err)
 
-    assert 'Missing enforcement migrations' not in err.getvalue()
+    assert 'Missing or outdated enforcement migrations' not in err.getvalue()
 
 
 def test_handle_generates_only_for_named_apps(monkeypatch):
@@ -492,7 +493,7 @@ def test_handle_check_only_reports_missing_migrations_and_mti_warnings(monkeypat
     with pytest.raises(CommandError, match='Run `manage.py makeguitarmigrations`'):
         command.handle('testapp', check_only=True)
 
-    assert 'Missing enforcement migrations' in command.stderr.getvalue()
+    assert 'Missing or outdated enforcement migrations' in command.stderr.getvalue()
     assert 'some skipped MTI cascade rule' in command.stderr.getvalue()
 
 
@@ -707,13 +708,113 @@ def test_tenant_policy_operations_are_emitted_for_uncovered_tables():
     command = Command()
     command.stdout = StringIO()
     command.existing.tenant_policies.clear()
+    command.existing.tenant_policy_identities.clear()
 
     operations = command._tenant_operations(app, force_rls=False)
     headers = [line for op in operations for line in op.splitlines() if line.startswith('#')]
 
-    assert '# Tenant RLS on "testapp_release" table!' in headers
+    assert any(header.startswith('# Tenant RLS on "testapp_release" table!') for header in headers)
     # One per policy-eligible table, and none for the multi-hop model.
     assert len(headers) == 6
+    # The CREATE form, not the replacement: there was no policy to replace.
+    assert not any('replaced' in header for header in headers)
+
+
+def test_a_policy_whose_shape_is_unchanged_emits_nothing():
+    """The steady state. Re-running the generator on untouched models must be a no-op.
+
+    Pinned as its own test because it is the precondition for the two below meaning anything:
+    an identity that were unstable across runs would emit a replacement every time, and the
+    drift detection would be indistinguishable from a bug.
+    """
+    app = django_apps.get_app_config('testapp')
+    command = Command()
+    command.stdout = StringIO()
+
+    assert command._tenant_operations(app, force_rls=False) == []
+
+
+def test_a_changed_coverage_shape_emits_a_replacement_not_nothing():
+    """A model gaining a tenant dimension must produce a migration.
+
+    The regression this guards is silent under-enforcement, and it is worth stating plainly:
+    the header used to record only the table name, so a table that had *any* policy was
+    treated as covered forever. Adding a dimension changed the predicate the models describe
+    while the database kept the old, weaker one -- and because the generator emitted nothing,
+    `makemigrations --check` reported nothing to do and CI stayed green.
+    """
+    app = django_apps.get_app_config('testapp')
+    command = Command()
+    command.stdout = StringIO()
+
+    # Pretend the recorded policy was written for a different shape.
+    command.existing.tenant_policy_identities['testapp_release'] = 'stale00000000'
+
+    operations = command._tenant_operations(app, force_rls=False)
+    headers = [line for op in operations for line in op.splitlines() if line.startswith('#')]
+
+    assert len(headers) == 1
+    assert headers[0].startswith('# Tenant RLS replaced on "testapp_release" table!')
+    # The replacement form, because PostgreSQL has no CREATE OR REPLACE POLICY -- re-emitting
+    # the CREATE form would fail migrate with "policy tenant_scope already exists".
+    assert 'sql.replace_table_rls(' in operations[0]
+
+
+def test_check_fails_when_a_policy_shape_changed(monkeypatch):
+    """The gate, end to end -- this is what the whole identity mechanism is for.
+
+    `makemigrations --check` used to exit 0 on a model that had gained a tenant dimension,
+    because the generator emitted nothing and so there was nothing to report. CI stayed green
+    while the database enforced a strictly weaker predicate than every call site implied.
+    """
+    app = django_apps.get_app_config('testapp')
+    real = app_coverage(app)
+    widened = real.tables['testapp_release']._replace(
+        columns={**real.tables['testapp_release'].columns, 'region': 'region_id'}
+    )
+    monkeypatch.setattr(
+        makeguitarmigrations_module,
+        'app_coverage',
+        lambda _app: type(real)(
+            tables={**real.tables, 'testapp_release': widened}, notes=real.notes
+        ),
+    )
+
+    command = Command()
+    command.stdout, command.stderr = StringIO(), StringIO()
+
+    with pytest.raises(CommandError, match='Run `manage.py makeguitarmigrations`'):
+        command.handle(check_only=True)
+
+    assert 'Missing or outdated enforcement migrations' in command.stderr.getvalue()
+    assert 'Tenant RLS replaced on "testapp_release"' in command.stderr.getvalue()
+
+
+def test_the_policy_identity_covers_the_predicate_and_the_exempt_roles():
+    """What must change the identity, and what must not.
+
+    ``force`` is excluded deliberately: it is an ALTER TABLE with its own staged mechanism
+    (``--force-rls``), so folding it in would make flipping GUITARS_RLS_FORCE replace every
+    policy and defeat the retrofit that setting exists for.
+    """
+    app = django_apps.get_app_config('testapp')
+    command = Command()
+    coverage = app_coverage(app).tables['testapp_release']
+    baseline = command._policy_identity('testapp_release', coverage)
+
+    # A second dimension on the same table -- the case that was silently missed.
+    widened = coverage._replace(columns={**coverage.columns, 'region': 'region_id'})
+    assert command._policy_identity('testapp_release', widened) != baseline
+
+    # A renamed tenant column, same dimension name.
+    renamed = coverage._replace(columns={dim: 'other_id' for dim in coverage.columns})
+    assert command._policy_identity('testapp_release', renamed) != baseline
+
+    with override_settings(GUITARS_RLS_EXEMPT_ROLES=['metabase_ro']):
+        assert command._policy_identity('testapp_release', coverage) != baseline
+
+    with override_settings(GUITARS_RLS_FORCE=False):
+        assert command._policy_identity('testapp_release', coverage) == baseline
 
 
 def test_force_rls_stage_skips_an_operation_set_already_written(monkeypatch):
@@ -731,12 +832,12 @@ def test_force_rls_stage_skips_an_operation_set_already_written(monkeypatch):
 # --- Which policies shipped inert -----------------------------------------------
 
 _TWO_POLICY_OPERATIONS = """
-        # Tenant RLS on "table_a" table!
+        # Tenant RLS on "table_a" table! [POLICY:aaaaaaaaaaaa]
         migrations.RunSQL(
             sql=sql.create_table_rls(table='table_a', columns={'l': 'l_id'}, force=True),
             reverse_sql=sql.drop_table_rls(table='table_a'),
         ),
-        # Tenant RLS on "table_b" table!
+        # Tenant RLS on "table_b" table! [POLICY:bbbbbbbbbbbb]
         migrations.RunSQL(
             sql=sql.create_table_rls(table='table_b', columns={'l': 'l_id'}, force=False),
             reverse_sql=sql.drop_table_rls(table='table_b'),
@@ -767,6 +868,21 @@ def test_unforced_policy_tables_handles_the_last_operation_in_a_file():
     only_unforced = _TWO_POLICY_OPERATIONS.replace('force=True', 'force=False')
 
     assert unforced_policy_tables(only_unforced) == {'table_a', 'table_b'}
+
+
+def test_unforced_policy_tables_bounds_a_replacement_operation_too():
+    """A replacement operation is a policy operation, so it must bound the one before it.
+
+    ``--force-rls`` reads ``force=`` out of each operation's own text. If the replacement
+    header were not one of the bounds, a preceding ``force=True`` operation would run on into
+    the replacement, read *its* ``force=False``, and flag the wrong table -- the same
+    off-by-one-operation bug the isolation test above pins for the CREATE form.
+    """
+    with_replacement = _TWO_POLICY_OPERATIONS.replace(
+        '# Tenant RLS on "table_b"', '# Tenant RLS replaced on "table_b"'
+    )
+
+    assert unforced_policy_tables(with_replacement) == {'table_b'}
 
 
 def test_the_real_migrations_ship_every_policy_forced():

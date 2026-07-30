@@ -289,7 +289,7 @@ it on a fully-forced database correctly does nothing.
 **4. Gate on it.** In your deploy pipeline:
 
 ```bash
-python manage.py audittenancy --require-force
+python manage.py audittenancy --require-force --require-match
 ```
 
 ## Auditing
@@ -301,6 +301,7 @@ enforcement binds. `audittenancy` asks the database:
 ```bash
 python manage.py audittenancy                    # warn on findings
 python manage.py audittenancy --require-force    # fail on a table the owner bypasses
+python manage.py audittenancy --require-match    # fail on a policy the models disagree with
 python manage.py audittenancy billing            # scope to an app
 ```
 
@@ -309,8 +310,22 @@ It catches, in descending order of danger:
 - **`ENABLE` without `FORCE`** — the table looks protected in `pg_policies` and
   constrains nothing.
 - **A missing policy or missing `ENABLE`** — a migration that never ran, or drift.
+- **A policy that no longer says what the models say** — the table has a healthy
+  `tenant_scope` policy that scopes on the *wrong* dimensions, or on a renamed
+  column. Every existence check passes while each statement is filtered by a
+  weaker predicate than the Python layer believes. The usual cause is a
+  replacement migration that was generated but never applied. Fatal only under
+  `--require-match`, since a run that precedes the deploy's own `migrate` is
+  legitimately in this state.
 - **Unexpected coverage** — a policy on a table the models no longer consider
   tenanted. Harmless to reads, but the database and the models disagree.
+
+The third is compared by the two facts a *stored* policy preserves, not by its
+text: PostgreSQL rewrites a policy expression when it saves it (casts made
+explicit, columns parenthesised), so the text it hands back never equals what
+was emitted, however correct the policy is. What survives intact is the set of
+`tenant.*` settings the predicate reads, and — from `pg_depend`, which records a
+real dependency per column a policy touches — the set of columns it references.
 
 Both commands share one definition of what coverage *should* be
 (`guitars.tenancy.discovery`), so the build gate and the live audit cannot

@@ -94,11 +94,20 @@ docker compose down -v && docker compose up -d --wait   # once, if upgrading an 
 uv run pytest                 # full suite (settings: tests.settings, auto via pyproject)
 uv run pytest --cov=guitars --cov-report=term-missing
 uv run pytest tests/test_base.py::TestUpdate::test_x   # single test
+export DJANGO_SETTINGS_MODULE=tests.settings    # REQUIRED for anything touching tests/testapp
 python manage.py makemigrations                # core + trigger/rule migrations (default)
 python manage.py makemigrations --check        # CI: fail if either layer is missing
 python manage.py makeguitarmigrations          # trigger/rule migrations only (standalone)
 python manage.py makeguitarmigrations --check  # CI: fail if missing
 ```
+
+> ⚠️ **`manage.py` defaults to `core.settings`, which has no test app.** It uses
+> `os.environ.setdefault`, so every `manage.py` command silently runs against a harness with
+> `LOCAL_APPS = []` unless you export `DJANGO_SETTINGS_MODULE=tests.settings`. Without it
+> `makemigrations --check` reports "No changes detected" and `audittenancy` reports
+> "0 table(s) expected … passed" — both **vacuously green**, having examined nothing. `pytest`
+> is unaffected (it sets the module via `pyproject.toml`), so a suite that passes proves
+> nothing about the commands. Always export it before verifying migrations or tenancy by hand.
 
 Set `GUITARS_AUTO_MAKE_MIGRATIONS = False` to make `makemigrations` skip the enforcement step and use the standalone command instead.
 

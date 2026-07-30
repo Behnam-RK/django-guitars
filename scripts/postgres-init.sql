@@ -20,7 +20,7 @@
 -- The role below is deliberately NOT a superuser.
 --
 -- CREATEDB is required because pytest-django creates `test_guitars` itself. That
--- also makes this role the owner of every table in it -- case 2 above -- which is
+-- also makes this role the owner of every table in it -- case 3 above -- which is
 -- what lets the FORCE tests prove something.
 --
 -- Connection parameters are unchanged from before (guitars/guitars@guitars), so

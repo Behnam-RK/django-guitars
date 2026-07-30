@@ -207,6 +207,13 @@ def _classify(model: type[models.Model]) -> tuple[TableCoverage | None, list[str
             f'left to Python scoping -- {remaining}.'
         )
         by_owner = {}
+        if not own:
+            # Return here rather than falling through to the skip note, which would add a
+            # second note for the same fact -- and a wrong one: it says these dimensions
+            # "have no column on this table or a shared-key ancestor", when what actually
+            # happened is that they have columns on *two* of them. The note above already
+            # says no policy is emitted, and says why.
+            return None, notes
 
     if not own and not by_owner:
         notes.append(_skip_note(model, spec))

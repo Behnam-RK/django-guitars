@@ -208,7 +208,7 @@ from guitars import sql
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("testapp", "0001_trigger_function"),
+        ('testapp', '0001_trigger_function'),
         ("testapp", "0001_initial"),
     ]
 
@@ -883,6 +883,26 @@ def test_unforced_policy_tables_bounds_a_replacement_operation_too():
     )
 
     assert unforced_policy_tables(with_replacement) == {'table_b'}
+
+
+def test_unforced_policy_tables_is_last_write_wins_within_one_file():
+    """Two operations for the SAME table: the later one is the state the database ends in.
+
+    Accumulating into a set instead answers "was this table ever shipped inert", which is a
+    different and useless question -- a table replaced with ``force=True`` would stay on the
+    FORCE backlog forever and ``--force-rls`` would keep writing a migration that changes
+    nothing. Across files the caller already applies this rule; within one it has to hold
+    here, because the caller cannot see the operation boundaries.
+    """
+    inert_then_forced = _TWO_POLICY_OPERATIONS.replace('table_b', 'table_a') + """
+        # Tenant RLS replaced on "table_a" table! [POLICY:cccccccccccc]
+        migrations.RunSQL(
+            sql=sql.replace_table_rls(table='table_a', columns={'l': 'l_id'}, force=True),
+            reverse_sql=sql.drop_table_rls(table='table_a'),
+        ),
+"""
+
+    assert unforced_policy_tables(inert_then_forced) == set()
 
 
 def test_a_replacement_carrying_force_takes_a_table_off_the_backlog(tmp_path, monkeypatch):

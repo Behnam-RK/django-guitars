@@ -199,14 +199,19 @@ def unforced_policy_tables(content: str) -> set[str]:
     *its* ``force=False``, and consumes the header on the way -- flagging the table that is
     already forced and missing the one that is not. Exactly backwards, and only on a file with
     two adjacent operations, which is every real file.
+
+    Within a file the **last** operation for a table wins, the same rule the caller applies
+    across files. Accumulating into a set instead would let a table that shipped
+    ``force=False`` and was later replaced with ``force=True`` in the same file stay on the
+    FORCE backlog forever -- a redundant migration for a table that is already forced, which
+    is the bug this function was extracted to fix, one scope smaller.
     """
     matches = list(_RE_TENANT_POLICY.finditer(content))
-    unforced = set()
+    state: dict[str, bool] = {}
     for index, match in enumerate(matches):
         end = matches[index + 1].start() if index + 1 < len(matches) else len(content)
-        if 'force=False' in content[match.end() : end]:
-            unforced.add(match.group(1))
-    return unforced
+        state[match.group(1)] = 'force=False' in content[match.end() : end]
+    return {table for table, unforced in state.items() if unforced}
 
 
 def _literal(value: object) -> str:
@@ -214,14 +219,19 @@ def _literal(value: object) -> str:
 
     Dicts and sets are emitted in sorted order so the content digest is stable. An unstable
     rendering produces a new digest -- and therefore a new migration -- on every run.
+
+    Scalars (strings included) go through ``repr``, which is what makes the output valid
+    Python for every value rather than only for the tidy ones: hand-building a string as
+    ``f"'{value}'"`` renders ``db_column="o'brien"`` as a syntax error and a backslash as an
+    escape sequence. For every identifier the kit accepts -- ``sql.policy._bare`` requires a
+    plain lower-case one -- ``repr`` produces the identical single-quoted text, so digests of
+    existing migrations are unchanged.
     """
     if isinstance(value, dict):
         items = ', '.join(f'{_literal(k)}: {_literal(v)}' for k, v in sorted(value.items()))
         return '{' + items + '}'
     if isinstance(value, (list, tuple)):
         return '[' + ', '.join(_literal(item) for item in value) + ']'
-    if isinstance(value, str):
-        return f"'{value}'"
     return repr(value)
 
 
@@ -818,7 +828,13 @@ class Command(BaseCommand):
                 # The rule lives on the table that owns _deleted_at (the model itself, or its
                 # MTI ancestor), matching where `_cascade_operations` places it.
                 table = column_owner(model, '_deleted_at')._meta.db_table
-                for related_model, fk_field, on_delete in self.reverse_relations_mapping[model]:
+                # Sorted for the same reason ``_cascade_operations`` sorts: the mapping holds
+                # sets, whose iteration order varies between runs, and warning text that
+                # reorders itself run to run is not diffable.
+                for related_model, fk_field, on_delete in sorted(
+                    self.reverse_relations_mapping[model],
+                    key=lambda t: (t[0]._meta.db_table, t[1].column),
+                ):
                     if on_delete != models.CASCADE or not has_column(related_model, '_deleted_at'):
                         continue
                     if getattr(fk_field.remote_field, 'parent_link', False):

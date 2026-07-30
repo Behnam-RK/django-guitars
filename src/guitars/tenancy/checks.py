@@ -12,17 +12,34 @@ from __future__ import annotations
 
 from django.apps import apps as django_apps
 from django.conf import settings
-from django.core.checks import Error, register
+from django.core.checks import Error, Warning, register
 
-from .manager import TenantEnforcement
+from .manager import TenantEnforcement, tenant_spec
 
 
-__all__ = ['check_guitar_models_have_a_tenant', 'check_tenancy_settings', 'register_checks']
+__all__ = [
+    'check_guitar_models_have_a_tenant',
+    'check_migrate_bypasses_tenancy',
+    'check_tenancy_settings',
+    'register_checks',
+]
 
 #: Django wants a stable id per check; namespaced so it cannot collide.
 ENFORCE_ID = 'guitars.tenancy.E001'
 AUTOFILL_ID = 'guitars.tenancy.E002'
 TENANT_MODEL_ID = 'guitars.tenancy.E003'
+MIGRATE_OVERRIDE_ID = 'guitars.tenancy.W001'
+
+
+def _candidate_models(app_configs) -> list:
+    """The models a check should consider.
+
+    ``manage.py check <app>`` passes ``app_configs``; reporting models outside the
+    requested apps would make a scoped run answer a question it was not asked.
+    """
+    if app_configs is None:
+        return list(django_apps.get_models())
+    return [model for config in app_configs for model in config.get_models()]
 
 
 def check_tenancy_settings(app_configs, **kwargs) -> list[Error]:
@@ -77,14 +94,9 @@ def check_guitar_models_have_a_tenant(app_configs, **kwargs) -> list[Error]:
     if GuitarModel._guitars_tenancy_installed:
         return []
 
-    # `manage.py check <app>` passes app_configs; reporting models outside the requested
-    # apps would make a scoped run answer a question it was not asked.
-    candidates = (
-        django_apps.get_models()
-        if app_configs is None
-        else [model for config in app_configs for model in config.get_models()]
-    )
-    subclasses = [model for model in candidates if issubclass(model, GuitarModel)]
+    subclasses = [
+        model for model in _candidate_models(app_configs) if issubclass(model, GuitarModel)
+    ]
     if not subclasses:
         # Nobody used the rung, so nothing is unprotected. Staying silent here is what
         # lets a project on the lower rungs run `manage.py check` clean.
@@ -105,7 +117,64 @@ def check_guitar_models_have_a_tenant(app_configs, **kwargs) -> list[Error]:
     ]
 
 
+def check_migrate_bypasses_tenancy(app_configs, **kwargs) -> list[Warning]:
+    """Warn when guitars' ``migrate`` override is not the one that will run.
+
+    ``guitars.management.commands.migrate`` wraps Django's in ``tenancy_bypassed()``,
+    because a ``RunPython`` backfill runs with no tenant scope active and every
+    ``tenant_scope`` policy therefore matches nothing: the ``UPDATE`` reports zero rows,
+    no error is raised, and the migration is marked applied. A backfill that silently did
+    nothing is the worst outcome available -- it surfaces much later as missing data, with
+    a green migration history pointing away from the cause.
+
+    Which override runs is decided by ``INSTALLED_APPS`` order: Django's ``get_commands()``
+    walks ``reversed(apps.get_app_configs())`` and lets each app overwrite the previous
+    entry, so the app listed **earliest** wins. That was an ordering convention documented
+    in a module docstring and enforced by nothing, which is a poor guard for a failure this
+    quiet -- hence this check.
+
+    Resolved by ``isinstance`` against the class rather than by comparing app names, so a
+    project that subclasses the override to add behaviour of its own is correctly silent.
+
+    Gated twice, because a warning that fires where the hazard cannot is a warning people
+    learn to skip: only when some model is actually tenanted, and only when
+    ``GUITARS_TENANT_POLICIES`` leaves the database layer switched on. A ``Warning`` rather
+    than an ``Error`` because a project with no data migrations is unaffected, and only its
+    authors know that.
+    """
+    # Deferred: this module is imported while ``guitars.models.base`` is still executing,
+    # and both of these reach back into the management layer -- which imports models.
+    from django.core.management import get_commands, load_command_class  # noqa: PLC0415
+
+    from guitars.management.commands.migrate import Command as GuitarsMigrate  # noqa: PLC0415
+
+    if not getattr(settings, 'GUITARS_TENANT_POLICIES', True):
+        return []
+    if not any(tenant_spec(model) for model in _candidate_models(app_configs)):
+        return []
+
+    winner = load_command_class(get_commands()['migrate'], 'migrate')
+    if isinstance(winner, GuitarsMigrate):
+        return []
+
+    return [
+        Warning(
+            f"`migrate` resolves to {type(winner).__module__}, not guitars' override, so "
+            f'migrations will run without tenancy bypassed. A RunPython backfill is then '
+            f'filtered by every tenant_scope policy, updates zero rows, and is still marked '
+            f'applied.',
+            hint=(
+                "List 'guitars' earlier in INSTALLED_APPS than the app providing that "
+                'command (the earliest app wins), or have that command subclass '
+                'guitars.management.commands.migrate.Command.'
+            ),
+            id=MIGRATE_OVERRIDE_ID,
+        )
+    ]
+
+
 def register_checks() -> None:
     """Register the checks. Idempotent -- Django's registry is a set, keyed by function."""
     register(check_tenancy_settings)
     register(check_guitar_models_have_a_tenant)
+    register(check_migrate_bypasses_tenancy)

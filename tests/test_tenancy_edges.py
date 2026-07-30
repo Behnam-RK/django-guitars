@@ -9,6 +9,8 @@ never had to.
 
 from __future__ import annotations
 
+import ast
+
 import pytest
 from django.core.management import CommandError, call_command
 from django.db import connection, models
@@ -131,6 +133,19 @@ class TestDimensionsOnTwoAncestors:
         note = next(note for note in notes if 'more than one ancestor' in note)
         assert "'label'" in note
         assert "'region'" in note
+
+    def test_it_is_reported_once_and_not_also_as_uncoverable(self, spread_spec):
+        """One fact, one note.
+
+        The uncoverable-model note says the dimensions "have no column on this table or a
+        shared-key ancestor", which is the opposite of what happened here -- they have
+        columns on *two* ancestors. Emitting both read as two separate problems, and sent
+        the reader looking for a missing column that is not missing.
+        """
+        _, notes = _classify(StadiumTour)
+
+        assert len(notes) == 1
+        assert 'skipped:' not in notes[0]
 
 
 # ─────────────────────────────── audit mode ────────────────────────────── #
@@ -400,6 +415,22 @@ class TestLiteralRendering:
 
     def test_nesting_is_sorted_all_the_way_down(self):
         assert _literal({'k': ['z', 'a']}) == "{'k': ['z', 'a']}"
+
+    def test_ordinary_identifiers_render_single_quoted(self):
+        """The shape every real table and column takes -- and the digests already on disk."""
+        assert _literal('testapp_release') == "'testapp_release'"
+        assert _literal({'label': 'label_id'}) == "{'label': 'label_id'}"
+
+    def test_awkward_strings_stay_valid_python(self):
+        """A hand-built f"'{value}'" would emit a syntax error here, or eat the backslash.
+
+        Unreachable through ``sql.policy._bare``, which refuses anything but a plain
+        lower-case identifier -- but the refusal happens at *migrate* time, in the consuming
+        project, and a migration file that cannot even be imported is a worse way to find
+        out than the ValueError that was supposed to say so.
+        """
+        for value in ("o'brien", 'back\\slash', 'new\nline'):
+            assert ast.literal_eval(_literal(value)) == value
 
 
 class TestGeneratorSettings:

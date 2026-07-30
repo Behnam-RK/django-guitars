@@ -352,6 +352,13 @@ that defines a `migrate` command: Django's `get_commands()` walks
 `reversed(get_app_configs())` and lets each app overwrite the previous entry, so
 the app appearing earliest wins.
 
+That ordering is checked rather than merely documented. `guitars.tenancy.W001`
+resolves the `migrate` that would actually run and warns if it is not this one —
+a warning, not an error, because a project with no data migrations is unaffected,
+and by `isinstance` rather than by app name, so subclassing the override to add
+your own behaviour is silent. It stays quiet when nothing is tenanted or when
+`GUITARS_TENANT_POLICIES = False` leaves the database layer switched off.
+
 ## Performance notes
 
 - **The tenant FK is `CASCADE`**, so if your tenant model is itself

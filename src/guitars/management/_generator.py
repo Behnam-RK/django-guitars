@@ -164,12 +164,17 @@ def create_empty_migration_file(app: AppConfig, name: str) -> str:
     Django prints the path it wrote rather than returning it, so it is parsed back out
     of the captured output. A failure to match is raised rather than guessed at: the
     alternative is rewriting whichever file the glob happened to find first.
+
+    Either separator, because the anchor is there to prove this is a *path* rather than
+    prose mentioning a filename -- and on Windows the path Django prints is separated by
+    backslashes, where insisting on ``/`` turns every generation into the CommandError
+    below.
     """
     buf = StringIO()
     call_command('makemigrations', app.label, '--name', name, '--empty', stdout=buf)
     output = buf.getvalue()
 
-    match = re.search(rf'/(?P<filename>\d{{4}}_{re.escape(name)}\.py)', output)
+    match = re.search(rf'[\\/](?P<filename>\d{{4}}_{re.escape(name)}\.py)', output)
     if not match:
         raise CommandError(f'Could not find the created migration file! Command output: {output}')
 
@@ -223,7 +228,10 @@ def write_migration_file(
             continue
         if any(f'"{dependency[1]}"' in line or f"'{dependency[1]}'" in line for line in lines):
             continue
-        dep_line = f'        ("{dependency[0]}", "{dependency[1]}"),\n'
+        # Single-quoted, matching what Django's own writer emits (it ``repr``s the tuple)
+        # and what a ruff- or black-free formatter leaves alone. The scan above accepts
+        # either quoting, so a file written by an older version still dedupes.
+        dep_line = f"        ('{dependency[0]}', '{dependency[1]}'),\n"
         dep_idx = next(i for i, line in enumerate(lines) if 'dependencies = [' in line)
         lines.insert(dep_idx + 1, dep_line)
 

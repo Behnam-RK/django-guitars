@@ -108,11 +108,25 @@ def _meta(model: type[models.Model]):
     return model._meta
 
 
+@functools.cache
 def tenant_spec(model: type[models.Model]) -> dict[str, str]:
     """``{dimension: lookup}`` for ``model``, or ``{}`` if it is not tenanted.
 
     Read off the model's managers, so a model is tenanted by virtue of *having* a
     ``TenantedManager`` -- there is no second registry to keep in step.
+
+    Cached per model class, because the ``pre_save`` receiver is connected without a
+    sender: it runs on **every** save in the project, tenanted model or not, and each one
+    would otherwise walk ``_meta.managers`` to be told "no" again. A model's managers are
+    fixed once its class is built -- Django copies an abstract base's down at subclass
+    creation -- so the answer cannot change under the cache. A later ``add_to_class`` of a
+    manager would be the one thing that invalidates it; nothing in the kit does that after
+    class creation, and ``GuitarModel``'s own contribution happens at import, before any
+    concrete subclass exists.
+
+    Note the cache lives *inside* the function, so patching the module attribute in a test
+    replaces it wholesale and is unaffected -- which is how ``discovery`` and this module's
+    own ``local_tenant_fields`` are stubbed.
     """
     for manager in _meta(model).managers:
         dimensions = getattr(manager, '_tenant_dimensions', None)

@@ -66,8 +66,10 @@ carry the old SQL — see *Fixed* below for why that matters and how to replace 
   inside `tenancy_bypassed()` — without it a `RunPython` backfill under RLS
   matches no rows and is silently marked applied.
 - `makeguitarmigrations --force-rls`, the second stage of a staged retrofit.
-- System checks `guitars.tenancy.E001`–`E003`, registered at import of
+- System checks `guitars.tenancy.E001`–`E003` and `W001`, registered at import of
   `guitars.models` so they fire even when guitars is used as a pure library.
+  `W001` verifies that the `migrate` override above is the one `INSTALLED_APPS`
+  order actually selects, since losing it is otherwise silent.
 - `docs/` — tenancy, soft deletion, migrations, MTI — plus four ADRs and
   `CONTEXT.md`, the domain glossary.
 

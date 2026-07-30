@@ -15,6 +15,10 @@ providing a ``migrate`` command for a tenanted project. Django's ``get_commands(
 ``reversed(apps.get_app_configs())`` and lets each app overwrite the previous entry, so
 the app appearing **earliest** in ``INSTALLED_APPS`` is the one that wins. The same
 ordering rule applies to the ``makemigrations`` override alongside this one.
+
+Losing that race is silent, so it is checked rather than left to the reader of this
+docstring: ``guitars.tenancy.W001`` resolves the ``migrate`` that would actually run and
+warns when it is not an instance of the class below.
 """
 
 from __future__ import annotations

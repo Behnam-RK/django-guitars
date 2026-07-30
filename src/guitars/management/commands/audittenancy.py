@@ -403,9 +403,13 @@ class Command(BaseCommand):
             + (len(unforced) if require_force else 0)
         )
         if failures:
+            # Findings, not tables: one table can be both drifted and unforced, and counting
+            # it as two tables would overstate the blast radius of a single fix. The heading
+            # above already reports the table counts, and it uses ``unhealthy`` -- a set --
+            # for exactly this reason.
             raise CommandError(
-                f'Tenant RLS audit failed: {failures} table(s) not enforcing what the '
-                f'models describe.'
+                f'Tenant RLS audit failed: {failures} finding(s) at or above the requested '
+                f'severity -- the database is not enforcing what the models describe.'
             )
 
         self.stdout.write(self.style.SUCCESS('Tenant RLS audit passed.'))

@@ -120,11 +120,17 @@ def _classify(model: type[models.Model]) -> tuple[TableCoverage | None, list[str
             # reference a table that has no such column either.
             by_owner.setdefault(column_owner(model, field_name), {})[dimension] = column
 
-    if len(spec) > len(local):
-        uncovered = sorted(set(spec) - set(local))
+    # Only when something *is* covered. A model whose every dimension is multi-hop gets the
+    # skip note below instead -- two notes for one fact, one naming the dimension and one the
+    # lookup, read as two separate problems.
+    if local and len(spec) > len(local):
+        uncovered = sorted(
+            f'{dimension} ({spec[dimension]})' for dimension in set(spec) - set(local)
+        )
         notes.append(
             f"'{_meta(model).db_table}': dimensions {uncovered} traverse a relation and are "
-            f'not covered by its policy (Python scoping still applies).'
+            f'not covered by its policy, which enforces {sorted(local)} '
+            f'(Python scoping still applies to all of them).'
         )
 
     if len(by_owner) > 1:
@@ -174,9 +180,11 @@ def _classify(model: type[models.Model]) -> tuple[TableCoverage | None, list[str
 
 
 def _skip_note(model: type[models.Model], spec: dict[str, str]) -> str:
-    lookups = ', '.join(sorted(spec.values()))
+    """The whole model is uncoverable. Names dimension *and* lookup, since either alone
+    leaves the reader guessing which of the two the message is about."""
+    dimensions = ', '.join(f'{dimension} ({lookup})' for dimension, lookup in sorted(spec.items()))
     return (
-        f"'{_meta(model).db_table}' skipped: tenant dimension(s) [{lookups}] have no column "
+        f"'{_meta(model).db_table}' skipped: tenant dimension(s) {dimensions} have no column "
         f'on this table or a shared-key ancestor, so there is nothing to predicate on. '
         f'Python scoping still applies.'
     )

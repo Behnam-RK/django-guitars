@@ -6,19 +6,36 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     initial = True
 
-    dependencies = [
-    ]
+    dependencies = []
 
     operations = [
         migrations.CreateModel(
             name='Genre',
             fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('_created_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Created at')),
-                ('_updated_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Updated at')),
+                (
+                    'id',
+                    models.BigAutoField(
+                        auto_created=True, primary_key=True, serialize=False, verbose_name='ID'
+                    ),
+                ),
+                (
+                    '_created_at',
+                    models.DateTimeField(
+                        db_default=django.db.models.functions.datetime.Now(),
+                        editable=False,
+                        verbose_name='Created at',
+                    ),
+                ),
+                (
+                    '_updated_at',
+                    models.DateTimeField(
+                        db_default=django.db.models.functions.datetime.Now(),
+                        editable=False,
+                        verbose_name='Updated at',
+                    ),
+                ),
                 ('name', models.CharField(max_length=50)),
             ],
             options={
@@ -28,13 +45,38 @@ class Migration(migrations.Migration):
         migrations.CreateModel(
             name='Band',
             fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('_deleted_at', models.DateTimeField(editable=False, null=True, verbose_name='Deleted at')),
-                ('_created_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Created at')),
-                ('_updated_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Updated at')),
+                (
+                    'id',
+                    models.BigAutoField(
+                        auto_created=True, primary_key=True, serialize=False, verbose_name='ID'
+                    ),
+                ),
+                (
+                    '_deleted_at',
+                    models.DateTimeField(editable=False, null=True, verbose_name='Deleted at'),
+                ),
+                (
+                    '_created_at',
+                    models.DateTimeField(
+                        db_default=django.db.models.functions.datetime.Now(),
+                        editable=False,
+                        verbose_name='Created at',
+                    ),
+                ),
+                (
+                    '_updated_at',
+                    models.DateTimeField(
+                        db_default=django.db.models.functions.datetime.Now(),
+                        editable=False,
+                        verbose_name='Updated at',
+                    ),
+                ),
                 ('name', models.CharField(max_length=100)),
                 ('nickname', models.CharField(blank=True, max_length=100, null=True)),
-                ('genres', models.ManyToManyField(blank=True, related_name='bands', to='testapp.genre')),
+                (
+                    'genres',
+                    models.ManyToManyField(blank=True, related_name='bands', to='testapp.genre'),
+                ),
             ],
             options={
                 'abstract': False,
@@ -44,21 +86,60 @@ class Migration(migrations.Migration):
         migrations.CreateModel(
             name='Album',
             fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('_deleted_at', models.DateTimeField(editable=False, null=True, verbose_name='Deleted at')),
-                ('_created_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Created at')),
-                ('_updated_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Updated at')),
+                (
+                    'id',
+                    models.BigAutoField(
+                        auto_created=True, primary_key=True, serialize=False, verbose_name='ID'
+                    ),
+                ),
+                (
+                    '_deleted_at',
+                    models.DateTimeField(editable=False, null=True, verbose_name='Deleted at'),
+                ),
+                (
+                    '_created_at',
+                    models.DateTimeField(
+                        db_default=django.db.models.functions.datetime.Now(),
+                        editable=False,
+                        verbose_name='Created at',
+                    ),
+                ),
+                (
+                    '_updated_at',
+                    models.DateTimeField(
+                        db_default=django.db.models.functions.datetime.Now(),
+                        editable=False,
+                        verbose_name='Updated at',
+                    ),
+                ),
                 ('title', models.CharField(max_length=100)),
-                ('band', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='albums', to='testapp.band')),
+                (
+                    'band',
+                    models.ForeignKey(
+                        on_delete=django.db.models.deletion.CASCADE,
+                        related_name='albums',
+                        to='testapp.band',
+                    ),
+                ),
             ],
             options={
                 'abstract': False,
                 'default_manager_name': 'objects',
-                'indexes': [models.Index(condition=models.Q(('_deleted_at__isnull', True)), fields=['_deleted_at'], name='album_deleted_at')],
+                'indexes': [
+                    models.Index(
+                        condition=models.Q(('_deleted_at__isnull', True)),
+                        fields=['_deleted_at'],
+                        name='album_deleted_at',
+                    )
+                ],
             },
         ),
         migrations.AddIndex(
             model_name='band',
-            index=models.Index(condition=models.Q(('_deleted_at__isnull', True)), fields=['_deleted_at'], name='band_deleted_at'),
+            index=models.Index(
+                condition=models.Q(('_deleted_at__isnull', True)),
+                fields=['_deleted_at'],
+                name='band_deleted_at',
+            ),
         ),
     ]

@@ -8,7 +8,8 @@ from django.db.models import (
 )
 from django.utils.functional import cached_property
 
-from guitars.models import DutarModel, SetarModel, TarModel
+from guitars.models import DutarModel, GuitarModel, LiveManager, SetarModel, TarModel
+from guitars.tenancy import TenantedManager
 
 
 class Riff(TarModel):
@@ -113,3 +114,122 @@ class Section(SetarModel):
 
     def __str__(self) -> str:
         return self.name
+
+
+# ─────────────────────────────── tenancy ─────────────────────────────── #
+#
+# `tests/settings.py` sets GUITARS_TENANT_MODEL = 'testapp.Label' and
+# GUITARS_TENANT_FIELD = 'label'. The field name is deliberately NOT the default
+# 'tenant': it has to name the column, the reverse accessor, the `tenant.label` session
+# setting, the policy predicate and the scope dimension, and only a non-default value
+# proves all five moved together. The default name is covered by the subprocess probes in
+# `tests/test_ladder.py`.
+#
+# The models above stay untenanted on purpose. A project adopting tenancy does so model by
+# model, and the two kinds have to coexist -- an untenanted model must not start demanding
+# a scope, and a tenanted one must not stop.
+
+
+class Label(SetarModel):
+    """The tenant. Soft-deletable on purpose, which is the more demanding shape.
+
+    A CASCADE tenant FK means `makeguitarmigrations` writes one cascade soft-delete rule
+    onto *this* table per tenanted model, so soft-deleting a label archives its rows. That
+    interacts with row-level security in a way worth having under test rather than in a
+    docstring: see `tests/test_tenancy_models.py`.
+    """
+
+    name = CharField(max_length=100)
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class Release(GuitarModel):
+    """The ordinary tenanted model: own-table tenant column, full kit."""
+
+    title = CharField(max_length=100)
+
+    def __str__(self) -> str:
+        return self.title
+
+
+class Track(GuitarModel):
+    """Tenanted, with a CASCADE FK to another tenanted model.
+
+    Two rules meet on this table -- the cascade soft-delete from `Release` and its own
+    tenant policy -- so it covers a `DO ALSO` rule firing under `FORCE ROW LEVEL SECURITY`.
+    """
+
+    title = CharField(max_length=100)
+    release = ForeignKey(Release, on_delete=CASCADE, related_name='tracks')
+
+    def __str__(self) -> str:
+        return self.title
+
+
+class Tour(GuitarModel):
+    """Root of a tenanted MTI chain. Owns the tenant column on its own table."""
+
+    name = CharField(max_length=100)
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class WorldTour(Tour):
+    """First MTI level: the tenant column is one table up."""
+
+    continents = IntegerField(default=1)
+
+    class Meta:
+        pass
+
+
+class StadiumTour(WorldTour):
+    """Second MTI level: the tenant column is *two* tables up.
+
+    The case `column_owner` exists for -- predicating the owner-join against the immediate
+    parent would reference a table that has no tenant column either.
+    """
+
+    capacity = IntegerField(default=0)
+
+    class Meta:
+        pass
+
+
+class Booking(SetarModel):
+    """Hand-declared `TenantedManager` over `LiveManager`, tenant FK declared by hand.
+
+    The composition path a project takes when it wants scoping without the `GuitarModel`
+    rung -- a nullable tenant, its own `on_delete`, and `GUITARS_TENANT_AUTOFILL` honoured
+    rather than overridden. Only `objects` is scoped, so `_archives` and `_all_objects`
+    stay unscoped here: that asymmetry is the point, and it is what `GuitarModel` exists to
+    stop you having to get right.
+    """
+
+    venue = CharField(max_length=100)
+    label = ForeignKey(Label, on_delete=CASCADE, related_name='bookings')
+
+    objects = TenantedManager(_manager_class=LiveManager, label='label')
+
+    def __str__(self) -> str:
+        return self.venue
+
+
+class Review(SetarModel):
+    """A multi-hop dimension: scoped through a relation, with no local tenant column.
+
+    Python scoping applies; a row-level-security policy cannot, because there is nothing on
+    this table to predicate on. `makeguitarmigrations` and `audittenancy` must both say so
+    out loud instead of skipping it silently.
+    """
+
+    body = CharField(max_length=200)
+    release = ForeignKey(Release, on_delete=CASCADE, related_name='reviews')
+
+    objects = TenantedManager(_manager_class=LiveManager, label='release__label')
+
+    def __str__(self) -> str:
+        return self.body

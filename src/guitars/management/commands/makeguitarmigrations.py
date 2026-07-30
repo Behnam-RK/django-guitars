@@ -618,19 +618,25 @@ class Command(BaseCommand):
             if getattr(fk_field.remote_field, 'parent_link', False):
                 continue
             related_table = related_model._meta.db_table
+            # An FK reached through MTI is not a second FK: it is the *same physical column*
+            # on the ancestor's table. The ancestor appears in this same loop with that
+            # column local to it, so its rule is emitted -- and because every table in an
+            # MTI chain shares one ``_deleted_at``, that one rule already archives the
+            # children too. Emitting anything here would be a duplicate, and warning about
+            # it would report a covered case as a limitation.
+            if fk_field.model is not related_model:
+                continue
             # The flat cascade rule does ``UPDATE related_table SET _deleted_at`` -- only valid
             # when the related child owns ``_deleted_at`` on the very table its FK lives on.
-            # Cascading INTO an MTI child (its column on a farther ancestor) needs a join form
-            # we don't emit yet; surface it instead of writing a rule that references a missing
-            # column.
-            if (
-                not owns_column(related_model, '_deleted_at')
-                or fk_field.model is not related_model
-            ):
+            # An FK declared on an MTI child's *own* table while its ``_deleted_at`` lives on a
+            # farther ancestor needs a join form we don't emit yet; surface it instead of
+            # writing a rule that references a missing column.
+            if not owns_column(related_model, '_deleted_at'):
                 self._mti_cascade_warnings.append(
                     f"Cascade rule for '{related_table}' -> '{owner_table}' skipped: "
-                    f"'{related_model.__name__}' inherits _deleted_at via multi-table "
-                    'inheritance; cascading into an MTI child is not supported yet.'
+                    f"'{related_model.__name__}' declares this foreign key on its own table "
+                    'but inherits _deleted_at from a multi-table-inheritance ancestor, which '
+                    'needs a join form the generator does not emit yet.'
                 )
                 continue
             if (related_table, owner_table) in self.existing.soft_delete_related:

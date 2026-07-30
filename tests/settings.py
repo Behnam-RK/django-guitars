@@ -13,3 +13,7 @@ INSTALLED_APPS = [*INSTALLED_APPS, 'tests.testapp']  # noqa: F405
 
 LOCAL_APPS = ['tests.testapp']
 TRIGGER_FUNCTION_APP = 'tests.testapp'
+
+# Tenancy. The field name is deliberately non-default -- see tests/testapp/models.py.
+GUITARS_TENANT_MODEL = 'testapp.Label'
+GUITARS_TENANT_FIELD = 'label'

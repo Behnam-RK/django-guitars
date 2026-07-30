@@ -91,7 +91,7 @@ def test_no_frozen_sql_name_has_been_dropped():
     """The whole point: a name that shipped must keep resolving."""
     missing = sorted(FROZEN_SQL_NAMES - set(dir(sql)))
     assert not missing, (
-        f'These names are part of guitars.sql\'s frozen interface but no longer '
+        f"These names are part of guitars.sql's frozen interface but no longer "
         f'resolve: {missing}. Already-applied migrations in consuming projects '
         f'reference them, so removing one breaks `migrate` on a fresh database '
         f'there. Re-export it, even if the implementation moved.'
@@ -160,8 +160,7 @@ def test_generator_templates_reference_only_names_that_resolve():
     assert referenced, 'found no sql.* references in the generator -- has the regex rotted?'
     unresolved = sorted(name for name in referenced if not hasattr(sql, name))
     assert not unresolved, (
-        f'{command.name} emits migrations referencing sql names that do not exist: '
-        f'{unresolved}'
+        f'{command.name} emits migrations referencing sql names that do not exist: {unresolved}'
     )
 
 

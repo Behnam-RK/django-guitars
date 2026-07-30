@@ -114,7 +114,7 @@ def test_cascade_operation_warns_when_related_model_is_mti_child_without_own_del
     assert len(command._mti_cascade_warnings) == 1
     warning = command._mti_cascade_warnings[0]
     assert 'testapp_orchestra' in warning
-    assert 'multi-table inheritance' in warning
+    assert 'multi-table-inheritance ancestor' in warning
 
 
 def test_migration_with_digest_returns_false_for_unknown_digest():

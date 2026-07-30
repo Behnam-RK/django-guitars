@@ -9,6 +9,17 @@ which call ``save()``.
 which every rule below tests. It is set transaction-locally (the ``TRUE`` third
 argument to ``set_config``), so it cannot leak past the block that set it.
 
+**Every guard is written ``<> 'on'``, never ``= 'off'``**, and that is not a style
+choice. A custom GUC that has never been set reads as NULL, but one that was set
+transaction-locally and then *rolled back* reads as the **empty string** -- PostgreSQL
+leaves a placeholder behind rather than removing it. Under ``= 'off'`` that empty
+string matches neither branch, so the rule stops firing and ``DELETE`` becomes a real
+delete: one rolled-back transaction containing a ``hard_delete()`` would silently
+turn every later ``.delete()`` on that connection into permanent data loss, for as
+long as the connection lived. ``<> 'on'`` inverts the default, so anything other than
+an explicit opt-in preserves the row. The failure direction has to be "keep the
+data".
+
 The MTI redirect rule at the bottom preserves the child row and stamps the *owner*
 instead -- see the package docstring for the shared-PK invariant it relies on.
 """
@@ -31,7 +42,7 @@ CHECK_RULE_EXISTS_ON_TABLE = """
 CREATE_SOFT_DELETE_RULE = """
     CREATE RULE soft_delete
         AS ON DELETE TO {table}
-        WHERE COALESCE(current_setting('rules.hard_deletion', true), 'off') = 'off'
+        WHERE COALESCE(current_setting('rules.hard_deletion', true), '') <> 'on'
         DO INSTEAD (
             UPDATE {table}
             SET _deleted_at = NOW()
@@ -47,7 +58,7 @@ CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE = """
     CREATE RULE soft_delete_related_{related_table}
         AS ON UPDATE TO {table}
         WHERE old._deleted_at IS NULL AND new._deleted_at IS NOT NULL AND
-              COALESCE(current_setting('rules.hard_deletion', true), 'off') = 'off'
+              COALESCE(current_setting('rules.hard_deletion', true), '') <> 'on'
         DO ALSO (
             UPDATE {related_table}
             SET _deleted_at = NOW()
@@ -67,7 +78,7 @@ DROP_SOFT_DELETE_RELATED_OBJECTS_RULE = """
 CREATE_MTI_SOFT_DELETE_RULE = """
     CREATE RULE soft_delete
         AS ON DELETE TO {child_table}
-        WHERE COALESCE(current_setting('rules.hard_deletion', true), 'off') = 'off'
+        WHERE COALESCE(current_setting('rules.hard_deletion', true), '') <> 'on'
         DO INSTEAD (
             UPDATE {parent_table}
             SET _deleted_at = NOW()

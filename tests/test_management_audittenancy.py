@@ -1,0 +1,169 @@
+"""Tests for the ``audittenancy`` management command.
+
+``makeguitarmigrations --check`` is a *build* gate: it proves the migrations exist. It cannot
+prove they ran, that nobody dropped a policy by hand, or that enforcement actually binds.
+This command asks the database, so it is the gate that runs after a deploy -- and a deploy
+gate that can pass while unprotected is worse than no gate at all.
+
+Every test here therefore has to break something real and watch the command notice. Asserting
+only the happy path would prove the command runs, not that it audits.
+"""
+
+from __future__ import annotations
+
+import pytest
+from django.core.management import CommandError, call_command
+from django.db import connection
+
+from guitars import sql
+from tests.testapp.models import Release
+
+
+def _audit(*args, **options) -> str:
+    """Run the command, returning its stdout. Raises ``CommandError`` on a finding."""
+    from io import StringIO
+
+    out, err = StringIO(), StringIO()
+    call_command('audittenancy', *args, stdout=out, stderr=err, **options)
+    return out.getvalue() + err.getvalue()
+
+
+def _audit_failure(*args, **options) -> str:
+    """Run the command expecting a failure, returning stdout+stderr plus the error text."""
+    from io import StringIO
+
+    out, err = StringIO(), StringIO()
+    with pytest.raises(CommandError) as caught:
+        call_command('audittenancy', *args, stdout=out, stderr=err, **options)
+    return out.getvalue() + err.getvalue() + str(caught.value)
+
+
+@pytest.fixture
+def _execute(db):
+    def run(*statements: str) -> None:
+        with connection.cursor() as cursor:
+            for statement in statements:
+                cursor.execute(statement)
+
+    return run
+
+
+class TestAGoodDatabasePasses:
+    def test_a_migrated_database_is_clean(self, db):
+        output = _audit()
+
+        assert 'audit passed' in output
+        # The count is part of the assertion: "passed" over zero tables is the failure mode
+        # a deploy gate has to be incapable of.
+        assert '6 table(s) expected, 6 enforced' in output
+
+    def test_force_is_already_on_everywhere(self, db):
+        """``GUITARS_RLS_FORCE`` defaults to True, so the strict gate passes out of the box.
+
+        This is the whole reason the default is True: a library that shipped policies which
+        the owning application role bypasses would ship an inert security feature.
+        """
+        assert 'audit passed' in _audit(require_force=True)
+
+    def test_it_reports_the_uncoverable_table(self, db):
+        """The multi-hop model. A named gap, on every run, not a one-off build-time note."""
+        assert 'testapp_review' in _audit()
+
+
+class TestItCatchesRealDamage:
+    def test_a_dropped_policy_fails_the_audit(self, _execute):
+        _execute(sql.drop_tenant_policy(table=Release._meta.db_table))
+
+        output = _audit_failure()
+
+        assert 'testapp_release' in output
+        assert 'no tenant_scope policy' in output
+        assert 'audit failed' in output
+
+    def test_disabled_rls_fails_the_audit(self, _execute):
+        """A policy that exists but is not enabled enforces nothing, and looks fine in
+        ``pg_policies``."""
+        _execute(sql.disable_rls(table=Release._meta.db_table))
+
+        output = _audit_failure()
+
+        assert 'RLS not enabled' in output
+
+    def test_a_missing_force_is_a_warning_by_default(self, _execute):
+        """Off by default so a project mid-retrofit can still audit its policy coverage.
+
+        It is a warning rather than silence because the table *looks* protected: the policy
+        is there, RLS is on, and the owning role sails straight past it.
+        """
+        _execute(sql.no_force_rls(table=Release._meta.db_table))
+
+        output = _audit()
+
+        assert 'audit passed' in output
+        assert 'without FORCE' in output
+        assert 'bypasses it silently' in output
+
+    def test_a_missing_force_fails_under_require_force(self, _execute):
+        _execute(sql.no_force_rls(table=Release._meta.db_table))
+
+        output = _audit_failure(require_force=True)
+
+        assert 'testapp_release' in output
+        assert 'audit failed' in output
+
+    def test_force_without_a_policy_is_still_caught(self, _execute):
+        """FORCE on its own is not protection -- and RLS enabled with *no* policy is
+        default-deny, so this state is loud in production but silent in an audit that only
+        looked at FORCE."""
+        _execute(sql.drop_tenant_policy(table=Release._meta.db_table))
+
+        assert 'no tenant_scope policy' in _audit_failure(require_force=True)
+
+    def test_a_policy_the_models_no_longer_expect_is_reported(self, _execute):
+        """The other direction. Harmless to reads, but the database and the models disagree,
+        and the next person to trust a green audit deserves to know."""
+        _execute(*sql.create_table_rls(table='testapp_band', columns={'label': 'id'}))
+        try:
+            output = _audit()
+
+            assert 'testapp_band' in output
+            assert 'no longer expect one' in output
+        finally:
+            _execute(*sql.drop_table_rls(table='testapp_band'))
+
+
+class TestScoping:
+    def test_a_scoped_run_audits_only_that_app(self, db):
+        assert 'audit passed' in _audit('testapp')
+
+    def test_an_unknown_app_label_is_rejected(self, db):
+        """Not "0 tables, passed".
+
+        A typo'd label in a deploy step would otherwise audit nothing and exit 0 -- a green
+        gate that verified nothing, which is the exact outcome this command exists to
+        prevent.
+        """
+        with pytest.raises(CommandError, match="No installed app with label 'nosuchapp'"):
+            call_command('audittenancy', 'nosuchapp')
+
+    def test_a_scoped_run_will_not_claim_a_policy_is_unexpected(self, _execute):
+        """It cannot tell "not mine" from "gone", so only a full-repo run may say so."""
+        _execute(*sql.create_table_rls(table='testapp_band', columns={'label': 'id'}))
+        try:
+            assert 'no longer expect one' not in _audit('testapp')
+        finally:
+            _execute(*sql.drop_table_rls(table='testapp_band'))
+
+
+class TestOptions:
+    def test_it_audits_the_named_database(self, db):
+        assert 'audit on default' in _audit(database='default')
+
+    def test_a_table_missing_entirely_is_a_finding(self, _execute):
+        """Not a crash. An unmigrated database is the most likely reason to run this."""
+        _execute('DROP TABLE testapp_track CASCADE')
+
+        output = _audit_failure()
+
+        assert 'testapp_track' in output
+        assert 'not found in the database' in output

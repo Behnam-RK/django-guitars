@@ -34,6 +34,7 @@ from guitars.models import (
     TarModel,
     UpdatableModel,
 )
+from tests.testapp.models import Label, Release
 
 
 # ─────────────────────────── the rungs themselves ─────────────────────────── #
@@ -74,10 +75,14 @@ class TestTheLadder:
     def test_guitar_is_setar_plus_tenancy(self):
         assert issubclass(GuitarModel, SetarModel)
 
-        # Tenancy is the *only* thing it adds, and it adds it from settings -- so with the
-        # setting unset (this suite's configuration) the rung is inert by construction.
-        # That state is what `guitars.tenancy.E003` exists to catch; see TestTheSystemCheck.
-        assert GuitarModel._guitars_tenancy_installed is False
+        # This suite configures GUITARS_TENANT_MODEL, so the rung is wired here. The
+        # *unwired* state -- and the E003 error that catches it -- is exercised by the
+        # subprocess probes below, which are the only place a different setting can be used.
+        assert GuitarModel._guitars_tenancy_installed is True
+        # On the abstract rung the FK target is still the lazy string -- Django resolves it
+        # when a concrete subclass is defined, which is what the next assertion checks.
+        assert GuitarModel._meta.get_field('label').related_model == 'testapp.Label'
+        assert Release._meta.get_field('label').related_model is Label
 
     def test_the_soft_delete_index_is_inherited_by_the_tenanted_rung(self):
         """``Meta`` inheritance is easy to break by re-declaring ``class Meta``."""

@@ -104,7 +104,7 @@ import django
 from django.conf import settings
 
 settings.configure(
-    INSTALLED_APPS=['guitars'],
+    INSTALLED_APPS=__INSTALLED_APPS__,
     DATABASES={},
     DEFAULT_AUTO_FIELD='django.db.models.BigAutoField',
     LOCAL_APPS=['guitars'],
@@ -142,12 +142,19 @@ print(json.dumps(result))
 """
 
 
-def _probe(body: str, **settings_extra: object) -> dict:
-    """Run *body* inside a fresh Django process configured with *settings_extra*."""
+def _probe(body: str, installed_apps: list[str] | None = None, **settings_extra: object) -> dict:
+    """Run *body* inside a fresh Django process configured with *settings_extra*.
+
+    ``installed_apps`` is separate from ``settings_extra`` because the template needs it
+    before the keyword expansion, and passing it twice is a TypeError rather than an
+    override.
+    """
     # Token substitution rather than str.format: the template is Python source full of
     # literal braces, and escaping every one of them is a trap the next edit falls into.
-    script = _PROBE.replace('__SETTINGS_EXTRA__', repr(settings_extra)).replace(
-        '__BODY__', textwrap.dedent(body).strip()
+    script = (
+        _PROBE.replace('__INSTALLED_APPS__', repr(installed_apps or ['guitars']))
+        .replace('__SETTINGS_EXTRA__', repr(settings_extra))
+        .replace('__BODY__', textwrap.dedent(body).strip())
     )
     completed = subprocess.run(
         [sys.executable, '-c', script],
@@ -324,6 +331,81 @@ class TestTheSystemCheck:
         )
 
         assert result['ids'] == []
+
+    def test_it_fires_even_when_guitars_is_not_in_installed_apps(self):
+        """The case that needs it most, and the one it used to miss.
+
+        The checks used to be registered only by ``tenancy.install()``, which reaches this
+        module two ways -- ``GuitarsConfig.ready()`` and ``TenantedManager()``. With
+        GUITARS_TENANT_MODEL unset the manager is never constructed, and a project using
+        guitars as a pure library has no INSTALLED_APPS entry for the AppConfig hook. So the
+        one configuration where a model is silently untenanted was the one configuration
+        where nothing said so. Registration now happens at import of ``guitars.models``.
+
+        ``contenttypes`` is borrowed purely as an installed app label to hang a concrete
+        model on; guitars itself is deliberately absent from INSTALLED_APPS.
+        """
+        completed = subprocess.run(
+            [
+                sys.executable,
+                '-c',
+                textwrap.dedent("""
+                    import django
+                    from django.conf import settings
+
+                    settings.configure(
+                        INSTALLED_APPS=['django.contrib.contenttypes'],
+                        DATABASES={},
+                        DEFAULT_AUTO_FIELD='django.db.models.BigAutoField',
+                        LOCAL_APPS=[],
+                        USE_TZ=True,
+                    )
+                    django.setup()
+
+                    from django.core.checks import run_checks
+                    from django.db.models import CharField
+
+                    from guitars.models import GuitarModel
+
+                    class Leaky(GuitarModel):
+                        title = CharField(max_length=50)
+
+                        class Meta(GuitarModel.Meta):
+                            app_label = 'contenttypes'
+                            abstract = False
+
+                    print(sorted(error.id for error in run_checks()))
+                """),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert completed.returncode == 0, completed.stderr
+        assert completed.stdout.strip() == "['guitars.tenancy.E003']"
+
+    def test_it_honours_a_scoped_check_run(self):
+        """``manage.py check <app>`` must not report models outside the apps it was given."""
+        result = _probe(
+            """
+            from django.apps import apps
+
+            from guitars.tenancy.checks import check_guitar_models_have_a_tenant
+
+            other = apps.get_app_config('contenttypes')
+            result['scoped_elsewhere'] = [
+                error.id for error in check_guitar_models_have_a_tenant([other])
+            ]
+            result['unscoped'] = [
+                error.id for error in check_guitar_models_have_a_tenant(None)
+            ]
+            """,
+            installed_apps=['guitars', 'django.contrib.contenttypes'],
+        )
+
+        assert result['scoped_elsewhere'] == []
+        assert result['unscoped'] == ['guitars.tenancy.E003']
 
     def test_it_is_silent_for_a_project_that_never_used_the_rung(self):
         """A project on the lower rungs must be able to run ``manage.py check`` clean.

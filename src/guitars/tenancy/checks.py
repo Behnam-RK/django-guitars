@@ -77,11 +77,14 @@ def check_guitar_models_have_a_tenant(app_configs, **kwargs) -> list[Error]:
     if GuitarModel._guitars_tenancy_installed:
         return []
 
-    subclasses = [
-        model
-        for model in django_apps.get_models()
-        if issubclass(model, GuitarModel) and not model._meta.abstract
-    ]
+    # `manage.py check <app>` passes app_configs; reporting models outside the requested
+    # apps would make a scoped run answer a question it was not asked.
+    candidates = (
+        django_apps.get_models()
+        if app_configs is None
+        else [model for config in app_configs for model in config.get_models()]
+    )
+    subclasses = [model for model in candidates if issubclass(model, GuitarModel)]
     if not subclasses:
         # Nobody used the rung, so nothing is unprotected. Staying silent here is what
         # lets a project on the lower rungs run `manage.py check` clean.

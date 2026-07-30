@@ -25,6 +25,7 @@ from django.db.models.functions import Now
 from django.utils.functional import cached_property
 
 from guitars.tenancy import TenantedManager
+from guitars.tenancy.checks import register_checks
 
 from .soft_deletion import AllObjectsManager, ArchiveManager, LiveManager, SoftDeletableModel
 
@@ -267,14 +268,13 @@ class SetarModel(DutarModel, SoftDeletableModel):
         abstract = True
 
 
-#: The tenant model to point at, ``'app_label.ModelName'``. No default: there is no
-#: sensible one, and guessing would wire a project to the wrong table silently.
-TENANT_MODEL = getattr(settings, 'GUITARS_TENANT_MODEL', None)
-
-#: Name of the foreign key ``GuitarModel`` contributes — and, by construction, the name of
-#: the scope dimension. One setting for both, because two would be two things to keep in
-#: step for no gain: ``tenant(shop=s)`` has to reach ``Model.objects.filter(shop=s)``.
-TENANT_FIELD = getattr(settings, 'GUITARS_TENANT_FIELD', 'tenant')
+# Both read once, at import, because that is when the field has to be named -- and both
+# private for the same reason. A consumer importing them would be holding a snapshot that
+# `override_settings` cannot move, which reads like live configuration and is not. The
+# supported way to ask a model what it is scoped on is `guitars.tenancy.tenant_spec(Model)`,
+# which is derived per model from the manager and therefore always current.
+_TENANT_MODEL = getattr(settings, 'GUITARS_TENANT_MODEL', None)
+_TENANT_FIELD = getattr(settings, 'GUITARS_TENANT_FIELD', 'tenant')
 
 
 class GuitarModel(SetarModel):
@@ -338,17 +338,23 @@ class GuitarModel(SetarModel):
         #    would add a failure mode without closing a hole.
 
 
-if TENANT_MODEL:
-    # Contributed after the class body rather than declared in it, because the field's
-    # *name* comes from a setting and a class body cannot bind a computed attribute name.
-    # ``add_to_class`` is the same entry point Django's own metaclass uses, and abstract
-    # bases have their ``local_fields`` and ``local_managers`` copied down when a concrete
-    # subclass is defined -- which happens later, at consumer import time -- so a field
-    # added here reaches every subclass exactly as a declared one would.
+def _install_tenancy(tenant_model: str, field_name: str) -> None:
+    """Contribute the tenant field and the scoped managers to ``GuitarModel``.
+
+    A function rather than module-level statements so the loop variables do not linger as
+    module globals, and so the whole operation has one name to point at.
+
+    Contributed after the class body rather than declared in it, because the field's *name*
+    comes from a setting and a class body cannot bind a computed attribute name.
+    ``add_to_class`` is the same entry point Django's own metaclass uses, and an abstract
+    base has its ``local_fields`` and ``local_managers`` copied down when a concrete
+    subclass is defined -- which happens later, at consumer import time -- so anything
+    added here reaches every subclass exactly as a declared one would.
+    """
     GuitarModel.add_to_class(
-        TENANT_FIELD,
+        field_name,
         ForeignKey(
-            TENANT_MODEL,
+            tenant_model,
             on_delete=CASCADE,
             # CASCADE, not PROTECT: a tenant's rows are meaningless without it, and the
             # database-level soft delete means "cascade" archives rather than destroys.
@@ -360,7 +366,7 @@ if TENANT_MODEL:
             # active scope by the write guard.
         ),
     )
-    for _name, _manager_class in (
+    for name, manager_class in (
         ('objects', LiveManager),
         ('_archives', ArchiveManager),
         ('_all_objects', AllObjectsManager),
@@ -368,11 +374,27 @@ if TENANT_MODEL:
         # All three, not just the default: ``_archives`` and ``_all_objects`` exist to see
         # rows ``objects`` hides, and an unscoped one would see every tenant's.
         GuitarModel.add_to_class(
-            _name,
+            name,
             TenantedManager(
-                _manager_class=_manager_class,
+                _manager_class=manager_class,
                 autofill=True,
-                **{TENANT_FIELD: TENANT_FIELD},
+                **{field_name: field_name},
             ),
         )
     GuitarModel._guitars_tenancy_installed = True
+
+
+# Registered unconditionally, and deliberately *not* behind ``tenancy.install()``.
+#
+# ``install()`` reaches this module two ways -- ``GuitarsConfig.ready()`` and
+# ``TenantedManager()`` -- and with GUITARS_TENANT_MODEL unset neither fires: the manager is
+# never constructed, and a project using guitars as a pure library has no INSTALLED_APPS
+# entry for the AppConfig hook. That combination is exactly the one E003 exists to catch, so
+# leaving the checks to ``install()`` meant they were absent from the only case that needed
+# them. Checks cost nothing to register and run on demand; the enforcement machinery
+# (an execute wrapper on every query, a pre_save receiver) is not free, so that stays
+# behind the manager that asks for it.
+register_checks()
+
+if _TENANT_MODEL:
+    _install_tenancy(_TENANT_MODEL, _TENANT_FIELD)

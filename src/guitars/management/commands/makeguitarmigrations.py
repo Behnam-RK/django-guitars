@@ -1,18 +1,19 @@
 from __future__ import annotations
 
-import hashlib
 import re
 import textwrap
 from collections import defaultdict
-from io import StringIO
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from django.apps import apps as django_apps
 from django.conf import settings
-from django.core.management import CommandError, call_command
+from django.core.management import CommandError
 from django.core.management.base import BaseCommand
 from django.db import models
+
+from guitars.introspection import column_owner, has_column, is_mti_child, owns_column
+from guitars.management import _generator
 
 
 if TYPE_CHECKING:
@@ -106,7 +107,8 @@ _RE_SOFT_DELETE_RELATED = re.compile(
 # patterns above (which anchor on ``# Updated`` / ``# Soft`` immediately after the comment mark).
 _RE_MTI_UPDATED_AT = re.compile(r'# MTI Updated at Trigger on "([^"]+)" table')
 _RE_MTI_SOFT_DELETE = re.compile(r'# MTI Soft Delete Rule on "([^"]+)" table')
-_RE_DIGEST = re.compile(r'\[DIGEST:(?P<digest>\w+)\]')
+# The [DIGEST:...] marker is matched by _generator.RE_DIGEST, shared with
+# maketenantmigrations -- one pattern, so the two can't drift on what a stamp looks like.
 
 
 class Command(BaseCommand):
@@ -174,17 +176,6 @@ class Command(BaseCommand):
     # Setup helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _is_in_scope(app: AppConfig, requested: set[str]) -> bool:
-        """Return ``True`` if *app* is local and, when scoping, among *requested* labels.
-
-        ``requested`` is the set of positional app labels passed to the command; an
-        empty set means "all local apps" (the default, unscoped behavior). Local-ness
-        is keyed on ``app.name`` (matches ``LOCAL_APPS`` entries like ``tests.testapp``)
-        while scoping is keyed on ``app.label`` (Django's positional args, e.g. ``testapp``).
-        """
-        return app.name in settings.LOCAL_APPS and (not requested or app.label in requested)
-
     def _setup_models_and_reverse_relations(self) -> None:
         """Populate ``all_models`` and ``reverse_relations_mapping`` from installed apps."""
         for app in django_apps.get_app_configs():
@@ -198,52 +189,8 @@ class Command(BaseCommand):
                     )
 
     # ------------------------------------------------------------------
-    # Metadata-column ownership (multi-table inheritance awareness)
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _has(model: type[models.Model], colname: str) -> bool:
-        """Return True if *colname* is reachable on *model* (own table or inherited)."""
-        return hasattr(model, colname)
-
-    @staticmethod
-    def _owns(model: type[models.Model], colname: str) -> bool:
-        """Return True if *colname* is a column on *model*'s OWN table.
-
-        Abstract-base fields are copied onto the concrete model (so they are local and
-        *owned*); MTI-inherited fields are not -- they physically live on an ancestor table.
-        """
-        return any(field.name == colname for field in model._meta.local_fields)
-
-    @classmethod
-    def _column_owner(cls, model: type[models.Model], colname: str) -> type[models.Model]:
-        """Return the concrete model whose physical table declares *colname*.
-
-        ``self`` for own-table columns; the owning ancestor for MTI-inherited columns.
-        """
-        return model._meta.get_field(colname).model
-
-    @classmethod
-    def _is_mti_child(cls, model: type[models.Model], colname: str) -> bool:
-        """Return True if *model* inherits *colname* from an MTI ancestor's table."""
-        return (
-            bool(model._meta.parents)
-            and cls._has(model, colname)
-            and not cls._owns(model, colname)
-        )
-
-    # ------------------------------------------------------------------
     # Migration-file scanning
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _iter_migration_files(app: AppConfig):
-        """Yield ``(path, content)`` for every migration file in *app*."""
-        migrations_dir = Path(app.path) / 'migrations'
-        if not migrations_dir.is_dir():
-            return
-        for path in migrations_dir.glob('*.py'):
-            yield path, path.read_text()
 
     def _scan_existing_custom_operations(self):
         """
@@ -269,7 +216,7 @@ class Command(BaseCommand):
         for app in django_apps.get_app_configs():
             if app.name not in settings.LOCAL_APPS:
                 continue
-            for path, content in self._iter_migration_files(app):
+            for path, content in _generator.iter_migration_files(app):
                 if _RE_TRIGGER_FUNCTION.search(content):
                     trigger_function_dep = (app.label, path.stem)
                 if _RE_PARENT_TRIGGER_FUNCTION.search(content):
@@ -301,41 +248,11 @@ class Command(BaseCommand):
     # Migration-file helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _migration_with_digest_exists(app: AppConfig, operations_digest: str) -> bool:
-        """Return ``True`` if a migration with the given digest already exists in *app*."""
-        migrations_dir = Path(app.path) / 'migrations'
-        if not migrations_dir.is_dir():
-            return False
-        for path in migrations_dir.glob('*.py'):
-            first_line = path.read_text().split('\n', 1)[0]
-            match = _RE_DIGEST.search(first_line)
-            if match and match.group('digest') == operations_digest:
-                return True
-        return False
-
     def _get_trigger_function_host_app(self) -> AppConfig:
         """Return the ``AppConfig`` that will host the singleton trigger-function migration."""
         host_app_name = getattr(settings, 'TRIGGER_FUNCTION_APP', None) or settings.LOCAL_APPS[0]
         host_app_label = host_app_name.rsplit('.', 1)[-1]
         return django_apps.get_app_config(host_app_label)
-
-    def _create_empty_migration_file(
-        self, app: AppConfig, name: str = 'auto_advanced'
-    ) -> str:  # pragma: no cover
-        """Run ``makemigrations --empty`` and return the created filename."""
-        buf = StringIO()
-        call_command('makemigrations', app.label, '--name', name, '--empty', stdout=buf)
-        output = buf.getvalue()
-
-        pattern = rf'/(?P<filename>\d{{4}}_{re.escape(name)}\.py)'
-        match = re.search(pattern, output)
-        if not match:
-            raise CommandError(
-                f'Could not find the created migration file! Command output: {output}'
-            )
-
-        return match.group('filename')
 
     @staticmethod
     def _write_migration_file(
@@ -345,37 +262,20 @@ class Command(BaseCommand):
         operations_digest: str,
         dependencies: list[tuple[str, str]] | None = None,
     ) -> None:
-        """Rewrite a migration file to include the given custom *operations*."""
-        file_path = Path(app.path) / 'migrations' / migration_file
-        lines = file_path.read_text().splitlines(keepends=True)
+        """Rewrite a migration file to include the given custom *operations*.
 
-        # Replace the first line with our digest marker.
-        lines[0] = f'# Generated by makeguitarmigrations command! [DIGEST:{operations_digest}]\n'
-
-        # Insert the sql import right after the existing imports.
-        lines.insert(3, 'from guitars import sql\n')
-        lines.insert(3, '\n')
-
-        # Append indented operations before the closing bracket.
-        for operation in operations:
-            indented = textwrap.indent(operation, ' ' * 8)
-            for line in indented.split('\n'):
-                lines.insert(-1, f'{line}\n')
-
-        # Add dependencies on the singleton function migration(s) if needed. Skip self-refs and
-        # any dependency Django's ``--empty`` scaffold already wrote (e.g. on the latest
-        # migration), so the same function migration isn't listed twice.
-        migration_stem = Path(migration_file).stem
-        for dependency in dependencies or []:
-            if migration_stem == dependency[1]:
-                continue
-            if any(f'"{dependency[1]}"' in line or f"'{dependency[1]}'" in line for line in lines):
-                continue
-            dep_line = f'        ("{dependency[0]}", "{dependency[1]}"),\n'
-            dep_idx = next(i for i, line in enumerate(lines) if 'dependencies = [' in line)
-            lines.insert(dep_idx + 1, dep_line)
-
-        file_path.write_text(''.join(lines))
+        Thin wrapper naming this command's marker text and import line; the mechanics
+        are shared with ``maketenantmigrations`` (see ``_generator``).
+        """
+        _generator.write_migration_file(
+            app=app,
+            migration_file=migration_file,
+            operations=operations,
+            operations_digest=operations_digest,
+            generated_by='makeguitarmigrations',
+            import_line='from guitars import sql',
+            dependencies=dependencies,
+        )
 
     # ------------------------------------------------------------------
     # Trigger function migration
@@ -401,10 +301,8 @@ class Command(BaseCommand):
             )
 
         host_app = self._get_trigger_function_host_app()
-        operations_digest = hashlib.md5(
-            TRIGGER_FUNCTION_OPERATION.encode(), usedforsecurity=False
-        ).hexdigest()
-        migration_file = self._create_empty_migration_file(
+        operations_digest = _generator.digest_of([TRIGGER_FUNCTION_OPERATION])
+        migration_file = _generator.create_empty_migration_file(
             host_app, name='auto_advanced_trigger_function'
         )
         self._write_migration_file(
@@ -445,10 +343,8 @@ class Command(BaseCommand):
             )
 
         host_app = self._get_trigger_function_host_app()
-        operations_digest = hashlib.md5(
-            PARENT_TRIGGER_FUNCTION_OPERATION.encode(), usedforsecurity=False
-        ).hexdigest()
-        migration_file = self._create_empty_migration_file(
+        operations_digest = _generator.digest_of([PARENT_TRIGGER_FUNCTION_OPERATION])
+        migration_file = _generator.create_empty_migration_file(
             host_app, name='auto_advanced_parent_trigger_function'
         )
         self._write_migration_file(
@@ -484,16 +380,13 @@ class Command(BaseCommand):
             primary_key = model._meta.pk.name
 
             # --- updated_at trigger: own table vs. MTI parent-propagation ---
-            if self._owns(model, '_updated_at'):
+            if owns_column(model, '_updated_at'):
                 if table not in self.existing_triggers:
                     operations.append(
                         UPDATED_AT_OPERATION.format(table=table, primary_key=primary_key)
                     )
-            elif (
-                self._is_mti_child(model, '_updated_at')
-                and table not in self.existing_mti_triggers
-            ):
-                owner = self._column_owner(model, '_updated_at')
+            elif is_mti_child(model, '_updated_at') and table not in self.existing_mti_triggers:
+                owner = column_owner(model, '_updated_at')
                 operations.append(
                     MTI_UPDATED_AT_OPERATION.format(
                         child_table=table,
@@ -504,16 +397,15 @@ class Command(BaseCommand):
                 )
 
             # --- soft-delete rule: own table vs. MTI redirect-to-owner ---
-            if self._owns(model, '_deleted_at'):
+            if owns_column(model, '_deleted_at'):
                 if table not in self.existing_soft_deletes:
                     operations.append(
                         SOFT_DELETE_OPERATION.format(table=table, primary_key=primary_key)
                     )
             elif (
-                self._is_mti_child(model, '_deleted_at')
-                and table not in self.existing_mti_soft_deletes
+                is_mti_child(model, '_deleted_at') and table not in self.existing_mti_soft_deletes
             ):
-                owner = self._column_owner(model, '_deleted_at')
+                owner = column_owner(model, '_deleted_at')
                 operations.append(
                     MTI_SOFT_DELETE_OPERATION.format(
                         child_table=table,
@@ -525,7 +417,7 @@ class Command(BaseCommand):
 
             # --- cascade rules for CASCADE FKs pointing at this model (deferred so they
             #     always follow the owner's own soft-delete rule) ---
-            if self._has(model, '_deleted_at'):
+            if has_column(model, '_deleted_at'):
                 deferred.extend(self._cascade_operations(model))
 
         return operations + deferred
@@ -539,7 +431,7 @@ class Command(BaseCommand):
         fire, since the child table's ``_deleted_at`` is never written). The related child's FK
         column holds the shared MTI pk value, so matching it against the owner pk still works.
         """
-        owner = self._column_owner(model, '_deleted_at')
+        owner = column_owner(model, '_deleted_at')
         owner_table = owner._meta.db_table
         owner_pk = owner._meta.pk.column
 
@@ -548,7 +440,7 @@ class Command(BaseCommand):
             self.reverse_relations_mapping[model],
             key=lambda t: (t[0]._meta.db_table, t[1].column),
         ):
-            if on_delete != models.CASCADE or not self._has(related_model, '_deleted_at'):
+            if on_delete != models.CASCADE or not has_column(related_model, '_deleted_at'):
                 continue
             # The MTI parent-link (a CASCADE OneToOne) is structural, not a user cascade FK --
             # the MTI redirect rule already ties the child's deletion to the owner, so no
@@ -561,7 +453,10 @@ class Command(BaseCommand):
             # Cascading INTO an MTI child (its column on a farther ancestor) needs a join form
             # we don't emit yet; surface it instead of writing a rule that references a missing
             # column.
-            if not self._owns(related_model, '_deleted_at') or fk_field.model is not related_model:
+            if (
+                not owns_column(related_model, '_deleted_at')
+                or fk_field.model is not related_model
+            ):
                 self._mti_cascade_warnings.append(
                     f"Cascade rule for '{related_table}' -> '{owner_table}' skipped: "
                     f"'{related_model.__name__}' inherits _deleted_at via multi-table "
@@ -610,13 +505,13 @@ class Command(BaseCommand):
             if app.name not in settings.LOCAL_APPS or app.label in requested:
                 continue
             for model in app.get_models():
-                if not self._has(model, '_deleted_at'):
+                if not has_column(model, '_deleted_at'):
                     continue
                 # The rule lives on the table that owns _deleted_at (the model itself, or its
                 # MTI ancestor), matching where `_cascade_operations` places it.
-                table = self._column_owner(model, '_deleted_at')._meta.db_table
+                table = column_owner(model, '_deleted_at')._meta.db_table
                 for related_model, _fk_field, on_delete in self.reverse_relations_mapping[model]:
-                    if on_delete != models.CASCADE or not self._has(related_model, '_deleted_at'):
+                    if on_delete != models.CASCADE or not has_column(related_model, '_deleted_at'):
                         continue
                     if getattr(_fk_field.remote_field, 'parent_link', False):
                         continue
@@ -658,14 +553,7 @@ class Command(BaseCommand):
         # Positional app labels scope generation; empty => all local apps.
         requested: set[str] = set(app_labels)
 
-        # Mirror Django's own makemigrations: reject unknown app labels outright
-        # rather than silently matching nothing, which would otherwise let a typo
-        # turn `--check` into a no-op that exits 0 having validated zero apps.
-        for app_label in sorted(requested):
-            try:
-                django_apps.get_app_config(app_label)
-            except LookupError as err:
-                raise CommandError(str(err)) from err
+        _generator.validate_app_labels(requested)
 
         # Step 1: Ensure the singleton function migration(s) exist, so all subsequent app
         # migrations can safely depend on them. Scoped to the requested apps, but still hosted
@@ -675,11 +563,11 @@ class Command(BaseCommand):
         in_scope_models = [
             model
             for app in django_apps.get_app_configs()
-            if self._is_in_scope(app, requested)
+            if _generator.is_in_scope(app, requested)
             for model in app.get_models()
         ]
-        needs_trigger_function = any(self._owns(m, '_updated_at') for m in in_scope_models)
-        needs_parent_function = any(self._is_mti_child(m, '_updated_at') for m in in_scope_models)
+        needs_trigger_function = any(owns_column(m, '_updated_at') for m in in_scope_models)
+        needs_parent_function = any(is_mti_child(m, '_updated_at') for m in in_scope_models)
 
         changes_made = needs_trigger_function and self._ensure_trigger_function_migration(
             check_only=check_only
@@ -695,7 +583,7 @@ class Command(BaseCommand):
         # Intentionally skips cross-app CASCADE rules whose parent app isn't in
         # scope (see `_scoped_cascade_gap_notes`) -- surfaced below, not silent.
         for app in django_apps.get_app_configs():
-            if not self._is_in_scope(app, requested):
+            if not _generator.is_in_scope(app, requested):
                 continue
 
             operations = self._build_operations(app)
@@ -703,17 +591,15 @@ class Command(BaseCommand):
                 continue
 
             operations_blob = '\n'.join(operations)
-            operations_digest = hashlib.md5(
-                operations_blob.encode(), usedforsecurity=False
-            ).hexdigest()
-            if self._migration_with_digest_exists(app, operations_digest):
+            operations_digest = _generator.digest_of(operations)
+            if _generator.migration_with_digest_exists(app, operations_digest):
                 continue
 
             if check_only:
                 check_missing.append((app.label, operations))
                 continue
 
-            migration_file = self._create_empty_migration_file(app)
+            migration_file = _generator.create_empty_migration_file(app, 'auto_advanced')
             self._write_migration_file(
                 app=app,
                 migration_file=migration_file,

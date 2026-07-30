@@ -24,7 +24,9 @@ database keeps score; you just write models. Use only the pieces you need.
   `_updated_at` trigger live in the database itself. Other backends are on the
   roadmap.
 
-> **Status:** early days (alpha). The API may still shift between minor versions.
+> **Status:** 1.0.0. The public API — the base models, the managers, the
+> `guitars.sql` names generated migrations depend on, and the `GUITARS_*`
+> settings — is stable, and breaking changes now require a major version.
 
 ## Installation
 
@@ -40,6 +42,18 @@ INSTALLED_APPS = [
     "guitars",
 ]
 ```
+
+## Where to find what
+
+| If you want to… | Read |
+| --- | --- |
+| pick a base model | [Pick your instrument](#pick-your-instrument), below |
+| understand soft deletion, cascades and `hard_delete` | [`docs/soft-deletion.md`](docs/soft-deletion.md) |
+| scope rows to a tenant | [`docs/tenancy.md`](docs/tenancy.md) |
+| use multi-table inheritance | [`docs/mti.md`](docs/mti.md) |
+| know how the triggers, rules and policies get into your database | [`docs/migrations.md`](docs/migrations.md) |
+| know *why* something was built this way | [`docs/adr/`](docs/adr/) |
+| upgrade from 0.7 | [`CHANGELOG.md`](CHANGELOG.md) |
 
 ## Pick your instrument
 

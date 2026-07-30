@@ -1,6 +1,6 @@
 [project]
 name = "django-guitars"
-version = "0.7.0"
+version = "1.0.0"
 description = "A kit of reusable Django utilities: base models, PostgreSQL soft deletion, and more."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -154,3 +154,7 @@ omit = [
 
 [tool.coverage.report]
 show_missing = true
+# The kit's whole claim is that behaviour is enforced rather than hoped for, and an
+# unexercised enforcement path is indistinguishable from an absent one. CI runs pytest
+# with --cov, so this is the gate; a new branch ships with a test or does not ship.
+fail_under = 100

@@ -6,7 +6,6 @@ from guitars import sql
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ('testapp', '0001_initial'),
     ]
@@ -17,5 +16,4 @@ class Migration(migrations.Migration):
             sql=sql.CREATE_UPDATED_AT_TRIGGER_FUNCTION,
             reverse_sql=sql.DROP_UPDATED_AT_TRIGGER_FUNCTION,
         ),
-
     ]

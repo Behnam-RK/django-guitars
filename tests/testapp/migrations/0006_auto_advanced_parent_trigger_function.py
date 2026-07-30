@@ -6,9 +6,8 @@ from guitars import sql
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ("testapp", "0002_auto_advanced_trigger_function"),
+        ('testapp', '0002_auto_advanced_trigger_function'),
         ('testapp', '0005_ensemble_section_orchestra_and_more'),
     ]
 
@@ -18,5 +17,4 @@ class Migration(migrations.Migration):
             sql=sql.CREATE_PARENT_UPDATED_AT_TRIGGER_FUNCTION,
             reverse_sql=sql.DROP_PARENT_UPDATED_AT_TRIGGER_FUNCTION,
         ),
-
     ]

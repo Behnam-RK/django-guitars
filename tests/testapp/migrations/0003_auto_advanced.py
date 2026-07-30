@@ -6,9 +6,8 @@ from guitars import sql
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ("testapp", "0002_auto_advanced_trigger_function"),
+        ('testapp', '0002_auto_advanced_trigger_function'),
         ('testapp', '0002_auto_advanced_trigger_function'),
     ]
 
@@ -18,31 +17,26 @@ class Migration(migrations.Migration):
             sql=sql.CREATE_UPDATED_AT_TRIGGER.format(table='testapp_genre', primary_key='id'),
             reverse_sql=sql.DROP_UPDATED_AT_TRIGGER.format(table='testapp_genre'),
         ),
-
         # Updated at Trigger on "testapp_band" table!
         migrations.RunSQL(
             sql=sql.CREATE_UPDATED_AT_TRIGGER.format(table='testapp_band', primary_key='id'),
             reverse_sql=sql.DROP_UPDATED_AT_TRIGGER.format(table='testapp_band'),
         ),
-
         # Soft Delete Rule on "testapp_band" table!
         migrations.RunSQL(
             sql=sql.CREATE_SOFT_DELETE_RULE.format(table='testapp_band', primary_key='id'),
             reverse_sql=sql.DROP_SOFT_DELETE_RULE.format(table='testapp_band'),
         ),
-
         # Updated at Trigger on "testapp_album" table!
         migrations.RunSQL(
             sql=sql.CREATE_UPDATED_AT_TRIGGER.format(table='testapp_album', primary_key='id'),
             reverse_sql=sql.DROP_UPDATED_AT_TRIGGER.format(table='testapp_album'),
         ),
-
         # Soft Delete Rule on "testapp_album" table!
         migrations.RunSQL(
             sql=sql.CREATE_SOFT_DELETE_RULE.format(table='testapp_album', primary_key='id'),
             reverse_sql=sql.DROP_SOFT_DELETE_RULE.format(table='testapp_album'),
         ),
-
         # Soft Delete Related Rule on "testapp_album" that is related to "testapp_band"!
         migrations.RunSQL(
             sql=sql.CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE.format(
@@ -55,5 +49,4 @@ class Migration(migrations.Migration):
                 table='testapp_band', related_table='testapp_album'
             ),
         ),
-
     ]

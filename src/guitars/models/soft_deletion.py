@@ -61,14 +61,29 @@ class LiveQuerySet(QuerySet):
 
 
 class LiveManager(Manager):
-    """Default manager — returns only live records (``_deleted_at IS NULL``)."""
+    """Default manager — returns only live records (``_deleted_at IS NULL``).
+
+    These three managers override ``get_queryset()`` for one reason only: to append the
+    ``.lives`` / ``.archives`` filter. Everything else is Django's, and that includes
+    **instantiating ``self._queryset_class`` rather than a hard-coded class name**.
+
+    That is load-bearing, not style. ``_queryset_class`` is Django's documented seam for
+    swapping the queryset a manager hands out, and a subclass that sets it expects to be
+    obeyed — ``guitars.tenancy.TenantedManager`` sets it to a subclass whose
+    ``bulk_create`` carries the tenant write guard, then calls ``super().get_queryset()``.
+    Naming ``LiveQuerySet`` here directly would hand back an unguarded queryset while the
+    manager still advertised the guarded one: a security guard that reads as installed and
+    silently does nothing. Covered by
+    ``tests/test_soft_deletion.py::TestManagerQuerySetClass``.
+    """
 
     _queryset_class = LiveQuerySet
 
     def get_queryset(self) -> LiveQuerySet:
-        # ``_hints`` is a real runtime attribute (set in Manager.__init__) that django-stubs
-        # doesn't declare.
-        return LiveQuerySet(model=self.model, using=self._db, hints=self._hints).lives  # ty: ignore[unresolved-attribute]
+        # ``self._queryset_class``, never the class named above -- see the note on
+        # ``_queryset_class`` below. ``_hints`` is a real runtime attribute (set in
+        # Manager.__init__) that django-stubs doesn't declare.
+        return self._queryset_class(model=self.model, using=self._db, hints=self._hints).lives  # ty: ignore[unresolved-attribute]
 
 
 class HardDeletableQuerySet(LiveQuerySet):
@@ -123,15 +138,24 @@ class HardDeletableQuerySet(LiveQuerySet):
         Used both for non-MTI models and, per model, by instance-level ``hard_delete`` -- which
         collects the whole MTI chain into its own child-first ``model_order`` and deletes each
         table separately, so this must never reach into ancestor tables.
+
+        Three statements, three ``execute`` calls -- like the MTI path above, and not
+        splice-able back into one string: a parameterised multi-statement ``execute`` only
+        works under client-side binding, so one call would break the moment a consumer sets
+        psycopg's ``server_side_binding`` option. ``atomic()`` is what keeps the split safe:
+        the switch is transaction-local, and in autocommit each statement would otherwise be
+        its own transaction -- the switch expiring before the DELETE it exists to unlock,
+        which then archives instead of deleting.
         """
         with connection.cursor() as cursor:
             query = self.query.clone()
             query.__class__ = sql.DeleteQuery
             compiled, params = query.sql_with_params()
             with transaction.atomic():
-                return cursor.execute(
-                    f'{SWITCH_ON_HARD_DELETION}\n{compiled};\n{SWITCH_OFF_HARD_DELETION}', params
-                )
+                cursor.execute(SWITCH_ON_HARD_DELETION)
+                result = cursor.execute(compiled, params)
+                cursor.execute(SWITCH_OFF_HARD_DELETION)
+                return result
 
 
 class ArchiveManager(Manager):
@@ -140,7 +164,7 @@ class ArchiveManager(Manager):
     _queryset_class = HardDeletableQuerySet
 
     def get_queryset(self) -> HardDeletableQuerySet:
-        return HardDeletableQuerySet(
+        return self._queryset_class(
             model=self.model,
             using=self._db,
             hints=self._hints,  # ty: ignore[unresolved-attribute]
@@ -148,12 +172,17 @@ class ArchiveManager(Manager):
 
 
 class AllObjectsManager(Manager):
-    """ """
+    """Manager that returns every record, live and soft-deleted alike.
+
+    The unfiltered view, exposed as ``_all_objects``. ``.lives`` and ``.archives`` are
+    mirrored onto the manager so either half is reachable without going through
+    ``get_queryset()`` first.
+    """
 
     _queryset_class = HardDeletableQuerySet
 
     def get_queryset(self) -> HardDeletableQuerySet:
-        return HardDeletableQuerySet(
+        return self._queryset_class(
             model=self.model,
             using=self._db,
             hints=self._hints,  # ty: ignore[unresolved-attribute]
@@ -180,7 +209,7 @@ class SoftDeletableModel(Model):
 
     - ``objects`` (``LiveManager``) — only live records (default).
     - ``_archives`` (``ArchiveManager``) — only soft-deleted records.
-    - ``_all_objects`` (``AllObjectManager``) — everything.
+    - ``_all_objects`` (``AllObjectsManager``) — everything.
     """
 
     _deleted_at = DateTimeField(

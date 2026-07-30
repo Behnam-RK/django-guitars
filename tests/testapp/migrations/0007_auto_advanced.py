@@ -6,9 +6,8 @@ from guitars import sql
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ("testapp", "0002_auto_advanced_trigger_function"),
+        ('testapp', '0002_auto_advanced_trigger_function'),
         ('testapp', '0006_auto_advanced_parent_trigger_function'),
     ]
 
@@ -18,13 +17,11 @@ class Migration(migrations.Migration):
             sql=sql.CREATE_UPDATED_AT_TRIGGER.format(table='testapp_ensemble', primary_key='id'),
             reverse_sql=sql.DROP_UPDATED_AT_TRIGGER.format(table='testapp_ensemble'),
         ),
-
         # Soft Delete Rule on "testapp_ensemble" table!
         migrations.RunSQL(
             sql=sql.CREATE_SOFT_DELETE_RULE.format(table='testapp_ensemble', primary_key='id'),
             reverse_sql=sql.DROP_SOFT_DELETE_RULE.format(table='testapp_ensemble'),
         ),
-
         # MTI Updated at Trigger on "testapp_orchestra" table (parent "testapp_ensemble")!
         migrations.RunSQL(
             sql=sql.CREATE_PARENT_UPDATED_AT_TRIGGER.format(
@@ -35,7 +32,6 @@ class Migration(migrations.Migration):
             ),
             reverse_sql=sql.DROP_PARENT_UPDATED_AT_TRIGGER.format(child_table='testapp_orchestra'),
         ),
-
         # MTI Soft Delete Rule on "testapp_orchestra" table (parent "testapp_ensemble")!
         migrations.RunSQL(
             sql=sql.CREATE_MTI_SOFT_DELETE_RULE.format(
@@ -46,7 +42,6 @@ class Migration(migrations.Migration):
             ),
             reverse_sql=sql.DROP_MTI_SOFT_DELETE_RULE.format(child_table='testapp_orchestra'),
         ),
-
         # MTI Updated at Trigger on "testapp_chamberorchestra" table (parent "testapp_ensemble")!
         migrations.RunSQL(
             sql=sql.CREATE_PARENT_UPDATED_AT_TRIGGER.format(
@@ -55,9 +50,10 @@ class Migration(migrations.Migration):
                 parent_pk='id',
                 child_pk='orchestra_ptr_id',
             ),
-            reverse_sql=sql.DROP_PARENT_UPDATED_AT_TRIGGER.format(child_table='testapp_chamberorchestra'),
+            reverse_sql=sql.DROP_PARENT_UPDATED_AT_TRIGGER.format(
+                child_table='testapp_chamberorchestra'
+            ),
         ),
-
         # MTI Soft Delete Rule on "testapp_chamberorchestra" table (parent "testapp_ensemble")!
         migrations.RunSQL(
             sql=sql.CREATE_MTI_SOFT_DELETE_RULE.format(
@@ -66,21 +62,20 @@ class Migration(migrations.Migration):
                 parent_pk='id',
                 child_pk='orchestra_ptr_id',
             ),
-            reverse_sql=sql.DROP_MTI_SOFT_DELETE_RULE.format(child_table='testapp_chamberorchestra'),
+            reverse_sql=sql.DROP_MTI_SOFT_DELETE_RULE.format(
+                child_table='testapp_chamberorchestra'
+            ),
         ),
-
         # Updated at Trigger on "testapp_section" table!
         migrations.RunSQL(
             sql=sql.CREATE_UPDATED_AT_TRIGGER.format(table='testapp_section', primary_key='id'),
             reverse_sql=sql.DROP_UPDATED_AT_TRIGGER.format(table='testapp_section'),
         ),
-
         # Soft Delete Rule on "testapp_section" table!
         migrations.RunSQL(
             sql=sql.CREATE_SOFT_DELETE_RULE.format(table='testapp_section', primary_key='id'),
             reverse_sql=sql.DROP_SOFT_DELETE_RULE.format(table='testapp_section'),
         ),
-
         # Soft Delete Related Rule on "testapp_section" that is related to "testapp_ensemble"!
         migrations.RunSQL(
             sql=sql.CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE.format(
@@ -93,5 +88,4 @@ class Migration(migrations.Migration):
                 table='testapp_ensemble', related_table='testapp_section'
             ),
         ),
-
     ]

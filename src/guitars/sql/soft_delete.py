@@ -1,0 +1,100 @@
+"""Raw SQL for PostgreSQL-enforced soft deletion.
+
+``.delete()`` never reaches Python: an ``ON DELETE ... DO INSTEAD`` rule rewrites it
+into an ``UPDATE`` that stamps ``_deleted_at``. Because the rewrite happens in the
+database, it holds for ``queryset.delete()``, cascades and raw SQL alike -- none of
+which call ``save()``.
+
+``hard_delete()`` opts out by setting the ``rules.hard_deletion`` session variable,
+which every rule below tests. It is set transaction-locally (the ``TRUE`` third
+argument to ``set_config``), so it cannot leak past the block that set it.
+
+**Every guard is written ``<> 'on'``, never ``= 'off'``**, and that is not a style
+choice. A custom GUC that has never been set reads as NULL, but one that was set
+transaction-locally and then *rolled back* reads as the **empty string** -- PostgreSQL
+leaves a placeholder behind rather than removing it. Under ``= 'off'`` that empty
+string matches neither branch, so the rule stops firing and ``DELETE`` becomes a real
+delete: one rolled-back transaction containing a ``hard_delete()`` would silently
+turn every later ``.delete()`` on that connection into permanent data loss, for as
+long as the connection lived. ``<> 'on'`` inverts the default, so anything other than
+an explicit opt-in preserves the row. The failure direction has to be "keep the
+data".
+
+**Every rule is created ``OR REPLACE``**, which is what makes replacing one safe.
+PostgreSQL swaps the definition in place inside the transaction, so there is no
+instant at which the table has no ``soft_delete`` rule -- and an instant without it
+is an instant in which ``DELETE`` means what it says. The alternative, reversing the
+enforcement migration and re-applying it, opens exactly that window between two
+commands (and reverses every migration after it besides). A database carrying the
+pre-1.0.0 ``= 'off'`` guard is upgraded by re-running these statements, nothing
+more; see ``docs/soft-deletion.md``.
+
+The MTI redirect rule at the bottom preserves the child row and stamps the *owner*
+instead -- see the package docstring for the shared-PK invariant it relies on.
+"""
+
+# *********************************************************************************
+# ****************************** Soft Deletion Rules ******************************
+# *********************************************************************************
+
+SWITCH_ON_HARD_DELETION = "SELECT set_config('rules.hard_deletion', 'on', TRUE);"
+
+SWITCH_OFF_HARD_DELETION = "SELECT set_config('rules.hard_deletion', 'off', TRUE);"
+
+CHECK_RULE_EXISTS_ON_TABLE = """
+    SELECT rulename
+    FROM pg_rules
+    WHERE rulename = '{rule}' AND
+          tablename = '{table}';
+"""
+
+CREATE_SOFT_DELETE_RULE = """
+    CREATE OR REPLACE RULE soft_delete
+        AS ON DELETE TO {table}
+        WHERE COALESCE(current_setting('rules.hard_deletion', true), '') <> 'on'
+        DO INSTEAD (
+            UPDATE {table}
+            SET _deleted_at = NOW()
+            WHERE {primary_key} = old.{primary_key} AND _deleted_at IS NULL
+        );
+"""
+
+DROP_SOFT_DELETE_RULE = """
+    DROP RULE soft_delete ON {table};
+"""
+
+CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE = """
+    CREATE OR REPLACE RULE soft_delete_related_{related_table}
+        AS ON UPDATE TO {table}
+        WHERE old._deleted_at IS NULL AND new._deleted_at IS NOT NULL AND
+              COALESCE(current_setting('rules.hard_deletion', true), '') <> 'on'
+        DO ALSO (
+            UPDATE {related_table}
+            SET _deleted_at = NOW()
+            WHERE {foreign_key} = old.{primary_key}
+        );
+"""
+
+DROP_SOFT_DELETE_RELATED_OBJECTS_RULE = """
+    DROP RULE soft_delete_related_{related_table} ON {table};
+"""
+
+# ---- MTI soft-delete rule (on the child table, soft-deletes the owner, preserves child row) ----
+# ``DO INSTEAD`` suppresses the physical delete of the child row and marks the owning ancestor
+# instead. The ``_deleted_at IS NULL`` guard makes it idempotent across the per-table DELETEs
+# Django issues for an MTI chain, so the owner's cascade rules fire exactly once.
+
+CREATE_MTI_SOFT_DELETE_RULE = """
+    CREATE OR REPLACE RULE soft_delete
+        AS ON DELETE TO {child_table}
+        WHERE COALESCE(current_setting('rules.hard_deletion', true), '') <> 'on'
+        DO INSTEAD (
+            UPDATE {parent_table}
+            SET _deleted_at = NOW()
+            WHERE {parent_pk} = old.{child_pk} AND _deleted_at IS NULL
+        );
+"""
+
+DROP_MTI_SOFT_DELETE_RULE = """
+    DROP RULE soft_delete ON {child_table};
+"""

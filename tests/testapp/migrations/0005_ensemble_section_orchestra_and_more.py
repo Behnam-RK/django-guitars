@@ -6,7 +6,6 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ('testapp', '0004_riff'),
     ]
@@ -15,10 +14,32 @@ class Migration(migrations.Migration):
         migrations.CreateModel(
             name='Ensemble',
             fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('_deleted_at', models.DateTimeField(editable=False, null=True, verbose_name='Deleted at')),
-                ('_created_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Created at')),
-                ('_updated_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Updated at')),
+                (
+                    'id',
+                    models.BigAutoField(
+                        auto_created=True, primary_key=True, serialize=False, verbose_name='ID'
+                    ),
+                ),
+                (
+                    '_deleted_at',
+                    models.DateTimeField(editable=False, null=True, verbose_name='Deleted at'),
+                ),
+                (
+                    '_created_at',
+                    models.DateTimeField(
+                        db_default=django.db.models.functions.datetime.Now(),
+                        editable=False,
+                        verbose_name='Created at',
+                    ),
+                ),
+                (
+                    '_updated_at',
+                    models.DateTimeField(
+                        db_default=django.db.models.functions.datetime.Now(),
+                        editable=False,
+                        verbose_name='Updated at',
+                    ),
+                ),
                 ('name', models.CharField(max_length=100)),
             ],
             options={
@@ -29,10 +50,32 @@ class Migration(migrations.Migration):
         migrations.CreateModel(
             name='Section',
             fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('_deleted_at', models.DateTimeField(editable=False, null=True, verbose_name='Deleted at')),
-                ('_created_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Created at')),
-                ('_updated_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Updated at')),
+                (
+                    'id',
+                    models.BigAutoField(
+                        auto_created=True, primary_key=True, serialize=False, verbose_name='ID'
+                    ),
+                ),
+                (
+                    '_deleted_at',
+                    models.DateTimeField(editable=False, null=True, verbose_name='Deleted at'),
+                ),
+                (
+                    '_created_at',
+                    models.DateTimeField(
+                        db_default=django.db.models.functions.datetime.Now(),
+                        editable=False,
+                        verbose_name='Created at',
+                    ),
+                ),
+                (
+                    '_updated_at',
+                    models.DateTimeField(
+                        db_default=django.db.models.functions.datetime.Now(),
+                        editable=False,
+                        verbose_name='Updated at',
+                    ),
+                ),
                 ('name', models.CharField(max_length=100)),
             ],
             options={
@@ -43,19 +86,43 @@ class Migration(migrations.Migration):
         migrations.CreateModel(
             name='Orchestra',
             fields=[
-                ('ensemble_ptr', models.OneToOneField(auto_created=True, on_delete=django.db.models.deletion.CASCADE, parent_link=True, primary_key=True, serialize=False, to='testapp.ensemble')),
+                (
+                    'ensemble_ptr',
+                    models.OneToOneField(
+                        auto_created=True,
+                        on_delete=django.db.models.deletion.CASCADE,
+                        parent_link=True,
+                        primary_key=True,
+                        serialize=False,
+                        to='testapp.ensemble',
+                    ),
+                ),
                 ('conductor', models.CharField(max_length=100)),
             ],
             bases=('testapp.ensemble',),
         ),
         migrations.AddIndex(
             model_name='ensemble',
-            index=models.Index(condition=models.Q(('_deleted_at__isnull', True)), fields=['_deleted_at'], name='ensemble_deleted_at'),
+            index=models.Index(
+                condition=models.Q(('_deleted_at__isnull', True)),
+                fields=['_deleted_at'],
+                name='ensemble_deleted_at',
+            ),
         ),
         migrations.CreateModel(
             name='ChamberOrchestra',
             fields=[
-                ('orchestra_ptr', models.OneToOneField(auto_created=True, on_delete=django.db.models.deletion.CASCADE, parent_link=True, primary_key=True, serialize=False, to='testapp.orchestra')),
+                (
+                    'orchestra_ptr',
+                    models.OneToOneField(
+                        auto_created=True,
+                        on_delete=django.db.models.deletion.CASCADE,
+                        parent_link=True,
+                        primary_key=True,
+                        serialize=False,
+                        to='testapp.orchestra',
+                    ),
+                ),
                 ('seats', models.IntegerField(default=0)),
             ],
             bases=('testapp.orchestra',),
@@ -63,10 +130,18 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name='section',
             name='orchestra',
-            field=models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='sections', to='testapp.orchestra'),
+            field=models.ForeignKey(
+                on_delete=django.db.models.deletion.CASCADE,
+                related_name='sections',
+                to='testapp.orchestra',
+            ),
         ),
         migrations.AddIndex(
             model_name='section',
-            index=models.Index(condition=models.Q(('_deleted_at__isnull', True)), fields=['_deleted_at'], name='section_deleted_at'),
+            index=models.Index(
+                condition=models.Q(('_deleted_at__isnull', True)),
+                fields=['_deleted_at'],
+                name='section_deleted_at',
+            ),
         ),
     ]

@@ -1,7 +1,7 @@
 """Tests for the makeguitarmigrations management command.
 
 ``_create_empty_migration_file`` (which shells out to ``makemigrations --empty``) is
-exercised in practice by the test app's committed advanced migrations applying against
+exercised in practice by the test app's committed enforcement migrations applying against
 Postgres, since running it for real would scaffold a new migration file on disk. Here we
 cover the scanning, idempotency, and SQL-operation-building logic directly, including
 ``_write_migration_file`` against a throwaway ``tmp_path`` migrations directory.
@@ -12,21 +12,24 @@ from io import StringIO
 
 import pytest
 from django.apps import apps
+from django.apps import apps as django_apps
 from django.core.management import CommandError, call_command
 from django.db.models import CASCADE
 from django.test import override_settings
 
+from guitars.management import _generator
 from guitars.management.commands import makeguitarmigrations as makeguitarmigrations_module
-from guitars.management.commands.makeguitarmigrations import Command
+from guitars.management.commands.makeguitarmigrations import Command, unforced_policy_tables
+from guitars.tenancy.discovery import app_coverage
 from tests.testapp.models import Album, Band, Ensemble, Orchestra
 
 
-def test_check_passes_when_advanced_migrations_exist():
+def test_check_passes_when_enforcement_migrations_exist():
     out, err = StringIO(), StringIO()
 
     call_command('makeguitarmigrations', '--check', stdout=out, stderr=err)
 
-    assert 'Missing advanced migrations' not in err.getvalue()
+    assert 'Missing or outdated enforcement migrations' not in err.getvalue()
 
 
 def test_run_is_idempotent_when_nothing_changed():
@@ -40,9 +43,9 @@ def test_run_is_idempotent_when_nothing_changed():
 def test_build_operations_emits_trigger_rule_and_cascade_ops():
     command = Command()
     # Pretend nothing has been generated yet so every operation is produced.
-    command.existing_triggers.clear()
-    command.existing_soft_deletes.clear()
-    command.existing_soft_delete_related.clear()
+    command.existing.triggers.clear()
+    command.existing.soft_deletes.clear()
+    command.existing.soft_delete_related.clear()
 
     ops = '\n'.join(command._build_operations(apps.get_app_config('testapp')))
 
@@ -53,11 +56,11 @@ def test_build_operations_emits_trigger_rule_and_cascade_ops():
 
 def test_build_operations_emits_mti_ops_for_child_models():
     command = Command()
-    command.existing_triggers.clear()
-    command.existing_soft_deletes.clear()
-    command.existing_soft_delete_related.clear()
-    command.existing_mti_triggers.clear()
-    command.existing_mti_soft_deletes.clear()
+    command.existing.triggers.clear()
+    command.existing.soft_deletes.clear()
+    command.existing.soft_delete_related.clear()
+    command.existing.mti_triggers.clear()
+    command.existing.mti_soft_deletes.clear()
 
     ops = '\n'.join(command._build_operations(apps.get_app_config('testapp')))
 
@@ -79,7 +82,7 @@ def test_cascade_operations_skip_non_cascade_and_non_deletable_relations():
     (SET_NULL -- skipped, wrong on_delete) and Riff.band (CASCADE, but Riff has no
     _deleted_at -- skipped, nothing to cascade to)."""
     command = Command()
-    command.existing_soft_delete_related.clear()
+    command.existing.soft_delete_related.clear()
 
     ops = '\n'.join(command._cascade_operations(Band))
 
@@ -98,7 +101,7 @@ def test_cascade_operation_warns_when_related_model_is_mti_child_without_own_del
     """
     command = Command()
     command._mti_cascade_warnings.clear()
-    command.existing_soft_delete_related.clear()
+    command.existing.soft_delete_related.clear()
 
     class _FakeFKField:
         column = 'sponsor_id'
@@ -113,25 +116,25 @@ def test_cascade_operation_warns_when_related_model_is_mti_child_without_own_del
     assert len(command._mti_cascade_warnings) == 1
     warning = command._mti_cascade_warnings[0]
     assert 'testapp_orchestra' in warning
-    assert 'multi-table inheritance' in warning
+    assert 'multi-table-inheritance ancestor' in warning
 
 
 def test_migration_with_digest_returns_false_for_unknown_digest():
     app = apps.get_app_config('testapp')
 
-    assert Command._migration_with_digest_exists(app, 'nonexistentdigest') is False
+    assert _generator.migration_with_digest_exists(app, 'nonexistentdigest') is False
 
 
 def test_iter_migration_files_empty_when_no_migrations_dir(tmp_path):
     app = types.SimpleNamespace(path=str(tmp_path))
 
-    assert list(Command._iter_migration_files(app)) == []
+    assert list(_generator.iter_migration_files(app)) == []
 
 
 def test_migration_with_digest_exists_false_when_no_migrations_dir(tmp_path):
     app = types.SimpleNamespace(path=str(tmp_path))
 
-    assert Command._migration_with_digest_exists(app, 'anydigest') is False
+    assert _generator.migration_with_digest_exists(app, 'anydigest') is False
 
 
 def test_migration_with_digest_exists_true_when_a_file_matches(tmp_path):
@@ -142,10 +145,16 @@ def test_migration_with_digest_exists_true_when_a_file_matches(tmp_path):
     )
     app = types.SimpleNamespace(path=str(tmp_path))
 
-    assert Command._migration_with_digest_exists(app, 'abc123') is True
+    assert _generator.migration_with_digest_exists(app, 'abc123') is True
 
 
-_EMPTY_MIGRATION_SCAFFOLD = '''# Generated by Django 5.2 on 2026-01-01
+# Must match Django's real ``makemigrations --empty`` output, in particular that
+# ``operations = [`` and its closing ``]`` are on SEPARATE lines. Operations are
+# inserted before the file's last line, so a single-line ``operations = []`` scaffold
+# would place them OUTSIDE the list -- producing a structurally broken migration that
+# a substring assertion still passes. See MIGRATION_TEMPLATE in
+# django/db/migrations/writer.py.
+_EMPTY_MIGRATION_SCAFFOLD = """# Generated by Django 5.2 on 2026-01-01
 
 from django.db import migrations
 
@@ -156,18 +165,26 @@ class Migration(migrations.Migration):
         ("testapp", "0001_initial"),
     ]
 
-    operations = []
-'''
+    operations = [
+    ]
+"""
 
 
-def _write_empty_migration(tmp_path, filename='0002_auto_advanced.py'):
+def _write_empty_migration(tmp_path, filename='0002_auto_enforcement.py'):
     migrations_dir = tmp_path / 'migrations'
     migrations_dir.mkdir()
     (migrations_dir / filename).write_text(_EMPTY_MIGRATION_SCAFFOLD)
     return types.SimpleNamespace(path=str(tmp_path)), filename
 
 
-def test_write_migration_file_inserts_digest_import_operations_and_dependency(tmp_path):
+def test_write_migration_file_output_is_exact(tmp_path):
+    """Pin the generated file byte for byte.
+
+    Substring assertions cannot catch the failure that actually matters here: an
+    operation landing outside ``operations = [...]``, or the ``sql`` import landing
+    inside the class body. Both produce a file that still contains every expected
+    fragment and still fails at ``migrate`` time in someone else's project.
+    """
     app, migration_file = _write_empty_migration(tmp_path)
 
     Command._write_migration_file(
@@ -179,12 +196,55 @@ def test_write_migration_file_inserts_digest_import_operations_and_dependency(tm
     )
 
     content = (tmp_path / 'migrations' / migration_file).read_text()
-    assert content.startswith(
-        '# Generated by makeguitarmigrations command! [DIGEST:digest123]\n'
+    assert (
+        content
+        == """# Generated by makeguitarmigrations command! [DIGEST:digest123]
+
+from django.db import migrations
+
+from guitars import sql
+
+
+class Migration(migrations.Migration):
+
+    dependencies = [
+        ('testapp', '0001_trigger_function'),
+        ("testapp", "0001_initial"),
+    ]
+
+    operations = [
+        # op-marker
+        migrations.RunSQL(sql="SELECT 1;"),
+
+    ]
+"""
     )
-    assert 'from guitars import sql' in content
-    assert '# op-marker' in content
-    assert '("testapp", "0001_trigger_function"),' in content
+
+
+def test_write_migration_file_puts_operations_inside_the_operations_list(tmp_path):
+    """The structural guarantee, asserted independently of exact formatting.
+
+    Parsed rather than pattern-matched: if the generated module does not import, or
+    the operation ends up outside the list, ``operations`` is empty and this fails --
+    which is the regression a substring check silently allows through.
+    """
+    app, migration_file = _write_empty_migration(tmp_path)
+
+    Command._write_migration_file(
+        app=app,
+        migration_file=migration_file,
+        operations=['# op-marker\nmigrations.RunSQL(sql="SELECT 1;"),\n'],
+        operations_digest='digest123',
+        dependencies=None,
+    )
+
+    path = tmp_path / 'migrations' / migration_file
+    namespace: dict = {}
+    exec(compile(path.read_text(), str(path), 'exec'), namespace)  # noqa: S102 - generated file
+
+    operations = namespace['Migration'].operations
+    assert len(operations) == 1, 'the operation did not land inside operations = [...]'
+    assert operations[0].sql == 'SELECT 1;'
 
 
 def test_write_migration_file_skips_self_referential_dependency(tmp_path):
@@ -196,11 +256,11 @@ def test_write_migration_file_skips_self_referential_dependency(tmp_path):
         operations=[],
         operations_digest='digest123',
         # The migration's own stem -- must not depend on itself.
-        dependencies=[('testapp', '0002_auto_advanced')],
+        dependencies=[('testapp', '0002_auto_enforcement')],
     )
 
     content = (tmp_path / 'migrations' / migration_file).read_text()
-    assert content.count('0002_auto_advanced') == 0
+    assert content.count('0002_auto_enforcement') == 0
 
 
 def test_write_migration_file_skips_dependency_already_present(tmp_path):
@@ -230,12 +290,12 @@ def test_is_in_scope_matches_local_apps_and_requested_labels():
     guitars_app = apps.get_app_config('guitars')  # installed but not in LOCAL_APPS
 
     # Unscoped (empty request): local apps are in scope, non-local apps are not.
-    assert Command._is_in_scope(testapp, set()) is True
-    assert Command._is_in_scope(guitars_app, set()) is False
+    assert _generator.is_in_scope(testapp, set()) is True
+    assert _generator.is_in_scope(guitars_app, set()) is False
 
     # Scoped: only requested labels among the local apps are in scope.
-    assert Command._is_in_scope(testapp, {'testapp'}) is True
-    assert Command._is_in_scope(testapp, {'other'}) is False
+    assert _generator.is_in_scope(testapp, {'testapp'}) is True
+    assert _generator.is_in_scope(testapp, {'other'}) is False
 
 
 def test_check_passes_when_scoped_to_named_app():
@@ -243,7 +303,7 @@ def test_check_passes_when_scoped_to_named_app():
 
     call_command('makeguitarmigrations', 'testapp', '--check', stdout=out, stderr=err)
 
-    assert 'Missing advanced migrations' not in err.getvalue()
+    assert 'Missing or outdated enforcement migrations' not in err.getvalue()
 
 
 def test_handle_generates_only_for_named_apps(monkeypatch):
@@ -254,17 +314,17 @@ def test_handle_generates_only_for_named_apps(monkeypatch):
         command = Command()
         command.stdout = StringIO()
         # Pretend nothing exists yet so generation would otherwise fire...
-        command.existing_triggers.clear()
-        command.existing_soft_deletes.clear()
-        command.existing_soft_delete_related.clear()
+        command.existing.triggers.clear()
+        command.existing.soft_deletes.clear()
+        command.existing.soft_delete_related.clear()
         # ...and the shared trigger-function migration is already in place.
         command.trigger_function_dependency = ('testapp', '0001_pretend')
-        monkeypatch.setattr(command, '_migration_with_digest_exists', lambda *a, **k: False)
+        monkeypatch.setattr(_generator, 'migration_with_digest_exists', lambda *a, **k: False)
         monkeypatch.setattr(command, '_write_migration_file', lambda **k: None)
         monkeypatch.setattr(
-            command,
-            '_create_empty_migration_file',
-            lambda app, name='auto_advanced': created.append(app.label) or f'0002_{name}.py',
+            _generator,
+            'create_empty_migration_file',
+            lambda app, name='auto_enforcement': created.append(app.label) or f'0002_{name}.py',
         )
         return command
 
@@ -298,7 +358,7 @@ def test_scoped_cascade_gap_reported_when_parent_app_out_of_scope(monkeypatch):
     # Real, already-related models (Album -> Band, CASCADE), reassigned to two
     # fake apps so we can scope to one without the other.
     command = Command()
-    command.existing_soft_delete_related.clear()
+    command.existing.soft_delete_related.clear()
 
     fake_band_app = _fake_app_config('fake.banda', 'banda', [Band])
     fake_album_app = _fake_app_config('fake.albumb', 'albumb', [Album])
@@ -319,7 +379,7 @@ def test_scoped_cascade_gap_reported_when_parent_app_out_of_scope(monkeypatch):
 @override_settings(LOCAL_APPS=['fake.banda', 'fake.albumb'])
 def test_scoped_cascade_gap_empty_when_parent_app_in_scope(monkeypatch):
     command = Command()
-    command.existing_soft_delete_related.clear()
+    command.existing.soft_delete_related.clear()
 
     fake_band_app = _fake_app_config('fake.banda', 'banda', [Band])
     fake_album_app = _fake_app_config('fake.albumb', 'albumb', [Album])
@@ -341,7 +401,7 @@ def test_scoped_cascade_gap_silent_when_child_app_also_out_of_scope(monkeypatch)
     about apps the caller isn't touching right now.
     """
     command = Command()
-    command.existing_soft_delete_related.clear()
+    command.existing.soft_delete_related.clear()
 
     fake_band_app = _fake_app_config('fake.banda', 'banda', [Band])
     fake_album_app = _fake_app_config('fake.albumb', 'albumb', [Album])
@@ -357,12 +417,45 @@ def test_scoped_cascade_gap_silent_when_child_app_also_out_of_scope(monkeypatch)
     assert command._scoped_cascade_gap_notes({'otherc'}) == []
 
 
+@override_settings(LOCAL_APPS=['fake.banda', 'fake.orchestrab'])
+def test_scoped_cascade_gap_silent_for_a_rule_the_generator_would_refuse(monkeypatch):
+    """A relation the writer skips is not a gap *scoping* created, so it must not be named.
+
+    Same synthetic shape as
+    ``test_cascade_operation_warns_when_related_model_is_mti_child_without_own_deleted_at``:
+    an FK on an MTI child's own table while its ``_deleted_at`` lives on an ancestor. A full
+    unscoped run emits no rule for it either -- only a warning -- so reporting it here would
+    promise that naming the parent's app closes a gap that nothing closes.
+    """
+    command = Command()
+    command.existing.soft_delete_related.clear()
+
+    class _FakeFKField:
+        column = 'sponsor_id'
+        model = Orchestra
+        remote_field = types.SimpleNamespace(parent_link=False)
+
+    command.reverse_relations_mapping[Band] = {(Orchestra, _FakeFKField(), CASCADE)}
+    monkeypatch.setattr(
+        makeguitarmigrations_module.django_apps,
+        'get_app_configs',
+        lambda: [
+            _fake_app_config('fake.banda', 'banda', [Band]),
+            _fake_app_config('fake.orchestrab', 'orchestrab', [Orchestra]),
+        ],
+    )
+
+    # Orchestra's app is in scope and Band's -- the cascade's parent -- is not, which is
+    # exactly the shape the note exists for. It is still silent, because there is no rule.
+    assert command._scoped_cascade_gap_notes({'orchestrab'}) == []
+
+
 @override_settings(LOCAL_APPS=['fake.ensemblea', 'fake.orchestrab'])
 def test_scoped_cascade_gap_skips_mti_parent_link(monkeypatch):
     """The MTI parent-link (Orchestra -> Ensemble) is structural, not a user cascade FK --
     it must never be reported as a skipped cascade rule, even when scoped out."""
     command = Command()
-    command.existing_soft_delete_related.clear()
+    command.existing.soft_delete_related.clear()
 
     fake_ensemble_app = _fake_app_config('fake.ensemblea', 'ensemblea', [Ensemble])
     fake_orchestra_app = _fake_app_config('fake.orchestrab', 'orchestrab', [Orchestra])
@@ -388,7 +481,7 @@ def test_scoped_cascade_gap_skipped_when_rule_already_exists(monkeypatch):
         'get_app_configs',
         lambda: [fake_band_app, fake_album_app],
     )
-    command.existing_soft_delete_related.add((Album._meta.db_table, Band._meta.db_table))
+    command.existing.soft_delete_related.add((Album._meta.db_table, Band._meta.db_table))
 
     assert command._scoped_cascade_gap_notes({'albumb'}) == []
 
@@ -399,14 +492,14 @@ def test_handle_skips_app_when_digest_already_exists(monkeypatch):
     no new migration file gets created."""
     command = Command()
     command.stdout = StringIO()
-    command.existing_triggers.clear()
-    command.existing_soft_deletes.clear()
-    command.existing_soft_delete_related.clear()
+    command.existing.triggers.clear()
+    command.existing.soft_deletes.clear()
+    command.existing.soft_delete_related.clear()
     command.trigger_function_dependency = ('testapp', '0001_pretend')
-    monkeypatch.setattr(command, '_migration_with_digest_exists', lambda *a, **k: True)
+    monkeypatch.setattr(_generator, 'migration_with_digest_exists', lambda *a, **k: True)
     created: list[str] = []
     monkeypatch.setattr(
-        command, '_create_empty_migration_file', lambda *a, **k: created.append(1)
+        _generator, 'create_empty_migration_file', lambda *a, **k: created.append(1)
     )
 
     command.handle('testapp', check_only=False)
@@ -418,14 +511,14 @@ def test_handle_check_only_reports_missing_migrations_and_mti_warnings(monkeypat
     command = Command()
     command.stdout = StringIO()
     command.stderr = StringIO()
-    command.existing_triggers.clear()
-    command.existing_soft_deletes.clear()
-    command.existing_soft_delete_related.clear()
-    command.existing_mti_triggers.clear()
-    command.existing_mti_soft_deletes.clear()
+    command.existing.triggers.clear()
+    command.existing.soft_deletes.clear()
+    command.existing.soft_delete_related.clear()
+    command.existing.mti_triggers.clear()
+    command.existing.mti_soft_deletes.clear()
     command.trigger_function_dependency = ('testapp', '0001_pretend')
     command.parent_trigger_function_dependency = ('testapp', '0001_pretend_parent')
-    monkeypatch.setattr(command, '_migration_with_digest_exists', lambda *a, **k: False)
+    monkeypatch.setattr(_generator, 'migration_with_digest_exists', lambda *a, **k: False)
     # Surfaced regardless of check_only -- seeded directly rather than relying on a real
     # MTI-cascade-limitation model, since that's covered at the unit level above.
     command._mti_cascade_warnings.append('some skipped MTI cascade rule')
@@ -433,7 +526,7 @@ def test_handle_check_only_reports_missing_migrations_and_mti_warnings(monkeypat
     with pytest.raises(CommandError, match='Run `manage.py makeguitarmigrations`'):
         command.handle('testapp', check_only=True)
 
-    assert 'Missing advanced migrations' in command.stderr.getvalue()
+    assert 'Missing or outdated enforcement migrations' in command.stderr.getvalue()
     assert 'some skipped MTI cascade rule' in command.stderr.getvalue()
 
 
@@ -442,7 +535,7 @@ def test_handle_writes_scoped_cascade_gap_warning_to_stdout(monkeypatch):
     command = Command()
     command.stdout = StringIO()
     command.stderr = StringIO()
-    command.existing_soft_delete_related.clear()
+    command.existing.soft_delete_related.clear()
     # Both singleton function migrations already exist, so the per-app loop is the only
     # thing left to exercise.
     command.trigger_function_dependency = ('albumb', '0001_pretend')
@@ -461,7 +554,7 @@ def test_handle_writes_scoped_cascade_gap_warning_to_stdout(monkeypatch):
         'get_app_config',
         lambda label: fake_apps_by_label[label],
     )
-    monkeypatch.setattr(command, '_migration_with_digest_exists', lambda *a, **k: True)
+    monkeypatch.setattr(_generator, 'migration_with_digest_exists', lambda *a, **k: True)
 
     command.handle('albumb', check_only=False)
 
@@ -499,3 +592,393 @@ def test_function_dependencies_for_only_includes_deps_the_operations_use():
     ]
     # Only soft-delete / cascade rules -> no function migration dependency at all.
     assert command._function_dependencies_for(rules_only) == []
+
+
+# --- The singleton function migrations and the staged FORCE run ------------------
+#
+# These branches only fire on a project that has not generated them yet, or one part-way
+# through a staged RLS retrofit. Neither state exists in this repo, so each is driven
+# directly with the same throwaway-app pattern used above. They are worth driving rather
+# than leaving uncovered: the trigger-function migration is a hard prerequisite of every
+# other enforcement migration, and the FORCE stage is the one that makes an inert policy
+# bind.
+
+
+def _command_with_scaffold(monkeypatch, tmp_path, filename='0002_auto_enforcement.py'):
+    """A command whose scaffolding writes into *tmp_path* instead of a real app."""
+    app, _ = _write_empty_migration(tmp_path, filename)
+    app.label = 'testapp'
+    command = Command()
+    command.stdout = StringIO()
+    monkeypatch.setattr(command, '_get_trigger_function_host_app', lambda: app)
+    monkeypatch.setattr(_generator, 'create_empty_migration_file', lambda *a, **k: filename)
+    return command, app, filename
+
+
+def test_ensure_trigger_function_migration_writes_and_records_the_dependency(
+    monkeypatch, tmp_path
+):
+    """Every other enforcement migration depends on this one by name, so the recorded
+    ``(app_label, stem)`` is what makes the dependency resolvable rather than a guess."""
+    command, app, filename = _command_with_scaffold(monkeypatch, tmp_path)
+    command.trigger_function_dependency = None
+
+    assert command._ensure_trigger_function_migration() is True
+
+    content = (tmp_path / 'migrations' / filename).read_text()
+    assert 'CREATE_UPDATED_AT_TRIGGER_FUNCTION' in content
+    assert command.trigger_function_dependency == ('testapp', '0002_auto_enforcement')
+    # Second call is a no-op: the singleton is a singleton.
+    assert command._ensure_trigger_function_migration() is False
+
+
+def test_ensure_parent_trigger_function_migration_depends_on_the_base_one(monkeypatch, tmp_path):
+    """Kept as a separate migration so adding MTI support never re-digests -- and therefore
+    never regenerates -- the existing single-table function migration."""
+    command, app, filename = _command_with_scaffold(
+        monkeypatch, tmp_path, '0003_auto_enforcement_parent_trigger_function.py'
+    )
+    command.trigger_function_dependency = ('testapp', '0002_auto_enforcement_trigger_function')
+    command.parent_trigger_function_dependency = None
+
+    assert command._ensure_parent_trigger_function_migration() is True
+
+    content = (tmp_path / 'migrations' / filename).read_text()
+    assert 'CREATE_PARENT_UPDATED_AT_TRIGGER_FUNCTION' in content
+    assert '0002_auto_enforcement_trigger_function' in content
+    assert command._ensure_parent_trigger_function_migration() is False
+
+
+def test_tenant_operations_force_stage_only_touches_policies_that_shipped_unforced():
+    """The flag exists for one situation: policies shipped inert under
+    ``GUITARS_RLS_FORCE = False``, then the setting was turned on.
+
+    Keying on "a policy exists and has no separate FORCE operation" would match every policy
+    generated with FORCE inline -- which is the default -- and emit a redundant migration per
+    tenanted table.
+    """
+    app = django_apps.get_app_config('testapp')
+
+    command = Command()
+    command.stdout = StringIO()
+    # As shipped: policies carry FORCE inline, so the stage has nothing to do.
+    assert command._tenant_operations(app, force_rls=True) == []
+
+    # Now pretend one of them shipped inert.
+    command.existing.unforced_policies.add('testapp_release')
+    operations = command._tenant_operations(app, force_rls=True)
+
+    assert len(operations) == 1
+    assert 'Tenant FORCE RLS on "testapp_release"' in operations[0]
+
+    # And once its FORCE operation exists, it is done.
+    command.existing.tenant_forces.add('testapp_release')
+    assert command._tenant_operations(app, force_rls=True) == []
+
+
+def test_force_rls_stage_writes_a_migration_for_an_inert_policy(monkeypatch):
+    """The staged retrofit's second half, end to end through ``handle``."""
+    written: list[dict] = []
+
+    command = Command()
+    command.stdout = StringIO()
+    command.existing.unforced_policies.add('testapp_release')
+    monkeypatch.setattr(_generator, 'migration_with_digest_exists', lambda *a, **k: False)
+    monkeypatch.setattr(command, '_write_migration_file', lambda **k: written.append(k))
+    monkeypatch.setattr(
+        _generator, 'create_empty_migration_file', lambda app, name: f'0011_{name}.py'
+    )
+
+    command.handle(check_only=False, force_rls=True)
+
+    assert len(written) == 1
+    assert written[0]['migration_file'] == '0011_auto_tenant_force.py'
+    assert 'Tenant FORCE RLS on "testapp_release"' in '\n'.join(written[0]['operations'])
+    assert 'No changes detected' not in command.stdout.getvalue()
+
+
+def test_force_rls_stage_check_only_reports_and_exits_non_zero(monkeypatch):
+    """So a deploy pipeline can gate on "the FORCE stage still has work to do"."""
+    command = Command()
+    command.stdout = StringIO()
+    command.stderr = StringIO()
+    command.existing.unforced_policies.add('testapp_release')
+    monkeypatch.setattr(_generator, 'migration_with_digest_exists', lambda *a, **k: False)
+
+    with pytest.raises(CommandError, match='makeguitarmigrations'):
+        command.handle(check_only=True, force_rls=True)
+
+    assert 'testapp' in command.stderr.getvalue()
+
+
+def test_check_reports_a_missing_trigger_function_migration():
+    """``--check`` on a project that never generated the shared function migration.
+
+    It is a hard prerequisite -- every per-app enforcement migration declares a dependency on
+    it -- so ``--check`` has to fail rather than report the per-app migrations as fine.
+    """
+    command = Command()
+    command.stdout = StringIO()
+    command.trigger_function_dependency = None
+
+    with pytest.raises(CommandError, match='trigger function migration'):
+        command._ensure_trigger_function_migration(check_only=True)
+
+
+def test_check_reports_a_missing_parent_trigger_function_migration():
+    command = Command()
+    command.stdout = StringIO()
+    command.parent_trigger_function_dependency = None
+
+    with pytest.raises(CommandError, match='MTI parent trigger function migration'):
+        command._ensure_parent_trigger_function_migration(check_only=True)
+
+
+def test_tenant_policy_operations_are_emitted_for_uncovered_tables():
+    """The ordinary first run: a tenanted table with no policy operation yet gets one."""
+    app = django_apps.get_app_config('testapp')
+
+    command = Command()
+    command.stdout = StringIO()
+    command.existing.tenant_policies.clear()
+    command.existing.tenant_policy_identities.clear()
+
+    operations = command._tenant_operations(app, force_rls=False)
+    headers = [line for op in operations for line in op.splitlines() if line.startswith('#')]
+
+    assert any(header.startswith('# Tenant RLS on "testapp_release" table!') for header in headers)
+    # One per policy-eligible table, and none for the multi-hop model.
+    assert len(headers) == 6
+    # The CREATE form, not the replacement: there was no policy to replace.
+    assert not any('replaced' in header for header in headers)
+
+
+def test_a_policy_whose_shape_is_unchanged_emits_nothing():
+    """The steady state. Re-running the generator on untouched models must be a no-op.
+
+    Pinned as its own test because it is the precondition for the two below meaning anything:
+    an identity that were unstable across runs would emit a replacement every time, and the
+    drift detection would be indistinguishable from a bug.
+    """
+    app = django_apps.get_app_config('testapp')
+    command = Command()
+    command.stdout = StringIO()
+
+    assert command._tenant_operations(app, force_rls=False) == []
+
+
+def test_a_changed_coverage_shape_emits_a_replacement_not_nothing():
+    """A model gaining a tenant dimension must produce a migration.
+
+    The regression this guards is silent under-enforcement, and it is worth stating plainly:
+    the header used to record only the table name, so a table that had *any* policy was
+    treated as covered forever. Adding a dimension changed the predicate the models describe
+    while the database kept the old, weaker one -- and because the generator emitted nothing,
+    `makemigrations --check` reported nothing to do and CI stayed green.
+    """
+    app = django_apps.get_app_config('testapp')
+    command = Command()
+    command.stdout = StringIO()
+
+    # Pretend the recorded policy was written for a different shape.
+    command.existing.tenant_policy_identities['testapp_release'] = 'stale00000000'
+
+    operations = command._tenant_operations(app, force_rls=False)
+    headers = [line for op in operations for line in op.splitlines() if line.startswith('#')]
+
+    assert len(headers) == 1
+    assert headers[0].startswith('# Tenant RLS replaced on "testapp_release" table!')
+    # The replacement form, because PostgreSQL has no CREATE OR REPLACE POLICY -- re-emitting
+    # the CREATE form would fail migrate with "policy tenant_scope already exists".
+    assert 'sql.replace_table_rls(' in operations[0]
+
+
+def test_check_fails_when_a_policy_shape_changed(monkeypatch):
+    """The gate, end to end -- this is what the whole identity mechanism is for.
+
+    `makemigrations --check` used to exit 0 on a model that had gained a tenant dimension,
+    because the generator emitted nothing and so there was nothing to report. CI stayed green
+    while the database enforced a strictly weaker predicate than every call site implied.
+    """
+    app = django_apps.get_app_config('testapp')
+    real = app_coverage(app)
+    widened = real.tables['testapp_release']._replace(
+        columns={**real.tables['testapp_release'].columns, 'region': 'region_id'}
+    )
+    monkeypatch.setattr(
+        makeguitarmigrations_module,
+        'app_coverage',
+        lambda _app: type(real)(
+            tables={**real.tables, 'testapp_release': widened}, notes=real.notes
+        ),
+    )
+
+    command = Command()
+    command.stdout, command.stderr = StringIO(), StringIO()
+
+    with pytest.raises(CommandError, match='Run `manage.py makeguitarmigrations`'):
+        command.handle(check_only=True)
+
+    assert 'Missing or outdated enforcement migrations' in command.stderr.getvalue()
+    assert 'Tenant RLS replaced on "testapp_release"' in command.stderr.getvalue()
+
+
+def test_the_policy_identity_covers_the_predicate_and_the_exempt_roles():
+    """What must change the identity, and what must not.
+
+    ``force`` is excluded deliberately: it is an ALTER TABLE with its own staged mechanism
+    (``--force-rls``), so folding it in would make flipping GUITARS_RLS_FORCE replace every
+    policy and defeat the retrofit that setting exists for.
+    """
+    app = django_apps.get_app_config('testapp')
+    command = Command()
+    coverage = app_coverage(app).tables['testapp_release']
+    baseline = command._policy_identity('testapp_release', coverage)
+
+    # A second dimension on the same table -- the case that was silently missed.
+    widened = coverage._replace(columns={**coverage.columns, 'region': 'region_id'})
+    assert command._policy_identity('testapp_release', widened) != baseline
+
+    # A renamed tenant column, same dimension name.
+    renamed = coverage._replace(columns={dim: 'other_id' for dim in coverage.columns})
+    assert command._policy_identity('testapp_release', renamed) != baseline
+
+    with override_settings(GUITARS_RLS_EXEMPT_ROLES=['metabase_ro']):
+        assert command._policy_identity('testapp_release', coverage) != baseline
+
+    with override_settings(GUITARS_RLS_FORCE=False):
+        assert command._policy_identity('testapp_release', coverage) == baseline
+
+
+def test_force_rls_stage_skips_an_operation_set_already_written(monkeypatch):
+    """Digest dedupe applies to the FORCE stage too, or re-running it would stack migrations."""
+    command = Command()
+    command.stdout = StringIO()
+    command.existing.unforced_policies.add('testapp_release')
+    monkeypatch.setattr(_generator, 'migration_with_digest_exists', lambda *a, **k: True)
+
+    command.handle(check_only=False, force_rls=True)
+
+    assert 'No changes detected' in command.stdout.getvalue()
+
+
+# --- Which policies shipped inert -----------------------------------------------
+
+_TWO_POLICY_OPERATIONS = """
+        # Tenant RLS on "table_a" table! [POLICY:aaaaaaaaaaaa]
+        migrations.RunSQL(
+            sql=sql.create_table_rls(table='table_a', columns={'l': 'l_id'}, force=True),
+            reverse_sql=sql.drop_table_rls(table='table_a'),
+        ),
+        # Tenant RLS on "table_b" table! [POLICY:bbbbbbbbbbbb]
+        migrations.RunSQL(
+            sql=sql.create_table_rls(table='table_b', columns={'l': 'l_id'}, force=False),
+            reverse_sql=sql.drop_table_rls(table='table_b'),
+        ),
+"""
+
+
+def test_unforced_policy_tables_reads_each_operation_in_isolation():
+    """Two adjacent operations, one forced and one not -- which is every real file.
+
+    A regex spanning a few lines after the header cannot do this: operations are about that
+    long, so a lazy match from the ``force=True`` operation reaches into the next one, claims
+    *its* ``force=False``, and consumes the header on the way. The result is exactly backwards
+    -- the already-forced table gets flagged and the inert one is missed -- so `--force-rls`
+    would force what needs nothing and leave the unprotected table unprotected.
+    """
+    assert unforced_policy_tables(_TWO_POLICY_OPERATIONS) == {'table_b'}
+
+
+def test_unforced_policy_tables_is_empty_when_everything_shipped_forced():
+    forced_only = _TWO_POLICY_OPERATIONS.replace('force=False', 'force=True')
+
+    assert unforced_policy_tables(forced_only) == set()
+
+
+def test_unforced_policy_tables_handles_the_last_operation_in_a_file():
+    """The final operation has no following header to bound it, so it is bounded by EOF."""
+    only_unforced = _TWO_POLICY_OPERATIONS.replace('force=True', 'force=False')
+
+    assert unforced_policy_tables(only_unforced) == {'table_a', 'table_b'}
+
+
+def test_unforced_policy_tables_bounds_a_replacement_operation_too():
+    """A replacement operation is a policy operation, so it must bound the one before it.
+
+    ``--force-rls`` reads ``force=`` out of each operation's own text. If the replacement
+    header were not one of the bounds, a preceding ``force=True`` operation would run on into
+    the replacement, read *its* ``force=False``, and flag the wrong table -- the same
+    off-by-one-operation bug the isolation test above pins for the CREATE form.
+    """
+    with_replacement = _TWO_POLICY_OPERATIONS.replace(
+        '# Tenant RLS on "table_b"', '# Tenant RLS replaced on "table_b"'
+    )
+
+    assert unforced_policy_tables(with_replacement) == {'table_b'}
+
+
+def test_unforced_policy_tables_is_last_write_wins_within_one_file():
+    """Two operations for the SAME table: the later one is the state the database ends in.
+
+    Accumulating into a set instead answers "was this table ever shipped inert", which is a
+    different and useless question -- a table replaced with ``force=True`` would stay on the
+    FORCE backlog forever and ``--force-rls`` would keep writing a migration that changes
+    nothing. Across files the caller already applies this rule; within one it has to hold
+    here, because the caller cannot see the operation boundaries.
+    """
+    inert_then_forced = _TWO_POLICY_OPERATIONS.replace('table_b', 'table_a') + """
+        # Tenant RLS replaced on "table_a" table! [POLICY:cccccccccccc]
+        migrations.RunSQL(
+            sql=sql.replace_table_rls(table='table_a', columns={'l': 'l_id'}, force=True),
+            reverse_sql=sql.drop_table_rls(table='table_a'),
+        ),
+"""
+
+    assert unforced_policy_tables(inert_then_forced) == set()
+
+
+def test_a_replacement_carrying_force_takes_a_table_off_the_backlog(tmp_path, monkeypatch):
+    """The scan is last-write-wins per table, not a union across every migration file.
+
+    The shape that matters is a finished retrofit: ``table_b``'s policy shipped inert under
+    ``GUITARS_RLS_FORCE = False``, then the model changed and the replacement was generated
+    with the setting back on. That replacement inlines FORCE, so it writes no
+    ``# Tenant FORCE RLS`` header for ``tenant_forces`` to find -- and if the scan merely
+    unioned every ``force=False`` it ever saw, ``table_b`` would stay on the backlog forever
+    and ``--force-rls`` would keep emitting a migration for a table that is already forced.
+    That is the same redundant-migration bug the flag was fixed for once already, one file
+    further along.
+    """
+    migrations_dir = tmp_path / 'migrations'
+    migrations_dir.mkdir()
+    # Both tables ship inert first, so the assertion below distinguishes "came off the
+    # backlog" from "the scan found nothing at all".
+    (migrations_dir / '0001_initial.py').write_text(
+        _TWO_POLICY_OPERATIONS.replace('force=True', 'force=False')
+    )
+    (migrations_dir / '0002_replacement.py').write_text(
+        '# Tenant RLS replaced on "table_b" table! [POLICY:cccccccccccc]\n'
+        "sql.replace_table_rls(table='table_b', columns={'l': 'l_id'}, force=True),\n"
+    )
+
+    app = django_apps.get_app_config('testapp')
+    monkeypatch.setattr(app, 'path', str(tmp_path))
+
+    command = Command()
+
+    # Both are recorded as policied; only the one whose latest operation is still inert
+    # remains something --force-rls has to act on.
+    assert {'table_a', 'table_b'} <= command.existing.tenant_policies
+    assert command.existing.unforced_policies == {'table_a'}
+
+
+def test_the_real_migrations_ship_every_policy_forced():
+    """GUITARS_RLS_FORCE defaults to True, so this repo's own migrations carry FORCE inline.
+
+    Pinned because it is the precondition for `--force-rls` correctly finding nothing to do.
+    """
+    command = Command()
+
+    assert command.existing.tenant_policies
+    assert command.existing.unforced_policies == set()

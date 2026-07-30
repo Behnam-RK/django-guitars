@@ -5,7 +5,6 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ('testapp', '0007_auto_advanced'),
     ]
@@ -14,11 +13,23 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name='album',
             name='producer',
-            field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='produced_albums', to='testapp.band'),
+            field=models.ForeignKey(
+                blank=True,
+                null=True,
+                on_delete=django.db.models.deletion.SET_NULL,
+                related_name='produced_albums',
+                to='testapp.band',
+            ),
         ),
         migrations.AddField(
             model_name='riff',
             name='band',
-            field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.CASCADE, related_name='riffs', to='testapp.band'),
+            field=models.ForeignKey(
+                blank=True,
+                null=True,
+                on_delete=django.db.models.deletion.CASCADE,
+                related_name='riffs',
+                to='testapp.band',
+            ),
         ),
     ]

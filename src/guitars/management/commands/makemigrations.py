@@ -1,12 +1,13 @@
-"""Override of Django's ``makemigrations`` that also generates guitar migrations.
+"""Override of Django's ``makemigrations`` that also generates the enforcement migrations.
 
-By default (``GUITARS_AUTO_MAKE_MIGRATIONS = True``) a single
-``manage.py makemigrations`` produces both the core Django migrations and the
-advanced trigger/rule migrations that ``makeguitarmigrations`` creates -- so the
-soft-delete rules and ``updated_at`` triggers can never be silently forgotten.
+By default (``GUITARS_AUTO_MAKE_MIGRATIONS = True``) a single ``manage.py makemigrations``
+produces both Django's own schema migrations and the enforcement migrations that
+``makeguitarmigrations`` creates -- timestamp triggers, soft-delete rules and tenant
+policies -- so none of them can be silently forgotten. That matters most for the
+soft-delete rule: until it exists in the database, ``.delete()`` destroys rows.
 
-Set ``GUITARS_AUTO_MAKE_MIGRATIONS = False`` to opt out and keep the explicit
-two-command workflow (``makemigrations`` then ``makeguitarmigrations``).
+Set ``GUITARS_AUTO_MAKE_MIGRATIONS = False`` to opt out and keep the explicit two-command
+workflow (``makemigrations`` then ``makeguitarmigrations``).
 """
 
 from __future__ import annotations
@@ -18,15 +19,14 @@ from django.core.management.commands.makemigrations import Command as MakeMigrat
 
 class Command(MakeMigrationsCommand):
     def handle(self, *args, **options):
-        # 1. Always run the real makemigrations first: core migrations must
-        #    exist before the guitar migrations that depend on them.
+        # 1. Always run the real makemigrations first: the schema migrations must exist
+        #    before the enforcement migrations that attach behaviour to those tables.
         super().handle(*args, **options)
 
-        # 2. Recursion + correctness guards. makeguitarmigrations scaffolds its
-        #    migrations via `makemigrations --empty`, which re-enters THIS
-        #    command; skipping on --empty breaks that cycle and is also the
-        #    right behavior (an explicit empty migration should not trigger
-        #    guitar generation). --dry-run: guitar has no no-write mode, so skip.
+        # 2. Recursion + correctness guards. makeguitarmigrations scaffolds its migrations
+        #    via `makemigrations --empty`, which re-enters THIS command; skipping on --empty
+        #    breaks that cycle and is also the right behaviour (an explicit empty migration
+        #    should not trigger generation). --dry-run: the generator has no no-write mode.
         if options.get('empty') or options.get('dry_run'):
             return
 
@@ -34,9 +34,12 @@ class Command(MakeMigrationsCommand):
         if not getattr(settings, 'GUITARS_AUTO_MAKE_MIGRATIONS', True):
             return
 
-        # 4. Delegate to the existing command; --check maps to guitar's check_only.
-        #    Forward any positional app labels so a scoped `makemigrations blog`
-        #    only generates guitar migrations for blog (mirrors Django scoping).
+        # 4. Delegate to the generator; --check maps to its check_only. Forward any
+        #    positional app labels so a scoped `makemigrations blog` scopes the enforcement
+        #    step the same way (mirroring Django's own scoping).
+        #
+        #    --force-rls is deliberately NOT forwarded: it is a staged-retrofit step run by
+        #    hand once a soak is clean, not something a routine makemigrations should do.
         call_command(
             'makeguitarmigrations',
             *args,

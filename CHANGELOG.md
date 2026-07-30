@@ -5,6 +5,192 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] - 2026-07-30
+
+First stable release. Adds multi-tenancy as a database-enforced capability, and
+renames the base models to make room for it.
+
+### ⚠️ BREAKING
+
+**Every rung of the instrument ladder shifted down one.** All three renames are
+behaviour-identical — the same class under a new name:
+
+| 0.7.0 | 1.0.0 | Behaviour |
+| --- | --- | --- |
+| `DutarModel` | `TarModel` | identical |
+| `SetarModel` | `DutarModel` | identical |
+| `GuitarModel` | `SetarModel` | identical |
+| — | `GuitarModel` | **new meaning:** `SetarModel` + tenancy |
+
+To upgrade without adopting tenancy, rename in that order — bottom-up, so no
+intermediate state collides:
+
+```
+GuitarModel -> SetarModel
+SetarModel  -> DutarModel
+DutarModel  -> TarModel
+```
+
+Nothing else about those models changed: no new columns, no new migrations, no
+behavioural difference. `makemigrations` should report no changes afterwards.
+
+`GuitarModel` keeps its name and gains tenancy, so a model left on `GuitarModel`
+by accident will fail loudly rather than quietly: without `GUITARS_TENANT_MODEL`
+the `guitars.tenancy.E003` system check errors and names it.
+
+**The soft-delete rule guards changed.** Databases migrated before 1.0.0 still
+carry the old SQL — see *Fixed* below for why that matters and how to replace it.
+
+### Added
+
+- **Multi-tenancy**, enforced in two layers. `GuitarModel` contributes a non-null
+  tenant `ForeignKey` (target `GUITARS_TENANT_MODEL`, name `GUITARS_TENANT_FIELD`,
+  `CASCADE`, `editable=False`), wraps all three managers in `TenantedManager`, and
+  gets a `tenant_scope` row-level-security policy from `makeguitarmigrations`.
+  The Python layer raises `TenantScopeError` on an unscoped read or a cross-tenant
+  write; the PostgreSQL layer enforces the same scope on joins, cascades,
+  `_base_manager`, `instance.save()` and raw SQL. See
+  [`docs/tenancy.md`](docs/tenancy.md).
+- `guitars.tenancy` public API: `tenant()`, `tenancy_bypassed()`, `@tenanted`,
+  `TenantedManager`, `TenantScopeError`, `get_tenant()`, `is_bypassed()`,
+  `set_reporter()`, `tenant_spec()`, `local_tenant_fields()`.
+- **MTI children get their own policy**, correlated to the ancestor holding the
+  tenant column by the shared primary key. Relying on the ancestor's policy would
+  leave every child-only statement unfiltered. See
+  [ADR 0003](docs/adr/0003-mti-owner-join-policy.md).
+- New settings: `GUITARS_TENANT_MODEL`, `GUITARS_TENANT_FIELD`,
+  `GUITARS_TENANT_ENFORCE`, `GUITARS_TENANT_AUTOFILL`, `GUITARS_TENANT_POLICIES`,
+  `GUITARS_RLS_FORCE`, `GUITARS_RLS_EXEMPT_ROLES`.
+- New commands: `audittenancy` (asks a live database whether the policies bind,
+  with `--require-force` for a deploy gate) and a `migrate` override that runs
+  inside `tenancy_bypassed()` — without it a `RunPython` backfill under RLS
+  matches no rows and is silently marked applied. `audittenancy` also reports
+  when the role it connected as holds `SUPERUSER` or `BYPASSRLS`: every other
+  check reads the catalog, which shows the same "enforced" whoever is asking, so
+  those two would otherwise leave the audit passing over a connection no policy
+  constrains. A warning, never fatal — it describes the connection, not the
+  database.
+- `makeguitarmigrations --force-rls`, the second stage of a staged retrofit.
+- System checks `guitars.tenancy.E001`–`E003` and `W001`, registered at import of
+  `guitars.models` so they fire even when guitars is used as a pure library.
+  `W001` verifies that the `migrate` override above is the one `INSTALLED_APPS`
+  order actually selects, since losing it is otherwise silent.
+- `docs/` — tenancy, soft deletion, migrations, MTI — plus four ADRs and
+  `CONTEXT.md`, the domain glossary.
+
+### Fixed
+
+- `refresh_from_db()` (via `HasCachedPropertyModel`) only expired
+  `cached_property`s declared on the concrete class itself — one inherited from a
+  mixin or an abstract base stayed stale after a refresh, and naming it explicitly
+  in `expire_cached_properties()` raised `KeyError`. The scan now walks the MRO.
+- `queryset.hard_delete()` on a non-MTI model spliced the hard-deletion switch and
+  the `DELETE` into one parameterised multi-statement `execute`, which only works
+  under psycopg's client-side binding (Django's default). It now issues three
+  statements inside the same transaction, like the MTI path always did, so
+  `server_side_binding = True` no longer breaks it.
+- **A rolled-back `hard_delete()` turned every later `.delete()` on that
+  connection into a permanent delete.** `hard_delete()` sets
+  `rules.hard_deletion` transaction-locally; PostgreSQL reverts that on rollback,
+  but not to *unset* — a custom setting that was set and rolled back reads back as
+  the **empty string**. The rule guards tested `= 'off'`, which the empty string
+  matches neither way, so the `DO INSTEAD` rule stopped firing. With
+  `CONN_MAX_AGE` or any pool the blast radius is the connection, not the
+  transaction. All guards are now `<> 'on'`: anything but an explicit opt-in
+  preserves the row.
+
+  **Existing databases need one action.** The rules were created by migrations
+  that call these SQL constants by name, so a database migrated before 1.0.0 still
+  carries the old guard, and no new migration is generated for it — the idempotency
+  digest covers the operation source, not the SQL it expands to. Write a one-off
+  migration that re-runs the same constants; they are now created `OR REPLACE`, so
+  each definition is swapped in place inside one transaction, never leaving the
+  table without a rule. See [`docs/soft-deletion.md`](docs/soft-deletion.md) for the
+  shape.
+
+  Do **not** reverse the enforcement migration and re-apply it. Its `reverse_sql`
+  drops the rules, so between the two `migrate` commands every `.delete()` on those
+  tables is a permanent delete — and reversing to a previous migration unapplies
+  everything after it, not just the enforcement one. New databases are correct on
+  first `migrate`.
+- Role names in `GUITARS_RLS_EXEMPT_ROLES` were interpolated into policy SQL
+  **unquoted**, so `metabase-ro` was a syntax error and `BI_Reader` silently bound
+  `bi_reader`. Role-derived names are now quoted at both nesting levels, and every
+  table/column identifier must prove it is a bare lower-case identifier or the
+  generator refuses at build time rather than emitting SQL that fails inside
+  `migrate`. Output for ordinary lower-case names is byte-identical.
+- `makeguitarmigrations` reported a cascade foreign key reached through MTI as an
+  unsupported limitation, when the ancestor's own rule already covers the whole
+  chain through the shared `_deleted_at`.
+- **A tenant policy was never regenerated once it existed**, so a model that gained
+  a tenant dimension — or had its tenant column renamed, or its
+  `GUITARS_RLS_EXEMPT_ROLES` edited — kept the *old, weaker* predicate in the
+  database. Dedupe was keyed on the table name alone, and the comment header carried
+  none of the predicate, so the generator emitted nothing and
+  `makemigrations --check` reported nothing to do: the Python layer enforced the new
+  dimension while row-level security enforced only the old one, silently, on exactly
+  the paths (raw SQL, `_base_manager`, cascades) where the policy is the only guard.
+
+  Policy headers now carry a `[POLICY:<digest>]` identity covering everything that
+  determines what the policy says, and a changed shape emits `sql.replace_table_rls`
+  — PostgreSQL has no `CREATE OR REPLACE POLICY`, so re-emitting the `CREATE` form
+  would fail `migrate`. `force` is excluded from the identity, keeping the
+  `--force-rls` retrofit workflow unchanged. See
+  [`docs/migrations.md`](docs/migrations.md).
+- **A tenant primary key containing a comma silently widened the policy to several
+  tenants.** The predicate splits the published GUC on `,` and tests membership, so a
+  single pk of `acme,globex` encoded identically to the two-tenant scope
+  `['acme', 'globex']` and PostgreSQL read it as "tenant acme OR tenant globex" —
+  while the Python manager filtered on the exact string and matched neither. The
+  database half was therefore strictly *wider* than the Python half. Such a value is
+  now refused when the scope is published, so it fails closed. Only reachable with a
+  non-integer tenant primary key.
+- `audittenancy` could not see a policy that existed but enforced the **wrong
+  scope**, and counted a table without `FORCE` as "enforced" in its summary. It now
+  compares each live policy's `tenant.*` settings and its `pg_depend` column
+  references against what the models imply — warned by default, fatal under the new
+  `--require-match` — and counts only clean tables as enforced. It also resolves a
+  table name through the search path in the order PostgreSQL does, so two same-named
+  tables in two schemas no longer collide.
+- The settings are compared for **both halves of a policy separately**. `USING`
+  governs reads and `WITH CHECK` governs writes, and they are independently
+  editable: a policy left as `USING (<tenant match>) WITH CHECK (true)` reads as
+  fully scoped while accepting every cross-tenant write, and neither the `USING`
+  settings nor the `pg_depend` columns give it away (`true` references nothing).
+- `makeguitarmigrations` interpolated the primary-key *field name* into the
+  timestamp trigger and soft-delete rule where PostgreSQL needs the *column*. The
+  two agree for an ordinary `id`, so this only bit a model whose primary key sets
+  `db_column` or is a `OneToOneField(primary_key=True)` — where the generated rule
+  named a column that does not exist and failed at `migrate`. The MTI forms already
+  used the column.
+
+### Changed
+
+- The three soft-delete rules are created `OR REPLACE`, so a rule can be redefined
+  without an instant in which the table has none — and an instant without a
+  `soft_delete` rule is an instant in which `DELETE` destroys rows. Output on a fresh
+  database is otherwise unchanged.
+- `sql.py` became the `sql/` package (`triggers`, `soft_delete`, `policy`), still
+  re-exported flat — `from guitars import sql` is unchanged, and every name in it
+  remains a frozen interface that generated migrations read by name.
+- Migration-file mechanics (digest stamping, scanning, `--empty` scaffolding, app
+  scoping) moved to `guitars.management._generator`. MTI column-ownership
+  resolution moved to `guitars.introspection`, shared by the generator and by
+  tenancy coverage discovery so the two cannot disagree.
+- The generated migrations and the command's output use one vocabulary,
+  **enforcement migrations**, with four precisely-named kinds inside. The previous
+  wording ("advanced migrations") described nothing, and the same concept had
+  gathered four names. Generated filenames are now `*_auto_enforcement*`.
+- `makeguitarmigrations` now also generates tenant policies, so there is still one
+  command. `audittenancy` validates app labels the way the generator does, so a
+  typo cannot produce a green gate that audited nothing.
+- The test suite runs as a deliberately non-superuser PostgreSQL role that owns its
+  tables (`scripts/postgres-init.sql`) — the exact condition `FORCE ROW LEVEL
+  SECURITY` exists to constrain. Existing checkouts need
+  `docker compose down -v` once.
+- CI now gates on `makemigrations --check`, `audittenancy --require-force`, and
+  100% coverage.
+
 ## [0.7.0] - 2026-07-06
 
 ### Added

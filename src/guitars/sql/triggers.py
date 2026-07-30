@@ -1,3 +1,17 @@
+"""Raw SQL for the DB-managed ``_updated_at`` column.
+
+Two pieces per table: a shared trigger *function* (one per database, a singleton
+migration) and a per-table statement *trigger* that calls it. Statement-level
+rather than row-level so a single ``UPDATE`` touching a thousand rows bumps them
+all in one pass, and ``WHEN (pg_trigger_depth() = 0)`` so the function's own
+``UPDATE`` cannot re-enter the trigger.
+
+The MTI pair at the bottom exists because the metadata columns live only on the
+ancestor that declares them, while a child-only ``QuerySet.update()`` writes only
+the child table -- see the package docstring for the shared-PK invariant that lets
+a trigger on the child address the owning ancestor row directly.
+"""
+
 # *****************************************************************************************
 # ****************************** Updated At Trigger Function ******************************
 # *****************************************************************************************
@@ -52,62 +66,6 @@ DROP_UPDATED_AT_TRIGGER = """
     DROP TRIGGER updated_at_trigger ON {table};
 """
 
-# *********************************************************************************
-# ****************************** Soft Deletion Rules ******************************
-# *********************************************************************************
-
-SWITCH_ON_HARD_DELETION = "SELECT set_config('rules.hard_deletion', 'on', TRUE);"
-
-SWITCH_OFF_HARD_DELETION = "SELECT set_config('rules.hard_deletion', 'off', TRUE);"
-
-CHECK_RULE_EXISTS_ON_TABLE = """
-    SELECT rulename
-    FROM pg_rules
-    WHERE rulename = '{rule}' AND
-          tablename = '{table}';
-"""
-
-CREATE_SOFT_DELETE_RULE = """
-    CREATE RULE soft_delete
-        AS ON DELETE TO {table}
-        WHERE COALESCE(current_setting('rules.hard_deletion', true), 'off') = 'off'
-        DO INSTEAD (
-            UPDATE {table}
-            SET _deleted_at = NOW()
-            WHERE {primary_key} = old.{primary_key} AND _deleted_at IS NULL
-        );
-"""
-
-DROP_SOFT_DELETE_RULE = """
-    DROP RULE soft_delete ON {table};
-"""
-
-CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE = """
-    CREATE RULE soft_delete_related_{related_table}
-        AS ON UPDATE TO {table}
-        WHERE old._deleted_at IS NULL AND new._deleted_at IS NOT NULL AND
-              COALESCE(current_setting('rules.hard_deletion', true), 'off') = 'off'
-        DO ALSO (
-            UPDATE {related_table}
-            SET _deleted_at = NOW()
-            WHERE {foreign_key} = old.{primary_key}
-        );
-"""
-
-DROP_SOFT_DELETE_RELATED_OBJECTS_RULE = """
-    DROP RULE soft_delete_related_{related_table} ON {table};
-"""
-
-# ***********************************************************************************************
-# ****************************** Multi-Table Inheritance (MTI) ***********************************
-# ***********************************************************************************************
-#
-# In Django MTI a concrete child model gets its OWN table whose primary key is a
-# ``OneToOneField(parent_link=True)`` referencing the parent's table; the metadata columns
-# (``_updated_at`` / ``_deleted_at``) live ONLY on the ancestor that declares them. Because every
-# table in an MTI chain shares the SAME primary-key value, a rule/trigger on any descendant table
-# can address the owning ancestor row directly via ``owner_pk = old.<child_pk>``.
-
 # ---- Parent updated-at trigger function (singleton, sibling of set_updated_at) ----
 # Unlike ``set_updated_at`` (which updates ``TG_TABLE_NAME``), this updates a DIFFERENT table --
 # the ancestor that actually owns ``_updated_at`` -- so a write to a child-only table still bumps
@@ -151,24 +109,4 @@ CREATE_PARENT_UPDATED_AT_TRIGGER = """
 
 DROP_PARENT_UPDATED_AT_TRIGGER = """
     DROP TRIGGER updated_at_trigger ON {child_table};
-"""
-
-# ---- MTI soft-delete rule (on the child table, soft-deletes the owner, preserves child row) ----
-# ``DO INSTEAD`` suppresses the physical delete of the child row and marks the owning ancestor
-# instead. The ``_deleted_at IS NULL`` guard makes it idempotent across the per-table DELETEs
-# Django issues for an MTI chain, so the owner's cascade rules fire exactly once.
-
-CREATE_MTI_SOFT_DELETE_RULE = """
-    CREATE RULE soft_delete
-        AS ON DELETE TO {child_table}
-        WHERE COALESCE(current_setting('rules.hard_deletion', true), 'off') = 'off'
-        DO INSTEAD (
-            UPDATE {parent_table}
-            SET _deleted_at = NOW()
-            WHERE {parent_pk} = old.{child_pk} AND _deleted_at IS NULL
-        );
-"""
-
-DROP_MTI_SOFT_DELETE_RULE = """
-    DROP RULE soft_delete ON {child_table};
 """

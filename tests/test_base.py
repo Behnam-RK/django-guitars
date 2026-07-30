@@ -1,4 +1,4 @@
-"""Tests for guitars.models.base (SetarModel / GuitarModel and their mixins)."""
+"""Tests for guitars.models.base (DutarModel / SetarModel and their mixins)."""
 
 import types
 
@@ -6,7 +6,7 @@ import pytest
 from asgiref.sync import async_to_sync
 from django.db import transaction
 
-from guitars.models.base import SetarModel
+from guitars.models.base import DutarModel
 from tests.testapp.models import Band, Genre, Riff
 
 
@@ -110,21 +110,17 @@ def test_app_label_and_model_name():
 
 
 def test_app_label_raises_when_meta_app_label_missing():
-    fake_cls = types.SimpleNamespace(
-        __name__='Fake', _meta=types.SimpleNamespace(app_label='')
-    )
+    fake_cls = types.SimpleNamespace(__name__='Fake', _meta=types.SimpleNamespace(app_label=''))
 
     with pytest.raises(AttributeError, match='_meta.app_label is not set'):
-        SetarModel.app_label.__func__(fake_cls)
+        DutarModel.app_label.__func__(fake_cls)
 
 
 def test_model_name_raises_when_meta_model_name_missing():
-    fake_cls = types.SimpleNamespace(
-        __name__='Fake', _meta=types.SimpleNamespace(model_name='')
-    )
+    fake_cls = types.SimpleNamespace(__name__='Fake', _meta=types.SimpleNamespace(model_name=''))
 
     with pytest.raises(AttributeError, match='_meta.model_name is not set'):
-        SetarModel.model_name.__func__(fake_cls)
+        DutarModel.model_name.__func__(fake_cls)
 
 
 @pytest.mark.django_db
@@ -166,7 +162,29 @@ def test_expire_cached_properties_directly():
     assert band.shout == 'YES'
 
 
-# --- DutarModel: the lightest rung (update + cached-property invalidation) ---
+@pytest.mark.django_db
+def test_inherited_cached_property_invalidated_on_refresh():
+    """``whisper`` lives on WhisperMixin's __dict__, not Band's -- a leaf-only scan skips it."""
+    band = Band.objects.create(name='RUSH')
+    assert band.whisper == 'rush'  # caches on the instance
+
+    Band.objects.filter(pk=band.pk).update(name='YES')  # bypasses the instance
+    band.refresh_from_db()
+
+    assert band.whisper == 'yes'  # stale 'rush' when only Band.__dict__ was searched
+
+
+def test_expire_cached_properties_accepts_an_inherited_name():
+    band = Band(name='RUSH')
+    assert band.whisper == 'rush'
+
+    band.name = 'YES'
+    band.expire_cached_properties('whisper')  # KeyError before the MRO walk
+
+    assert band.whisper == 'yes'
+
+
+# --- TarModel: the lightest rung (update + cached-property invalidation) ---
 
 
 @pytest.mark.django_db

@@ -176,10 +176,14 @@ def _owner_exists(
         _match(f'{_OWNER_ALIAS}.{_bare("owner tenant column", column)}', dimension)
         for dimension, column in sorted(owner_columns.items())
     )
-    # nosec B608 - DDL, not a query: every identifier here is resolved from Django's
+    # Suppressed below as DDL, not a query: every identifier here is resolved from Django's
     # model _meta by the generator, and the result is written into a migration file for
     # review. There are no runtime values and nothing to parameterise -- PostgreSQL does
     # not accept bind parameters in a policy definition.
+    #
+    # The marker sits on the first fragment because that is the line the finding is
+    # reported on, and it carries no trailing prose: bandit parses whatever follows the
+    # test id as further test ids and warns once per word.
     return (  # noqa: S608
         f'EXISTS (\n'  # nosec B608
         f'        SELECT 1 FROM {owner_table} AS {_OWNER_ALIAS}\n'
@@ -266,10 +270,10 @@ def create_exempt_policy(table: str, role: str) -> str:
         f'CREATE POLICY {_exempt_policy_name(role)} ON {table} '
         f'FOR SELECT TO {_quote_ident(role)} USING (true)'
     )
-    # nosec B608 - DDL, not a query, and not an injection boundary: the role name comes from
-    # GUITARS_RLS_EXEMPT_ROLES, a settings value the project author controls, and the result
-    # lands in a migration file for review. PostgreSQL accepts no bind parameters in a
-    # policy definition, so quoting above is the available defence and it is applied.
+    # Suppressed below as DDL, not a query, and not an injection boundary: the role name
+    # comes from GUITARS_RLS_EXEMPT_ROLES, a settings value the project author controls, and
+    # the result lands in a migration file for review. PostgreSQL accepts no bind parameters
+    # in a policy definition, so quoting above is the available defence and it is applied.
     return (  # noqa: S608
         'DO $$\n'  # nosec B608
         'BEGIN\n'
@@ -309,8 +313,8 @@ def drop_all_exempt_policies(table: str) -> str:
     read as a single-character wildcard.
     """
     table = _bare('table', table)
-    # nosec B608 - DDL, not a query: *table* is proved bare above and the prefix is a module
-    # constant. The policy names are read from the catalog and quoted by format(%I).
+    # Suppressed below as DDL, not a query: *table* is proved bare above and the prefix is a
+    # module constant. The policy names are read from the catalog and quoted by format(%I).
     return (  # noqa: S608
         'DO $$\n'  # nosec B608
         'DECLARE\n'

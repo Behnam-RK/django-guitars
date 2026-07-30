@@ -225,7 +225,7 @@ class Command(BaseCommand):
         'Creates enforcement migrations (timestamp triggers, soft-delete rules, tenant policies).'
     )
 
-    def __init__(self, *args, **kwargs):  # pragma: no cover
+    def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
         self.all_models: list[type[models.Model]] = []
@@ -245,7 +245,7 @@ class Command(BaseCommand):
         self.trigger_function_dependency = self.existing.trigger_function_dependency
         self.parent_trigger_function_dependency = self.existing.parent_trigger_function_dependency
 
-    def add_arguments(self, parser):  # pragma: no cover
+    def add_arguments(self, parser):
         parser.add_argument(
             'args',
             metavar='app_label',
@@ -391,7 +391,7 @@ class Command(BaseCommand):
         """Rewrite a migration file to include the given custom *operations*.
 
         Thin wrapper naming this command's marker text and import line; the mechanics
-        are shared with ``maketenantmigrations`` (see ``_generator``).
+        live in ``_generator``, shared with every command that generates migrations.
         """
         _generator.write_migration_file(
             app=app,
@@ -407,9 +407,7 @@ class Command(BaseCommand):
     # Trigger function migration
     # ------------------------------------------------------------------
 
-    def _ensure_trigger_function_migration(
-        self, *, check_only: bool = False
-    ) -> bool:  # pragma: no cover
+    def _ensure_trigger_function_migration(self, *, check_only: bool = False) -> bool:
         """
         Ensure a standalone migration for the trigger function exists in the host app.
         Sets ``self.trigger_function_dependency`` when done.
@@ -447,9 +445,7 @@ class Command(BaseCommand):
         self.stdout.write(f'  migrations/{migration_file}')
         return True
 
-    def _ensure_parent_trigger_function_migration(
-        self, *, check_only: bool = False
-    ) -> bool:  # pragma: no cover
+    def _ensure_parent_trigger_function_migration(self, *, check_only: bool = False) -> bool:
         """
         Ensure a standalone migration for the MTI parent updated-at function exists.
         Sets ``self.parent_trigger_function_dependency`` when done. Kept separate from the
@@ -830,10 +826,16 @@ class Command(BaseCommand):
         into the normal run would defeat the staging it exists to provide.
         """
         if self._rls_force_enabled():
+            # Not an error, and not redundant either: this is the shape of a *finished*
+            # retrofit. Policies shipped inert under GUITARS_RLS_FORCE = False, the setting
+            # was then flipped to True, and those already-policied tables still need their
+            # FORCE. New policies get it inline, so the run below finds only the backlog --
+            # commonly nothing, which is why it says so rather than failing.
             self.stdout.write(
                 self.style.WARNING(
-                    '--force-rls is redundant while GUITARS_RLS_FORCE is True: the policy '
-                    'migrations already emit FORCE, so there is no second stage to run.'
+                    'GUITARS_RLS_FORCE is True, so new tenant policies already emit FORCE. '
+                    '--force-rls only covers tables whose policies shipped before it was '
+                    'turned on; expect no changes if there are none.'
                 )
             )
         if not self._tenant_policies_enabled():

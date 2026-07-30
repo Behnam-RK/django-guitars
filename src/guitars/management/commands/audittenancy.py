@@ -1,6 +1,6 @@
 """Audit a live database's tenant RLS enforcement against the models.
 
-``maketenantmigrations --check`` is a *build* gate: it proves the migrations exist. It
+``makeguitarmigrations --check`` is a *build* gate: it proves the migrations exist. It
 cannot prove they ran, that nobody dropped a policy by hand, or that enforcement actually
 binds -- so this command asks the database directly, and is the gate to run after a deploy.
 
@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, NamedTuple
 from django.core.management.base import BaseCommand, CommandError
 from django.db import DEFAULT_DB_ALIAS, connections
 
+from guitars.management import _generator
 from guitars.sql.policy import TENANT_POLICY
 from guitars.tenancy.discovery import expected_coverage
 
@@ -65,7 +66,7 @@ class Command(BaseCommand):
 
     help = 'Audits tenant row-level security on a live database (see docs/tenancy.md).'
 
-    def add_arguments(self, parser):  # pragma: no cover
+    def add_arguments(self, parser):
         parser.add_argument(
             'args',
             metavar='app_label',
@@ -101,6 +102,12 @@ class Command(BaseCommand):
         connection = connections[options['database']]
         require_force = options['require_force']
         requested = set(app_labels)
+
+        # A typo'd label would otherwise match no app, audit zero tables and report
+        # "passed" -- a green deploy gate that verified nothing, which is precisely the
+        # outcome this command exists to prevent. Same validation, and the same error, as
+        # `makeguitarmigrations` and Django's own `makemigrations`.
+        _generator.validate_app_labels(requested)
 
         expected = expected_coverage(requested)
         live = self._live_state(connection)

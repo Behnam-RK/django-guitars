@@ -7,7 +7,7 @@ Policies read the ``tenant.*`` session settings published by
 :mod:`guitars.tenancy.guc`.
 
 These are functions rather than format-string constants because the predicate is composed
-from a variable-length ``{dimension: column}`` mapping. ``maketenantmigrations`` writes
+from a variable-length ``{dimension: column}`` mapping. ``makeguitarmigrations`` writes
 migrations that call them at *migrate* time.
 
 **Nothing here reads Django settings, and that is deliberate.** Whether to emit ``FORCE``,

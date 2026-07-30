@@ -1,6 +1,6 @@
 """Which tables are supposed to carry a ``tenant_scope`` policy, and how.
 
-One answer, two consumers: ``maketenantmigrations`` turns it into migrations at build
+One answer, two consumers: ``makeguitarmigrations`` turns it into migrations at build
 time, ``audittenancy`` compares it against a live database. Keeping the rule here means the
 audit can never quietly disagree with the generator about what coverage *should* look like
 -- a drift that would make a green audit meaningless.
@@ -24,8 +24,13 @@ What is still reported rather than covered:
   on. The Python manager still scopes reads; RLS coverage arrives via the table the hop
   lands on.
 * **Dimensions spread across two different ancestors** -- one correlated subquery reaches
-  one ancestor, and emitting a policy covering only some dimensions would look like
-  protection while enforcing less than the model declares.
+  one ancestor, and which one it reached would come down to field declaration order. All
+  of them are dropped rather than one picked arbitrarily.
+
+A model can therefore end up *partially* covered: its own-table dimensions get a policy
+while the ones above are left to Python scoping. That is reported as what it is. Every note
+names the dimensions it dropped and the ones the policy still enforces, because "skipped"
+alone would read as "no protection here" on a table that has some.
 
 Skips are design, not gaps -- but never silent.
 """
@@ -124,10 +129,21 @@ def _classify(model: type[models.Model]) -> tuple[TableCoverage | None, list[str
 
     if len(by_owner) > 1:
         owners = sorted(_meta(owner).db_table for owner in by_owner)
+        dropped = sorted(dim for columns in by_owner.values() for dim in columns)
+        # Dropping ALL of them rather than picking one ancestor arbitrarily: one correlated
+        # subquery reaches one ancestor, and which one it happened to be would depend on
+        # field declaration order -- a policy whose strength varied with that is worse than
+        # a named gap. Any own-table dimensions still get their policy, so the note has to
+        # say what is and is not enforced, not just that something was skipped.
+        remaining = (
+            f'its policy still enforces {sorted(own)}'
+            if own
+            else 'no policy is emitted for this table'
+        )
         notes.append(
-            f"'{_meta(model).db_table}': tenant dimensions live on more than one ancestor "
-            f'({owners}); one correlated subquery reaches one ancestor, so no policy is '
-            f'emitted for them rather than one that enforces less than the model declares.'
+            f"'{_meta(model).db_table}': tenant dimensions {dropped} live on more than one "
+            f'ancestor ({owners}) and one correlated subquery reaches only one, so they are '
+            f'left to Python scoping -- {remaining}.'
         )
         by_owner = {}
 

@@ -1,8 +1,11 @@
-"""Shared mechanics for the commands that generate raw-SQL migrations.
+"""Shared mechanics for generating raw-SQL migrations.
 
-Two commands write migrations the same way -- ``makeguitarmigrations`` (triggers and
-rules) and ``maketenantmigrations`` (row-level-security policies) -- and the
-mechanics are the delicate part, not the SQL:
+``makeguitarmigrations`` is the only command that writes them today, and the mechanics
+are the delicate part, not the SQL. They live here rather than inside the command for
+two reasons: ``makemigrations`` (guitars' override) reaches for the app-scoping and
+label-validation helpers, and ``audittenancy`` must reject an unknown app label with the
+same error the generator does, or a scoped deploy gate could pass having checked
+nothing. A second generating command would inherit all of it:
 
 * **Idempotency has two layers.** A content digest stamped on the migration's first
   line (``[DIGEST:...]``), plus each command's own regex scan of existing migration
@@ -144,7 +147,7 @@ def digest_of(operations: list[str]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def create_empty_migration_file(app: AppConfig, name: str) -> str:  # pragma: no cover
+def create_empty_migration_file(app: AppConfig, name: str) -> str:
     """Scaffold via ``makemigrations --empty`` and return the created filename.
 
     Django prints the path it wrote rather than returning it, so it is parsed back out

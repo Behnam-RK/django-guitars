@@ -61,14 +61,29 @@ class LiveQuerySet(QuerySet):
 
 
 class LiveManager(Manager):
-    """Default manager — returns only live records (``_deleted_at IS NULL``)."""
+    """Default manager — returns only live records (``_deleted_at IS NULL``).
+
+    These three managers override ``get_queryset()`` for one reason only: to append the
+    ``.lives`` / ``.archives`` filter. Everything else is Django's, and that includes
+    **instantiating ``self._queryset_class`` rather than a hard-coded class name**.
+
+    That is load-bearing, not style. ``_queryset_class`` is Django's documented seam for
+    swapping the queryset a manager hands out, and a subclass that sets it expects to be
+    obeyed — ``guitars.tenancy.TenantedManager`` sets it to a subclass whose
+    ``bulk_create`` carries the tenant write guard, then calls ``super().get_queryset()``.
+    Naming ``LiveQuerySet`` here directly would hand back an unguarded queryset while the
+    manager still advertised the guarded one: a security guard that reads as installed and
+    silently does nothing. Covered by
+    ``tests/test_soft_deletion.py::TestManagerQuerySetClass``.
+    """
 
     _queryset_class = LiveQuerySet
 
     def get_queryset(self) -> LiveQuerySet:
-        # ``_hints`` is a real runtime attribute (set in Manager.__init__) that django-stubs
-        # doesn't declare.
-        return LiveQuerySet(model=self.model, using=self._db, hints=self._hints).lives  # ty: ignore[unresolved-attribute]
+        # ``self._queryset_class``, never the class named above -- see the note on
+        # ``_queryset_class`` below. ``_hints`` is a real runtime attribute (set in
+        # Manager.__init__) that django-stubs doesn't declare.
+        return self._queryset_class(model=self.model, using=self._db, hints=self._hints).lives  # ty: ignore[unresolved-attribute]
 
 
 class HardDeletableQuerySet(LiveQuerySet):
@@ -140,7 +155,7 @@ class ArchiveManager(Manager):
     _queryset_class = HardDeletableQuerySet
 
     def get_queryset(self) -> HardDeletableQuerySet:
-        return HardDeletableQuerySet(
+        return self._queryset_class(
             model=self.model,
             using=self._db,
             hints=self._hints,  # ty: ignore[unresolved-attribute]
@@ -153,7 +168,7 @@ class AllObjectsManager(Manager):
     _queryset_class = HardDeletableQuerySet
 
     def get_queryset(self) -> HardDeletableQuerySet:
-        return HardDeletableQuerySet(
+        return self._queryset_class(
             model=self.model,
             using=self._db,
             hints=self._hints,  # ty: ignore[unresolved-attribute]

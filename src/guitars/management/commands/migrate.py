@@ -11,8 +11,10 @@ Bypassing here is safe in a way it would not be at runtime: ``migrate`` is
 operator-invoked, single-purpose, and already trusted with DDL.
 
 This override is why guitars must be in ``INSTALLED_APPS`` *ahead of* anything else
-providing a ``migrate`` command for a tenanted project -- Django resolves a management
-command to the last app that defines it.
+providing a ``migrate`` command for a tenanted project. Django's ``get_commands()`` walks
+``reversed(apps.get_app_configs())`` and lets each app overwrite the previous entry, so
+the app appearing **earliest** in ``INSTALLED_APPS`` is the one that wins. The same
+ordering rule applies to the ``makemigrations`` override alongside this one.
 """
 
 from __future__ import annotations

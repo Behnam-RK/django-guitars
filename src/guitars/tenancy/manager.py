@@ -100,10 +100,12 @@ def _matches(expected: object, actual: object) -> bool:
 def _meta(model: type[models.Model]):
     """``Model._meta``, in one place.
 
-    Django injects ``_meta`` onto the class at definition time, which the type checker
-    does not model -- so the ignore lives here once instead of at every call site.
+    A named seam rather than inline ``model._meta`` at a dozen call sites: it is private
+    Django API, so if a future release moves it there is one line to change. The return is
+    left unannotated deliberately -- ``Options`` is generic over the model and pinning it
+    here would buy nothing these call sites use.
     """
-    return model._meta  # ty:ignore[unresolved-attribute]
+    return model._meta
 
 
 def tenant_spec(model: type[models.Model]) -> dict[str, str]:

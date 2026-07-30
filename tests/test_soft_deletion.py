@@ -2,6 +2,13 @@
 
 import pytest
 
+from guitars.models.soft_deletion import (
+    AllObjectsManager,
+    ArchiveManager,
+    HardDeletableQuerySet,
+    LiveManager,
+    LiveQuerySet,
+)
 from tests.testapp.models import Album, Band, Genre, Orchestra, Riff
 
 
@@ -114,3 +121,62 @@ def test_hard_delete_hard_deletes_non_soft_deletable_cascade_children():
     band.hard_delete()
 
     assert not Riff.objects.filter(pk=riff.pk).exists()
+
+
+class TestManagerQuerySetClass:
+    """Every soft-delete manager must instantiate ``self._queryset_class``.
+
+    Not a style preference. ``_queryset_class`` is Django's seam for swapping the queryset
+    a manager hands out, and ``guitars.tenancy.TenantedManager`` uses it to install the
+    tenant write guard on ``bulk_create``. A manager that names its queryset class
+    literally in ``get_queryset()`` ignores the swap and returns an *unguarded* queryset
+    while still advertising the guarded one on the class -- so the guard reads as installed
+    and does nothing.
+
+    These assert the seam directly, with no database and no tenancy, so a regression is
+    attributed to the manager rather than to whatever downstream feature noticed.
+    """
+
+    @staticmethod
+    def _bind(manager_class, queryset_class):
+        """A manager instance with ``_queryset_class`` swapped, outside model machinery."""
+        manager = type('_Probe', (manager_class,), {'_queryset_class': queryset_class})()
+        manager.model = Band
+        manager._db = None
+        manager._hints = {}
+        return manager
+
+    @pytest.mark.parametrize(
+        ('manager_class', 'base_queryset'),
+        [
+            (LiveManager, LiveQuerySet),
+            (ArchiveManager, HardDeletableQuerySet),
+            (AllObjectsManager, HardDeletableQuerySet),
+        ],
+    )
+    def test_get_queryset_honours_the_swapped_class(self, manager_class, base_queryset):
+        swapped = type('_Swapped', (base_queryset,), {})
+        manager = self._bind(manager_class, swapped)
+
+        # `is`, not isinstance: the whole failure mode is getting the BASE class back, and
+        # the base passes isinstance for a subclass swap.
+        assert type(manager.get_queryset()) is swapped
+
+    def test_a_swapped_override_actually_runs(self):
+        """The swap must survive the ``.lives`` clone and win method dispatch.
+
+        ``bulk_create`` on purpose: it is the method tenancy overrides to guard. An empty
+        list returns early in Django's implementation, so the un-swapped path is reached
+        without touching the database and the mutation shows up as this assertion rather
+        than as a connection error.
+        """
+        calls = []
+
+        class _Recording(LiveQuerySet):
+            def bulk_create(self, objs, *args, **kwargs):
+                calls.append(objs)
+                return objs
+
+        self._bind(LiveManager, _Recording).get_queryset().bulk_create([])
+
+        assert calls == [[]]

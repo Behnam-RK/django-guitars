@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-07-31
+
+No package changes -- tooling only. Upgraded pinned GitHub Actions
+(`actions/checkout` v4 -> v7, `astral-sh/setup-uv` v5 -> v9.0.0,
+`actions/cache` v4 -> v6) across all workflows, clearing the "targets
+Node.js 20" deprecation warning the old pins were emitting on every run.
+
 ## [1.1.0] - 2026-07-31
 
 ### Upgrading

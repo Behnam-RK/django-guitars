@@ -7,18 +7,24 @@ label-validation helpers, and ``audittenancy`` must reject an unknown app label 
 same error the generator does, or a scoped deploy gate could pass having checked
 nothing. A second generating command would inherit all of it:
 
-* **Idempotency has two layers.** A content digest stamped on the migration's first
-  line (``[DIGEST:...]``), plus each command's own regex scan of existing migration
-  files for the comment header it emits per operation. Either alone is insufficient:
-  the digest catches an unchanged operation set, the header scan catches a *partially*
-  covered app so only the genuinely new operations get written.
+* **Idempotency has three layers**, and this module owns only the first. A content
+  digest stamped on the migration's first line (``[DIGEST:...]``) identifies an
+  unchanged operation set; each command's own regex scan of existing migration files
+  for the comment header it emits per operation identifies which tables are already
+  covered; and a ``[SQL:...]`` identity on each header (``makeguitarmigrations``'s own,
+  not shared here) identifies whether a covered table's operation is the SQL the kit
+  emits *today*. All three matter: the file digest alone cannot handle a partially
+  covered app, the header scan alone cannot tell "already done" from "done
+  differently", and without the per-operation identity a recognised header read as
+  covered forever, which is how the 1.0.0 soft-delete guard rewrite shipped no
+  migration to any existing database.
 * **Scaffolding re-enters ``makemigrations``.** These commands do not template a
   migration from scratch; they run ``makemigrations --empty`` and rewrite the result,
   which is why the ``makemigrations`` override must skip its guitar/tenant step on
   ``--empty`` or the two recurse.
 
 Keeping one copy means a fix lands for both. The two commands diverged in exactly this
-code before it was shared, and the import-insertion logic below is the scar.
+code before it was shared.
 
 This module is deliberately about *files*, not models: what belongs in a migration is
 each command's own business.

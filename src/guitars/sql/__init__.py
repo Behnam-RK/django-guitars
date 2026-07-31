@@ -1,10 +1,12 @@
 """Every byte of raw SQL the kit emits, re-exported flat.
 
-Generated migrations do ``from guitars import sql`` and reference names off this
-module (``sql.CREATE_SOFT_DELETE_RULE.format(...)``). Those migration files are
-checked into consuming projects and already applied, so **this module's public
+Migrations generated *before* 1.1.0 do ``from guitars import sql`` and reference names
+off this module (``sql.CREATE_SOFT_DELETE_RULE.format(...)``); migrations generated from
+1.1.0 on carry their SQL literally and reference nothing here. Those pre-1.1.0 migration
+files are checked into consuming projects and already applied, so **this module's public
 names are a frozen interface** -- split the implementation across submodules as
-needed, but a name that ever appeared here must keep resolving here.
+needed, but a name that ever appeared here must keep resolving here. The obligation is
+therefore fixed in size rather than still growing; see ``docs/migrations.md``.
 
 Organised by concern:
 

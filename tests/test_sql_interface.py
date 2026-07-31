@@ -1,11 +1,13 @@
 """Guards on ``guitars.sql``'s public surface, which is a frozen interface.
 
 Generated migrations are written into consuming projects, checked into their VCS,
-and applied to their databases. Every one of them does ``from guitars import sql``
-and reads constants off it by name. So renaming or removing a public name here does
+and applied to their databases. Every one generated *before* 1.1.0 does
+``from guitars import sql`` and reads constants off it by name -- migrations
+generated from 1.1.0 on carry their SQL literally instead, but those pre-1.1.0 files
+are already committed and applied. So renaming or removing a public name here does
 not break *this* repo's tests -- it breaks ``migrate`` on a fresh database in every
-project that ever ran the generator, at which point the only fix is hand-editing
-historical migration files.
+project that ever ran the generator before 1.1.0, at which point the only fix is
+hand-editing historical migration files.
 
 These tests exist so that failure is caught here instead. They are deliberately
 about *names*, not SQL text: the text may be corrected (a bug fix lands in every

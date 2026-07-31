@@ -374,6 +374,27 @@ def test_check_reports_a_changed_function_body_rather_than_passing(monkeypatch, 
         command._ensure_trigger_function_migration(check_only=True)
 
 
+def test_adopt_emits_or_replace_for_a_function_with_nothing_recorded(monkeypatch, tmp_path):
+    """The gap ``--adopt`` exists to close, for a function rather than a trigger or policy.
+
+    A function with no recorded migration at all -- not even a stale one -- is exactly the
+    database ``--adopt`` is for: created by hand, or by a generator whose headers this one
+    cannot read. A plain ``CREATE FUNCTION`` there fails migrate with "function already
+    exists". There is no separate adopt form for a function, because ``OR REPLACE`` is
+    already correct whether or not it exists -- so ``--adopt`` must select it even though
+    nothing is recorded, which is the one case the create/replace choice used to get wrong.
+    """
+    command, _, filename = _command_with_scaffold(monkeypatch, tmp_path)
+    command.trigger_function_dependency = None
+    command.trigger_function_sql = None
+    command._adopt = True
+
+    assert command._ensure_trigger_function_migration() is True
+
+    content = (tmp_path / 'migrations' / filename).read_text()
+    assert 'CREATE OR REPLACE FUNCTION set_updated_at()' in content
+
+
 # ---------------------------------------------------------------------------
 # Flag combinations
 # ---------------------------------------------------------------------------

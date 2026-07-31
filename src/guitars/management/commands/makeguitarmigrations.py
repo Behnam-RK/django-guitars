@@ -21,12 +21,15 @@ All four ship from one command because they share every mechanic that is actuall
 difficult: model discovery, MTI column-ownership resolution, dedupe against operations
 already written, ``--empty`` scaffolding, digest stamping and app scoping.
 
-**Idempotency has two layers**, and both matter. A ``[DIGEST:...]`` marker on the first
+**Idempotency has three layers**, and all matter. A ``[DIGEST:...]`` marker on the first
 line identifies an unchanged operation set; per-operation comment headers
-(``# Updated at Trigger on "x" table!``) identify which tables are already covered, so a
-*partially* covered app gets only the genuinely new operations. Those header strings are
+(``# Updated at Trigger on "x" table!``) identify which tables are already covered; and a
+``[SQL:...]`` identity on each header identifies whether the covered table's operation is
+the SQL the kit emits *today* -- without it, a table whose header was recognised read as
+covered forever, so an edited SQL constant shipped no migration at all. A *partially*
+covered app gets only the genuinely new or outdated operations. Those header strings are
 therefore **frozen**: reword one and every existing migration stops being recognised, and
-the next run emits duplicates.
+the next run emits duplicates. See ``docs/migrations.md`` for the full account.
 """
 
 from __future__ import annotations
@@ -639,6 +642,13 @@ class Command(BaseCommand):
         the ``OR REPLACE`` form. ``OR REPLACE`` rather than DROP + CREATE is forced, not
         defensive -- ``DROP FUNCTION`` refuses while any trigger depends on it, and CASCADE
         would take every table's trigger with it.
+
+        Under ``--adopt`` the ``OR REPLACE`` form is used even when nothing is recorded at
+        all: the whole premise of the flag is a database the generator has no record of, and
+        a plain ``CREATE FUNCTION`` there fails migrate with "function already exists" on
+        exactly the database ``--adopt`` exists to bring in. There is no separate adopt form
+        for a function the way there is for a trigger, because ``OR REPLACE`` is already the
+        one form that is correct whether or not the function exists.
         """
         current_source, current_digest = _operation(header, create, drop)
         if recorded is not None and (recorded_digest == current_digest and not self._adopt):
@@ -648,7 +658,7 @@ class Command(BaseCommand):
         if check_only:
             raise CommandError(self.style.ERROR(stale_message if stale else missing_message))
 
-        if stale:
+        if stale or self._adopt:
             current_source, _ = _operation(header, create, drop, emit=replace)
 
         host_app = self._get_trigger_function_host_app()

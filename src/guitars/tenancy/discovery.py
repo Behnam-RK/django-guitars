@@ -37,7 +37,7 @@ Skips are design, not gaps -- but never silent.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, NamedTuple, TypedDict
 
 from django.apps import apps as django_apps
 from django.conf import settings
@@ -53,7 +53,32 @@ if TYPE_CHECKING:
     from django.db import models
 
 
-__all__ = ['Coverage', 'TableCoverage', 'app_coverage', 'expected_coverage', 'is_local']
+__all__ = [
+    'Coverage',
+    'PolicyKwargs',
+    'TableCoverage',
+    'app_coverage',
+    'expected_coverage',
+    'is_local',
+]
+
+
+class PolicyKwargs(TypedDict, total=False):
+    """The shape :meth:`TableCoverage.as_kwargs` produces.
+
+    Spelled out rather than left as ``dict[str, object]`` because the generator now *calls*
+    ``sql.create_table_rls(**kwargs)`` instead of rendering the call as text into a
+    migration. Text was never type-checked; a real call is, and an untyped mapping makes
+    every parameter read as ``object``.
+
+    ``total=False``: the owner keys are absent, not ``None``, when there is no owner join.
+    """
+
+    columns: dict[str, str]
+    owner_table: str | None
+    owner_pk: str | None
+    child_pk: str | None
+    owner_columns: dict[str, str] | None
 
 
 class TableCoverage(NamedTuple):
@@ -70,13 +95,13 @@ class TableCoverage(NamedTuple):
     child_pk: str | None = None
     owner_columns: dict[str, str] | None = None
 
-    def as_kwargs(self) -> dict[str, object]:
+    def as_kwargs(self) -> PolicyKwargs:
         """The keyword arguments ``guitars.sql.create_table_rls`` expects.
 
         Owner keys are omitted entirely when there is no owner join, so a non-MTI table's
         generated migration stays as simple as it reads.
         """
-        kwargs: dict[str, object] = {'columns': dict(self.columns)}
+        kwargs: PolicyKwargs = {'columns': dict(self.columns)}
         if self.owner_columns:
             kwargs['owner_table'] = self.owner_table
             kwargs['owner_pk'] = self.owner_pk

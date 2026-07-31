@@ -1,10 +1,12 @@
 """Every byte of raw SQL the kit emits, re-exported flat.
 
-Generated migrations do ``from guitars import sql`` and reference names off this
-module (``sql.CREATE_SOFT_DELETE_RULE.format(...)``). Those migration files are
-checked into consuming projects and already applied, so **this module's public
+Migrations generated *before* 1.1.0 do ``from guitars import sql`` and reference names
+off this module (``sql.CREATE_SOFT_DELETE_RULE.format(...)``); migrations generated from
+1.1.0 on carry their SQL literally and reference nothing here. Those pre-1.1.0 migration
+files are checked into consuming projects and already applied, so **this module's public
 names are a frozen interface** -- split the implementation across submodules as
-needed, but a name that ever appeared here must keep resolving here.
+needed, but a name that ever appeared here must keep resolving here. The obligation is
+therefore fixed in size rather than still growing; see ``docs/migrations.md``.
 
 Organised by concern:
 
@@ -55,6 +57,8 @@ from .soft_delete import (
     SWITCH_ON_HARD_DELETION,
 )
 from .triggers import (
+    ADOPT_PARENT_UPDATED_AT_TRIGGER,
+    ADOPT_UPDATED_AT_TRIGGER,
     CHECK_PARENT_TRIGGER_FUNCTION_EXISTS,
     CHECK_TRIGGER_EXISTS_ON_TABLE,
     CHECK_TRIGGER_FUNCTION_EXISTS,
@@ -66,12 +70,18 @@ from .triggers import (
     DROP_PARENT_UPDATED_AT_TRIGGER_FUNCTION,
     DROP_UPDATED_AT_TRIGGER,
     DROP_UPDATED_AT_TRIGGER_FUNCTION,
+    REPLACE_PARENT_UPDATED_AT_TRIGGER,
+    REPLACE_PARENT_UPDATED_AT_TRIGGER_FUNCTION,
+    REPLACE_UPDATED_AT_TRIGGER,
+    REPLACE_UPDATED_AT_TRIGGER_FUNCTION,
 )
 
 
 # One flat sorted list -- frozen names, so a reviewer diffing a release should see an
 # insertion, never a reshuffle. tests/test_sql_interface.py compares the set.
 __all__ = [
+    'ADOPT_PARENT_UPDATED_AT_TRIGGER',
+    'ADOPT_UPDATED_AT_TRIGGER',
     'CHECK_PARENT_TRIGGER_FUNCTION_EXISTS',
     'CHECK_RULE_EXISTS_ON_TABLE',
     'CHECK_TRIGGER_EXISTS_ON_TABLE',
@@ -91,6 +101,10 @@ __all__ = [
     'DROP_UPDATED_AT_TRIGGER',
     'DROP_UPDATED_AT_TRIGGER_FUNCTION',
     'EXEMPT_POLICY_PREFIX',
+    'REPLACE_PARENT_UPDATED_AT_TRIGGER',
+    'REPLACE_PARENT_UPDATED_AT_TRIGGER_FUNCTION',
+    'REPLACE_UPDATED_AT_TRIGGER',
+    'REPLACE_UPDATED_AT_TRIGGER_FUNCTION',
     'SWITCH_OFF_HARD_DELETION',
     'SWITCH_ON_HARD_DELETION',
     'TENANT_POLICY',

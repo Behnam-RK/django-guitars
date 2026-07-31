@@ -5,6 +5,103 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-07-31
+
+### Upgrading
+
+**`makemigrations --check` will fail on your first run, and that is the fix, not a
+regression.** Every enforcement migration written before this release carries a
+recognised comment header with no `[SQL:…]` identity, which now reads as *stale*
+rather than *covered*. Run `makemigrations` (or `makeguitarmigrations`) and
+`migrate`; each operation is re-emitted once, in a form that redefines the object
+in place. A database already correct gets a refresh that is a no-op in effect.
+
+This is how the 1.0.0 soft-delete guard fix finally reaches existing databases. Until
+now it could not: see *Fixed* below.
+
+### Added
+
+- **`makeguitarmigrations --adopt`** — re-emit every enforcement operation for the
+  apps in scope, in a form that is correct whether or not the database object already
+  exists. For a database whose triggers, rules or policies were created outside this
+  command: by hand, or by another generator whose comment headers this one cannot
+  read.
+
+  There was previously no supported way in. `create_tenant_policy` is a bare
+  `CREATE POLICY` — PostgreSQL has no `CREATE POLICY IF NOT EXISTS` — so a table
+  whose policy existed but carried no `[POLICY:…]` header took the "not covered"
+  branch, emitted the `CREATE` form, and failed `migrate` with *policy
+  "tenant_scope" already exists*. Editing comments in committed migrations by hand
+  was the only route through.
+
+  Cannot be combined with `--force-rls`, which acts only on tables whose policies
+  this command already recorded — the very thing `--adopt` exists because you lack.
+  Run `--adopt` first.
+
+- `sql.REPLACE_UPDATED_AT_TRIGGER_FUNCTION`, `sql.REPLACE_UPDATED_AT_TRIGGER`,
+  `sql.ADOPT_UPDATED_AT_TRIGGER` and their `*_PARENT_*` counterparts — the refresh
+  and adoption forms. `IF EXISTS` appears on the adopt form and nowhere else: it is a
+  claim about knowledge, and on a path where the answer is known it turns "your
+  database has diverged from its migration history" into silence.
+
+### Fixed
+
+- **A change to any enforcement SQL constant shipped no migration.** 1.0.0 rewrote
+  every soft-delete rule guard to `<> 'on'` — the fix for a rolled-back
+  `hard_delete()` turning every later `.delete()` on that connection into a permanent
+  delete — and then told you, in this file, to hand-write a migration to actually get
+  it. That instruction is withdrawn; it is generated now.
+
+  Two causes, and the second is the one that mattered. Generated migrations did
+  `from guitars import sql` and named the constant, so the `[DIGEST:…]` marker covered
+  a source that never contained the SQL. But the digest was never reached anyway: the
+  per-table `_RE_*` header scan short-circuits first, so any table with a recognised
+  header was treated as covered *forever*. Each operation header now carries a
+  `[SQL:<digest>]` identity of its own SQL, and a stale or absent one re-emits.
+
+- **Generated migrations no longer import from `guitars`.** They carry their SQL
+  literally. Django freezes model state into migration files so that replaying history
+  reproduces the same database; naming a library constant un-freezes exactly that — a
+  fresh `migrate` on 1.0.0 built `<> 'on'` rules at migration `0003` while a database
+  that ran `0003` on 0.7 had `= 'off'`, from an identical history.
+
+  Migrations already committed on the old form keep working, so `guitars.sql`'s public
+  names stay frozen forever. This stops the obligation growing rather than discharging
+  it.
+
+- **A changed trigger-function body shipped nothing.** Both singleton function
+  migrations returned early on "a migration mentioning this function exists
+  somewhere". They now compare the recorded digest too, and emit
+  `CREATE OR REPLACE FUNCTION` — forced rather than defensive, since `DROP FUNCTION`
+  refuses while any trigger depends on it and `CASCADE` would take every table's
+  trigger with it.
+
+- **A tenant policy whose SQL text changed was not replaced.** `[POLICY:…]` covers
+  what the policy *says*, with `force` deliberately excluded so that flipping
+  `GUITARS_RLS_FORCE` cannot defeat the staged `--force-rls` retrofit. That left a
+  change to the policy SQL itself invisible to it. Both identities are now checked.
+
+- **The comment headers were never actually guarded.** `CLAUDE.md` and
+  `docs/migrations.md` both pointed at `tests/test_sql_interface.py`, which only ever
+  checked `guitars.sql`'s exported names. The emit templates and the scan regexes are
+  two hand-written copies in one module with nothing deriving one from the other, and
+  a silent drift between them makes the next run in a consuming project duplicate every
+  operation it already has. `tests/test_enforcement_identity.py` now asserts the round
+  trip, and both documents are corrected.
+
+### Changed
+
+- The two singleton trigger-function scanners match their comment header rather than
+  the `sql.CREATE_*_TRIGGER_FUNCTION` reference, which inlining removed. Both forms of
+  migration carry the header, so migrations already written are still recognised.
+- `unforced_policy_tables` reads the FORCE decision from the emitted SQL, falling back
+  to the old `force=False` keyword wherever a pre-1.1.0 operation still records it that
+  way. Reading only the new form would put every already-forced table back on the
+  `--force-rls` backlog.
+- `TableCoverage.as_kwargs()` returns a typed `PolicyKwargs` rather than
+  `dict[str, object]`. The generator now *calls* `sql.create_table_rls(**kwargs)`
+  instead of rendering the call as text, and text was never type-checked.
+
 ## [1.0.2] - 2026-07-31
 
 No package changes — tooling only.

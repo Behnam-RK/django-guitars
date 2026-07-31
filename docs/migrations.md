@@ -68,9 +68,39 @@ The shape of the model *is* the opt-in. There is no registry:
   soft-deletable models whose FK is `on_delete=CASCADE`
 - a `TenantedManager` → a row-level-security tenant policy
 
-## Idempotency has two layers
+## Generated migrations carry their SQL literally
 
-Both matter, and they answer different questions.
+A generated operation contains the statements it runs:
+
+```python
+# Soft Delete Rule on "blog_post" table! [SQL:9f3c1a20be47]
+migrations.RunSQL(
+    sql="""
+    CREATE OR REPLACE RULE soft_delete AS ON DELETE TO blog_post
+    WHERE current_setting('rules.hard_deletion', true) <> 'on'
+    DO INSTEAD UPDATE blog_post SET _deleted_at = NOW() WHERE id = old.id;
+""",
+    reverse_sql="""
+    DROP RULE IF EXISTS soft_delete ON blog_post;
+""",
+)
+```
+
+It did not always. Until 1.1.0 the file did `from guitars import sql` and named
+the constant, which meant the migration's *meaning* was a function of the
+installed version of the kit. Django freezes model state into migration files so
+that replaying history reproduces the same database; naming a library constant
+un-freezes exactly that — a fresh `migrate` on 1.0.0 built `<> 'on'` rules at
+migration `0003`, while a database that ran `0003` on 0.7 had `= 'off'`. Same
+history, two different databases.
+
+Migrations already committed on the old form keep working — `guitars.sql`'s names
+remain a frozen interface for their sake, forever. Nothing new is added to that
+obligation.
+
+## Idempotency has three layers
+
+They answer different questions, and each covers a gap the others cannot see.
 
 1. **A `[DIGEST:…]` marker** on the generated migration's first line identifies an
    unchanged *operation set*. If nothing about an app's operations changed, no new
@@ -78,16 +108,72 @@ Both matter, and they answer different questions.
 2. **Per-operation comment headers** (`# Updated at Trigger on "x" table!`)
    identify which tables are already covered, so a *partially* covered app
    receives exactly the operations it lacks.
+3. **A `[SQL:…]` identity** on each header is a digest of that operation's SQL. It
+   is what makes a changed SQL constant generate its own migration.
 
-The digest alone cannot handle a partially covered app; the headers alone cannot
-tell "already done" from "done differently". Hence both.
+The third exists because the first two together still missed the case that
+mattered most. The header scan short-circuits before anything is built, so a table
+whose header was recognised was treated as covered *forever* — the file digest was
+never even reached, and it could not have helped anyway, since it covered a source
+that named the constant rather than containing it. That is how the 1.0.0
+soft-delete guard rewrite — the fix for a rolled-back `hard_delete()` turning every
+later `.delete()` into a permanent delete — reached every existing database as
+nothing at all.
+
+A header with **no** `[SQL:…]` token is a migration written before the SQL was
+inlined. It reads as stale, not as covered, so the first run on 1.1.0 regenerates
+it once.
 
 > ⚠️ **Those header strings are frozen.** Reword one and every existing migration
-> stops being recognised, and the next run emits duplicates. The same goes for
-> the public names in `guitars.sql`: generated migrations in consuming projects do
+> stops being recognised, and the next run emits duplicates.
+> `tests/test_enforcement_identity.py` asserts every emitted header is matched by
+> the scanner meant to read it — the two are hand-written copies in one module and
+> nothing else stops them drifting.
+>
+> The public names in `guitars.sql` are frozen for a different reason: migrations
+> generated before 1.1.0 and committed in consuming projects do
 > `from guitars import sql` and read them by name, so a rename breaks `migrate` on
 > a fresh database there. `tests/test_sql_interface.py` guards the names;
 > `FROZEN_SQL_CONSTANTS` / `FROZEN_SQL_CALLABLES` is the list.
+
+## Three forms, and why `IF EXISTS` is not sprinkled everywhere
+
+Each operation is emitted in one of three forms, chosen from what the migration
+history records. `IF EXISTS` and `OR REPLACE` are claims about *knowledge*: used
+where the answer is known they turn "your database has diverged from its history"
+into silence, so each appears on exactly the path where it is true.
+
+| What is recorded | Form | Why |
+| --- | --- | --- |
+| nothing | plain `CREATE` | A collision must fail `migrate` loudly. `set_updated_at()` is an unqualified public-schema name; silently replacing someone else's would surface as a runtime mystery elsewhere. |
+| a different `[SQL:…]`, or none | `DROP` + `CREATE`, no `IF EXISTS` | The object is known to be ours. An unguarded drop reports a diverged database instead of papering over it. |
+| `--adopt` | `DROP … IF EXISTS` + `CREATE` | The premise of the flag is that nobody knows what the database holds. The uncertainty is real and was opted into. |
+
+Two exceptions, both for correctness rather than convenience:
+
+- **Soft-delete rules** are always `CREATE OR REPLACE RULE`. An instant without a
+  `soft_delete` rule is an instant in which `DELETE` destroys rows, so the
+  definition is swapped in place rather than dropped and re-made.
+- **Trigger functions** are refreshed with `CREATE OR REPLACE FUNCTION`.
+  `DROP FUNCTION` refuses while any trigger depends on it, and `CASCADE` would take
+  every table's trigger with it.
+
+## Adopting a database this command did not build
+
+`makeguitarmigrations --adopt [app_label …]` re-emits every enforcement operation
+for the apps in scope, in the guarded form, ignoring what the migration history
+records.
+
+It exists because there was previously no supported way in. `create_tenant_policy`
+is a bare `CREATE POLICY` — PostgreSQL has no `CREATE POLICY IF NOT EXISTS` — so a
+table whose policy exists in the database but carries no `[POLICY:…]` header here
+took the "not covered" branch, emitted the `CREATE` form, and failed `migrate` with
+*policy "tenant_scope" already exists*. The same applied to a project migrating from
+another generator whose comment headers this one cannot read.
+
+`--adopt` cannot be combined with `--force-rls`: that flag acts only on tables whose
+policies this command already recorded, which is the very thing `--adopt` exists
+because you do not have. Run `--adopt` first, then `--force-rls`.
 
 ## Singleton function migrations
 
@@ -162,19 +248,27 @@ everything that determines what the policy says — the dimensions, the columns,
 the owner join, and `exempt_roles`:
 
 ```python
-# Tenant RLS on "billing_invoice" table! [POLICY:57ff74989db7]
+# Tenant RLS on "billing_invoice" table! [POLICY:57ff74989db7] [SQL:ebff8d5fbdc6]
 ```
 
 A run that finds a recorded identity different from the one the models now imply
 emits a **replacement** rather than nothing:
 
 ```python
-# Tenant RLS replaced on "billing_invoice" table! [POLICY:0b7c94cc2edc]
+# Tenant RLS replaced on "billing_invoice" table! [POLICY:0b7c94cc2edc] [SQL:f1a3734d30dd]
 migrations.RunSQL(
-    sql=sql.replace_table_rls(table='billing_invoice', columns={...}, force=True),
-    reverse_sql=sql.drop_table_rls(table='billing_invoice'),
+    sql=[
+        """DROP POLICY IF EXISTS tenant_scope ON billing_invoice""",
+        ...
+    ],
+    ...
 )
 ```
+
+The two tokens answer different questions and both are checked. `[POLICY:…]` is
+what the policy *says*; `[SQL:…]` is whether the text is the text the kit emits
+today. Neither subsumes the other — which is why `force` can stay out of the
+identity without becoming invisible.
 
 Three ordinary changes take that path: a model gaining or losing a tenant
 dimension, a renamed tenant column, and an edited `GUITARS_RLS_EXEMPT_ROLES`.

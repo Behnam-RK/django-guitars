@@ -78,31 +78,26 @@ with `CONN_MAX_AGE` or any pool, one rolled-back transaction containing a
 into permanent data loss.
 
 > **If your database was migrated before 1.0.0** it still carries the old guard.
-> No new migration is generated for it: the idempotency digest covers the operation
-> source, not the SQL it expands to. Replace the rules with a one-off migration that
-> re-runs the same constants — they are created `OR REPLACE`, so PostgreSQL swaps
-> each definition in place:
+> On 1.1.0 and later this is generated for you — run:
 >
-> ```python
-> # <app>/migrations/00XX_replace_soft_delete_guards.py
-> from guitars import sql
->
-> operations = [
->     migrations.RunSQL(
->         sql=sql.CREATE_SOFT_DELETE_RULE.format(table='blog_post', primary_key='id'),
->         reverse_sql=migrations.RunSQL.noop,
->     ),
->     # ...one per table with a rule, plus CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE
->     # and CREATE_MTI_SOFT_DELETE_RULE for the cascade and MTI forms.
-> ]
+> ```bash
+> python manage.py makeguitarmigrations   # or just makemigrations
+> python manage.py migrate
 > ```
+>
+> Every header written before 1.1.0 lacks the `[SQL:…]` identity, so it reads as
+> stale and each rule is re-emitted once, `CREATE OR REPLACE`, swapping the
+> definition in place inside one transaction. `makemigrations --check` fails until
+> you do, which is the point: through 1.0.x nothing failed and nothing was
+> generated, because the header scan reported the table covered before any SQL was
+> looked at. See [`migrations.md`](migrations.md).
 >
 > **Do not do this by reversing the enforcement migration and re-applying it.**
 > Its `reverse_sql` *drops* the rules, so between the two `migrate` commands every
 > `.delete()` on those tables is a permanent delete — and `migrate <app> <previous>`
 > unapplies every migration after `<previous>`, not just the enforcement one, so on
-> any real history it reverses schema changes too. The one-off above runs in a single
-> transaction and is never without a rule.
+> any real history it reverses schema changes too. The generated refresh runs in a
+> single transaction and is never without a rule.
 
 **Instance-level `hard_delete()` is two-phase.** It soft-deletes first (so the
 cascade rules fire), then DFS-collects `CASCADE` children through `_all_objects`

@@ -504,13 +504,17 @@ class TestGeneratorSettings:
 
         coverage = app_coverage(django_apps.get_app_config('testapp'))
         with override_settings(GUITARS_RLS_EXEMPT_ROLES=['metabase_ro']):
-            operation = Command()._tenant_policy_operation(
+            operation, _ = Command()._tenant_policy_operation(
                 'testapp_release', coverage.tables['testapp_release'], replacing=False
             )
 
-        assert "exempt_roles=['metabase_ro']" in operation
-        # Twice: once forward, once in the reverse, or the drop would miss the policy.
-        assert operation.count('metabase_ro') == 2
+        # The role reaches the operation as SQL now, not as an `exempt_roles=[...]` keyword:
+        # settings are resolved at generation time and the statements written literally, so
+        # editing the setting later cannot change what an applied migration means.
+        assert 'CREATE POLICY "rls_exempt_metabase_ro" ON testapp_release' in operation
+        assert 'TO "metabase_ro"' in operation
+        # And in the reverse, or the drop would miss the exemption policy the forward created.
+        assert 'DROP POLICY IF EXISTS "rls_exempt_metabase_ro" ON testapp_release' in operation
 
 
 class TestScaffoldingFailsLoudly:

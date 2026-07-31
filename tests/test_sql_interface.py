@@ -33,6 +33,13 @@ FROZEN_SQL_CONSTANTS = frozenset(
         'CHECK_TRIGGER_EXISTS_ON_TABLE',
         'CREATE_UPDATED_AT_TRIGGER',
         'DROP_UPDATED_AT_TRIGGER',
+        # Refresh and adoption forms. Generated migrations inline their SQL rather than
+        # referencing these by name, so unlike the constants above they are not load-bearing
+        # for a consuming project's `migrate` -- but they are recorded here anyway, because
+        # the rule this file enforces is that no exported name may be renamed unnoticed.
+        'REPLACE_UPDATED_AT_TRIGGER_FUNCTION',
+        'REPLACE_UPDATED_AT_TRIGGER',
+        'ADOPT_UPDATED_AT_TRIGGER',
         # soft deletion: the ON DELETE rule, the cascade rule, the session switch
         'SWITCH_ON_HARD_DELETION',
         'SWITCH_OFF_HARD_DELETION',
@@ -47,6 +54,9 @@ FROZEN_SQL_CONSTANTS = frozenset(
         'DROP_PARENT_UPDATED_AT_TRIGGER_FUNCTION',
         'CREATE_PARENT_UPDATED_AT_TRIGGER',
         'DROP_PARENT_UPDATED_AT_TRIGGER',
+        'REPLACE_PARENT_UPDATED_AT_TRIGGER_FUNCTION',
+        'REPLACE_PARENT_UPDATED_AT_TRIGGER',
+        'ADOPT_PARENT_UPDATED_AT_TRIGGER',
         'CREATE_MTI_SOFT_DELETE_RULE',
         'DROP_MTI_SOFT_DELETE_RULE',
         # row-level security: policy names, not statements

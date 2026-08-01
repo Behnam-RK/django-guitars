@@ -5,6 +5,7 @@ import types
 import pytest
 from asgiref.sync import async_to_sync
 from django.db import transaction
+from django.db.models.signals import post_save, pre_save
 
 from guitars.models.base import DutarModel
 from tests.testapp.models import Band, Genre, Riff
@@ -88,6 +89,36 @@ def test_update_m2m_without_save_raises():
 
     with pytest.raises(ValueError, match='Cannot update m2m'):
         band.update(genres=[rock], _save=False)
+
+
+@pytest.mark.django_db
+def test_update_disable_signals_only_narrows_to_save_signals(monkeypatch):
+    """``_disable_signals=True`` must disable exactly pre_save/post_save, not the other
+    six DEFAULT_SIGNALS -- a bare ``DisableSignals()`` would also suppress
+    pre_migrate/post_migrate/pre_init/post_init/pre_delete/post_delete for the
+    duration of the call, which is scope creep for a save path.
+
+    ``DisableSignals.__exit__`` always restores fully before ``update()`` returns in
+    the single-threaded case, so a black-box check of ``pre_migrate.receivers`` before
+    and after the call cannot tell the eight-signal default apart from the narrowed
+    pair -- both leave it intact by the time control returns. What actually differs is
+    the ``signals=`` argument passed for the call's duration, so that is what this pins.
+    """
+    import guitars.signals as signals_module
+
+    captured = {}
+    real_init = signals_module.DisableSignals.__init__
+
+    def spy_init(self, signals=None):
+        captured['signals'] = signals
+        real_init(self, signals=signals)
+
+    monkeypatch.setattr(signals_module.DisableSignals, '__init__', spy_init)
+
+    band = Band.objects.create(name='Rush')
+    band.update(name='Yes', _disable_signals=True)
+
+    assert captured['signals'] == [pre_save, post_save]
 
 
 @pytest.mark.django_db

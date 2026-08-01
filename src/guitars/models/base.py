@@ -127,9 +127,15 @@ class UpdatableModel(Model):
         )
 
         if _save:
+            from django.db.models.signals import post_save, pre_save
+
             from guitars.signals import DisableSignals
 
-            signals_context = DisableSignals() if _disable_signals else nullcontext()
+            signals_context = (
+                DisableSignals(signals=[pre_save, post_save])
+                if _disable_signals
+                else nullcontext()
+            )
             with signals_context:
                 with transaction.atomic():
                     self.save(update_fields=update_fields)

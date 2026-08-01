@@ -1,4 +1,4 @@
-from collections import defaultdict
+import threading
 
 from django.db.models.signals import (
     post_delete,
@@ -13,6 +13,18 @@ from django.db.models.signals import (
 from django.dispatch import Signal
 
 
+# Process-global, keyed by signal, so overlapping DisableSignals() instances -- on
+# different threads, or nested on the same one -- agree on one true stash per signal
+# instead of each keeping its own. `signal.receivers` is itself process-global mutable
+# state with no lock of its own; without this, a second block's __exit__ would restore
+# from a stash it took *after* the first block had already emptied the list, overwriting
+# the first block's correct restore with an empty one and permanently losing every
+# receiver. `_lock` serialises every read/write of both this dict and `signal.receivers`
+# so "stash it" and "count the stash" never interleave across threads.
+_lock = threading.Lock()
+_state: dict[Signal, dict] = {}
+
+
 class DisableSignals:
     """Context manager that temporarily disconnects Django signals.
 
@@ -20,9 +32,13 @@ class DisableSignals:
     them on exit. Used by ``UpdatableModel.update(_disable_signals=True)``
     to suppress ``pre_save``/``post_save`` during silent updates.
 
+    Thread-safe and re-entrant: overlapping blocks (nested on one thread, or concurrent
+    across threads) for the same signal share one reference-counted stash, taken by
+    whichever block enters first and restored only when the last one exits.
+
     Usage::
 
-        with DisableSignals():
+        with DisableSignals() as ds:
             instance.save()  # no signals fire
 
         with DisableSignals(signals=[post_save]):
@@ -41,22 +57,30 @@ class DisableSignals:
     ]
 
     def __init__(self, signals: list[Signal] | None = None):
-        self.stashed_signals = defaultdict(list)
         self.disabled_signals = signals or self.DEFAULT_SIGNALS
 
     def __enter__(self):
         for signal in self.disabled_signals:
             self.disconnect(signal)
+        return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        for signal in list(self.stashed_signals.keys()):
+        for signal in self.disabled_signals:
             self.reconnect(signal)
 
     def disconnect(self, signal):
-        self.stashed_signals[signal] = signal.receivers
-        signal.receivers = []
+        with _lock:
+            entry = _state.setdefault(signal, {'count': 0, 'original': signal.receivers})
+            if entry['count'] == 0:
+                entry['original'] = signal.receivers
+                signal.receivers = []
+            entry['count'] += 1
 
     def reconnect(self, signal):
-        signal.receivers = self.stashed_signals.get(signal, [])
-        signal.sender_receivers_cache.clear()
-        del self.stashed_signals[signal]
+        with _lock:
+            entry = _state[signal]
+            entry['count'] -= 1
+            if entry['count'] == 0:
+                signal.receivers = entry['original']
+                signal.sender_receivers_cache.clear()
+                del _state[signal]

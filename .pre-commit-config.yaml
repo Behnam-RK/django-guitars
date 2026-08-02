@@ -8,7 +8,12 @@ repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
+      # syrupy's .ambr snapshots use a leading-space indent to represent a blank line
+      # *inside* the snapshotted string (as distinct from one that ends the block), so
+      # trimming it silently corrupts the snapshot into a stored value the code under
+      # test no longer produces -- see tests/__snapshots__/.
       - id: trailing-whitespace
+        exclude: '\.ambr$'
       - id: end-of-file-fixer
       - id: check-merge-conflict
       - id: check-added-large-files

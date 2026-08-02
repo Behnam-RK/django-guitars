@@ -97,7 +97,7 @@ class UpdatableModel(Model):
         if not _save and m2m_attrs:
             raise ValueError('Cannot update m2m fields without saving the instance!')
 
-        update_fields = updating_fields if not _save_all_fields and updating_fields else None
+        update_fields = None if _save_all_fields else updating_fields
         return m2m_attrs, update_fields
 
     def update(

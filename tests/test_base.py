@@ -71,6 +71,41 @@ def test_update_ignores_unknown_field_when_not_raising():
     assert band.name == 'Yes'
 
 
+@pytest.mark.django_db(transaction=True)
+def test_update_with_no_scalar_fields_writes_nothing():
+    """A bare, argument-less update() must not become a full-row rewrite.
+
+    ``_prepare_update`` used to collapse an empty ``updating_fields`` set to
+    ``update_fields=None`` (truthiness), which Django reads as "save every field" --
+    the opposite of the docstring's promise that only the passed attrs are written.
+    ``_updated_at``'s trigger is the observable proof: a real UPDATE bumps it, an
+    empty one (Django short-circuits before issuing any SQL) must not.
+    """
+    band = Band.objects.create(name='Rush')
+    band.refresh_from_db()
+    before = band._updated_at
+
+    band.update()
+
+    band.refresh_from_db()
+    assert band._updated_at == before
+
+
+@pytest.mark.django_db(transaction=True)
+def test_update_m2m_only_writes_no_scalar_column():
+    """An M2M-only update() must not also rewrite every scalar column."""
+    band = Band.objects.create(name='Rush')
+    band.refresh_from_db()
+    before = band._updated_at
+    rock = Genre.objects.create(name='rock')
+
+    band.update(genres=[rock])
+
+    assert set(band.genres.all()) == {rock}
+    band.refresh_from_db()
+    assert band._updated_at == before  # no scalar column touched
+
+
 @pytest.mark.django_db
 def test_update_sets_m2m_relations():
     band = Band.objects.create(name='Rush')

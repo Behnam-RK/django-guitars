@@ -67,6 +67,11 @@ dev = [
     # production's build -- see the [project.optional-dependencies] comment.
     "psycopg[binary]>=3.2",
     "django-stubs>=6.0.6,<7.0.0",
+    # M2 (issue #9): behavioural-test dependencies. Dev/test-only -- the runtime
+    # `dependencies` above stay Django-only.
+    "hypothesis>=6.140",  # property-based fuzzing (identifiers, update() flag combinatorics)
+    "syrupy>=5.0",  # snapshot testing for generated-migration text
+    "pglast>=8.0",  # structural (not textual) parsing of generated policy SQL
 ]
 
 [build-system]

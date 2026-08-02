@@ -36,6 +36,14 @@ dependencies = [
     "Django>=5.0",
 ]
 
+[project.optional-dependencies]
+# [c], not [binary]: psycopg's own docs call [c] "the preferred method for
+# production sites" -- it builds against the local libpq rather than shipping
+# a bundled one. Requires build prerequisites (a C compiler, libpq headers) at
+# install time; the dev group keeps [binary] instead, see below, since CI/local
+# dev value the no-build-tools convenience over the production-matching build.
+psycopg = ["psycopg[c]>=3.2"]
+
 [project.urls]
 Homepage = "https://github.com/Behnam-RK/django-guitars"
 Repository = "https://github.com/Behnam-RK/django-guitars"
@@ -54,6 +62,9 @@ dev = [
     "pytest-cov>=7.0",
     "pytest-xdist>=3.8",
     "pytest-django>=4.9",
+    # [binary], not the project's own [psycopg] extra ([c]): CI/local dev value
+    # a driver that installs without build tools over one that matches
+    # production's build -- see the [project.optional-dependencies] comment.
     "psycopg[binary]>=3.2",
     "django-stubs>=6.0.6,<7.0.0",
 ]

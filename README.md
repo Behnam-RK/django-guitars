@@ -34,6 +34,18 @@ database keeps score; you just write models. Use only the pieces you need.
 pip install django-guitars
 ```
 
+`django-guitars` doesn't pin a PostgreSQL driver itself, since a consuming
+project may already have one. If it doesn't, pull in `psycopg` via the
+`psycopg` extra, which installs [`psycopg[c]`](https://www.psycopg.org/psycopg3/docs/basic/install.html) --
+psycopg's own recommendation for production, built against your system's
+`libpq` rather than a bundled copy. It needs a C compiler and `libpq` headers
+at install time; if you can't provide those, install `psycopg[binary]`
+directly instead.
+
+```bash
+pip install django-guitars[psycopg]
+```
+
 Add the app to your settings:
 
 ```python

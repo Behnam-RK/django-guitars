@@ -5,6 +5,30 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.3] - 2026-08-02
+
+Two follow-up bugs found reviewing #15 after it merged, one of them in that
+PR's own fix.
+
+### Fixed
+
+- `hard_delete()`'s new `contextlib.suppress(Exception)` around
+  `SWITCH_OFF_HARD_DELETION` swallowed a genuine failure of that statement
+  itself, not just failures caused by an already-aborted transaction. If the
+  DELETE succeeded but the following switch-off statement then failed for its
+  own reason, `hard_delete()` returned normally with `rules.hard_deletion`
+  left `'on'` for the rest of any enclosing transaction -- silently turning a
+  later plain `.delete()` call in that same transaction into a hard delete.
+  Verified against a real database before fixing. The suppression now only
+  applies on the failure path (where the switch-off's own error would just
+  replace the real `DELETE` error); on the success path a switch-off failure
+  propagates, so the enclosing `atomic()` rolls the `DELETE` back too instead
+  of leaking the switch open.
+- `update(_disable_signals=True)` reported a tenant-write-guard-bypass
+  finding even when `update_fields` collapsed to an empty set -- a case where
+  `self.save()` is a no-op (no SQL, no signals) and so nothing was actually
+  bypassed.
+
 ## [1.1.2] - 2026-08-02
 
 Five confirmed bugs found by a multi-aspect quality review, each shipped

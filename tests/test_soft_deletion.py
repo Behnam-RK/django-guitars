@@ -4,6 +4,7 @@ import contextlib
 
 import pytest
 from django.db import connection, transaction
+from django.db.backends.utils import CursorWrapper
 
 from guitars.models.soft_deletion import (
     AllObjectsManager,
@@ -12,6 +13,7 @@ from guitars.models.soft_deletion import (
     LiveManager,
     LiveQuerySet,
 )
+from guitars.sql import SWITCH_OFF_HARD_DELETION, SWITCH_ON_HARD_DELETION
 from tests.testapp.models import Album, Band, Genre, Orchestra, Riff
 
 
@@ -153,6 +155,35 @@ def test_mti_queryset_hard_delete_operates_on_the_bound_alias():
     Orchestra._all_objects.using('secondary').filter(pk=orchestra.pk).hard_delete()
 
     assert not Orchestra._all_objects.using('secondary').filter(pk=orchestra.pk).exists()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_switch_off_is_attempted_even_when_the_delete_itself_raises(monkeypatch):
+    """The switch-off must be this function's own guarantee, not merely an effect of
+    the enclosing ``atomic()`` eventually rolling back.
+
+    Proven by making the DELETE raise a plain Python exception that never reaches
+    Postgres -- so the transaction is never server-side aborted, and only the
+    ``finally`` in ``_hard_delete_own_table`` decides whether ``SWITCH_OFF_HARD_DELETION``
+    is still attempted afterwards. Before the fix, that line was simply never reached.
+    """
+    band = Band.objects.create(name='Doomed')
+    calls = []
+    real_execute = CursorWrapper.execute
+
+    def spy_execute(self, sql, params=None):
+        calls.append(sql)
+        if isinstance(sql, str) and sql.strip().upper().startswith('DELETE FROM'):
+            raise RuntimeError('simulated failure -- never reaches postgres')
+        return real_execute(self, sql, params)
+
+    monkeypatch.setattr(CursorWrapper, 'execute', spy_execute)
+
+    with pytest.raises(RuntimeError, match='simulated failure'):
+        Band._all_objects.filter(pk=band.pk).hard_delete()
+
+    assert calls.count(SWITCH_ON_HARD_DELETION) == 1
+    assert calls.count(SWITCH_OFF_HARD_DELETION) == 1
 
 
 class TestManagerQuerySetClass:

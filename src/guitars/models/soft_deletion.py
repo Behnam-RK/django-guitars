@@ -1,3 +1,4 @@
+import contextlib
 from collections import defaultdict
 
 from django.db import connections, transaction
@@ -120,13 +121,19 @@ class HardDeletableQuerySet(LiveQuerySet):
         quote = db_connection.ops.quote_name
         with db_connection.cursor() as cursor, transaction.atomic(using=self.db):
             cursor.execute(SWITCH_ON_HARD_DELETION)
-            for table, pk_column in _mti_table_chain(model):
-                # Identifiers come from model._meta (trusted); the PK values are parameterized.
-                sql_stmt = (
-                    f'DELETE FROM {quote(table)} WHERE {quote(pk_column)} IN ({placeholders})'  # noqa: E501  # nosec B608
-                )
-                cursor.execute(sql_stmt, pks)
-            cursor.execute(SWITCH_OFF_HARD_DELETION)
+            try:
+                for table, pk_column in _mti_table_chain(model):
+                    # Identifiers come from model._meta (trusted); PK values are parameterized.
+                    sql_stmt = (
+                        f'DELETE FROM {quote(table)} WHERE {quote(pk_column)} IN ({placeholders})'  # noqa: E501  # nosec B608
+                    )
+                    cursor.execute(sql_stmt, pks)
+            finally:
+                # See _hard_delete_own_table for why this is suppressed rather than
+                # left to raise: if a DELETE above failed, the transaction is already
+                # aborted and this statement would only replace that error with its own.
+                with contextlib.suppress(Exception):
+                    cursor.execute(SWITCH_OFF_HARD_DELETION)
             return None
 
     # Marks `hard_delete` as queryset-only for Manager.from_queryset(); a valid runtime
@@ -143,10 +150,15 @@ class HardDeletableQuerySet(LiveQuerySet):
         Three statements, three ``execute`` calls -- like the MTI path above, and not
         splice-able back into one string: a parameterised multi-statement ``execute`` only
         works under client-side binding, so one call would break the moment a consumer sets
-        psycopg's ``server_side_binding`` option. ``atomic()`` is what keeps the split safe:
-        the switch is transaction-local, and in autocommit each statement would otherwise be
-        its own transaction -- the switch expiring before the DELETE it exists to unlock,
-        which then archives instead of deleting.
+        psycopg's ``server_side_binding`` option. ``atomic()`` is what keeps the split safe
+        even without the ``finally`` below: the switch is transaction-local, and in
+        autocommit each statement would otherwise be its own transaction -- the switch
+        expiring before the DELETE it exists to unlock, which then archives instead of
+        deleting. The ``finally`` makes turning the switch back off a guarantee of this
+        function rather than a side effect of whatever ``atomic()`` block happens to be
+        enclosing it -- on the failure path the DELETE has already aborted the
+        transaction, so the switch-off attempt there would only raise its own error in
+        place of the real one, hence the suppression.
         """
         with connections[self.db].cursor() as cursor:
             query = self.query.clone()
@@ -154,8 +166,11 @@ class HardDeletableQuerySet(LiveQuerySet):
             compiled, params = query.sql_with_params()
             with transaction.atomic(using=self.db):
                 cursor.execute(SWITCH_ON_HARD_DELETION)
-                result = cursor.execute(compiled, params)
-                cursor.execute(SWITCH_OFF_HARD_DELETION)
+                try:
+                    result = cursor.execute(compiled, params)
+                finally:
+                    with contextlib.suppress(Exception):
+                        cursor.execute(SWITCH_OFF_HARD_DELETION)
                 return result
 
 

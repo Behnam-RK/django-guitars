@@ -121,6 +121,12 @@ class UpdatableModel(Model):
         ``_save=True``.
 
         The save runs inside ``transaction.atomic()``.
+
+        ``_disable_signals=True`` suppresses exactly ``pre_save``/``post_save`` for this
+        call -- which, on a tenanted (``GuitarModel``) instance, disables the tenant write
+        guard that fills in and validates the tenant field. The database-level RLS policy
+        still applies if installed, but nothing on the Python side does; each such call is
+        reported once per model class via ``guitars.tenancy.reporting``.
         """
         m2m_attrs, update_fields = self._prepare_update(
             _save, _save_all_fields, _raise_for_excessive, attrs
@@ -130,12 +136,21 @@ class UpdatableModel(Model):
             from django.db.models.signals import post_save, pre_save
 
             from guitars.signals import DisableSignals
+            from guitars.tenancy import tenant_spec
+            from guitars.tenancy.reporting import report_once
 
             signals_context = (
                 DisableSignals(signals=[pre_save, post_save])
                 if _disable_signals
                 else nullcontext()
             )
+            if _disable_signals and tenant_spec(type(self)):
+                report_once(
+                    (type(self), 'update_disable_signals_bypasses_tenant_guard'),
+                    f'{type(self).__name__}.update(_disable_signals=True) suppresses '
+                    'pre_save, which disables the tenant write guard for this save.',
+                    model=type(self).__name__,
+                )
             with signals_context:
                 with transaction.atomic():
                     self.save(update_fields=update_fields)

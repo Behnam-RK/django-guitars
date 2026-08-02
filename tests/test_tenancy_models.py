@@ -20,7 +20,8 @@ from django.db import connection
 from django.db.utils import IntegrityError
 
 from guitars.tenancy import TenantScopeError, tenancy_bypassed, tenant
-from tests.testapp.models import Booking, Label, Release, Review, StadiumTour, Tour, Track
+from guitars.tenancy import reporting
+from tests.testapp.models import Band, Booking, Label, Release, Review, StadiumTour, Tour, Track
 
 
 def _count(table: str) -> int:
@@ -259,6 +260,62 @@ class TestWrites:
         with tenancy_bypassed():
             assert list(Release._all_objects.values_list('title', flat=True)) == ['release-b']
             assert list(Track._all_objects.values_list('title', flat=True)) == ['track-b']
+
+
+class TestUpdateDisableSignalsReporting:
+    """``update(_disable_signals=True)`` suppresses ``pre_save`` -- which is also where
+    the tenant write guard lives. Nothing here can refuse the write without breaking the
+    flag's whole purpose, so it must at least say so."""
+
+    @pytest.fixture(autouse=True)
+    def _isolated_reporter(self):
+        original = reporting._reporter
+        reporting.reset_reported()
+        yield
+        reporting.set_reporter(original)
+        reporting.reset_reported()
+
+    def test_disabling_signals_on_a_tenanted_model_is_reported(self, tenants):
+        seen = []
+        reporting.set_reporter(lambda message, /, **context: seen.append((message, context)))
+
+        with tenant(label=tenants.a):
+            tenants.release_a.update(title='renamed', _disable_signals=True)
+
+        assert len(seen) == 1
+        message, context = seen[0]
+        assert 'Release' in message
+        assert 'disable_signals' in message
+        assert context == {'model': 'Release'}
+
+    def test_repeated_calls_on_the_same_model_report_only_once(self, tenants):
+        seen = []
+        reporting.set_reporter(lambda message, /, **context: seen.append(message))
+
+        with tenant(label=tenants.a):
+            tenants.release_a.update(title='one', _disable_signals=True)
+        with tenant(label=tenants.b):
+            tenants.release_b.update(title='two', _disable_signals=True)
+
+        assert len(seen) == 1  # deduped by model class, not by instance
+
+    def test_disabling_signals_on_an_untenanted_model_is_not_reported(self, db):
+        seen = []
+        reporting.set_reporter(lambda message, /, **context: seen.append(message))
+
+        band = Band.objects.create(name='Rush')
+        band.update(name='Yes', _disable_signals=True)
+
+        assert seen == []
+
+    def test_disabling_signals_without_it_actually_being_requested_is_not_reported(self, tenants):
+        seen = []
+        reporting.set_reporter(lambda message, /, **context: seen.append(message))
+
+        with tenant(label=tenants.a):
+            tenants.release_a.update(title='renamed')  # no _disable_signals
+
+        assert seen == []
 
 
 # ─────────────────────── soft deletion under FORCE ─────────────────────── #

@@ -15,7 +15,16 @@ import pytest
 from django.apps import apps as django_apps
 
 from guitars.tenancy.discovery import TableCoverage, app_coverage, expected_coverage, is_local
-from tests.testapp.models import Booking, Label, Release, Review, StadiumTour, Tour, WorldTour
+from tests.testapp.models import (
+    Booking,
+    HeadlineFestival,
+    Label,
+    Release,
+    Review,
+    StadiumTour,
+    Tour,
+    WorldTour,
+)
 
 
 @pytest.fixture
@@ -27,6 +36,7 @@ class TestWhichTablesAreCovered:
     def test_every_tenanted_table_and_nothing_else(self, coverage):
         assert set(coverage.tables) == {
             'testapp_booking',
+            'testapp_headlinefestival',
             'testapp_release',
             'testapp_stadiumtour',
             'testapp_tour',
@@ -51,14 +61,30 @@ class TestWhichTablesAreCovered:
         assert 'label (release__label)' in note
         assert 'Python scoping still applies' in note
 
-    def test_that_is_the_only_note(self, coverage):
+    def test_that_is_the_only_note_about_it(self, coverage):
         """One fact, one note.
 
         A model whose every dimension is multi-hop used to collect two -- a "traverses a
         relation" note naming the dimension and a "skipped" note naming the lookup -- which
         read as two separate problems with one model.
         """
-        assert len(coverage.notes) == 1
+        review_notes = [note for note in coverage.notes if 'testapp_review' in note]
+        assert len(review_notes) == 1
+
+    def test_an_own_dimension_survives_a_multi_ancestor_conflict(self, coverage):
+        """``HeadlineFestival`` has ``sponsor`` on its own table, while ``market`` and
+        ``promoter`` live on two *different* ancestors (``Festival`` and
+        ``TouringFestival``) -- one correlated subquery can only reach one of them, so
+        both are dropped. The own-table dimension must still get a policy: dropping
+        those two must not also drop the one this table can actually enforce itself.
+        """
+        assert coverage.tables[HeadlineFestival._meta.db_table] == TableCoverage(
+            columns={'sponsor': 'sponsor_id'}
+        )
+
+        note = next(note for note in coverage.notes if 'testapp_headlinefestival' in note)
+        assert "tenant dimensions ['market', 'promoter'] live on more than one ancestor" in note
+        assert "its policy still enforces ['sponsor']" in note
 
 
 class TestHowEachTableIsPredicated:

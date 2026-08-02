@@ -7,12 +7,25 @@ is really about the rows the caller must *not* see.
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import NamedTuple
 
 import pytest
 
 from guitars.tenancy import tenancy_bypassed, tenant
 from tests.testapp.models import Booking, Label, Release, StadiumTour, Track
+
+
+# test_ladder.py runs some probes in a subprocess (see its module docstring for why).
+# Setting this before those subprocesses spawn makes coverage.py's own site-packages
+# shim (installed by the `coverage` package itself, not something added here) start
+# tracking inside each one; [tool.coverage.run] parallel=true is what then lets
+# pytest-cov combine that data with the main process's at session end. Module-level so
+# it lands in os.environ well before collection reaches any subprocess-spawning test.
+os.environ.setdefault(
+    'COVERAGE_PROCESS_START', str(Path(__file__).resolve().parent.parent / 'pyproject.toml')
+)
 
 
 class Tenants(NamedTuple):

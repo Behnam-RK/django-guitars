@@ -149,6 +149,14 @@ filterwarnings = ["error"]
 [tool.coverage.run]
 source = ["guitars"]
 branch = true
+# Several tests in test_ladder.py deliberately run in subprocesses (import-time,
+# settings-dependent module state can't be probed any other way -- see that file's
+# module docstring). parallel=true plus COVERAGE_PROCESS_START (set in
+# tests/conftest.py) makes those subprocesses record their own coverage data, which
+# pytest-cov then combines with the main process's at session end. Without this, the
+# branches those subprocesses exercise (e.g. GuitarModel with no tenant model
+# configured) would read as untested even though real assertions cover them.
+parallel = true
 omit = [
     "tests/*",
 ]

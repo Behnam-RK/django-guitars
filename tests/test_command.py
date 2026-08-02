@@ -361,6 +361,34 @@ def test_handle_generates_only_for_named_apps(monkeypatch):
     assert created == []
 
 
+def test_handle_skips_an_in_scope_app_with_no_operations(monkeypatch):
+    """An in-scope app that needs no enforcement contributes nothing to generate.
+
+    Every real LOCAL_APP in this suite (just testapp) always has models needing
+    enforcement, so nothing exercises this otherwise -- ``_build_operations`` is
+    mocked directly rather than reaching for a fake app with no models, which
+    ``test_scoped_cascade_gap_*`` already does for a different method.
+    """
+    created: list[str] = []
+
+    command = Command()
+    command.stdout = StringIO()
+    command.existing.triggers.clear()
+    command.existing.soft_deletes.clear()
+    command.existing.soft_delete_related.clear()
+    command.trigger_function_dependency = ('testapp', '0001_pretend')
+    monkeypatch.setattr(command, '_build_operations', lambda app: [])
+    monkeypatch.setattr(
+        _generator,
+        'create_empty_migration_file',
+        lambda app, name='auto_enforcement': created.append(app.label) or f'0002_{name}.py',
+    )
+
+    command.handle(check_only=False)
+
+    assert created == []
+
+
 def test_unknown_app_label_raises_command_error():
     with pytest.raises(CommandError):
         call_command('makeguitarmigrations', 'not_a_real_app')
@@ -778,7 +806,7 @@ def test_tenant_policy_operations_are_emitted_for_uncovered_tables():
 
     assert any(header.startswith('# Tenant RLS on "testapp_release" table!') for header in headers)
     # One per policy-eligible table, and none for the multi-hop model.
-    assert len(headers) == 6
+    assert len(headers) == 7
     # The CREATE form, not the replacement: there was no policy to replace.
     assert not any('replaced' in header for header in headers)
 

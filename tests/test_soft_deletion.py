@@ -14,7 +14,7 @@ from guitars.models.soft_deletion import (
     LiveQuerySet,
 )
 from guitars.sql import SWITCH_OFF_HARD_DELETION, SWITCH_ON_HARD_DELETION
-from tests.testapp.models import Album, Band, Genre, Orchestra, Riff
+from tests.testapp.models import Album, Band, Genre, Merch, Orchestra, Riff
 
 
 @pytest.mark.django_db
@@ -82,6 +82,27 @@ def test_hard_delete_removes_instance_and_cascade_children():
 
     assert not Band._all_objects.filter(pk=band_pk).exists()
     assert not Album._all_objects.filter(pk=album_pk).exists()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_hard_delete_collects_a_diamond_convergence_once():
+    """``Merch`` is reachable from ``Album`` by two independent CASCADE relations --
+    ``album`` and ``bonus_album`` -- so the DFS in instance-level ``hard_delete()``
+    visits it twice: once per relation, each time with a *different* new pk. The
+    second visit must not re-append it to the deletion order (it is already queued
+    from the first), only fold its new pk into the row already scheduled for that
+    table.
+    """
+    band = Band.objects.create(name='Rush')
+    album = Album.objects.create(title='Hemispheres', band=band)
+    # Two distinct Merch rows so the two relations bring different, non-overlapping pks.
+    via_album = Merch.objects.create(description='Tour shirt', album=album)
+    via_bonus = Merch.objects.create(description='Poster', bonus_album=album)
+
+    band.hard_delete()
+
+    assert not Merch._all_objects.filter(pk=via_album.pk).exists()
+    assert not Merch._all_objects.filter(pk=via_bonus.pk).exists()
 
 
 @pytest.mark.django_db(transaction=True)

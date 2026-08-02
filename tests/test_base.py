@@ -107,6 +107,28 @@ def test_update_m2m_only_writes_no_scalar_column():
 
 
 @pytest.mark.django_db
+def test_updatable_fields_skips_columnless_relations(monkeypatch):
+    """``_updatable_fields`` must record a columnless relation's *name* without also
+    adding a phantom column for it.
+
+    The guard's own comment says it exists for relations with no column, but nothing in
+    the test app actually produces one: even the M2M ``genres`` reports a truthy
+    ``column`` (Django falls back to the field's ``attname``). Rather than reshape the
+    schema chasing a case real relations don't produce here, this synthesizes one.
+    """
+    band = Band.objects.create(name='Rush')
+    real_get_fields = type(band)._meta._get_fields
+    phantom = types.SimpleNamespace(name='phantom_relation')  # deliberately no `.column`
+
+    monkeypatch.setattr(
+        type(band)._meta, '_get_fields', lambda *a, **kw: [*real_get_fields(*a, **kw), phantom]
+    )
+
+    assert 'phantom_relation' in band._updatable_fields
+    assert None not in band._updatable_fields  # the falsy column must never be added
+
+
+@pytest.mark.django_db
 def test_update_sets_m2m_relations():
     band = Band.objects.create(name='Rush')
     rock = Genre.objects.create(name='rock')

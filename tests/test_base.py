@@ -127,6 +127,19 @@ def test_update_m2m_without_save_raises():
 
 
 @pytest.mark.django_db
+def test_update_m2m_without_save_raises_before_mutating_scalar_fields():
+    """A raising update() must leave the instance untouched -- validation has to run
+    before any attribute is set, not interleaved with setting them."""
+    band = Band.objects.create(name='Rush')
+    rock = Genre.objects.create(name='rock')
+
+    with pytest.raises(ValueError, match='Cannot update m2m'):
+        band.update(name='Yes', genres=[rock], _save=False)
+
+    assert band.name == 'Rush'  # unchanged in memory
+
+
+@pytest.mark.django_db
 def test_update_disable_signals_only_narrows_to_save_signals(monkeypatch):
     """``_disable_signals=True`` must disable exactly pre_save/post_save, not the other
     six DEFAULT_SIGNALS -- a bare ``DisableSignals()`` would also suppress

@@ -87,15 +87,14 @@ class UpdatableModel(Model):
         if excessive_fields and _raise_for_excessive:
             raise ValueError(f'Invalid arguments: {excessive_fields}. (valid choices: {fields})')
 
-        m2m_attrs: dict[str, object] = {}
-        for attr, attr_value in attrs.items():
-            if attr in m2m_fields:
-                m2m_attrs[attr] = attr_value
-            elif attr in updating_fields:
-                setattr(self, attr, attr_value)
+        m2m_attrs = {attr: value for attr, value in attrs.items() if attr in m2m_fields}
 
         if not _save and m2m_attrs:
             raise ValueError('Cannot update m2m fields without saving the instance!')
+
+        for attr, attr_value in attrs.items():
+            if attr in updating_fields:
+                setattr(self, attr, attr_value)
 
         update_fields = None if _save_all_fields else updating_fields
         return m2m_attrs, update_fields

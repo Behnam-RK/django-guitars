@@ -5,6 +5,72 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-08-02
+
+M2: new behavioural test families (#9) -- dev/test-only, no production code path changes
+behavior in this release. 100% line/branch coverage cannot see behavioural gaps in a
+library whose whole premise is PostgreSQL-enforced correctness under conditions Python
+doesn't control: concurrency, connection reuse, a database that drifted from what
+migrations claim, and consuming projects upgrading across the 1.1.0 SQL-inlining change.
+
+### Added
+
+- `hypothesis`, `syrupy` and `pglast` as dev/test dependencies: property-based fuzzing,
+  snapshot testing for generated-migration text, and structural (not textual) parsing of
+  generated policy SQL, respectively.
+- `tests/test_concurrency.py`: two threads in different tenant scopes, `aupdate()` inside
+  an already-running event loop, a connection reused across logical requests via
+  `CONN_MAX_AGE`, Django 5.1+'s `OPTIONS={"pool": True}`, and pgbouncer transaction
+  pooling -- behind a new opt-in `pooling` compose profile
+  (`docker compose --profile pooling up -d --wait`) so default local/CI runs don't pay
+  for it.
+- `tests/test_drift.py`: a hand-dropped soft-delete rule or `_updated_at` trigger is
+  invisible to both `makemigrations --check` (a build-time gate over migration files) and
+  `audittenancy` (a runtime gate scoped to tenant RLS only); a hand-dropped tenant policy
+  is the one drift `audittenancy` does catch. Also covers `--adopt`'s `DROP ... IF EXISTS`
+  form succeeding where the plain generated form fails against an already-present,
+  unrecorded object.
+- `tests/test_legacy_migrations.py` and `tests/legacy_migrations/`: reproduces an
+  already-migrated downstream project on upgrade -- pre-1.1.0-shaped migrations
+  (`from guitars import sql`, no `[SQL:...]` identity) that `--check` correctly refuses
+  rather than treating as "covered forever" (the bug `2ba86a3` fixed), and the generator's
+  replace form applying cleanly against the live, already-populated tables.
+- `tests/test_migrate_override.py`: a real `RunPython` migration backfilling across two
+  tenants in one statement with no tenant scope open, proving `migrate.py`'s
+  `tenancy_bypassed()` wrapper for real rather than only via the `guitars.tenancy.W001`
+  system check that it's installed.
+- `tests/test_properties.py`: identifier fuzzing pinning that `sql/policy.py`'s `_bare()`
+  raises a build-time error while the trigger/rule path
+  (`makeguitarmigrations._build_operations`) has no equivalent guard at all
+  (`xfail(strict=True)`, flips once M4 fixes it); the 16-way `_save` x
+  `_save_all_fields` x `_raise_for_excessive` x `_disable_signals` cross product of
+  `update()`/`aupdate()`, exhaustively explored via hypothesis.
+- `tests/test_tenancy_rls.py::TestThreeLevelMTIOwnerJoin`: the owner-join policy proven
+  against a real three-level MTI chain (`Tour -> WorldTour -> StadiumTour`), not just the
+  two-level raw-DDL fixture the rest of the file uses.
+- `tests/test_mti_incremental.py` and `tests/mti_incremental/`: an MTI child added to an
+  app whose parent's enforcement migration already exists and is already current --
+  proving only the new child is reported missing and generated.
+
+### Changed
+
+- `tests/test_makemigrations_override.py` no longer mocks both Django's real
+  `makemigrations` and the module's own `call_command` and asserts on call arguments
+  (every one of the six tests would have passed if `makeguitarmigrations` became a
+  same-named no-op). Replaced with five tests running the real command against a real
+  throwaway app, asserting on what actually lands on disk.
+- `tests/test_command.py`'s six `test_scoped_cascade_gap_*` tests collapsed into one
+  parametrized test; same for the `_ensure_trigger_function_migration` /
+  `_ensure_parent_trigger_function_migration` "writes and records the dependency" pair,
+  and the two "`--check` reports a missing ... trigger function migration" tests. No
+  coverage lost.
+- Cursor-based raw-SQL test helpers (`execute`/`scalar`/`rows`), previously redefined
+  independently across seven files, now live once in `tests/conftest.py`.
+- Hand-written expected migration text in `tests/test_command.py` replaced with a
+  `syrupy` snapshot -- the generator's own output is the source of truth.
+- `tests/test_management_audittenancy.py` gained `pglast`-parsed structural assertions of
+  generated policy SQL alongside the existing `pg_policies` text assertions.
+
 ## [1.2.0] - 2026-08-02
 
 M1: fixing the measuring instruments themselves (#8) -- harness and CI

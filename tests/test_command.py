@@ -128,8 +128,7 @@ def test_cascade_operations_disambiguates_two_fks_to_the_same_related_table():
     assert len(merch_ops) == 2
     headers = [op.splitlines()[0] for op in merch_ops]
     assert any(
-        '# Soft Delete Related Rule on "testapp_merch" that is related to '
-        '"testapp_album"!' in h
+        '# Soft Delete Related Rule on "testapp_merch" that is related to "testapp_album"!' in h
         for h in headers
     )
     assert any('via "bonus_album_id"!' in h for h in headers)
@@ -417,137 +416,130 @@ def _fake_app_config(name: str, label: str, model_list: list) -> types.SimpleNam
     return types.SimpleNamespace(name=name, label=label, get_models=lambda: model_list)
 
 
-@override_settings(LOCAL_APPS=['fake.banda', 'fake.albumb'])
-def test_scoped_cascade_gap_reported_when_parent_app_out_of_scope(monkeypatch):
-    # Real, already-related models (Album -> Band, CASCADE), reassigned to two
-    # fake apps so we can scope to one without the other.
-    command = Command()
-    command.existing.soft_delete_related.clear()
-
-    fake_band_app = _fake_app_config('fake.banda', 'banda', [Band])
-    fake_album_app = _fake_app_config('fake.albumb', 'albumb', [Album])
-    monkeypatch.setattr(
-        makeguitarmigrations_module.django_apps,
-        'get_app_configs',
-        lambda: [fake_band_app, fake_album_app],
-    )
-
-    # Album's app ('albumb') is in scope; Band's app ('banda') -- the cascade
-    # rule's parent -- is not, so the Band -> Album cascade rule is skipped.
-    notes = command._scoped_cascade_gap_notes({'albumb'})
-
-    assert len(notes) == 1
-    assert 'banda' in notes[0]
-
-
-@override_settings(LOCAL_APPS=['fake.banda', 'fake.albumb'])
-def test_scoped_cascade_gap_empty_when_parent_app_in_scope(monkeypatch):
-    command = Command()
-    command.existing.soft_delete_related.clear()
-
-    fake_band_app = _fake_app_config('fake.banda', 'banda', [Band])
-    fake_album_app = _fake_app_config('fake.albumb', 'albumb', [Album])
-    monkeypatch.setattr(
-        makeguitarmigrations_module.django_apps,
-        'get_app_configs',
-        lambda: [fake_band_app, fake_album_app],
-    )
-
-    # Both apps in scope, or unscoped entirely: no gap to report.
-    assert command._scoped_cascade_gap_notes({'banda', 'albumb'}) == []
-    assert command._scoped_cascade_gap_notes(set()) == []
-
-
-@override_settings(LOCAL_APPS=['fake.banda', 'fake.albumb', 'fake.otherc'])
-def test_scoped_cascade_gap_silent_when_child_app_also_out_of_scope(monkeypatch):
-    """A cascade rule between two apps neither of which is in the requested
-    scope is not this run's business -- reporting it would just be noise
-    about apps the caller isn't touching right now.
+def _sponsor_fk_reverse_relation():
+    """Synthetic shape for the "generator would refuse this rule anyway" case: an FK on
+    an MTI child's own table while its ``_deleted_at`` lives on an ancestor -- same as
+    ``test_cascade_operation_warns_when_related_model_is_mti_child_without_own_deleted_at``.
     """
-    command = Command()
-    command.existing.soft_delete_related.clear()
-
-    fake_band_app = _fake_app_config('fake.banda', 'banda', [Band])
-    fake_album_app = _fake_app_config('fake.albumb', 'albumb', [Album])
-    fake_other_app = _fake_app_config('fake.otherc', 'otherc', [])
-    monkeypatch.setattr(
-        makeguitarmigrations_module.django_apps,
-        'get_app_configs',
-        lambda: [fake_band_app, fake_album_app, fake_other_app],
-    )
-
-    # Requested scope is a third, unrelated app -- neither the cascade's
-    # parent ('banda') nor its child ('albumb') is part of this run.
-    assert command._scoped_cascade_gap_notes({'otherc'}) == []
-
-
-@override_settings(LOCAL_APPS=['fake.banda', 'fake.orchestrab'])
-def test_scoped_cascade_gap_silent_for_a_rule_the_generator_would_refuse(monkeypatch):
-    """A relation the writer skips is not a gap *scoping* created, so it must not be named.
-
-    Same synthetic shape as
-    ``test_cascade_operation_warns_when_related_model_is_mti_child_without_own_deleted_at``:
-    an FK on an MTI child's own table while its ``_deleted_at`` lives on an ancestor. A full
-    unscoped run emits no rule for it either -- only a warning -- so reporting it here would
-    promise that naming the parent's app closes a gap that nothing closes.
-    """
-    command = Command()
-    command.existing.soft_delete_related.clear()
 
     class _FakeFKField:
         column = 'sponsor_id'
         model = Orchestra
         remote_field = types.SimpleNamespace(parent_link=False)
 
-    command.reverse_relations_mapping[Band] = {(Orchestra, _FakeFKField(), CASCADE)}
-    monkeypatch.setattr(
-        makeguitarmigrations_module.django_apps,
-        'get_app_configs',
-        lambda: [
-            _fake_app_config('fake.banda', 'banda', [Band]),
-            _fake_app_config('fake.orchestrab', 'orchestrab', [Orchestra]),
-        ],
-    )
-
-    # Orchestra's app is in scope and Band's -- the cascade's parent -- is not, which is
-    # exactly the shape the note exists for. It is still silent, because there is no rule.
-    assert command._scoped_cascade_gap_notes({'orchestrab'}) == []
+    return {(Orchestra, _FakeFKField(), CASCADE)}
 
 
-@override_settings(LOCAL_APPS=['fake.ensemblea', 'fake.orchestrab'])
-def test_scoped_cascade_gap_skips_mti_parent_link(monkeypatch):
-    """The MTI parent-link (Orchestra -> Ensemble) is structural, not a user cascade FK --
-    it must never be reported as a skipped cascade rule, even when scoped out."""
-    command = Command()
-    command.existing.soft_delete_related.clear()
+@pytest.mark.parametrize(
+    (
+        'local_apps',
+        'app_configs',
+        'setup',
+        'requested',
+        'expected_note_substrings',
+    ),
+    [
+        pytest.param(
+            ['fake.banda', 'fake.albumb'],
+            lambda: [
+                _fake_app_config('fake.banda', 'banda', [Band]),
+                _fake_app_config('fake.albumb', 'albumb', [Album]),
+            ],
+            None,
+            {'albumb'},
+            ['banda'],
+            id='reported_when_parent_app_out_of_scope',
+        ),
+        pytest.param(
+            ['fake.banda', 'fake.albumb'],
+            lambda: [
+                _fake_app_config('fake.banda', 'banda', [Band]),
+                _fake_app_config('fake.albumb', 'albumb', [Album]),
+            ],
+            None,
+            {'banda', 'albumb'},
+            [],
+            id='empty_when_both_apps_in_scope',
+        ),
+        pytest.param(
+            ['fake.banda', 'fake.albumb'],
+            lambda: [
+                _fake_app_config('fake.banda', 'banda', [Band]),
+                _fake_app_config('fake.albumb', 'albumb', [Album]),
+            ],
+            None,
+            set(),
+            [],
+            id='empty_when_entirely_unscoped',
+        ),
+        pytest.param(
+            ['fake.banda', 'fake.albumb', 'fake.otherc'],
+            lambda: [
+                _fake_app_config('fake.banda', 'banda', [Band]),
+                _fake_app_config('fake.albumb', 'albumb', [Album]),
+                _fake_app_config('fake.otherc', 'otherc', []),
+            ],
+            None,
+            {'otherc'},
+            [],
+            id='silent_when_child_app_also_out_of_scope',
+        ),
+        pytest.param(
+            ['fake.banda', 'fake.orchestrab'],
+            lambda: [
+                _fake_app_config('fake.banda', 'banda', [Band]),
+                _fake_app_config('fake.orchestrab', 'orchestrab', [Orchestra]),
+            ],
+            lambda command: command.reverse_relations_mapping.__setitem__(
+                Band, _sponsor_fk_reverse_relation()
+            ),
+            {'orchestrab'},
+            [],
+            id='silent_for_a_rule_the_generator_would_refuse',
+        ),
+        pytest.param(
+            ['fake.ensemblea', 'fake.orchestrab'],
+            lambda: [
+                _fake_app_config('fake.ensemblea', 'ensemblea', [Ensemble]),
+                _fake_app_config('fake.orchestrab', 'orchestrab', [Orchestra]),
+            ],
+            None,
+            {'orchestrab'},
+            [],
+            id='skips_mti_parent_link',
+        ),
+        pytest.param(
+            ['fake.banda', 'fake.albumb'],
+            lambda: [
+                _fake_app_config('fake.banda', 'banda', [Band]),
+                _fake_app_config('fake.albumb', 'albumb', [Album]),
+            ],
+            lambda command: command.existing.soft_delete_related.__setitem__(
+                (Album._meta.db_table, Band._meta.db_table, None), None
+            ),
+            {'albumb'},
+            [],
+            id='skipped_when_rule_already_exists',
+        ),
+    ],
+)
+def test_scoped_cascade_gap_notes(
+    local_apps, app_configs, setup, requested, expected_note_substrings, monkeypatch
+):
+    with override_settings(LOCAL_APPS=local_apps):
+        command = Command()
+        command.existing.soft_delete_related.clear()
+        if setup is not None:
+            setup(command)
+        monkeypatch.setattr(
+            makeguitarmigrations_module.django_apps, 'get_app_configs', app_configs
+        )
 
-    fake_ensemble_app = _fake_app_config('fake.ensemblea', 'ensemblea', [Ensemble])
-    fake_orchestra_app = _fake_app_config('fake.orchestrab', 'orchestrab', [Orchestra])
-    monkeypatch.setattr(
-        makeguitarmigrations_module.django_apps,
-        'get_app_configs',
-        lambda: [fake_ensemble_app, fake_orchestra_app],
-    )
+        notes = command._scoped_cascade_gap_notes(requested)
 
-    # Ensemble's app ('ensemblea') is scoped out; Orchestra's ('orchestrab') is in scope --
-    # the only relation between them is the structural parent-link, so no gap is reported.
-    assert command._scoped_cascade_gap_notes({'orchestrab'}) == []
-
-
-@override_settings(LOCAL_APPS=['fake.banda', 'fake.albumb'])
-def test_scoped_cascade_gap_skipped_when_rule_already_exists(monkeypatch):
-    command = Command()
-
-    fake_band_app = _fake_app_config('fake.banda', 'banda', [Band])
-    fake_album_app = _fake_app_config('fake.albumb', 'albumb', [Album])
-    monkeypatch.setattr(
-        makeguitarmigrations_module.django_apps,
-        'get_app_configs',
-        lambda: [fake_band_app, fake_album_app],
-    )
-    command.existing.soft_delete_related[(Album._meta.db_table, Band._meta.db_table, None)] = None
-
-    assert command._scoped_cascade_gap_notes({'albumb'}) == []
+    assert len(notes) == len(expected_note_substrings)
+    for note, substring in zip(notes, expected_note_substrings, strict=True):
+        assert substring in note
 
 
 def test_handle_skips_app_when_digest_already_exists(monkeypatch):
@@ -678,46 +670,72 @@ def _command_with_scaffold(monkeypatch, tmp_path, filename='0002_auto_enforcemen
     return command, app, filename
 
 
+@pytest.mark.parametrize(
+    (
+        'filename',
+        'dependency_attr',
+        'method_name',
+        'pre_setup',
+        'function_signature',
+        'extra_content_substring',
+    ),
+    [
+        pytest.param(
+            '0002_auto_enforcement.py',
+            'trigger_function_dependency',
+            '_ensure_trigger_function_migration',
+            None,
+            'CREATE FUNCTION set_updated_at()',
+            None,
+            id='base_trigger_function',
+        ),
+        pytest.param(
+            '0003_auto_enforcement_parent_trigger_function.py',
+            'parent_trigger_function_dependency',
+            '_ensure_parent_trigger_function_migration',
+            ('trigger_function_dependency', ('testapp', '0002_auto_enforcement_trigger_function')),
+            'CREATE FUNCTION set_parent_updated_at()',
+            '0002_auto_enforcement_trigger_function',
+            id='parent_trigger_function_depends_on_the_base_one',
+        ),
+    ],
+)
 def test_ensure_trigger_function_migration_writes_and_records_the_dependency(
-    monkeypatch, tmp_path
+    monkeypatch,
+    tmp_path,
+    filename,
+    dependency_attr,
+    method_name,
+    pre_setup,
+    function_signature,
+    extra_content_substring,
 ):
-    """Every other enforcement migration depends on this one by name, so the recorded
-    ``(app_label, stem)`` is what makes the dependency resolvable rather than a guess."""
-    command, app, filename = _command_with_scaffold(monkeypatch, tmp_path)
-    command.trigger_function_dependency = None
+    """Every other enforcement migration depends on one of these two by name, so the
+    recorded ``(app_label, stem)`` is what makes the dependency resolvable rather than a
+    guess. The parent one is kept as its own migration so adding MTI support never
+    re-digests -- and therefore never regenerates -- the base function migration."""
+    command, app, filename = _command_with_scaffold(monkeypatch, tmp_path, filename)
+    if pre_setup is not None:
+        attr, value = pre_setup
+        setattr(command, attr, value)
+    setattr(command, dependency_attr, None)
 
-    assert command._ensure_trigger_function_migration() is True
+    assert getattr(command, method_name)() is True
 
     content = (tmp_path / 'migrations' / filename).read_text()
     # The SQL itself, not a reference to the constant that holds it: a generated migration
     # that reads ``sql.CREATE_UPDATED_AT_TRIGGER_FUNCTION`` at migrate time means something
     # different on a later version of the kit than it did when it was written.
-    assert 'CREATE FUNCTION set_updated_at()' in content
+    assert function_signature in content
     assert 'from guitars import sql' not in content
     # A first definition, so the plain CREATE -- a collision on this unqualified public-schema
     # name must fail migrate rather than silently replace something that is not ours.
     assert 'CREATE OR REPLACE FUNCTION' not in content
-    assert command.trigger_function_dependency == ('testapp', '0002_auto_enforcement')
+    if extra_content_substring is not None:
+        assert extra_content_substring in content
+    assert getattr(command, dependency_attr) == ('testapp', filename.removesuffix('.py'))
     # Second call is a no-op: the singleton is a singleton, and it is now current.
-    assert command._ensure_trigger_function_migration() is False
-
-
-def test_ensure_parent_trigger_function_migration_depends_on_the_base_one(monkeypatch, tmp_path):
-    """Kept as a separate migration so adding MTI support never re-digests -- and therefore
-    never regenerates -- the existing single-table function migration."""
-    command, app, filename = _command_with_scaffold(
-        monkeypatch, tmp_path, '0003_auto_enforcement_parent_trigger_function.py'
-    )
-    command.trigger_function_dependency = ('testapp', '0002_auto_enforcement_trigger_function')
-    command.parent_trigger_function_dependency = None
-
-    assert command._ensure_parent_trigger_function_migration() is True
-
-    content = (tmp_path / 'migrations' / filename).read_text()
-    assert 'CREATE FUNCTION set_parent_updated_at()' in content
-    assert 'from guitars import sql' not in content
-    assert '0002_auto_enforcement_trigger_function' in content
-    assert command._ensure_parent_trigger_function_migration() is False
+    assert getattr(command, method_name)() is False
 
 
 def test_tenant_operations_force_stage_only_touches_policies_that_shipped_unforced():
@@ -782,7 +800,26 @@ def test_force_rls_stage_check_only_reports_and_exits_non_zero(monkeypatch):
     assert 'testapp' in command.stderr.getvalue()
 
 
-def test_check_reports_a_missing_trigger_function_migration():
+@pytest.mark.parametrize(
+    ('dependency_attr', 'method_name', 'error_match'),
+    [
+        pytest.param(
+            'trigger_function_dependency',
+            '_ensure_trigger_function_migration',
+            'trigger function migration',
+            id='base_trigger_function',
+        ),
+        pytest.param(
+            'parent_trigger_function_dependency',
+            '_ensure_parent_trigger_function_migration',
+            'MTI parent trigger function migration',
+            id='parent_trigger_function',
+        ),
+    ],
+)
+def test_check_reports_a_missing_trigger_function_migration(
+    dependency_attr, method_name, error_match
+):
     """``--check`` on a project that never generated the shared function migration.
 
     It is a hard prerequisite -- every per-app enforcement migration declares a dependency on
@@ -790,19 +827,10 @@ def test_check_reports_a_missing_trigger_function_migration():
     """
     command = Command()
     command.stdout = StringIO()
-    command.trigger_function_dependency = None
+    setattr(command, dependency_attr, None)
 
-    with pytest.raises(CommandError, match='trigger function migration'):
-        command._ensure_trigger_function_migration(check_only=True)
-
-
-def test_check_reports_a_missing_parent_trigger_function_migration():
-    command = Command()
-    command.stdout = StringIO()
-    command.parent_trigger_function_dependency = None
-
-    with pytest.raises(CommandError, match='MTI parent trigger function migration'):
-        command._ensure_parent_trigger_function_migration(check_only=True)
+    with pytest.raises(CommandError, match=error_match):
+        getattr(command, method_name)(check_only=True)
 
 
 def test_tenant_policy_operations_are_emitted_for_uncovered_tables():
@@ -1003,13 +1031,16 @@ def test_unforced_policy_tables_is_last_write_wins_within_one_file():
     nothing. Across files the caller already applies this rule; within one it has to hold
     here, because the caller cannot see the operation boundaries.
     """
-    inert_then_forced = _TWO_POLICY_OPERATIONS.replace('table_b', 'table_a') + """
+    inert_then_forced = (
+        _TWO_POLICY_OPERATIONS.replace('table_b', 'table_a')
+        + """
         # Tenant RLS replaced on "table_a" table! [POLICY:cccccccccccc]
         migrations.RunSQL(
             sql=sql.replace_table_rls(table='table_a', columns={'l': 'l_id'}, force=True),
             reverse_sql=sql.drop_table_rls(table='table_a'),
         ),
 """
+    )
 
     assert unforced_policy_tables(inert_then_forced) == set()
 

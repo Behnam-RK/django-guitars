@@ -45,6 +45,7 @@ Changelog = "https://github.com/Behnam-RK/django-guitars/blob/main/CHANGELOG.md"
 [dependency-groups]
 dev = [
     "pre-commit>=4.5.1",
+    "nox>=2025.5.1",
     "ruff>=0.15.11",
     "ty>=0.0.34",
     "bandit[toml]>=1.9",

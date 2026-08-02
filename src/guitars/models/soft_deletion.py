@@ -128,12 +128,22 @@ class HardDeletableQuerySet(LiveQuerySet):
                         f'DELETE FROM {quote(table)} WHERE {quote(pk_column)} IN ({placeholders})'  # noqa: E501  # nosec B608
                     )
                     cursor.execute(sql_stmt, pks)
-            finally:
-                # See _hard_delete_own_table for why this is suppressed rather than
-                # left to raise: if a DELETE above failed, the transaction is already
-                # aborted and this statement would only replace that error with its own.
+            except Exception:
+                # See _hard_delete_own_table for why this attempt's own failure is
+                # suppressed here but not below: a DELETE failure means the transaction
+                # is likely already aborted, so a failing switch-off here would only
+                # replace the real error with its own. Re-raise the real one either way.
                 with contextlib.suppress(Exception):
                     cursor.execute(SWITCH_OFF_HARD_DELETION)
+                raise
+            else:
+                # No suppression here: if the DELETEs succeeded but turning the switch
+                # back off fails, that failure must abort the enclosing transaction (via
+                # this atomic() block) rather than be swallowed -- swallowing it would
+                # leave 'rules.hard_deletion' leaked 'on' for the rest of any transaction
+                # this call is nested in, silently turning later plain .delete() calls
+                # into hard deletes.
+                cursor.execute(SWITCH_OFF_HARD_DELETION)
             return None
 
     # Marks `hard_delete` as queryset-only for Manager.from_queryset(); a valid runtime
@@ -151,14 +161,17 @@ class HardDeletableQuerySet(LiveQuerySet):
         splice-able back into one string: a parameterised multi-statement ``execute`` only
         works under client-side binding, so one call would break the moment a consumer sets
         psycopg's ``server_side_binding`` option. ``atomic()`` is what keeps the split safe
-        even without the ``finally`` below: the switch is transaction-local, and in
+        even without the switch-off attempt below: the switch is transaction-local, and in
         autocommit each statement would otherwise be its own transaction -- the switch
         expiring before the DELETE it exists to unlock, which then archives instead of
-        deleting. The ``finally`` makes turning the switch back off a guarantee of this
+        deleting. Turning the switch back off is still attempted as a guarantee of this
         function rather than a side effect of whatever ``atomic()`` block happens to be
-        enclosing it -- on the failure path the DELETE has already aborted the
-        transaction, so the switch-off attempt there would only raise its own error in
-        place of the real one, hence the suppression.
+        enclosing it -- on the failure path the DELETE has already aborted the transaction,
+        so a failing switch-off attempt there is suppressed (it would only replace the real
+        error with its own); on the success path a failing switch-off attempt is left to
+        raise, so this ``atomic()`` block rolls the DELETE back too rather than silently
+        leaving ``rules.hard_deletion`` leaked 'on' for the rest of any transaction this
+        call is nested in.
         """
         with connections[self.db].cursor() as cursor:
             query = self.query.clone()
@@ -168,9 +181,12 @@ class HardDeletableQuerySet(LiveQuerySet):
                 cursor.execute(SWITCH_ON_HARD_DELETION)
                 try:
                     result = cursor.execute(compiled, params)
-                finally:
+                except Exception:
                     with contextlib.suppress(Exception):
                         cursor.execute(SWITCH_OFF_HARD_DELETION)
+                    raise
+                else:
+                    cursor.execute(SWITCH_OFF_HARD_DELETION)
                 return result
 
 

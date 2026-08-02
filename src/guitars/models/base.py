@@ -143,7 +143,11 @@ class UpdatableModel(Model):
                 if _disable_signals
                 else nullcontext()
             )
-            if _disable_signals and tenant_spec(type(self)):
+            # update_fields=set() (empty, not None) makes self.save() below a no-op --
+            # Django issues no SQL and fires no signals at all -- so there is nothing for
+            # _disable_signals to have bypassed. Only report when the save will actually run.
+            save_will_write = update_fields is None or update_fields
+            if _disable_signals and save_will_write and tenant_spec(type(self)):
                 report_once(
                     (type(self), 'update_disable_signals_bypasses_tenant_guard'),
                     f'{type(self).__name__}.update(_disable_signals=True) suppresses '

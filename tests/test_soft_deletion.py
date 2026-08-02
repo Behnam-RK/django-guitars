@@ -164,8 +164,9 @@ def test_switch_off_is_attempted_even_when_the_delete_itself_raises(monkeypatch)
 
     Proven by making the DELETE raise a plain Python exception that never reaches
     Postgres -- so the transaction is never server-side aborted, and only the
-    ``finally`` in ``_hard_delete_own_table`` decides whether ``SWITCH_OFF_HARD_DELETION``
-    is still attempted afterwards. Before the fix, that line was simply never reached.
+    ``except`` branch in ``_hard_delete_own_table`` decides whether
+    ``SWITCH_OFF_HARD_DELETION`` is still attempted afterwards. Before the fix, that line
+    was simply never reached.
     """
     band = Band.objects.create(name='Doomed')
     calls = []
@@ -184,6 +185,70 @@ def test_switch_off_is_attempted_even_when_the_delete_itself_raises(monkeypatch)
 
     assert calls.count(SWITCH_ON_HARD_DELETION) == 1
     assert calls.count(SWITCH_OFF_HARD_DELETION) == 1
+
+
+@pytest.mark.django_db(transaction=True)
+def test_mti_switch_off_is_attempted_even_when_a_delete_raises(monkeypatch):
+    """MTI-path analogue of ``test_switch_off_is_attempted_even_when_the_delete_itself_raises``
+    -- the ``except`` branch in the MTI loop of ``HardDeletableQuerySet.hard_delete`` must
+    also attempt the switch-off and then re-raise the real error, not swallow it."""
+    orchestra = Orchestra.objects.create(name='Philharmonic', conductor='Kar')
+    calls = []
+    real_execute = CursorWrapper.execute
+
+    def spy_execute(self, sql, params=None):
+        calls.append(sql)
+        if isinstance(sql, str) and sql.strip().upper().startswith('DELETE FROM'):
+            raise RuntimeError('simulated failure -- never reaches postgres')
+        return real_execute(self, sql, params)
+
+    monkeypatch.setattr(CursorWrapper, 'execute', spy_execute)
+
+    with pytest.raises(RuntimeError, match='simulated failure'):
+        Orchestra._all_objects.filter(pk=orchestra.pk).hard_delete()
+
+    assert calls.count(SWITCH_ON_HARD_DELETION) == 1
+    assert calls.count(SWITCH_OFF_HARD_DELETION) == 1
+
+
+@pytest.mark.django_db(transaction=True)
+def test_switch_off_failure_after_a_successful_delete_is_not_swallowed(monkeypatch):
+    """A switch-off failure that follows a *successful* DELETE must propagate, not be
+    suppressed.
+
+    ``_hard_delete_own_table`` (and the MTI path above it) suppress a failing switch-off
+    attempt only when it follows a failed DELETE -- suppressing it there just avoids
+    replacing the real error with a second one, since the transaction is typically already
+    aborted at that point. Suppressing it unconditionally, including here on the success
+    path, would be worse: nothing would tell the caller that ``rules.hard_deletion`` never
+    got turned back off, and it would stay 'on' for the rest of any transaction this call
+    is nested in -- silently turning later plain ``.delete()`` calls in that same
+    transaction into hard deletes instead of archiving them.
+
+    Proven by making only the switch-off statement raise (the DELETE itself succeeds
+    normally) inside a caller-owned ``transaction.atomic()`` block, and asserting both that
+    the exception surfaces and that it aborts the whole block -- the row must not end up
+    hard-deleted behind a swallowed error.
+    """
+    band = Band.objects.create(name='Doomed')
+    real_execute = CursorWrapper.execute
+
+    def spy_execute(self, sql, params=None):
+        if isinstance(sql, str) and sql.strip() == SWITCH_OFF_HARD_DELETION.strip():
+            raise RuntimeError('simulated failure of the switch-off statement itself')
+        return real_execute(self, sql, params)
+
+    monkeypatch.setattr(CursorWrapper, 'execute', spy_execute)
+
+    with (
+        pytest.raises(RuntimeError, match='simulated failure of the switch-off'),
+        transaction.atomic(),
+    ):
+        Band._all_objects.filter(pk=band.pk).hard_delete()
+
+    # The enclosing atomic() must have rolled back the DELETE along with the propagated
+    # error -- not left it committed with the switch silently stuck 'on'.
+    assert Band._all_objects.filter(pk=band.pk).exists()
 
 
 class TestManagerQuerySetClass:

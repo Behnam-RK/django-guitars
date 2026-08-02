@@ -1,6 +1,6 @@
 from collections import defaultdict
 
-from django.db import connection, transaction
+from django.db import connections, transaction
 from django.db.models import CASCADE, DateTimeField, Index, Manager, Q, QuerySet, sql
 from django.db.models.base import Model
 
@@ -116,8 +116,9 @@ class HardDeletableQuerySet(LiveQuerySet):
         if not pks:
             return None
         placeholders = ', '.join(['%s'] * len(pks))
-        quote = connection.ops.quote_name
-        with connection.cursor() as cursor, transaction.atomic():
+        db_connection = connections[self.db]
+        quote = db_connection.ops.quote_name
+        with db_connection.cursor() as cursor, transaction.atomic(using=self.db):
             cursor.execute(SWITCH_ON_HARD_DELETION)
             for table, pk_column in _mti_table_chain(model):
                 # Identifiers come from model._meta (trusted); the PK values are parameterized.
@@ -147,11 +148,11 @@ class HardDeletableQuerySet(LiveQuerySet):
         its own transaction -- the switch expiring before the DELETE it exists to unlock,
         which then archives instead of deleting.
         """
-        with connection.cursor() as cursor:
+        with connections[self.db].cursor() as cursor:
             query = self.query.clone()
             query.__class__ = sql.DeleteQuery
             compiled, params = query.sql_with_params()
-            with transaction.atomic():
+            with transaction.atomic(using=self.db):
                 cursor.execute(SWITCH_ON_HARD_DELETION)
                 result = cursor.execute(compiled, params)
                 cursor.execute(SWITCH_OFF_HARD_DELETION)

@@ -126,6 +126,35 @@ def test_hard_delete_hard_deletes_non_soft_deletable_cascade_children():
     assert not Riff.objects.filter(pk=riff.pk).exists()
 
 
+@pytest.mark.django_db(transaction=True, databases=['default', 'secondary'])
+def test_instance_hard_delete_operates_on_the_bound_alias():
+    """``hard_delete()`` must delete from the alias the instance is bound to.
+
+    Both the MTI path and ``_hard_delete_own_table`` used to open a cursor on the
+    module-global default ``connection`` regardless of ``self.db`` -- on a multi-DB
+    project this either errors (no matching row on 'default') or, worse, silently
+    deletes the wrong row if one happens to share a pk. A same-named row on 'default'
+    surviving is the proof the delete actually went to 'secondary'.
+    """
+    default_band = Band.objects.create(name='Default')
+    secondary_band = Band.objects.using('secondary').create(name='Secondary')
+
+    secondary_band.hard_delete()
+
+    assert not Band._all_objects.using('secondary').filter(pk=secondary_band.pk).exists()
+    assert Band._all_objects.using('default').filter(pk=default_band.pk).exists()
+
+
+@pytest.mark.django_db(transaction=True, databases=['default', 'secondary'])
+def test_mti_queryset_hard_delete_operates_on_the_bound_alias():
+    """The MTI branch of ``HardDeletableQuerySet.hard_delete`` on a non-default alias."""
+    orchestra = Orchestra.objects.using('secondary').create(name='Philharmonic', conductor='Kar')
+
+    Orchestra._all_objects.using('secondary').filter(pk=orchestra.pk).hard_delete()
+
+    assert not Orchestra._all_objects.using('secondary').filter(pk=orchestra.pk).exists()
+
+
 class TestManagerQuerySetClass:
     """Every soft-delete manager must instantiate ``self._queryset_class``.
 

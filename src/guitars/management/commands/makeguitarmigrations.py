@@ -71,6 +71,16 @@ HEADER_SOFT_DELETE = '# Soft Delete Rule on "{table}" table!'
 HEADER_SOFT_DELETE_RELATED = (
     '# Soft Delete Related Rule on "{related_table}" that is related to "{table}"!'
 )
+# A second CASCADE FK from the same related_table to the same owner table needs a header
+# distinct from the first's, or this one and the regex below collide on the same dedupe key
+# -- see sql.CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE_VIA's comment for why the underlying
+# PostgreSQL rule name has to disambiguate too. _cascade_candidates below picks one FK per
+# pair (sorted first by column) to keep the plain header above unchanged; every other FK on
+# the same pair gets this one, naming which column it is.
+HEADER_SOFT_DELETE_RELATED_VIA = (
+    '# Soft Delete Related Rule on "{related_table}" that is related to "{table}" '
+    'via "{foreign_key}"!'
+)
 
 # --- Multi-table inheritance (MTI) operations ---
 
@@ -191,6 +201,7 @@ _RE_UPDATED_AT = re.compile(r'# Updated at Trigger on "([^"]+)" table!')
 _RE_SOFT_DELETE = re.compile(r'# Soft Delete Rule on "([^"]+)" table!')
 _RE_SOFT_DELETE_RELATED = re.compile(
     r'# Soft Delete Related Rule on "([^"]+)" that is related to "([^"]+)"'
+    r'(?: via "(?P<foreign_key>[^"]+)")?'
 )
 # MTI headers carry a leading "MTI " token, so they never collide with the single-table
 # patterns above (which anchor on ``# Updated`` / ``# Soft`` immediately after the comment mark).
@@ -318,7 +329,11 @@ class ExistingOperations(NamedTuple):
 
     triggers: dict[str, str | None]
     soft_deletes: dict[str, str | None]
-    soft_delete_related: dict[tuple[str, str], str | None]
+    #: Keyed on (related_table, table, foreign_key) -- the third element is ``None`` for
+    #: the one FK per pair that keeps the plain, historical header (see
+    #: HEADER_SOFT_DELETE_RELATED_VIA's comment), or the FK's column for any other FK on
+    #: the same pair.
+    soft_delete_related: dict[tuple[str, str, str | None], str | None]
     mti_triggers: dict[str, str | None]
     mti_soft_deletes: dict[str, str | None]
     tenant_policies: set[str]
@@ -498,7 +513,7 @@ class Command(BaseCommand):
         # _generator.iter_migration_files yields in filename order -- see its docstring.
         existing_triggers: dict[str, str | None] = {}
         existing_soft_deletes: dict[str, str | None] = {}
-        existing_soft_delete_related: dict[tuple[str, str], str | None] = {}
+        existing_soft_delete_related: dict[tuple[str, str, str | None], str | None] = {}
         existing_mti_triggers: dict[str, str | None] = {}
         existing_mti_soft_deletes: dict[str, str | None] = {}
         existing_tenant_policies: set[str] = set()
@@ -532,9 +547,9 @@ class Command(BaseCommand):
                 for match in _RE_SOFT_DELETE.finditer(content):
                     existing_soft_deletes[match.group(1)] = _recorded_sql_identity(content, match)
                 for match in _RE_SOFT_DELETE_RELATED.finditer(content):
-                    existing_soft_delete_related[(match.group(1), match.group(2))] = (
-                        _recorded_sql_identity(content, match)
-                    )
+                    existing_soft_delete_related[
+                        (match.group(1), match.group(2), match.group('foreign_key'))
+                    ] = _recorded_sql_identity(content, match)
                 for match in _RE_MTI_UPDATED_AT.finditer(content):
                     existing_mti_triggers[match.group(1)] = _recorded_sql_identity(content, match)
                 for match in _RE_MTI_SOFT_DELETE.finditer(content):
@@ -1034,20 +1049,29 @@ class Command(BaseCommand):
             and fk_field.model is related_model
         )
 
-    def _cascade_operations(self, model: type[models.Model]) -> list[str]:
-        """Cascade soft-delete rules for ``on_delete=CASCADE`` FKs pointing at *model*.
+    def _cascade_candidates(
+        self, model: type[models.Model], owner_table: str
+    ) -> list[tuple[type[models.Model], models.ForeignKey, bool]]:
+        """CASCADE FKs pointing at *model*, each flagged whether it is the *primary* one
+        for its related_table.
 
-        The rule is an ``ON UPDATE`` rule that must live on the table whose ``_deleted_at``
-        column actually flips: *model*'s own table for the single-table case, or the owning
-        ancestor when *model* is an MTI child (an ``ON UPDATE TO child_table`` rule would never
-        fire, since the child table's ``_deleted_at`` is never written). The related child's FK
-        column holds the shared MTI pk value, so matching it against the owner pk still works.
+        Shared by :meth:`_cascade_operations` (which writes the rules) and
+        :meth:`_scoped_cascade_gap_notes` (which reports the ones an out-of-scope run
+        leaves out), for the same reason :meth:`_is_cascade_candidate` is shared: the two
+        must agree not just on *which* FKs count but on *which dedupe key* each one uses,
+        or a report and a write disagree about what is already covered.
+
+        Two or more CASCADE FKs from the same related_table to the same owner table need
+        distinct dedupe keys -- and, when the rules are actually written, distinct rule
+        names (see ``sql.CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE_VIA``'s comment for why a
+        shared name silently orphans one FK's cascade). The first one, in the
+        deterministic ``(related_table, column)`` sort order below, is primary and keeps
+        the plain, historical form -- so every already-migrated project's lone cascade
+        rule for a pair is untouched and never re-emitted. Only a genuine second-or-later
+        FK on the same pair is not primary.
         """
-        owner = column_owner(model, '_deleted_at')
-        owner_table = owner._meta.db_table
-        owner_pk = owner._meta.pk.column
-
-        ops: list[str] = []
+        seen_related_tables: set[str] = set()
+        candidates: list[tuple[type[models.Model], models.ForeignKey, bool]] = []
         for related_model, fk_field, on_delete in sorted(
             self.reverse_relations_mapping[model],
             key=lambda t: (t[0]._meta.db_table, t[1].column),
@@ -1073,20 +1097,57 @@ class Command(BaseCommand):
                     'needs a join form the generator does not emit yet.'
                 )
                 continue
-            self._append_if_stale(
-                ops,
-                self.existing.soft_delete_related,
-                (related_table, owner_table),
-                HEADER_SOFT_DELETE_RELATED.format(related_table=related_table, table=owner_table),
-                sql.CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE.format(
+            is_primary = related_table not in seen_related_tables
+            seen_related_tables.add(related_table)
+            candidates.append((related_model, fk_field, is_primary))
+        return candidates
+
+    def _cascade_operations(self, model: type[models.Model]) -> list[str]:
+        """Cascade soft-delete rules for ``on_delete=CASCADE`` FKs pointing at *model*.
+
+        The rule is an ``ON UPDATE`` rule that must live on the table whose ``_deleted_at``
+        column actually flips: *model*'s own table for the single-table case, or the owning
+        ancestor when *model* is an MTI child (an ``ON UPDATE TO child_table`` rule would never
+        fire, since the child table's ``_deleted_at`` is never written). The related child's FK
+        column holds the shared MTI pk value, so matching it against the owner pk still works.
+        """
+        owner = column_owner(model, '_deleted_at')
+        owner_table = owner._meta.db_table
+        owner_pk = owner._meta.pk.column
+
+        ops: list[str] = []
+        for related_model, fk_field, is_primary in self._cascade_candidates(model, owner_table):
+            related_table = related_model._meta.db_table
+            if is_primary:
+                key = (related_table, owner_table, None)
+                header = HEADER_SOFT_DELETE_RELATED.format(
+                    related_table=related_table, table=owner_table
+                )
+                forward = sql.CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE.format(
                     table=owner_table,
                     related_table=related_table,
                     primary_key=owner_pk,
                     foreign_key=fk_field.column,
-                ),
-                sql.DROP_SOFT_DELETE_RELATED_OBJECTS_RULE.format(
+                )
+                reverse = sql.DROP_SOFT_DELETE_RELATED_OBJECTS_RULE.format(
                     table=owner_table, related_table=related_table
-                ),
+                )
+            else:
+                key = (related_table, owner_table, fk_field.column)
+                header = HEADER_SOFT_DELETE_RELATED_VIA.format(
+                    related_table=related_table, table=owner_table, foreign_key=fk_field.column
+                )
+                forward = sql.CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE_VIA.format(
+                    table=owner_table,
+                    related_table=related_table,
+                    primary_key=owner_pk,
+                    foreign_key=fk_field.column,
+                )
+                reverse = sql.DROP_SOFT_DELETE_RELATED_OBJECTS_RULE_VIA.format(
+                    table=owner_table, related_table=related_table, foreign_key=fk_field.column
+                )
+            self._append_if_stale(
+                ops, self.existing.soft_delete_related, key, header, forward, reverse
             )
         return ops
 
@@ -1125,25 +1186,15 @@ class Command(BaseCommand):
                 # The rule lives on the table that owns _deleted_at (the model itself, or its
                 # MTI ancestor), matching where `_cascade_operations` places it.
                 table = column_owner(model, '_deleted_at')._meta.db_table
-                # Sorted for the same reason ``_cascade_operations`` sorts: the mapping holds
-                # sets, whose iteration order varies between runs, and warning text that
-                # reorders itself run to run is not diffable.
-                for related_model, fk_field, on_delete in sorted(
-                    self.reverse_relations_mapping[model],
-                    key=lambda t: (t[0]._meta.db_table, t[1].column),
-                ):
-                    # Same predicate the writer uses, plus its ``owns_column`` test: a
-                    # relation it would refuse anyway is not a gap this run *created*, and
-                    # saying "closed by a later run naming the parent's app" about one would
-                    # be a promise nothing keeps.
-                    if not self._is_cascade_candidate(related_model, fk_field, on_delete):
-                        continue
-                    if not owns_column(related_model, '_deleted_at'):
-                        continue
+                # Shared with _cascade_operations, which is what makes "closed by a later run
+                # naming the parent's app" a promise this check can actually verify: the two
+                # must agree on both which FKs count and which dedupe key each one uses.
+                for related_model, fk_field, is_primary in self._cascade_candidates(model, table):
                     if model_app_label.get(related_model) not in requested:
                         continue
                     related_table = related_model._meta.db_table
-                    if (related_table, table) in self.existing.soft_delete_related:
+                    key = (related_table, table, None if is_primary else fk_field.column)
+                    if key in self.existing.soft_delete_related:
                         continue
                     notes.append(
                         f"Cascade rule on '{related_table}' related to '{table}' skipped: "

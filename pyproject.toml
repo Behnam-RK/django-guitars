@@ -156,7 +156,12 @@ python_files = ["test_*.py", "*_test.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 testpaths = ["tests"]
-addopts = "-q --no-header --tb=short -ra --strict-markers --strict-config --junit-xml=.pytest-last.xml -n auto"
+# -n auto is deliberately NOT here: it costs ~3s of worker-spawn overhead per
+# invocation (measured: 3.3s vs 0.4s for one test), which is wasted on the single-test
+# workflow this project's own docs recommend (`pytest tests/test_base.py::test_x`).
+# CI and `noxfile.py` pass it explicitly on the full-suite run, where the parallelism
+# pays for itself.
+addopts = "-q --no-header --tb=short -ra --strict-markers --strict-config --junit-xml=.pytest-last.xml"
 xfail_strict = true
 filterwarnings = ["error"]
 

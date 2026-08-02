@@ -51,6 +51,11 @@ HEADER_SCANNERS = [
         {'related_table': 'shop_line', 'table': 'shop_order'},
     ),
     (
+        gen.HEADER_SOFT_DELETE_RELATED_VIA,
+        gen._RE_SOFT_DELETE_RELATED,
+        {'related_table': 'shop_line', 'table': 'shop_order', 'foreign_key': 'bonus_order_id'},
+    ),
+    (
         gen.HEADER_MTI_UPDATED_AT,
         gen._RE_MTI_UPDATED_AT,
         {'child_table': 'shop_giftorder', 'parent_table': 'shop_order'},

@@ -47,6 +47,15 @@ Because it keys off the `_deleted_at` transition rather than off `.delete()`, it
 fires for bulk deletes and raw SQL too. Non-`CASCADE` relations (`SET_NULL`,
 `PROTECT`, `DO_NOTHING`) get no rule — Django's own semantics stand.
 
+A rule name is the only thing PostgreSQL dedupes on — it is not scoped by what
+the rule references. If a child table has more than one `CASCADE` FK to the
+same parent (e.g. two FKs from `Merch` to `Album`), the second FK's rule gets
+its foreign-key column name appended — `soft_delete_related_<child>_<fk>` —
+so its `CREATE OR REPLACE RULE` can't silently replace the first FK's rule.
+The first FK on a given (child, parent) pair keeps the bare
+`soft_delete_related_<child>` name for backward compatibility with
+migrations generated before this existed.
+
 The cascade only reaches models that are themselves soft-deletable. A plain
 `Model` with a `CASCADE` FK is deleted for real by Django's collector, as it
 always was.

@@ -17,8 +17,10 @@ tooling only, no production code path changes behavior in this release.
   never searching past a non-matching `run_on_commit` entry) is closed with a
   real test, not a lowered threshold.
 - A GitHub Actions test matrix: Python 3.10/3.12/3.14 x Django 5.0/5.2/6.0
-  (minus the one cell pip itself refuses) x PostgreSQL 14/18 -- previously
-  only one of the 18 advertised cells was ever verified by CI.
+  (minus the one combination pip itself refuses) x PostgreSQL 14/18 -- 16
+  cells, sampling the floor/mid/ceiling of each axis rather than the full
+  20-cell grid the classifiers advertise (5 Python versions x 4 Django
+  versions). Previously only 1 cell was ever verified by CI.
 - `noxfile.py`, mirroring the same matrix for local runs via `uv run nox`.
 - `psycopg` as an optional dependency (`pip install django-guitars[psycopg]`),
   installing `psycopg[c]` per psycopg's own production recommendation.

@@ -111,6 +111,35 @@ def test_cascade_operations_skip_non_cascade_and_non_deletable_relations():
     assert 'testapp_riff' not in ops  # Riff has no _deleted_at to cascade into
 
 
+def test_cascade_operations_disambiguates_two_fks_to_the_same_related_table():
+    """Merch has two independent CASCADE FKs to Album -- ``album`` and ``bonus_album`` --
+    which is the exact shape the ``_via`` naming scheme exists for: a PostgreSQL rule is
+    namespaced by name alone, not by what it references, so without disambiguation the
+    second FK's ``CREATE OR REPLACE RULE soft_delete_related_testapp_merch`` would silently
+    replace the first FK's rule, leaving one of the two relations uncascaded with no error
+    anywhere (see ``sql.CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE_VIA``'s comment).
+    """
+    command = Command()
+    command.existing.soft_delete_related.clear()
+
+    ops = command._cascade_operations(Album)
+    merch_ops = [op for op in ops if 'testapp_merch' in op]
+
+    assert len(merch_ops) == 2
+    headers = [op.splitlines()[0] for op in merch_ops]
+    assert any(
+        '# Soft Delete Related Rule on "testapp_merch" that is related to '
+        '"testapp_album"!' in h
+        for h in headers
+    )
+    assert any('via "bonus_album_id"!' in h for h in headers)
+    # Two distinct rule names -- neither op's CREATE OR REPLACE can silently clobber the
+    # other's.
+    blob = '\n'.join(merch_ops)
+    assert 'RULE soft_delete_related_testapp_merch\n' in blob
+    assert 'RULE soft_delete_related_testapp_merch_bonus_album_id' in blob
+
+
 def test_cascade_operation_warns_when_related_model_is_mti_child_without_own_deleted_at(
     monkeypatch,
 ):
@@ -532,7 +561,7 @@ def test_scoped_cascade_gap_skipped_when_rule_already_exists(monkeypatch):
         'get_app_configs',
         lambda: [fake_band_app, fake_album_app],
     )
-    command.existing.soft_delete_related[(Album._meta.db_table, Band._meta.db_table)] = None
+    command.existing.soft_delete_related[(Album._meta.db_table, Band._meta.db_table, None)] = None
 
     assert command._scoped_cascade_gap_notes({'albumb'}) == []
 

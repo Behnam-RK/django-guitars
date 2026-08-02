@@ -36,7 +36,7 @@ CELLS = [
 ]
 
 
-@nox.session(venv_backend='uv')
+@nox.session
 @nox.parametrize('python,django,postgres', CELLS)
 def test(session: nox.Session, python: str, django: str, postgres: str) -> None:
     """Run the suite for one (python, django, postgres) cell -- same steps as CI."""
@@ -56,7 +56,15 @@ def test(session: nox.Session, python: str, django: str, postgres: str) -> None:
 
     session.run('docker', 'compose', 'up', '-d', '--wait', env=env, external=True)
     try:
-        session.run('pytest', '--cov=guitars', '--cov-report=term-missing', env=env, external=True)
+        session.run(
+            'pytest',
+            '-n',
+            'auto',
+            '--cov=guitars',
+            '--cov-report=term-missing',
+            env=env,
+            external=True,
+        )
         session.run('python', 'manage.py', 'makemigrations', '--check', env=env, external=True)
         session.run('python', 'manage.py', 'migrate', env=env, external=True)
         session.run(

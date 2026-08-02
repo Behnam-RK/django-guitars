@@ -156,7 +156,7 @@ python_files = ["test_*.py", "*_test.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 testpaths = ["tests"]
-addopts = "-q --no-header --tb=short -ra --strict-markers --strict-config --junit-xml=.pytest-last.xml"
+addopts = "-q --no-header --tb=short -ra --strict-markers --strict-config --junit-xml=.pytest-last.xml -n auto"
 xfail_strict = true
 filterwarnings = ["error"]
 

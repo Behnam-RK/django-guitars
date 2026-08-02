@@ -320,6 +320,19 @@ class TestUpdateDisableSignalsReporting:
 
         assert seen == []
 
+    def test_disabling_signals_when_the_save_is_a_no_op_is_not_reported(self, tenants):
+        """A no-op ``update(_disable_signals=True)`` -- nothing to write -- must not report
+        a guard bypass. ``update_fields`` collapses to an empty (non-None) set, so
+        ``self.save()`` short-circuits with no SQL and no signals at all; there is nothing
+        for ``_disable_signals`` to have bypassed."""
+        seen = []
+        reporting.set_reporter(lambda message, /, **context: seen.append(message))
+
+        with tenant(label=tenants.a):
+            tenants.release_a.update(_disable_signals=True)  # no attrs to write
+
+        assert seen == []
+
 
 # ─────────────────────── soft deletion under FORCE ─────────────────────── #
 

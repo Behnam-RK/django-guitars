@@ -7,12 +7,34 @@ is really about the rows the caller must *not* see.
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import NamedTuple
 
 import pytest
 
 from guitars.tenancy import tenancy_bypassed, tenant
 from tests.testapp.models import Booking, Label, Release, StadiumTour, Track
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """test_ladder.py runs some probes in a subprocess (see its module docstring for why).
+
+    Setting COVERAGE_PROCESS_START before those subprocesses spawn makes coverage.py's own
+    site-packages shim (installed by the `coverage` package itself, not something added
+    here) start tracking inside each one; [tool.coverage.run] parallel=true is what then
+    lets pytest-cov combine that data with the main process's at session end. Gated on
+    ``--cov`` actually being passed (pytest-cov's own ``cov_source`` option) -- otherwise a
+    plain ``pytest`` invocation still spawns coverage.py inside every subprocess and leaves
+    a stray ``.coverage.<host>.pid<N>...`` file per probe, despite nothing on the command
+    line asking for coverage at all. ``pytest_configure`` runs once per process (main and
+    each xdist worker alike) and well before collection reaches any subprocess-spawning
+    test, so the timing guarantee the env var needs still holds.
+    """
+    if config.getoption('cov_source', default=None):
+        os.environ.setdefault(
+            'COVERAGE_PROCESS_START', str(Path(__file__).resolve().parent.parent / 'pyproject.toml')
+        )
 
 
 class Tenants(NamedTuple):

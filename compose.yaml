@@ -15,9 +15,13 @@
 # init script only runs against an empty data directory:
 #
 #   docker compose down -v && docker compose up -d --wait
+#
+# POSTGRES_VERSION selects the major version (defaults to 18, today's baseline).
+# CI sets it per matrix cell to prove the kit's rules/triggers/RLS hold across
+# more than one PostgreSQL major; locally it's almost never worth overriding.
 services:
   db:
-    image: postgres:18-alpine
+    image: postgres:${POSTGRES_VERSION:-18}-alpine
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres

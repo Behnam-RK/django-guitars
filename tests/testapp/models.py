@@ -117,6 +117,31 @@ class ChamberOrchestra(Orchestra):
         pass
 
 
+class Merch(SetarModel):
+    """Reachable from ``Album`` by two independent CASCADE relations -- ``album`` and
+    ``bonus_album`` -- so hard-deleting the shared root (``Band``) makes the
+    instance-level hard_delete's DFS (``_collect`` in ``soft_deletion.py``) visit this
+    model twice, each time with a different new pk. That is the only way to exercise
+    its "already queued, don't re-append" branch: every other relation in this app
+    converges on a model at most once.
+
+    Both FKs deliberately target ``Album`` (soft-deletable), not ``Riff``: ``Riff`` has
+    no soft-delete rule, so Phase 1's cascade (Django's own Collector, which walks the
+    *entire* graph and does not know about rules) would physically remove the ``Riff``
+    row while a live ``Merch`` row still pointed at it -- a real FK violation, not the
+    branch this model exists to exercise.
+    """
+
+    description = CharField(max_length=100)
+    album = ForeignKey(Album, on_delete=CASCADE, null=True, blank=True, related_name='merch')
+    bonus_album = ForeignKey(
+        Album, on_delete=CASCADE, null=True, blank=True, related_name='bonus_merch'
+    )
+
+    def __str__(self) -> str:
+        return self.description
+
+
 class Section(SetarModel):
     """Soft-deletable model with a CASCADE FK to an MTI child (the FK target).
 
@@ -248,3 +273,48 @@ class Review(SetarModel):
 
     def __str__(self) -> str:
         return self.body
+
+
+# ─────────────────────── a dimension on every rung ─────────────────────── #
+#
+# Three-level MTI chain built solely to give `discovery._classify` a model whose tenant
+# dimensions are split across *two different* ancestors while it also has one on its own
+# table -- the only combination that exercises the "an own-table dimension survives a
+# multi-ancestor conflict" branch. Every other tenanted model here has all its dimensions
+# on one table (or none).
+
+
+class Festival(SetarModel):
+    """MTI root: owns the `market` dimension's column directly."""
+
+    name = CharField(max_length=100)
+    market = ForeignKey(Label, on_delete=CASCADE, related_name='festivals')
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class TouringFestival(Festival):
+    """First MTI level: the `promoter` dimension's column lives here, one table up
+    from the eventual leaf."""
+
+    promoter = ForeignKey(Label, on_delete=CASCADE, related_name='touring_festivals')
+
+    class Meta:
+        pass
+
+
+class HeadlineFestival(TouringFestival):
+    """Leaf: `sponsor` is own-table, `market` and `promoter` are each owned by a
+    *different* ancestor (`Festival` and `TouringFestival`) -- the diamond `_classify`
+    has nothing else to trigger it with.
+    """
+
+    sponsor = ForeignKey(Label, on_delete=CASCADE, related_name='headline_festivals')
+
+    objects = TenantedManager(
+        _manager_class=LiveManager, market='market', promoter='promoter', sponsor='sponsor'
+    )
+
+    class Meta:
+        pass

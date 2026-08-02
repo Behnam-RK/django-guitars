@@ -111,6 +111,35 @@ def test_cascade_operations_skip_non_cascade_and_non_deletable_relations():
     assert 'testapp_riff' not in ops  # Riff has no _deleted_at to cascade into
 
 
+def test_cascade_operations_disambiguates_two_fks_to_the_same_related_table():
+    """Merch has two independent CASCADE FKs to Album -- ``album`` and ``bonus_album`` --
+    which is the exact shape the ``_via`` naming scheme exists for: a PostgreSQL rule is
+    namespaced by name alone, not by what it references, so without disambiguation the
+    second FK's ``CREATE OR REPLACE RULE soft_delete_related_testapp_merch`` would silently
+    replace the first FK's rule, leaving one of the two relations uncascaded with no error
+    anywhere (see ``sql.CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE_VIA``'s comment).
+    """
+    command = Command()
+    command.existing.soft_delete_related.clear()
+
+    ops = command._cascade_operations(Album)
+    merch_ops = [op for op in ops if 'testapp_merch' in op]
+
+    assert len(merch_ops) == 2
+    headers = [op.splitlines()[0] for op in merch_ops]
+    assert any(
+        '# Soft Delete Related Rule on "testapp_merch" that is related to '
+        '"testapp_album"!' in h
+        for h in headers
+    )
+    assert any('via "bonus_album_id"!' in h for h in headers)
+    # Two distinct rule names -- neither op's CREATE OR REPLACE can silently clobber the
+    # other's.
+    blob = '\n'.join(merch_ops)
+    assert 'RULE soft_delete_related_testapp_merch\n' in blob
+    assert 'RULE soft_delete_related_testapp_merch_bonus_album_id' in blob
+
+
 def test_cascade_operation_warns_when_related_model_is_mti_child_without_own_deleted_at(
     monkeypatch,
 ):
@@ -361,6 +390,34 @@ def test_handle_generates_only_for_named_apps(monkeypatch):
     assert created == []
 
 
+def test_handle_skips_an_in_scope_app_with_no_operations(monkeypatch):
+    """An in-scope app that needs no enforcement contributes nothing to generate.
+
+    Every real LOCAL_APP in this suite (just testapp) always has models needing
+    enforcement, so nothing exercises this otherwise -- ``_build_operations`` is
+    mocked directly rather than reaching for a fake app with no models, which
+    ``test_scoped_cascade_gap_*`` already does for a different method.
+    """
+    created: list[str] = []
+
+    command = Command()
+    command.stdout = StringIO()
+    command.existing.triggers.clear()
+    command.existing.soft_deletes.clear()
+    command.existing.soft_delete_related.clear()
+    command.trigger_function_dependency = ('testapp', '0001_pretend')
+    monkeypatch.setattr(command, '_build_operations', lambda app: [])
+    monkeypatch.setattr(
+        _generator,
+        'create_empty_migration_file',
+        lambda app, name='auto_enforcement': created.append(app.label) or f'0002_{name}.py',
+    )
+
+    command.handle(check_only=False)
+
+    assert created == []
+
+
 def test_unknown_app_label_raises_command_error():
     with pytest.raises(CommandError):
         call_command('makeguitarmigrations', 'not_a_real_app')
@@ -504,7 +561,7 @@ def test_scoped_cascade_gap_skipped_when_rule_already_exists(monkeypatch):
         'get_app_configs',
         lambda: [fake_band_app, fake_album_app],
     )
-    command.existing.soft_delete_related[(Album._meta.db_table, Band._meta.db_table)] = None
+    command.existing.soft_delete_related[(Album._meta.db_table, Band._meta.db_table, None)] = None
 
     assert command._scoped_cascade_gap_notes({'albumb'}) == []
 
@@ -778,7 +835,7 @@ def test_tenant_policy_operations_are_emitted_for_uncovered_tables():
 
     assert any(header.startswith('# Tenant RLS on "testapp_release" table!') for header in headers)
     # One per policy-eligible table, and none for the multi-hop model.
-    assert len(headers) == 6
+    assert len(headers) == 7
     # The CREATE form, not the replacement: there was no policy to replace.
     assert not any('replaced' in header for header in headers)
 

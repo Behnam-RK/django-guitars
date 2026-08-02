@@ -5,6 +5,40 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-08-02
+
+M1: fixing the measuring instruments themselves (#8) -- harness and CI
+tooling only, no production code path changes behavior in this release.
+
+### Added
+
+- Branch coverage (`branch = true`), gated at 100% same as line coverage; the
+  one gap this surfaced (`guc.py`'s transaction-marker replace-in-place loop
+  never searching past a non-matching `run_on_commit` entry) is closed with a
+  real test, not a lowered threshold.
+- A GitHub Actions test matrix: Python 3.10/3.12/3.14 x Django 5.0/5.2/6.0
+  (minus the one combination pip itself refuses) x PostgreSQL 14/18 -- 16
+  cells, sampling the floor/mid/ceiling of each axis rather than the full
+  20-cell grid the classifiers advertise (5 Python versions x 4 Django
+  versions). Previously only 1 cell was ever verified by CI.
+- `noxfile.py`, mirroring the same matrix for local runs via `uv run nox`.
+- `psycopg` as an optional dependency (`pip install django-guitars[psycopg]`),
+  installing `psycopg[c]` per psycopg's own production recommendation.
+- A dynamic drift check in `tests/test_tenancy_denylist.py`: every public
+  member Django's `QuerySet` exposes is now enumerated at runtime and must
+  fall into one of four classified buckets, so a future Django release adding
+  a new queryset method fails the suite instead of silently going unguarded.
+- Coverage uploaded as a CI artifact (HTML report, one canonical matrix cell)
+  so a coverage drop is diffable from the PR/Actions UI.
+
+### Changed
+
+- `pytest-xdist` (previously an unused dev dependency) now actually runs the
+  suite in parallel (`-n auto`).
+- `compose.yaml`'s Postgres image version is now parametrized
+  (`POSTGRES_VERSION`, defaulting to 18) so CI can exercise more than one
+  PostgreSQL major.
+
 ## [1.1.3] - 2026-08-02
 
 Two follow-up bugs found reviewing #15 after it merged, one of them in that

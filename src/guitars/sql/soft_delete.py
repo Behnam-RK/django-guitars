@@ -79,6 +79,31 @@ DROP_SOFT_DELETE_RELATED_OBJECTS_RULE = """
     DROP RULE soft_delete_related_{related_table} ON {table};
 """
 
+# A second CASCADE FK from the same related table to the same parent needs a rule name
+# distinct from the first's: a PostgreSQL rule is namespaced by name alone, not by what it
+# references, so ``CREATE OR REPLACE RULE soft_delete_related_{related_table}`` under a
+# second FK silently replaces the first FK's cascade rather than adding to it -- one of the
+# two relations stops being enforced with no error anywhere. The generator picks one FK per
+# (related_table, table) pair to keep the plain name above unchanged (so every
+# already-migrated project's lone cascade rule for a pair is untouched); every other FK on
+# the same pair gets this form instead, with its own column folded into the name.
+
+CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE_VIA = """
+    CREATE OR REPLACE RULE soft_delete_related_{related_table}_{foreign_key}
+        AS ON UPDATE TO {table}
+        WHERE old._deleted_at IS NULL AND new._deleted_at IS NOT NULL AND
+              COALESCE(current_setting('rules.hard_deletion', true), '') <> 'on'
+        DO ALSO (
+            UPDATE {related_table}
+            SET _deleted_at = NOW()
+            WHERE {foreign_key} = old.{primary_key}
+        );
+"""
+
+DROP_SOFT_DELETE_RELATED_OBJECTS_RULE_VIA = """
+    DROP RULE soft_delete_related_{related_table}_{foreign_key} ON {table};
+"""
+
 # ---- MTI soft-delete rule (on the child table, soft-deletes the owner, preserves child row) ----
 # ``DO INSTEAD`` suppresses the physical delete of the child row and marks the owning ancestor
 # instead. The ``_deleted_at IS NULL`` guard makes it idempotent across the per-table DELETEs

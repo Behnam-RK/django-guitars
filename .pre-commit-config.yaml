@@ -54,6 +54,11 @@ repos:
         types: [python]
         pass_filenames: false
       - id: bandit
+        # tests/ is out of scope, same as ruff/ty (see pyproject.toml): the
+        # harness deliberately does things a security scanner would flag --
+        # hardcoded creds for the local-only Postgres role, raw SQL probes of
+        # generated migrations -- that are the point of the test, not a risk.
+        # The shipped package is src/ alone; see CLAUDE.md.
         name: bandit security scan
         entry: uv run bandit -q -r src/
         language: system

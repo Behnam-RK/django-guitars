@@ -16,7 +16,7 @@ from __future__ import annotations
 import pytest
 from django.apps import apps as django_apps
 from django.core.management import CommandError
-from django.db import connection, connections
+from django.db import connection, connections, transaction
 from django.test import override_settings
 
 from guitars.management import _generator
@@ -33,7 +33,7 @@ from guitars.tenancy import (
 )
 from guitars.tenancy.checks import TENANT_MODEL_ID, check_guitar_models_have_a_tenant
 from guitars.tenancy.discovery import _classify
-from tests.testapp.models import Booking, Label, Release, Track
+from tests.testapp.models import Band, Booking, Label, Release, Track
 
 
 # ─────────────────────────── defensive SQL guards ──────────────────────────── #
@@ -125,6 +125,20 @@ class TestLocalTenantFields:
         )
 
         assert manager.local_tenant_fields(Release) == {}
+
+    def test_a_lookup_naming_a_non_concrete_field_is_not_local(self, monkeypatch):
+        """A lookup with no ``__`` is not automatically a column.
+
+        ``Band._meta.get_field('albums')`` resolves -- it is the reverse relation
+        ``Album.band`` creates -- but a reverse relation has no column of its own to
+        predicate on or autofill, so it must be dropped exactly like the multi-hop and
+        typo cases above, not treated as local because it happened to resolve.
+        """
+        monkeypatch.setattr(
+            'guitars.tenancy.manager.tenant_spec', lambda model: {'label': 'albums'}
+        )
+
+        assert manager.local_tenant_fields(Band) == {}
 
     def test_an_untenanted_model_never_autofills(self):
         """``_autofills`` walks the managers looking for a tenanted one and finds none."""
@@ -331,6 +345,45 @@ class TestPublisherGuards:
             # Restored by hand rather than by monkeypatch: teardown rolls the test back, which
             # opens a cursor, which re-enters the wrapper -- and would hit the stub.
             guc._publish = original
+
+    @pytest.mark.django_db(transaction=True)
+    def test_a_transaction_marker_is_found_past_an_unrelated_commit_hook(self):
+        """The replace-in-place loop in ``_transaction_marker`` must not assume the
+        marker it is looking for is the *first* entry in ``run_on_commit`` -- anything
+        else on the connection could have registered a hook earlier in the same
+        transaction, and the search has to keep going past it.
+
+        ``transaction=True`` (real commits, no wrapping test-transaction) is load-bearing
+        here: under the plain ``db`` fixture the whole test already runs inside one atomic
+        block, so the fixture setup below would itself publish a *local* marker before this
+        test's own ``transaction.atomic()`` even starts -- landing at index 0 and leaving
+        nothing for the search to skip past.
+        """
+        with tenancy_bypassed():
+            # Outside any atomic() block: in_atomic_block is False, so this publish is
+            # session-level (no run_on_commit entry at all) -- run_on_commit starts empty.
+            label_a = Label.objects.create(name='Aardvark')
+            label_b = Label.objects.create(name='Basilisk')
+
+        with transaction.atomic():
+            # Registered before any tenant switch, so it sits ahead of the first marker.
+            transaction.on_commit(lambda: None)
+
+            with tenant(label=label_a):
+                Release.objects.exists()  # first publish: superseded=None, marker appended last
+            first_marker = getattr(connection, guc._CACHE)[2]
+
+            with tenant(label=label_b):
+                # Different state -> _ensure republishes, this time with superseded=first_marker,
+                # which now sits behind the decoy and makes the search skip past it.
+                Release.objects.exists()
+            second_marker = getattr(connection, guc._CACHE)[2]
+
+            hooks = [hook for _, hook, *_ in connection.run_on_commit]
+            # Replaced in place, not appended: still one decoy plus one marker.
+            assert len(hooks) == 2
+            assert first_marker not in hooks
+            assert second_marker in hooks
 
     def test_uninstall_forgets_the_cached_state(self, db):
         """A reinstall must not inherit a cache describing a session it no longer owns."""

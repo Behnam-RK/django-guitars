@@ -9,16 +9,27 @@ failure mode is a silent cross-tenant read -- or, for ``hard_delete``, permanent
 of every tenant's rows.
 
 So this module refuses to let a method be *undecided*. Every public method guitars adds to
-a queryset must be either denied or explicitly declared safe, with a reason. A new method
-fails these tests until someone classifies it.
+a queryset must be either denied or explicitly declared safe, with a reason -- and, lower
+down, so must every public method **Django's own** ``QuerySet`` declares: a hand-maintained
+frozen set (``MUST_BE_DENIED``, historical) only ever names what someone remembered to add,
+so a Django release that adds a queryset method used to leak silently past every test here.
+``test_djangos_own_queryset_surface_is_fully_classified`` walks
+``django.db.models.QuerySet`` itself instead, so a new method fails loudly by name until
+someone classifies it -- which is what makes the CI matrix in ``ci.yml`` (Python x Django x
+Postgres) worth having: this drift check now runs against three different Django versions,
+not one.
 """
 
 import inspect
 
 import pytest
+from django.db import connections
+from django.db.models import QuerySet as DjangoQuerySet
 
 from guitars.models import HardDeletableQuerySet, LiveQuerySet
+from guitars.tenancy import TenantScopeError
 from guitars.tenancy.manager import _untenanted_queryset_class
+from tests.testapp.models import Release
 
 
 #: Methods guitars adds to its querysets that do NOT reach the database, with the reason.
@@ -29,11 +40,15 @@ SAFE_BY_DESIGN = {
     'archives': 'property returning self.filter(...) -- lazy, chains into a denying clone',
 }
 
-#: Django's own database-touching API, which the deny-list also has to cover. Frozen here
-#: so a Django upgrade that renames or adds one of these surfaces as a failure rather than
-#: as a hole. ``none``/``create``/``bulk_create`` are handled but not by simple denial
-#: (``none`` stays usable; the writes report-or-raise per enforcement mode), so they are
-#: asserted separately below.
+#: Historical: the frozen subset of Django's database-touching API this module named
+#: before the dynamic check below existed. Kept, and still asserted against below by
+#: ``test_documented_database_methods_are_denied``, because these are pinned findings
+#: (``hard_delete``, ``_raw_delete``, ``explain`` were each once missing from the ported
+#: deny-list) -- but a Django *addition* is now caught by
+#: ``test_djangos_own_queryset_surface_is_fully_classified`` instead of by remembering to
+#: extend this set. ``none``/``create``/``bulk_create`` are handled but not by simple
+#: denial (``none`` stays usable; the writes report-or-raise per enforcement mode), so
+#: they are asserted separately below.
 MUST_BE_DENIED = {
     '_fetch_all',
     'count',
@@ -62,14 +77,264 @@ _QUERYSETS = [LiveQuerySet, HardDeletableQuerySet]
 def _own_members(cls) -> set[str]:
     """Names *this* class declares, excluding dunders.
 
-    Django's own QuerySet API is covered by MUST_BE_DENIED rather than enumerated here;
-    what matters for drift is what guitars itself adds.
+    Django's own QuerySet API used to be covered by MUST_BE_DENIED alone -- a frozen
+    literal someone had to remember to extend. It is now cross-checked dynamically too,
+    below, against django.db.models.QuerySet itself.
     """
     return {name for name in vars(cls) if not name.startswith('__')}
 
 
 def _denying_class(base):
     return _untenanted_queryset_class(base)
+
+
+# ──────────────────────── Django's own QuerySet surface ───────────────────────── #
+#
+# MUST_BE_DENIED, above, is what a human remembered to write down. The tests in this
+# section instead walk django.db.models.QuerySet itself, so a method Django adds --
+# not one guitars adds -- fails loudly by name instead of shipping unclassified. Checked
+# live against Django 5.0.14, 5.2.15 and 6.0.6 while writing this: all three expose the
+# identical 68 public members classified below, so there is no drift today; this is what
+# catches the next one.
+#
+# Manager.__dict__ is deliberately not enumerated here: both Django versions checked
+# have zero own non-dunder members on django.db.models.Manager (most Manager methods are
+# proxied from QuerySet via from_queryset, so there is nothing of Manager's own to
+# classify), which matches ADR 0004's finding that Manager is not a distinct enforcement
+# surface -- the gap on the save() path it describes is real, but it is a Model method
+# (_do_insert/_do_update), not a Manager one, and out of scope for a QuerySet drift test.
+
+#: Explicitly overridden with _deny / _deny_query_write in guitars/tenancy/manager.py.
+DJANGO_DENIED_DIRECTLY = {
+    'aaggregate',
+    'abulk_update',
+    'acount',
+    'adelete',
+    'aexists',
+    'aggregate',
+    'aiterator',
+    'aupdate',
+    'bulk_update',
+    'count',
+    'delete',
+    'exists',
+    'explain',
+    'iterator',
+    'update',
+}
+
+#: Not separately overridden -- but every one of these is implemented, in Django itself,
+#: by delegating to an already-denied primitive. The nine async members call
+#: sync_to_async(self.<sync method>) (verified with inspect.getsource on all nine while
+#: writing this), so self.<sync method> already resolves to the override on the denying
+#: class. get/first/last/earliest/latest/in_bulk/contains/get_or_create/update_or_create
+#: all build a clone of self (same denying class) and then iterate, .get(), or .exists()
+#: it, which is the _fetch_all/exists chokepoint again. No production code needed these
+#: added to manager.py; TestDeniedViaChainActuallyRaises below proves it behaviorally
+#: rather than trusting this reasoning statically.
+DJANGO_DENIED_VIA_CHAIN = {
+    'acontains',
+    'aearliest',
+    'aexplain',
+    'afirst',
+    'aget',
+    'aget_or_create',
+    'ain_bulk',
+    'alast',
+    'alatest',
+    'aupdate_or_create',
+    'contains',
+    'earliest',
+    'first',
+    'get',
+    'get_or_create',
+    'in_bulk',
+    'last',
+    'latest',
+    'update_or_create',
+}
+
+#: Overridden individually in manager.py, not aliased to a bare denial, so audit mode can
+#: report and proceed instead of hard-raising. Asserted specially in
+#: test_row_creating_writes_are_intercepted_rather_than_plainly_denied and
+#: test_none_stays_usable_on_an_unscoped_queryset, below.
+DJANGO_INDIVIDUALLY_HANDLED = {'abulk_create', 'acreate', 'bulk_create', 'create', 'none'}
+
+#: Chain-building or metadata: return a new (lazy) queryset, or a value that never
+#: required a query, so they never touch the database by themselves.
+#:
+#: ``raw`` is here, not in a denied bucket, on a technicality worth naming: *calling*
+#: raw() doesn't touch the database -- it returns a RawQuerySet -- but that RawQuerySet
+#: is a distinct class that never passes through the denying queryset at all, so an
+#: unscoped `Model.objects.raw(...)` bypasses this Python-side deny-list entirely. Same
+#: shape of gap as the save()-path one ADR 0004 documents (the *complete* enforcement
+#: layer -- FORCE ROW LEVEL SECURITY -- still applies; this deny-list is the *loud* one).
+#: Out of scope to close here: harness-only milestone, no SQL/generator/model changes.
+DJANGO_LAZY_SAFE = {
+    'alias',
+    'all',
+    'annotate',
+    'as_manager',
+    'complex_filter',
+    'dates',
+    'datetimes',
+    'db',
+    'defer',
+    'difference',
+    'distinct',
+    'exclude',
+    'extra',
+    'filter',
+    'intersection',
+    'only',
+    'order_by',
+    'ordered',
+    'prefetch_related',
+    'query',
+    'raw',
+    'resolve_expression',
+    'reverse',
+    'select_for_update',
+    'select_related',
+    'union',
+    'using',
+    'values',
+    'values_list',
+}
+
+
+def _django_queryset_public_members() -> set[str]:
+    """django.db.models.QuerySet's own public members.
+
+    Private helpers (_clone, _chain, _merge_sanity_check, ...) are deliberately excluded
+    from this enumeration: Django routes every independent database-touching path through
+    the public methods classified above, or through _fetch_all (DJANGO_DENIED_DIRECTLY) --
+    private helpers are plumbing invoked *by* those public methods, not separate entry
+    points of their own, so classifying dozens of them by hand would add volume without
+    adding coverage.
+    """
+    return {name for name in vars(DjangoQuerySet) if not name.startswith('_')}
+
+
+def test_djangos_own_queryset_surface_is_fully_classified():
+    """The drift test this module used to be missing.
+
+    Not parametrized over LiveQuerySet/HardDeletableQuerySet like the tests below --
+    Django's QuerySet class is the same one whichever guitars queryset subclasses it, so
+    there is exactly one surface to check, not two.
+    """
+    classified = (
+        DJANGO_DENIED_DIRECTLY
+        | DJANGO_DENIED_VIA_CHAIN
+        | DJANGO_INDIVIDUALLY_HANDLED
+        | DJANGO_LAZY_SAFE
+    )
+
+    unclassified = sorted(_django_queryset_public_members() - classified)
+    assert not unclassified, (
+        f'django.db.models.QuerySet gained public member(s) {unclassified} that no bucket '
+        f'in tests/test_tenancy_denylist.py names. Decide, do not default: if it can reach '
+        f'the database on an unscoped queryset, deny it in guitars/tenancy/manager.py and '
+        f'add it to DJANGO_DENIED_DIRECTLY -- or confirm it already raises by delegating to '
+        f'a denied primitive and add it to DJANGO_DENIED_VIA_CHAIN, proven by a new case in '
+        f'TestDeniedViaChainActuallyRaises. Otherwise it is lazy: add it to DJANGO_LAZY_SAFE '
+        f'with a reason.'
+    )
+
+    # And the reverse direction: a classified name Django no longer has means the
+    # classification, not Django, has gone stale -- just as much a drift as an addition.
+    stale = sorted(classified - _django_queryset_public_members())
+    assert not stale, (
+        f'{stale} no longer exist on django.db.models.QuerySet. Remove from whichever '
+        f'DJANGO_* set still names them, or update it if Django renamed rather than '
+        f'removed it.'
+    )
+
+
+#: The two DJANGO_DENIED_VIA_CHAIN names that open a real connection before ever reaching
+#: the denial: Django wraps update_or_create/aupdate_or_create's whole body in
+#: transaction.atomic(using=self.db) *before* the internal get() that would raise, so
+#: entering the method at all needs a connection -- the denial still fires from get(),
+#: just one frame later than for get_or_create. These carry an explicit django_db mark
+#: below; everything else must NOT -- a name that turns out to need one is a sign the
+#: reasoning needs re-checking, not an opportunity to mark it "just in case".
+_NEEDS_DB = {'update_or_create', 'aupdate_or_create'}
+
+
+def _chain_params(names):
+    return [
+        pytest.param(name, marks=pytest.mark.django_db(transaction=True))
+        if name in _NEEDS_DB
+        else name
+        for name in sorted(names)
+    ]
+
+
+class TestDeniedViaChainActuallyRaises:
+    """Proof, not just reasoning: every DJANGO_DENIED_VIA_CHAIN member actually raises.
+
+    ``Release`` is a GuitarModel, so ``Release.objects`` with no active tenant scope is
+    the denying queryset every name here reasons about. No test is marked ``db`` --
+    same reasoning as ``test_acreate_is_denied_without_a_scope`` in
+    test_tenancy_internals.py: the denial fires from a pure-Python override before the
+    chain ever compiles SQL, so no real lookup values, an existing row, or a database
+    connection are needed -- only arguments shaped enough for Python to accept the call.
+    An async test that *did* open one without closing it would leak a connection past
+    this session's teardown; not opening one at all is simpler than remembering to.
+
+    ``update_or_create``/``aupdate_or_create`` are the one exception -- see ``_NEEDS_DB``
+    above. The async one also needs the ``_close_executor_connections`` fixture below,
+    for the same reason ``TestAsyncTwins`` in test_tenancy_internals.py does.
+    """
+
+    #: Positional/keyword arguments each name needs to be called at all -- not to succeed,
+    #: since every one of them raises before touching the database. Anything absent here
+    #: is called with no arguments.
+    _CALL_ARGS: dict[str, tuple] = {
+        'contains': (Release(pk=1),),
+        'acontains': (Release(pk=1),),
+        'earliest': ('pk',),
+        'aearliest': ('pk',),
+        'latest': ('pk',),
+        'alatest': ('pk',),
+        'in_bulk': ([1],),
+        'ain_bulk': ([1],),
+    }
+    _CALL_KWARGS: dict[str, dict] = {
+        'get_or_create': {'id': 1},
+        'aget_or_create': {'id': 1},
+        'update_or_create': {'id': 1},
+        'aupdate_or_create': {'id': 1},
+    }
+
+    @pytest.fixture(autouse=True)
+    async def _close_executor_connections(self):
+        """See TestAsyncTwins in test_tenancy_internals.py: a harmless no-op for the
+        17 of 19 cases that never opened a connection in the first place."""
+        yield
+        from asgiref.sync import sync_to_async
+
+        await sync_to_async(connections.close_all)()
+
+    @pytest.mark.parametrize(
+        'name',
+        _chain_params(n for n in DJANGO_DENIED_VIA_CHAIN if not n.startswith('a')),
+        ids=str,
+    )
+    def test_sync_members_raise(self, name):
+        method = getattr(Release.objects, name)
+        with pytest.raises(TenantScopeError):
+            method(*self._CALL_ARGS.get(name, ()), **self._CALL_KWARGS.get(name, {}))
+
+    @pytest.mark.parametrize(
+        'name',
+        _chain_params(n for n in DJANGO_DENIED_VIA_CHAIN if n.startswith('a')),
+        ids=str,
+    )
+    async def test_async_members_raise(self, name):
+        method = getattr(Release.objects, name)
+        with pytest.raises(TenantScopeError):
+            await method(*self._CALL_ARGS.get(name, ()), **self._CALL_KWARGS.get(name, {}))
 
 
 @pytest.mark.parametrize('queryset_class', _QUERYSETS, ids=lambda c: c.__name__)

@@ -9,9 +9,9 @@ These exercise the PG triggers and rules generated for MTI children, whose ``_up
 import types
 
 import pytest
-from django.db import connection
 
 from guitars.models.soft_deletion import _mti_table_chain
+from tests.conftest import scalar as _scalar
 from tests.testapp.models import ChamberOrchestra, Ensemble, Orchestra, Section
 
 
@@ -23,9 +23,7 @@ def _row_exists(model: type, pk: int) -> bool:
     """
     table = model._meta.db_table
     pk_column = model._meta.pk.column
-    with connection.cursor() as cursor:
-        cursor.execute(f'SELECT 1 FROM {table} WHERE {pk_column} = %s', [pk])
-        return cursor.fetchone() is not None
+    return _scalar(f'SELECT 1 FROM {table} WHERE {pk_column} = %s', [pk]) is not None
 
 
 @pytest.mark.django_db

@@ -15,11 +15,11 @@ import types
 
 import pytest
 from django.core.management import CommandError, call_command
-from django.db import connection
 
 from guitars import sql
 from guitars.management.commands.audittenancy import Command as AuditCommand
 from guitars.tenancy import tenant
+from tests.conftest import execute
 from tests.testapp.models import Release
 
 
@@ -40,16 +40,6 @@ def _audit_failure(*args, **options) -> str:
     with pytest.raises(CommandError) as caught:
         call_command('audittenancy', *args, stdout=out, stderr=err, **options)
     return out.getvalue() + err.getvalue() + str(caught.value)
-
-
-@pytest.fixture
-def _execute(db):
-    def run(*statements: str) -> None:
-        with connection.cursor() as cursor:
-            for statement in statements:
-                cursor.execute(statement)
-
-    return run
 
 
 class TestAGoodDatabasePasses:
@@ -339,11 +329,11 @@ class TestAPolicyThatNoLongerMatchesTheModels:
             assert 'a cross-tenant write is accepted' in output
             assert 'audit failed' in output
             # Not merely reported: the write really does land, so the finding is not academic.
-            with tenant(label=tenants.a), connection.cursor() as cursor:
-                cursor.execute(
+            with tenant(label=tenants.a):
+                execute(
                     f'INSERT INTO {table} (title, label_id, _created_at, _updated_at) '
                     f'VALUES (%s, %s, NOW(), NOW())',
-                    ['smuggled', tenants.b.pk],
+                    params=['smuggled', tenants.b.pk],
                 )
         finally:
             _execute(

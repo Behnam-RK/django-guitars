@@ -23,6 +23,9 @@ from django.db import ProgrammingError, connection, transaction
 
 from guitars import sql
 from guitars.tenancy import TenantScopeError, tenancy_bypassed, tenant
+from tests.conftest import execute as _execute
+from tests.conftest import rows as _rows
+from tests.conftest import scalar as _scalar
 
 
 TENANT_A, TENANT_B = 1, 2
@@ -41,25 +44,6 @@ CREATE TABLE {_CHILD_TABLE} (
     note text
 );
 """
-
-
-def _execute(*statements: str) -> None:
-    with connection.cursor() as cursor:
-        for statement in statements:
-            cursor.execute(statement)
-
-
-def _scalar(query: str, params: list | None = None):
-    with connection.cursor() as cursor:
-        cursor.execute(query, params)
-        row = cursor.fetchone()
-    return row[0] if row else None
-
-
-def _rows(query: str, params: list | None = None) -> list:
-    with connection.cursor() as cursor:
-        cursor.execute(query, params)
-        return cursor.fetchall()
 
 
 @pytest.fixture

@@ -33,6 +33,7 @@ from guitars.tenancy import (
 )
 from guitars.tenancy.checks import TENANT_MODEL_ID, check_guitar_models_have_a_tenant
 from guitars.tenancy.discovery import _classify
+from tests.conftest import execute as _execute
 from tests.testapp.models import Band, Booking, Label, Release, Track
 
 
@@ -387,8 +388,7 @@ class TestPublisherGuards:
 
     def test_uninstall_forgets_the_cached_state(self, db):
         """A reinstall must not inherit a cache describing a session it no longer owns."""
-        with connection.cursor() as cursor:
-            cursor.execute('SELECT 1')
+        _execute('SELECT 1')
         assert hasattr(connection, guc._CACHE)
 
         guc.uninstall()

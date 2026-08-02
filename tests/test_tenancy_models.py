@@ -16,10 +16,11 @@ cannot see theirs", and one tenant's data cannot demonstrate that.
 from __future__ import annotations
 
 import pytest
-from django.db import connection
 from django.db.utils import IntegrityError
 
 from guitars.tenancy import TenantScopeError, reporting, tenancy_bypassed, tenant
+from tests.conftest import execute as _execute
+from tests.conftest import scalar as _scalar
 from tests.testapp.models import Band, Booking, Label, Release, Review, StadiumTour, Tour, Track
 
 
@@ -29,9 +30,7 @@ def _count(table: str) -> int:
     What the policy alone decides. A manager could produce the right number for the wrong
     reason; this cannot.
     """
-    with connection.cursor() as cursor:
-        cursor.execute(f'SELECT count(*) FROM {table}')  # noqa: S608 - fixed literal names
-        return cursor.fetchone()[0]
+    return _scalar(f'SELECT count(*) FROM {table}')  # noqa: S608 - fixed literal names
 
 
 # ───────────────────────────────── reads ───────────────────────────────── #
@@ -431,8 +430,8 @@ class TestTenantedMti:
         """
         a_pk, b_pk = tenants.tour_a.pk, tenants.tour_b.pk
 
-        with tenant(label=tenants.a), connection.cursor() as cursor:
-            cursor.execute('DELETE FROM testapp_stadiumtour')
+        with tenant(label=tenants.a):
+            _execute('DELETE FROM testapp_stadiumtour')
 
         with tenancy_bypassed():
             assert StadiumTour._archives.filter(pk=a_pk).exists()
@@ -499,13 +498,14 @@ class TestMultiHopDimension:
     def test_the_table_carries_no_policy(self, reviews):
         """Asserted against the database, because the alternative to a *named* gap is a
         policy that looks like protection and predicates on nothing."""
-        with connection.cursor() as cursor:
-            cursor.execute(
+        assert (
+            _scalar(
                 'SELECT count(*) FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid '
                 'WHERE c.relname = %s',
                 ['testapp_review'],
             )
-            assert cursor.fetchone()[0] == 0
+            == 0
+        )
 
     def test_raw_sql_is_therefore_not_scoped(self, reviews):
         """The honest consequence, pinned. This is what the skip note is warning about."""

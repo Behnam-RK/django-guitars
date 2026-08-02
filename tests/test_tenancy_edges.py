@@ -13,7 +13,7 @@ import ast
 
 import pytest
 from django.core.management import CommandError, call_command
-from django.db import connection, models
+from django.db import models
 from django.test import override_settings
 
 from guitars import sql
@@ -29,6 +29,7 @@ from guitars.tenancy import (
 )
 from guitars.tenancy.checks import TENANT_MODEL_ID, check_guitar_models_have_a_tenant
 from guitars.tenancy.discovery import _classify
+from tests.conftest import execute as _execute
 from tests.testapp.models import Booking, Label, Release, Review, StadiumTour
 
 
@@ -182,9 +183,7 @@ class TestAuditMode:
         undone with everything else. It models the stage of a rollout where the Python layer
         is in place and the database layer is not yet.
         """
-        with connection.cursor() as cursor:
-            for statement in sql.drop_table_rls(table=Release._meta.db_table):
-                cursor.execute(statement)
+        _execute(*sql.drop_table_rls(table=Release._meta.db_table))
         return None
 
     @pytest.fixture

@@ -148,6 +148,7 @@ filterwarnings = ["error"]
 
 [tool.coverage.run]
 source = ["guitars"]
+branch = true
 omit = [
     "tests/*",
 ]

@@ -391,7 +391,7 @@ def _untenanted_queryset_class(base: type[models.QuerySet]) -> type[models.Query
         # values, first/last, get, in_bulk): one chokepoint catches them all.
         _fetch_all = _deny
         # DB hits that bypass _fetch_all need explicit denial.
-        count = exists = aggregate = _deny
+        count = exists = aggregate = explain = _deny
         acount = aexists = aaggregate = _deny
         # Set-wide writes: on an unscoped set they would mutate every tenant's rows.
         # bulk_update is denied in its own right, not just because Django currently
@@ -411,7 +411,11 @@ def _untenanted_queryset_class(base: type[models.QuerySet]) -> type[models.Query
         #
         # tests/test_tenancy_denylist.py fails if a queryset method appears unclassified,
         # so this list cannot quietly fall behind the querysets it guards.
-        hard_delete = _hard_delete_own_table = _deny_query_write
+        #
+        # _raw_delete is Django's own primitive underneath delete()/Collector: it compiles
+        # a DeleteQuery straight off self.query and executes it, with no signals and no
+        # per-row guard. Unscoped, that is an unfiltered DELETE across every tenant.
+        hard_delete = _hard_delete_own_table = _raw_delete = _deny_query_write
         # iterator()/aiterator() deliberately stream without populating _result_cache, so
         # they skip _fetch_all entirely -- deny them by name.
         iterator = aiterator = _deny

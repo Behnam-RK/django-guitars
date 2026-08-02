@@ -39,6 +39,7 @@ MUST_BE_DENIED = {
     'count',
     'exists',
     'aggregate',
+    'explain',
     'acount',
     'aexists',
     'aaggregate',
@@ -52,6 +53,7 @@ MUST_BE_DENIED = {
     'aiterator',
     'hard_delete',
     '_hard_delete_own_table',
+    '_raw_delete',
 }
 
 _QUERYSETS = [LiveQuerySet, HardDeletableQuerySet]
@@ -152,6 +154,17 @@ def test_hard_delete_is_denied_and_has_no_async_twin():
         'HardDeletableQuerySet gained an async hard_delete -- add it to the deny-list in '
         'guitars/tenancy/manager.py and to MUST_BE_DENIED here.'
     )
+
+
+def test_raw_delete_and_explain_are_denied():
+    """Pin the finding that motivated adding these two: ``_raw_delete`` compiles a
+    ``DeleteQuery`` straight off ``self.query`` and executes it -- unscoped, an
+    unfiltered DELETE across every tenant -- and ``explain`` executes an ``EXPLAIN``,
+    bypassing ``_fetch_all`` entirely. Both were absent from the ported deny-list."""
+    denying = _denying_class(LiveQuerySet)
+
+    assert '_raw_delete' in _own_members(denying)
+    assert 'explain' in _own_members(denying)
 
 
 def test_none_stays_usable_on_an_unscoped_queryset():

@@ -5,6 +5,7 @@ import types
 import pytest
 from asgiref.sync import async_to_sync
 from django.db import transaction
+from django.db.models.signals import post_save, pre_save
 
 from guitars.models.base import DutarModel
 from tests.testapp.models import Band, Genre, Riff
@@ -70,6 +71,41 @@ def test_update_ignores_unknown_field_when_not_raising():
     assert band.name == 'Yes'
 
 
+@pytest.mark.django_db(transaction=True)
+def test_update_with_no_scalar_fields_writes_nothing():
+    """A bare, argument-less update() must not become a full-row rewrite.
+
+    ``_prepare_update`` used to collapse an empty ``updating_fields`` set to
+    ``update_fields=None`` (truthiness), which Django reads as "save every field" --
+    the opposite of the docstring's promise that only the passed attrs are written.
+    ``_updated_at``'s trigger is the observable proof: a real UPDATE bumps it, an
+    empty one (Django short-circuits before issuing any SQL) must not.
+    """
+    band = Band.objects.create(name='Rush')
+    band.refresh_from_db()
+    before = band._updated_at
+
+    band.update()
+
+    band.refresh_from_db()
+    assert band._updated_at == before
+
+
+@pytest.mark.django_db(transaction=True)
+def test_update_m2m_only_writes_no_scalar_column():
+    """An M2M-only update() must not also rewrite every scalar column."""
+    band = Band.objects.create(name='Rush')
+    band.refresh_from_db()
+    before = band._updated_at
+    rock = Genre.objects.create(name='rock')
+
+    band.update(genres=[rock])
+
+    assert set(band.genres.all()) == {rock}
+    band.refresh_from_db()
+    assert band._updated_at == before  # no scalar column touched
+
+
 @pytest.mark.django_db
 def test_update_sets_m2m_relations():
     band = Band.objects.create(name='Rush')
@@ -88,6 +124,49 @@ def test_update_m2m_without_save_raises():
 
     with pytest.raises(ValueError, match='Cannot update m2m'):
         band.update(genres=[rock], _save=False)
+
+
+@pytest.mark.django_db
+def test_update_m2m_without_save_raises_before_mutating_scalar_fields():
+    """A raising update() must leave the instance untouched -- validation has to run
+    before any attribute is set, not interleaved with setting them."""
+    band = Band.objects.create(name='Rush')
+    rock = Genre.objects.create(name='rock')
+
+    with pytest.raises(ValueError, match='Cannot update m2m'):
+        band.update(name='Yes', genres=[rock], _save=False)
+
+    assert band.name == 'Rush'  # unchanged in memory
+
+
+@pytest.mark.django_db
+def test_update_disable_signals_only_narrows_to_save_signals(monkeypatch):
+    """``_disable_signals=True`` must disable exactly pre_save/post_save, not the other
+    six DEFAULT_SIGNALS -- a bare ``DisableSignals()`` would also suppress
+    pre_migrate/post_migrate/pre_init/post_init/pre_delete/post_delete for the
+    duration of the call, which is scope creep for a save path.
+
+    ``DisableSignals.__exit__`` always restores fully before ``update()`` returns in
+    the single-threaded case, so a black-box check of ``pre_migrate.receivers`` before
+    and after the call cannot tell the eight-signal default apart from the narrowed
+    pair -- both leave it intact by the time control returns. What actually differs is
+    the ``signals=`` argument passed for the call's duration, so that is what this pins.
+    """
+    import guitars.signals as signals_module
+
+    captured = {}
+    real_init = signals_module.DisableSignals.__init__
+
+    def spy_init(self, signals=None):
+        captured['signals'] = signals
+        real_init(self, signals=signals)
+
+    monkeypatch.setattr(signals_module.DisableSignals, '__init__', spy_init)
+
+    band = Band.objects.create(name='Rush')
+    band.update(name='Yes', _disable_signals=True)
+
+    assert captured['signals'] == [pre_save, post_save]
 
 
 @pytest.mark.django_db

@@ -1,5 +1,7 @@
 """Tests for guitars.signals.DisableSignals."""
 
+import threading
+
 import pytest
 from django.db.models.signals import post_save, pre_save
 
@@ -47,3 +49,55 @@ def test_disable_signals_only_disconnects_listed_signal():
     finally:
         pre_save.disconnect(on_pre, sender=Band)
         post_save.disconnect(on_post, sender=Band)
+
+
+def test_disable_signals_concurrent_use_does_not_lose_receivers():
+    """Two overlapping ``DisableSignals()`` blocks must not permanently wipe receivers.
+
+    ``signal.receivers`` is process-global mutable state with no lock. This forces the
+    exact interleaving that loses it: A enters (stashes the real receivers, empties the
+    list), B enters (stashes A's now-empty list), A exits (correctly restores), then B
+    exits -- overwriting A's restore with B's stale, empty stash. The net effect is every
+    receiver in the process permanently disconnected, including guitars' own tenant write
+    guard, with no exception raised anywhere to say so.
+
+    The interleaving is forced with events rather than left to scheduler luck, so the test
+    reproduces deterministically instead of being flaky.
+    """
+
+    def on_save(sender, **kwargs):
+        pass
+
+    pre_save.connect(on_save, sender=Band, weak=False)
+    try:
+        original = list(pre_save.receivers)
+        assert original  # sanity: something is actually connected to begin with
+
+        a_entered = threading.Event()
+        b_entered = threading.Event()
+        a_exited = threading.Event()
+
+        def thread_a():
+            with DisableSignals():
+                a_entered.set()
+                b_entered.wait(timeout=5)
+            a_exited.set()
+
+        def thread_b():
+            a_entered.wait(timeout=5)
+            with DisableSignals():
+                b_entered.set()
+                a_exited.wait(timeout=5)
+
+        ta = threading.Thread(target=thread_a)
+        tb = threading.Thread(target=thread_b)
+        ta.start()
+        tb.start()
+        ta.join(timeout=5)
+        tb.join(timeout=5)
+
+        assert not ta.is_alive()
+        assert not tb.is_alive()
+        assert pre_save.receivers == original
+    finally:
+        pre_save.disconnect(on_save, sender=Band)

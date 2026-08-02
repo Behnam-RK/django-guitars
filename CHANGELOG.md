@@ -5,6 +5,57 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.2] - 2026-08-02
+
+Five confirmed bugs found by a multi-aspect quality review, each shipped
+behind a regression test that was observed failing before the fix.
+
+### Fixed
+
+- `DisableSignals` stashed `signal.receivers` -- process-global mutable
+  state -- per instance with no lock. Two overlapping blocks (nested or
+  concurrent across threads) could race: the second block's `__exit__`
+  restored from a stash taken *after* the first block had already emptied
+  the list, overwriting the first block's correct restore with an empty
+  one and permanently disconnecting every receiver in the process,
+  including the tenant write guard. The stash is now a module-level,
+  lock-guarded, reference count keyed by signal: whichever block enters
+  first takes the real stash, and only the last one out restores it.
+  `DisableSignals.__enter__` also now returns `self`, matching
+  `with DisableSignals() as ds:` (it previously returned `None`).
+- `update(_disable_signals=True)` disabled all eight `DEFAULT_SIGNALS` --
+  including `pre_init`/`post_init`/`pre_delete`/`post_delete`/
+  `pre_migrate`/`post_migrate` -- instead of just `pre_save`/`post_save`.
+  Even narrowed, suppressing `pre_save` still disables the tenant write
+  guard for a `GuitarModel` instance; that interaction is now reported
+  once per model class via `guitars.tenancy.reporting`, and documented on
+  `update()`.
+- `update()` collapsed an empty `updating_fields` set to
+  `update_fields=None` by truthiness, so an M2M-only or argument-less call
+  rewrote every column instead of none -- the opposite of what the
+  docstring promises. `_prepare_update` also applied attributes to the
+  instance before validating that `_save=False` combined with M2M
+  arguments should raise, so a raising call still left the instance
+  mutated in memory. Both fixed: `update_fields` is `None` only when
+  `_save_all_fields=True`, and validation now runs before any `setattr`.
+- `hard_delete()` (both the multi-table-inheritance path and
+  `_hard_delete_own_table`) opened a cursor on the module-global default
+  database connection and quoted identifiers via its `ops`, ignoring the
+  queryset's own `.db`. On a project with more than one database alias
+  this either raised (no matching row on `'default'`) or silently deleted
+  the wrong row. Both now resolve `connections[self.db]`, and the
+  enclosing transactions are opened with `using=self.db`. The switch-off
+  statement that re-enables the soft-delete rule is now also wrapped in
+  `try`/`finally`, so it is a guarantee of the function itself rather than
+  an effect that happened to follow from the enclosing transaction rolling
+  back on error.
+- The tenancy deny-list, applied to an unscoped queryset, missed two of
+  Django's own database-touching `QuerySet` methods: `_raw_delete`
+  compiles a `DeleteQuery` straight off `self.query` and executes it with
+  no signals and no per-row guard -- unscoped, an unfiltered `DELETE`
+  across every tenant -- and `explain()` executes an `EXPLAIN`, bypassing
+  the `_fetch_all` chokepoint entirely. Both are now denied.
+
 ## [1.1.1] - 2026-07-31
 
 No package changes -- tooling only. Upgraded pinned GitHub Actions

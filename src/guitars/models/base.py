@@ -87,17 +87,16 @@ class UpdatableModel(Model):
         if excessive_fields and _raise_for_excessive:
             raise ValueError(f'Invalid arguments: {excessive_fields}. (valid choices: {fields})')
 
-        m2m_attrs: dict[str, object] = {}
-        for attr, attr_value in attrs.items():
-            if attr in m2m_fields:
-                m2m_attrs[attr] = attr_value
-            elif attr in updating_fields:
-                setattr(self, attr, attr_value)
+        m2m_attrs = {attr: value for attr, value in attrs.items() if attr in m2m_fields}
 
         if not _save and m2m_attrs:
             raise ValueError('Cannot update m2m fields without saving the instance!')
 
-        update_fields = updating_fields if not _save_all_fields and updating_fields else None
+        for attr, attr_value in attrs.items():
+            if attr in updating_fields:
+                setattr(self, attr, attr_value)
+
+        update_fields = None if _save_all_fields else updating_fields
         return m2m_attrs, update_fields
 
     def update(
@@ -121,15 +120,36 @@ class UpdatableModel(Model):
         ``_save=True``.
 
         The save runs inside ``transaction.atomic()``.
+
+        ``_disable_signals=True`` suppresses exactly ``pre_save``/``post_save`` for this
+        call -- which, on a tenanted (``GuitarModel``) instance, disables the tenant write
+        guard that fills in and validates the tenant field. The database-level RLS policy
+        still applies if installed, but nothing on the Python side does; each such call is
+        reported once per model class via ``guitars.tenancy.reporting``.
         """
         m2m_attrs, update_fields = self._prepare_update(
             _save, _save_all_fields, _raise_for_excessive, attrs
         )
 
         if _save:
-            from guitars.signals import DisableSignals
+            from django.db.models.signals import post_save, pre_save
 
-            signals_context = DisableSignals() if _disable_signals else nullcontext()
+            from guitars.signals import DisableSignals
+            from guitars.tenancy import tenant_spec
+            from guitars.tenancy.reporting import report_once
+
+            signals_context = (
+                DisableSignals(signals=[pre_save, post_save])
+                if _disable_signals
+                else nullcontext()
+            )
+            if _disable_signals and tenant_spec(type(self)):
+                report_once(
+                    (type(self), 'update_disable_signals_bypasses_tenant_guard'),
+                    f'{type(self).__name__}.update(_disable_signals=True) suppresses '
+                    'pre_save, which disables the tenant write guard for this save.',
+                    model=type(self).__name__,
+                )
             with signals_context:
                 with transaction.atomic():
                     self.save(update_fields=update_fields)

@@ -101,6 +101,10 @@ add-bounds = "major"
 # *************************** TY Configuration *************************** #
 
 [tool.ty.src]
+# tests/ is deliberately out of scope: the suite leans on Django/pytest dynamic
+# patterns (monkeypatching internals, constructing unsaved/invalid model
+# instances to probe a guard) that a static checker can't distinguish from real
+# type errors, and the shipped package is `src/` alone -- see CLAUDE.md.
 exclude = ["tests"]
 
 [tool.ty.environment]

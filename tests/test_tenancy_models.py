@@ -19,8 +19,7 @@ import pytest
 from django.db import connection
 from django.db.utils import IntegrityError
 
-from guitars.tenancy import TenantScopeError, tenancy_bypassed, tenant
-from guitars.tenancy import reporting
+from guitars.tenancy import TenantScopeError, reporting, tenancy_bypassed, tenant
 from tests.testapp.models import Band, Booking, Label, Release, Review, StadiumTour, Tour, Track
 
 
@@ -221,6 +220,10 @@ class TestWrites:
                 lambda: Release._all_objects.all()._hard_delete_own_table(),
                 id='_hard_delete_own_table',
             ),
+            pytest.param(
+                lambda: Release.objects.all()._raw_delete(using='default'), id='_raw_delete'
+            ),
+            pytest.param(lambda: Release.objects.explain(), id='explain'),
         ],
     )
     def test_set_wide_writes_are_denied_without_a_scope(self, tenants, call):

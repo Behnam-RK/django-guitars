@@ -321,7 +321,7 @@ class SoftDeletableModel(Model):
         while root._meta.parents:
             root = next(iter(root._meta.parents))
 
-        with transaction.atomic():
+        with transaction.atomic(using=using):
             # Phase 1 — soft-delete first (idempotent; PG rules cascade to related objects).
             self.delete()
 

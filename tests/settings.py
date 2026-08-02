@@ -29,7 +29,11 @@ DATABASES['pooled'] = {  # noqa: F405
     'TEST': {'MIRROR': 'default'},
 }
 
-INSTALLED_APPS = [*INSTALLED_APPS, 'tests.testapp']  # noqa: F405
+# 'tests.legacy_migrations' is installed (so pytest-django migrates it like any other app,
+# giving tests/test_legacy_migrations.py an already-migrated "legacy" database for free at
+# session setup) but deliberately left out of LOCAL_APPS -- makeguitarmigrations/
+# audittenancy ignore it by default, and that test scopes to it explicitly by app label.
+INSTALLED_APPS = [*INSTALLED_APPS, 'tests.testapp', 'tests.legacy_migrations']  # noqa: F405
 
 LOCAL_APPS = ['tests.testapp']
 TRIGGER_FUNCTION_APP = 'tests.testapp'

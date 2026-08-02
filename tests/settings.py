@@ -33,11 +33,14 @@ DATABASES['pooled'] = {  # noqa: F405
 # migrates them like any other app, giving their tests an already-migrated database for
 # free at session setup) but deliberately left out of LOCAL_APPS -- makeguitarmigrations/
 # audittenancy ignore them by default, and each test scopes to its app explicitly.
+# 'tests.makemigrations_override' has no migrations checked in at all -- its own test
+# generates and removes them, so there is nothing for session setup to apply.
 INSTALLED_APPS = [  # noqa: F405
     *INSTALLED_APPS,  # noqa: F405
     'tests.testapp',
     'tests.legacy_migrations',
     'tests.mti_incremental',
+    'tests.makemigrations_override',
 ]
 
 LOCAL_APPS = ['tests.testapp']

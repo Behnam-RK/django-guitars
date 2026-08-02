@@ -89,7 +89,7 @@ jobs:
         run: docker compose up -d --wait
 
       - name: Run tests
-        run: uv run pytest --cov=guitars --cov-report=term-missing
+        run: uv run pytest --cov=guitars --cov-report=term-missing --cov-report=html
 
       - name: Check migrations are up to date
         env:
@@ -102,3 +102,20 @@ jobs:
         run: |
           uv run python manage.py migrate
           uv run python manage.py audittenancy --require-force --require-match
+
+      - name: Upload coverage report
+        # One canonical cell, not all 14: fail_under is a single number, not
+        # per-cell, so one unambiguous artifact to inspect in the PR/Actions UI
+        # beats fourteen near-identical ones. Floor versions, so the artifact
+        # reflects the widest-compatibility cell rather than the newest one.
+        # The HTML report (not the raw .coverage data file) so a reviewer can open
+        # it and see which lines/branches a drop actually came from, not just the
+        # percentage.
+        if: |
+          matrix.python-version == '3.10' &&
+          matrix.django-version == '5.0' &&
+          matrix.postgres-version == '14'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: htmlcov/

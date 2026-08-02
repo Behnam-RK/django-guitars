@@ -14,6 +14,18 @@ name: CI
 # 'core.settings'), and core.settings has LOCAL_APPS = [] -- so without it
 # `makemigrations --check` reports "No changes detected" and `audittenancy` reports
 # "0 table(s) expected ... passed", both green having examined nothing.
+#
+# The `test` job runs a matrix, not a single cell: pyproject.toml's classifiers claim
+# Python 3.10-3.14 x Django 5.0-6.0, and until this matrix existed 19 of those 20
+# advertised cells were never verified by anything. Python x Django is a full cross
+# product minus the one combination pip itself refuses (Django 6.0 requires Python
+# >=3.12 -- confirmed by trying to install it under 3.10, not assumed); Postgres major
+# is a third axis so the kit's own rules/triggers/RLS are proven across more than one
+# server version too. `uv sync --locked` still seeds the job from the committed
+# lockfile (every other dependency), then `uv pip install "Django==X.*"` overrides
+# just Django for that cell -- deliberately not `uv run --with`, which only overrides
+# the one invocation it wraps, and every later step in this job (migrations, audit)
+# needs to see the same overridden Django the tests just ran against.
 on:
   push:
     branches: [main]
@@ -42,18 +54,38 @@ jobs:
         run: uv run pre-commit run --all-files
 
   test:
-    name: Test suite
+    name: Test (py${{ matrix.python-version }}, dj${{ matrix.django-version }}, pg${{ matrix.postgres-version }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12", "3.14"]
+        django-version: ["5.0", "5.2", "6.0"]
+        postgres-version: ["14", "18"]
+        exclude:
+          # Django 6.0 requires Python >=3.12 -- verified by trying to install it
+          # under 3.10 (uv reports the requirement as unsatisfiable), not assumed.
+          # Every other cell in the cross product installs successfully; whether it
+          # also *runs* correctly is exactly what the rest of this matrix finds out.
+          - python-version: "3.10"
+            django-version: "6.0"
     steps:
       - uses: actions/checkout@v7
 
       - name: Install uv
         uses: astral-sh/setup-uv@v9.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
 
       - name: Sync dependencies
         run: uv sync --locked
 
+      - name: Pin this cell's Django version
+        run: uv pip install "Django==${{ matrix.django-version }}.*"
+
       - name: Start Postgres
+        env:
+          POSTGRES_VERSION: ${{ matrix.postgres-version }}
         run: docker compose up -d --wait
 
       - name: Run tests

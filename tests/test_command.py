@@ -636,6 +636,31 @@ def test_handle_check_only_reports_missing_migrations_and_mti_warnings(monkeypat
     assert 'some skipped MTI cascade rule' in command.stderr.getvalue()
 
 
+def test_check_reports_both_function_and_app_level_gaps_in_one_run():
+    """Function-migration staleness used to raise immediately, before the per-app loop ever
+    ran -- so a project with both problems only ever heard about whichever one this method
+    reached first. Both must be visible in the same ``--check`` run."""
+    command = Command()
+    command.stdout = StringIO()
+    command.stderr = StringIO()
+    command.existing.triggers.clear()
+    command.existing.soft_deletes.clear()
+    command.existing.soft_delete_related.clear()
+    # Overridden after touching .existing above, which is what populates these from the
+    # real scan -- setting them first would just be clobbered by that scan.
+    command.trigger_function_dependency = None
+    command.trigger_function_sql = None
+
+    with pytest.raises(CommandError, match='Run `manage.py makeguitarmigrations`'):
+        command.handle('testapp', check_only=True)
+
+    stderr = command.stderr.getvalue()
+    assert 'Run `manage.py makeguitarmigrations` to create the trigger function migration' in (
+        stderr
+    )
+    assert 'Missing or outdated enforcement migrations' in stderr
+
+
 @override_settings(LOCAL_APPS=['fake.banda', 'fake.albumb'])
 def test_handle_writes_scoped_cascade_gap_warning_to_stdout(monkeypatch):
     command = Command()

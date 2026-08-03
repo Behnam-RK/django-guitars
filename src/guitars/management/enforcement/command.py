@@ -298,7 +298,11 @@ class Command(OperationsMixin, BaseCommand):
 
         stale = recorded is not None
         if check_only:
-            raise CommandError(self.style.ERROR(stale_message if stale else missing_message))
+            # Bare message, not self.style.ERROR(...): Django's own top-level handler
+            # applies style.ERROR() again when it prints an uncaught CommandError, and
+            # double-wrapping garbled the ANSI codes. Compare _report_missing's raise below,
+            # which never wrapped its message and was always correct.
+            raise CommandError(stale_message if stale else missing_message)
 
         if stale or adopt:
             current_source, _ = _operation(header, create, drop, emit=replace)
@@ -433,14 +437,31 @@ class Command(OperationsMixin, BaseCommand):
         needs_trigger_function = any(owns_column(m, '_updated_at') for m in in_scope_models)
         needs_parent_function = any(is_mti_child(m, '_updated_at') for m in in_scope_models)
 
-        changes_made = needs_trigger_function and self._ensure_trigger_function_migration(
-            check_only=check_only, adopt=adopt
-        )
+        # Under --check, a stale/missing function migration raises immediately from inside
+        # _ensure_function_migration -- caught here rather than left to propagate, so it can
+        # join the per-app report below instead of hiding it: function-migration staleness
+        # used to fail fast while app-operation staleness aggregated into one report, so a
+        # project with both problems only ever heard about whichever this method reached
+        # first.
+        function_check_messages: list[str] = []
+        changes_made = False
+        if needs_trigger_function:
+            try:
+                changes_made = self._ensure_trigger_function_migration(
+                    check_only=check_only, adopt=adopt
+                )
+            except CommandError as err:
+                function_check_messages.append(str(err))
         if needs_parent_function:
-            changes_made = (
-                self._ensure_parent_trigger_function_migration(check_only=check_only, adopt=adopt)
-                or changes_made
-            )
+            try:
+                changes_made = (
+                    self._ensure_parent_trigger_function_migration(
+                        check_only=check_only, adopt=adopt
+                    )
+                    or changes_made
+                )
+            except CommandError as err:
+                function_check_messages.append(str(err))
         # Step 2: per-app trigger / soft-delete migrations, scoped to `requested`.
         # Intentionally skips cross-app CASCADE rules whose parent app isn't in
         # scope (see `_scoped_cascade_gap_notes`) -- surfaced below, not silent.
@@ -466,19 +487,29 @@ class Command(OperationsMixin, BaseCommand):
         for note in self._tenancy_notes:
             self.stdout.write(self.style.WARNING(note))
 
-        if check_missing:
-            self._report_missing(check_missing)
+        if check_missing or function_check_messages:
+            self._report_missing(check_missing, function_check_messages)
 
         if not changes_made and not check_only:
             self.stdout.write('No changes detected')
 
-    def _report_missing(self, check_missing: list[tuple[str, list[str]]]) -> None:
+    def _report_missing(
+        self,
+        check_missing: list[tuple[str, list[str]]],
+        function_check_messages: list[str] | None = None,
+    ) -> None:
         """Print what ``--check`` found and exit non-zero.
 
         "or outdated" is not padding: an operation here may be a *replacement* for a policy
         whose shape no longer matches the models, which is a migration the app needs despite
         already having one for that table.
+
+        *function_check_messages* prints first: a missing/stale singleton function migration
+        is a hard prerequisite every per-app migration depends on, so it reads as the more
+        fundamental problem even though both are reported together.
         """
+        for message in function_check_messages or []:
+            self.stderr.write(self.style.ERROR(message))
         for app_label, operations in check_missing:
             self.stderr.write(
                 self.style.ERROR(f"Missing or outdated enforcement migrations for '{app_label}':")

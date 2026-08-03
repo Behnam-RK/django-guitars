@@ -297,6 +297,7 @@ def test_tenant_scope_is_correct_under_djangos_psycopg_pool(tenants):
 
 
 @requires_pgbouncer
+@pytest.mark.xdist_group(name='pgbouncer')
 class TestPgbouncerTransactionPooling:
     """``compose.yaml``'s opt-in ``pooling`` profile runs pgbouncer with ``POOL_MODE:
     transaction`` and ``DEFAULT_POOL_SIZE: 1`` -- one PostgreSQL backend total, shared by
@@ -310,6 +311,13 @@ class TestPgbouncerTransactionPooling:
     GUC values is that PostgreSQL, not guitars, is what silently reverts a ``SET``. This
     demonstrates the PostgreSQL-and-pooler-level mechanism that guards against; there is
     no Python-level cache to fool because nothing here asks Python to cache anything.
+
+    ``xdist_group`` pins both tests below to the same worker process: under
+    ``DEFAULT_POOL_SIZE: 1`` every client anywhere shares the one PostgreSQL backend behind
+    pgbouncer, so two *different* xdist workers each opening their own client at the same
+    moment could interleave with each other and read back the wrong leaked value -- these
+    two tests would only be racing against each other, not against the rest of the suite,
+    since nothing else in the suite talks to port 6432 at all.
     """
 
     @staticmethod

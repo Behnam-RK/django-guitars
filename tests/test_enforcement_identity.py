@@ -218,7 +218,7 @@ def test_sql_that_cannot_be_triple_quoted_falls_back_to_repr():
 # ---------------------------------------------------------------------------
 
 
-def _emit(command, recorded, key='shop_order'):
+def _emit(command, recorded, key='shop_order', *, is_adopt=False):
     operations: list[str] = []
     command._append_if_stale(
         operations,
@@ -227,6 +227,7 @@ def _emit(command, recorded, key='shop_order'):
         '# Updated at Trigger on "shop_order" table!',
         'CREATE TRIGGER updated_at_trigger ...',
         'DROP TRIGGER updated_at_trigger ON shop_order',
+        is_adopt=is_adopt,
         replace='DROP TRIGGER updated_at_trigger ON shop_order; CREATE TRIGGER ...',
         adopt='DROP TRIGGER IF EXISTS updated_at_trigger ON shop_order; CREATE TRIGGER ...',
     )
@@ -274,9 +275,8 @@ def test_a_stale_record_emits_the_replace_form_without_if_exists(recorded):
 def test_adopt_emits_the_guarded_form_even_with_nothing_recorded():
     """The one path where the uncertainty is real -- and was opted into by flag."""
     command = Command()
-    command._adopt = True
 
-    (operation,) = _emit(command, {})
+    (operation,) = _emit(command, {}, is_adopt=True)
 
     assert 'DROP TRIGGER IF EXISTS updated_at_trigger ON shop_order' in operation
 
@@ -284,14 +284,13 @@ def test_adopt_emits_the_guarded_form_even_with_nothing_recorded():
 def test_adopt_re_emits_even_a_record_that_is_already_current():
     """Otherwise the flag does nothing on the tables an adopter most needs it for."""
     command = Command()
-    command._adopt = True
     _, digest = gen._operation(
         '# Updated at Trigger on "shop_order" table!',
         'CREATE TRIGGER updated_at_trigger ...',
         'DROP TRIGGER updated_at_trigger ON shop_order',
     )
 
-    assert len(_emit(command, {'shop_order': digest})) == 1
+    assert len(_emit(command, {'shop_order': digest}, is_adopt=True)) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -310,9 +309,10 @@ def test_adopt_emits_the_replacement_policy_form():
     """
     command = Command()
     command.stdout = StringIO()
-    command._adopt = True
 
-    operations = command._tenant_policy_operations(django_apps.get_app_config('testapp'))
+    operations = command._tenant_policy_operations(
+        django_apps.get_app_config('testapp'), adopt=True
+    )
 
     assert operations
     for operation in operations:
@@ -396,9 +396,8 @@ def test_adopt_emits_or_replace_for_a_function_with_nothing_recorded(monkeypatch
     command, _, filename = _command_with_scaffold(monkeypatch, tmp_path)
     command.trigger_function_dependency = None
     command.trigger_function_sql = None
-    command._adopt = True
 
-    assert command._ensure_trigger_function_migration() is True
+    assert command._ensure_trigger_function_migration(adopt=True) is True
 
     content = (tmp_path / 'migrations' / filename).read_text()
     assert 'CREATE OR REPLACE FUNCTION set_updated_at()' in content

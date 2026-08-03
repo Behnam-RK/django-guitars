@@ -168,6 +168,18 @@ def test_cascade_operation_warns_when_related_model_is_mti_child_without_own_del
     assert 'multi-table-inheritance ancestor' in warning
 
 
+def test_constructing_the_command_does_not_touch_the_filesystem(monkeypatch):
+    """Django constructs a Command() for --help and the command registry -- neither needs
+    a filesystem scan of every local app's migrations, so __init__ must not trigger one."""
+
+    def _fail(*args, **kwargs):
+        raise AssertionError('Command() must not scan migration files eagerly')
+
+    monkeypatch.setattr(_generator, 'iter_migration_files', _fail)
+
+    Command()  # must not raise
+
+
 def test_migration_with_digest_returns_false_for_unknown_digest():
     app = apps.get_app_config('testapp')
 
@@ -420,7 +432,7 @@ def test_handle_skips_an_in_scope_app_with_no_operations(monkeypatch):
     command.existing.soft_deletes.clear()
     command.existing.soft_delete_related.clear()
     command.trigger_function_dependency = ('testapp', '0001_pretend')
-    monkeypatch.setattr(command, '_build_operations', lambda app: [])
+    monkeypatch.setattr(command, '_build_operations', lambda app, **kwargs: [])
     monkeypatch.setattr(
         _generator,
         'create_empty_migration_file',

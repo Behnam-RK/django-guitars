@@ -487,28 +487,42 @@ class Command(BaseCommand):
         self.reverse_relations_mapping: defaultdict[type[models.Model], set] = defaultdict(set)
         self._setup_models_and_reverse_relations()
 
-        # (app_label, migration_stem) tuples or None, pointing at the singleton function migrations.
+        # (app_label, migration_stem) tuples or None, pointing at the singleton function
+        # migrations. Populated from self.existing on first access, not here -- see that
+        # property -- and mutable alongside it for the same reason: a singleton function
+        # migration is only "already done" when it both exists and defines the SQL the kit
+        # emits today.
         self.trigger_function_dependency: tuple[str, str] | None = None
         self.parent_trigger_function_dependency: tuple[str, str] | None = None
+        self.trigger_function_sql: str | None = None
+        self.parent_trigger_function_sql: str | None = None
 
         # Cross-app / MTI cascade rules skipped this run, surfaced as warnings (not silent).
         self._mti_cascade_warnings: list[str] = []
         # Tables tenancy discovery could not cover, with the reason. Also surfaced.
         self._tenancy_notes: list[str] = []
 
-        # Set from --adopt in handle(). Read by _append_if_stale and _tenant_operations, which
-        # run per-app during handle() and so always see the resolved value; the default here
-        # keeps the command importable and directly instantiable in tests.
-        self._adopt: bool = False
+        self._existing: ExistingOperations | None = None
 
-        self.existing = self._scan_existing_operations()
-        self.trigger_function_dependency = self.existing.trigger_function_dependency
-        self.parent_trigger_function_dependency = self.existing.parent_trigger_function_dependency
-        # Paired with the two dependencies above, and mutable alongside them for the same
-        # reason: a singleton function migration is only "already done" when it both exists
-        # and defines the SQL the kit emits today.
-        self.trigger_function_sql = self.existing.trigger_function_sql
-        self.parent_trigger_function_sql = self.existing.parent_trigger_function_sql
+    @property
+    def existing(self) -> ExistingOperations:
+        """Every enforcement operation already on disk, scanned once and cached.
+
+        Not scanned eagerly in ``__init__``: Django constructs a ``Command()`` for
+        ``--help`` and the command registry, and neither needs a filesystem scan of every
+        local app's migrations. The first real access -- by ``handle()``, or directly by a
+        test exercising internals below the CLI entry point -- triggers the scan and copies
+        the singleton-function state onto ``self`` exactly once.
+        """
+        if self._existing is None:
+            self._existing = self._scan_existing_operations()
+            self.trigger_function_dependency = self._existing.trigger_function_dependency
+            self.parent_trigger_function_dependency = (
+                self._existing.parent_trigger_function_dependency
+            )
+            self.trigger_function_sql = self._existing.trigger_function_sql
+            self.parent_trigger_function_sql = self._existing.parent_trigger_function_sql
+        return self._existing
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -754,6 +768,7 @@ class Command(BaseCommand):
         missing_message: str,
         stale_message: str,
         check_only: bool,
+        adopt: bool = False,
         dependencies: list[tuple[str, str]] | None = None,
     ) -> tuple[tuple[str, str], str] | None:
         """Ensure the host app has a current migration for one singleton trigger function.
@@ -777,14 +792,14 @@ class Command(BaseCommand):
         one form that is correct whether or not the function exists.
         """
         current_source, current_digest = _operation(header, create, drop)
-        if recorded is not None and (recorded_digest == current_digest and not self._adopt):
+        if recorded is not None and (recorded_digest == current_digest and not adopt):
             return None
 
         stale = recorded is not None
         if check_only:
             raise CommandError(self.style.ERROR(stale_message if stale else missing_message))
 
-        if stale or self._adopt:
+        if stale or adopt:
             current_source, _ = _operation(header, create, drop, emit=replace)
 
         host_app = self._get_trigger_function_host_app()
@@ -803,7 +818,9 @@ class Command(BaseCommand):
         self.stdout.write(f'  migrations/{migration_file}')
         return (host_app.label, Path(migration_file).stem), current_digest
 
-    def _ensure_trigger_function_migration(self, *, check_only: bool = False) -> bool:
+    def _ensure_trigger_function_migration(
+        self, *, check_only: bool = False, adopt: bool = False
+    ) -> bool:
         """
         Ensure a current standalone migration for the trigger function exists in the host app.
         Sets ``self.trigger_function_dependency`` when done.
@@ -827,13 +844,16 @@ class Command(BaseCommand):
                 'regenerate it.\n'
             ),
             check_only=check_only,
+            adopt=adopt,
         )
         if written is None:
             return False
         self.trigger_function_dependency, self.trigger_function_sql = written
         return True
 
-    def _ensure_parent_trigger_function_migration(self, *, check_only: bool = False) -> bool:
+    def _ensure_parent_trigger_function_migration(
+        self, *, check_only: bool = False, adopt: bool = False
+    ) -> bool:
         """
         Ensure a current standalone migration for the MTI parent updated-at function exists.
         Sets ``self.parent_trigger_function_dependency`` when done. Kept separate from the
@@ -859,6 +879,7 @@ class Command(BaseCommand):
                 '`manage.py makeguitarmigrations` to regenerate it.\n'
             ),
             check_only=check_only,
+            adopt=adopt,
             dependencies=[self.trigger_function_dependency]
             if self.trigger_function_dependency
             else None,
@@ -976,7 +997,7 @@ class Command(BaseCommand):
             operations.append(force_source)
         return operations
 
-    def _tenant_policy_operations(self, app: AppConfig) -> list[str]:
+    def _tenant_policy_operations(self, app: AppConfig, *, adopt: bool = False) -> list[str]:
         """Tenant-policy create/replace operations *app* is missing or has outdated."""
         if not self._tenant_policies_enabled():
             return []
@@ -998,7 +1019,7 @@ class Command(BaseCommand):
                 table, table_coverage, replacing=False
             )
 
-            if self._adopt:
+            if adopt:
                 # The premise of --adopt is a policy that exists in the database but was
                 # never recorded here, and PostgreSQL has no CREATE POLICY IF NOT EXISTS --
                 # so the CREATE form would fail migrate with "policy tenant_scope already
@@ -1029,15 +1050,18 @@ class Command(BaseCommand):
         forward: str | list[str],
         reverse: str | list[str],
         *,
+        is_adopt: bool = False,
         replace: str | list[str] | None = None,
         adopt: str | list[str] | None = None,
     ) -> None:
         """Append one operation to *operations* unless the recorded one is already current.
 
-        Which of the three forms is written is decided by what the migration history knows,
-        and the distinction is deliberate rather than a matter of taste -- ``IF EXISTS`` and
-        ``OR REPLACE`` are claims about knowledge, and using them where the answer is known
-        turns "your database has diverged from its history" into silence:
+        *is_adopt* is the ``--adopt`` flag; *adopt* (confusingly, but this is the name the
+        SQL forms below already use) is the SQL text to emit under it. Which of the three
+        forms is written is decided by what the migration history knows, and the distinction
+        is deliberate rather than a matter of taste -- ``IF EXISTS`` and ``OR REPLACE`` are
+        claims about knowledge, and using them where the answer is known turns "your database
+        has diverged from its history" into silence:
 
         * **Nothing recorded** -> the plain ``forward`` form. A collision then fails
           ``migrate`` loudly, which for an unqualified public-schema name like
@@ -1054,7 +1078,7 @@ class Command(BaseCommand):
         anything created ``OR REPLACE`` in the first place.
         """
         source, digest = _operation(header, forward, reverse)
-        if self._adopt:
+        if is_adopt:
             source, _ = _operation(header, forward, reverse, emit=adopt or replace or forward)
         elif key not in recorded:
             pass  # `source` already holds the create form.
@@ -1081,7 +1105,7 @@ class Command(BaseCommand):
             'parent_pk': owner._meta.pk.column,
         }
 
-    def _build_operations(self, app: AppConfig) -> list[str]:
+    def _build_operations(self, app: AppConfig, *, adopt: bool = False) -> list[str]:
         """Return a list of SQL operation snippets needed for *app*'s models."""
         operations: list[str] = []
         deferred: list[str] = []
@@ -1166,6 +1190,7 @@ class Command(BaseCommand):
                     row.header,
                     row.forward,
                     row.reverse,
+                    is_adopt=adopt,
                     replace=row.replace,
                     adopt=row.adopt,
                 )
@@ -1173,11 +1198,11 @@ class Command(BaseCommand):
             # --- cascade rules for CASCADE FKs pointing at this model (deferred so they
             #     always follow the owner's own soft-delete rule) ---
             if has_column(model, '_deleted_at'):
-                deferred.extend(self._cascade_operations(model))
+                deferred.extend(self._cascade_operations(model, adopt=adopt))
 
         # Tenant policies last: they are independent of the triggers and rules above (a
         # policy references neither), so they sort to the end where they read as a group.
-        return operations + deferred + self._tenant_policy_operations(app)
+        return operations + deferred + self._tenant_policy_operations(app, adopt=adopt)
 
     @staticmethod
     def _is_cascade_candidate(related_model, fk_field, on_delete) -> bool:
@@ -1254,7 +1279,7 @@ class Command(BaseCommand):
             candidates.append((related_model, fk_field, is_primary))
         return candidates
 
-    def _cascade_operations(self, model: type[models.Model]) -> list[str]:
+    def _cascade_operations(self, model: type[models.Model], *, adopt: bool = False) -> list[str]:
         """Cascade soft-delete rules for ``on_delete=CASCADE`` FKs pointing at *model*.
 
         The rule is an ``ON UPDATE`` rule that must live on the table whose ``_deleted_at``
@@ -1299,7 +1324,13 @@ class Command(BaseCommand):
                     table=owner_table, related_table=related_table, foreign_key=fk_field.column
                 )
             self._append_if_stale(
-                ops, self.existing.soft_delete_related, key, header, forward, reverse
+                ops,
+                self.existing.soft_delete_related,
+                key,
+                header,
+                forward,
+                reverse,
+                is_adopt=adopt,
             )
         return ops
 
@@ -1379,13 +1410,13 @@ class Command(BaseCommand):
     def handle(self, *app_labels, **options):
         check_only: bool = options['check_only']
         force_rls: bool = options.get('force_rls', False)
-        self._adopt = options.get('adopt', False)
+        adopt: bool = options.get('adopt', False)
         # Positional app labels scope generation; empty => all local apps.
         requested: set[str] = set(app_labels)
 
         _generator.validate_app_labels(requested)
 
-        if force_rls and self._adopt:
+        if force_rls and adopt:
             raise CommandError(
                 '--adopt and --force-rls cannot be combined. --force-rls is the second stage '
                 'of a retrofit and acts only on tables whose policies this command already '
@@ -1395,6 +1426,11 @@ class Command(BaseCommand):
 
         if force_rls:
             return self._handle_force_rls_stage(requested, check_only=check_only)
+
+        # Force self.existing's lazy scan now: Step 1 below reads trigger_function_dependency/
+        # _sql directly off self, not through self.existing, since it mutates them after
+        # writing a migration -- so they must already carry the scanned values by then.
+        _ = self.existing
 
         # Step 1: Ensure the singleton function migration(s) exist, so all subsequent app
         # migrations can safely depend on them. Scoped to the requested apps, but still hosted
@@ -1411,11 +1447,11 @@ class Command(BaseCommand):
         needs_parent_function = any(is_mti_child(m, '_updated_at') for m in in_scope_models)
 
         changes_made = needs_trigger_function and self._ensure_trigger_function_migration(
-            check_only=check_only
+            check_only=check_only, adopt=adopt
         )
         if needs_parent_function:
             changes_made = (
-                self._ensure_parent_trigger_function_migration(check_only=check_only)
+                self._ensure_parent_trigger_function_migration(check_only=check_only, adopt=adopt)
                 or changes_made
             )
         # Step 2: per-app trigger / soft-delete migrations, scoped to `requested`.
@@ -1424,7 +1460,7 @@ class Command(BaseCommand):
         stage_changed, check_missing = self._generate_stage(
             requested,
             migration_name='auto_enforcement',
-            build_ops=self._build_operations,
+            build_ops=lambda app: self._build_operations(app, adopt=adopt),
             check_only=check_only,
             dependencies_for=self._function_dependencies_for,
         )

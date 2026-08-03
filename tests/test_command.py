@@ -19,8 +19,11 @@ from django.test import override_settings
 
 from guitars import sql
 from guitars.management import _generator
-from guitars.management.commands import makeguitarmigrations as makeguitarmigrations_module
-from guitars.management.commands.makeguitarmigrations import Command, unforced_policy_tables
+from guitars.management.enforcement import command as command_module
+from guitars.management.enforcement import headers as headers_module
+from guitars.management.enforcement import identity as identity_module
+from guitars.management.enforcement import operations as operations_module
+from guitars.management.enforcement.command import Command
 from guitars.tenancy.discovery import app_coverage
 from tests.testapp.models import Album, Band, Ensemble, Orchestra
 
@@ -36,10 +39,10 @@ def _pretend_function_migrations_are_current(command):
     """
     command.trigger_function_dependency = ('albumb', '0001_pretend')
     command.parent_trigger_function_dependency = ('albumb', '0001_pretend_parent')
-    command.trigger_function_sql = makeguitarmigrations_module._sql_digest(
+    command.trigger_function_sql = identity_module._sql_digest(
         sql.CREATE_UPDATED_AT_TRIGGER_FUNCTION, sql.DROP_UPDATED_AT_TRIGGER_FUNCTION
     )
-    command.parent_trigger_function_sql = makeguitarmigrations_module._sql_digest(
+    command.parent_trigger_function_sql = identity_module._sql_digest(
         sql.CREATE_PARENT_UPDATED_AT_TRIGGER_FUNCTION,
         sql.DROP_PARENT_UPDATED_AT_TRIGGER_FUNCTION,
     )
@@ -575,7 +578,7 @@ def test_scoped_cascade_gap_notes(
         if setup is not None:
             setup(command)
         monkeypatch.setattr(
-            makeguitarmigrations_module.django_apps, 'get_app_configs', app_configs
+            command_module.django_apps, 'get_app_configs', app_configs
         )
 
         notes = command._scoped_cascade_gap_notes(requested)
@@ -647,12 +650,12 @@ def test_handle_writes_scoped_cascade_gap_warning_to_stdout(monkeypatch):
     fake_album_app = _fake_app_config('fake.albumb', 'albumb', [Album])
     fake_apps_by_label = {'banda': fake_band_app, 'albumb': fake_album_app}
     monkeypatch.setattr(
-        makeguitarmigrations_module.django_apps,
+        command_module.django_apps,
         'get_app_configs',
         lambda: [fake_band_app, fake_album_app],
     )
     monkeypatch.setattr(
-        makeguitarmigrations_module.django_apps,
+        command_module.django_apps,
         'get_app_config',
         lambda label: fake_apps_by_label[label],
     )
@@ -961,7 +964,7 @@ def test_check_fails_when_a_policy_shape_changed(monkeypatch):
         columns={**real.tables['testapp_release'].columns, 'region': 'region_id'}
     )
     monkeypatch.setattr(
-        makeguitarmigrations_module,
+        operations_module,
         'app_coverage',
         lambda _app: type(real)(
             tables={**real.tables, 'testapp_release': widened}, notes=real.notes
@@ -1026,12 +1029,12 @@ def _unforced_policy_tables(content: str) -> set[str]:
     """Find the ``_RE_TENANT_POLICY`` matches *content* needs, then defer to the real thing.
 
     ``unforced_policy_tables`` takes them as an argument rather than finding them itself --
-    its caller (``Command._scan_existing_operations``) already scans for the same pattern
+    its caller (``scanning.scan_existing_operations``) already scans for the same pattern
     and passes its own matches in, so a second scan here would be exactly the double work
     that changed.
     """
-    matches = list(makeguitarmigrations_module._RE_TENANT_POLICY.finditer(content))
-    return unforced_policy_tables(content, matches)
+    matches = list(headers_module._RE_TENANT_POLICY.finditer(content))
+    return identity_module.unforced_policy_tables(content, matches)
 
 
 _TWO_POLICY_OPERATIONS = """

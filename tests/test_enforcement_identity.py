@@ -28,8 +28,9 @@ from django.apps import apps as django_apps
 from django.core.management import CommandError, call_command
 
 from guitars import sql
-from guitars.management.commands import makeguitarmigrations as gen
-from guitars.management.commands.makeguitarmigrations import Command
+from guitars.management.enforcement import headers as headers_module
+from guitars.management.enforcement import identity as identity_module
+from guitars.management.enforcement.command import Command
 from guitars.tenancy.discovery import app_coverage
 
 from .test_command import _command_with_scaffold, _unforced_policy_tables
@@ -45,41 +46,41 @@ from .test_command import _command_with_scaffold, _unforced_policy_tables
 #: the hand-written ones, where nothing else stops emitter and scanner drifting apart -- a
 #: drift invisible until a consuming project's next run silently duplicates an operation.
 HEADER_SCANNERS = [
-    (gen.HEADER_TRIGGER_FUNCTION, gen._RE_TRIGGER_FUNCTION, {}),
-    (gen.HEADER_PARENT_TRIGGER_FUNCTION, gen._RE_PARENT_TRIGGER_FUNCTION, {}),
-    (gen.HEADER_UPDATED_AT, gen._RE_UPDATED_AT, {'table': 'shop_order'}),
-    (gen.HEADER_SOFT_DELETE, gen._RE_SOFT_DELETE, {'table': 'shop_order'}),
+    (headers_module.HEADER_TRIGGER_FUNCTION, headers_module._RE_TRIGGER_FUNCTION, {}),
+    (headers_module.HEADER_PARENT_TRIGGER_FUNCTION, headers_module._RE_PARENT_TRIGGER_FUNCTION, {}),
+    (headers_module.HEADER_UPDATED_AT, headers_module._RE_UPDATED_AT, {'table': 'shop_order'}),
+    (headers_module.HEADER_SOFT_DELETE, headers_module._RE_SOFT_DELETE, {'table': 'shop_order'}),
     (
-        gen.HEADER_SOFT_DELETE_RELATED,
-        gen._RE_SOFT_DELETE_RELATED,
+        headers_module.HEADER_SOFT_DELETE_RELATED,
+        headers_module._RE_SOFT_DELETE_RELATED,
         {'related_table': 'shop_line', 'table': 'shop_order'},
     ),
     (
-        gen.HEADER_SOFT_DELETE_RELATED_VIA,
-        gen._RE_SOFT_DELETE_RELATED,
+        headers_module.HEADER_SOFT_DELETE_RELATED_VIA,
+        headers_module._RE_SOFT_DELETE_RELATED,
         {'related_table': 'shop_line', 'table': 'shop_order', 'foreign_key': 'bonus_order_id'},
     ),
     (
-        gen.HEADER_MTI_UPDATED_AT,
-        gen._RE_MTI_UPDATED_AT,
+        headers_module.HEADER_MTI_UPDATED_AT,
+        headers_module._RE_MTI_UPDATED_AT,
         {'child_table': 'shop_giftorder', 'parent_table': 'shop_order'},
     ),
     (
-        gen.HEADER_MTI_SOFT_DELETE,
-        gen._RE_MTI_SOFT_DELETE,
+        headers_module.HEADER_MTI_SOFT_DELETE,
+        headers_module._RE_MTI_SOFT_DELETE,
         {'child_table': 'shop_giftorder', 'parent_table': 'shop_order'},
     ),
     (
-        gen.HEADER_TENANT_POLICY,
-        gen._RE_TENANT_POLICY,
+        headers_module.HEADER_TENANT_POLICY,
+        headers_module._RE_TENANT_POLICY,
         {'table': 'shop_order', 'identity': '57ff74989db7'},
     ),
     (
-        gen.HEADER_TENANT_POLICY_REPLACED,
-        gen._RE_TENANT_POLICY,
+        headers_module.HEADER_TENANT_POLICY_REPLACED,
+        headers_module._RE_TENANT_POLICY,
         {'table': 'shop_order', 'identity': '0b7c94cc2edc'},
     ),
-    (gen.HEADER_TENANT_FORCE, gen._RE_TENANT_FORCE, {'table': 'shop_order'}),
+    (headers_module.HEADER_TENANT_FORCE, headers_module._RE_TENANT_FORCE, {'table': 'shop_order'}),
 ]
 
 
@@ -96,21 +97,21 @@ def test_every_emitted_header_is_matched_by_its_scanner(template, scanner, value
     has. The failure is at ``migrate`` time in someone else's repository, which is why it
     has to be caught here.
     """
-    source, digest = gen._operation(template.format(**values), 'SELECT 1', 'SELECT 2')
+    source, digest = identity_module._operation(template.format(**values), 'SELECT 1', 'SELECT 2')
     header = source.splitlines()[0]
 
     match = scanner.search(header)
     assert match, f'{scanner.pattern!r} does not match the header it is meant to read: {header!r}'
-    assert gen._recorded_sql_identity(header, match) == digest
+    assert identity_module._recorded_sql_identity(header, match) == digest
 
 
 def test_the_header_table_lists_every_header_the_module_defines():
     """Exhaustiveness, so adding a kind without a scanner fails here rather than in the wild."""
-    defined = {name for name in dir(gen) if name.startswith('HEADER_')}
+    defined = {name for name in dir(headers_module) if name.startswith('HEADER_')}
     covered = {
         name
         for name in defined
-        if any(getattr(gen, name) is template for template, _, _ in HEADER_SCANNERS)
+        if any(getattr(headers_module, name) is template for template, _, _ in HEADER_SCANNERS)
     }
     assert defined == covered, f'headers with no scanner in HEADER_SCANNERS: {defined - covered}'
 
@@ -122,17 +123,17 @@ def test_the_force_header_cannot_be_read_as_a_policy_header():
     scanner, a table would read as policied on the strength of a migration that only forces
     row-level security -- an ``ALTER TABLE`` with no predicate behind it.
     """
-    force = gen.HEADER_TENANT_FORCE.format(table='shop_order')
-    assert gen._RE_TENANT_POLICY.search(force) is None
-    assert gen._RE_TENANT_FORCE.search(force) is not None
+    force = headers_module.HEADER_TENANT_FORCE.format(table='shop_order')
+    assert headers_module._RE_TENANT_POLICY.search(force) is None
+    assert headers_module._RE_TENANT_FORCE.search(force) is not None
 
 
 def test_the_two_function_headers_cannot_be_read_as_each_other():
     """Otherwise the MTI parent function migration would satisfy the base one's dependency."""
-    base = gen.HEADER_TRIGGER_FUNCTION
-    parent = gen.HEADER_PARENT_TRIGGER_FUNCTION
-    assert gen._RE_TRIGGER_FUNCTION.search(parent) is None
-    assert gen._RE_PARENT_TRIGGER_FUNCTION.search(base) is None
+    base = headers_module.HEADER_TRIGGER_FUNCTION
+    parent = headers_module.HEADER_PARENT_TRIGGER_FUNCTION
+    assert headers_module._RE_TRIGGER_FUNCTION.search(parent) is None
+    assert headers_module._RE_PARENT_TRIGGER_FUNCTION.search(base) is None
 
 
 def test_a_header_without_the_sql_token_reads_as_stale_not_covered():
@@ -144,10 +145,10 @@ def test_a_header_without_the_sql_token_reads_as_stale_not_covered():
     deletes -- reached every existing database as nothing at all.
     """
     legacy = '# Soft Delete Rule on "shop_order" table!'
-    match = gen._RE_SOFT_DELETE.search(legacy)
+    match = headers_module._RE_SOFT_DELETE.search(legacy)
 
     assert match is not None
-    assert gen._recorded_sql_identity(legacy, match) is None
+    assert identity_module._recorded_sql_identity(legacy, match) is None
 
 
 # ---------------------------------------------------------------------------
@@ -163,7 +164,7 @@ def test_generated_operations_carry_sql_rather_than_naming_it():
     differing while sharing an identical history. It also put the SQL out of reach of every
     digest, since the source named the constant instead of containing it.
     """
-    source, _ = gen._operation(
+    source, _ = identity_module._operation(
         '# Soft Delete Rule on "shop_order" table!',
         sql.CREATE_SOFT_DELETE_RULE.format(table='shop_order', primary_key='id'),
         sql.DROP_SOFT_DELETE_RULE.format(table='shop_order'),
@@ -178,8 +179,8 @@ def test_generated_operations_carry_sql_rather_than_naming_it():
 
 def test_a_changed_sql_constant_changes_the_operation_digest():
     """The property that makes regeneration generated rather than hand-written."""
-    _, before = gen._operation('# h!', 'CREATE RULE r AS ...', 'DROP RULE r')
-    _, after = gen._operation('# h!', 'CREATE RULE r AS ... changed', 'DROP RULE r')
+    _, before = identity_module._operation('# h!', 'CREATE RULE r AS ...', 'DROP RULE r')
+    _, after = identity_module._operation('# h!', 'CREATE RULE r AS ... changed', 'DROP RULE r')
 
     assert before != after
 
@@ -191,8 +192,8 @@ def test_the_digest_ignores_which_form_is_emitted():
     fresh database records the create form's digest, the next run builds the replace form to
     compare against it, the two differ, and a replacement migration is written every run.
     """
-    _, created = gen._operation('# h!', 'CREATE TRIGGER t ...', 'DROP TRIGGER t')
-    replaced_source, replaced = gen._operation(
+    _, created = identity_module._operation('# h!', 'CREATE TRIGGER t ...', 'DROP TRIGGER t')
+    replaced_source, replaced = identity_module._operation(
         '# h!', 'CREATE TRIGGER t ...', 'DROP TRIGGER t', emit='DROP TRIGGER t; CREATE TRIGGER t'
     )
 
@@ -207,9 +208,9 @@ def test_sql_that_cannot_be_triple_quoted_falls_back_to_repr():
     quote would close it early -- either way the generated migration is a syntax error that
     only shows up in someone else's repository.
     """
-    assert gen._sql_string_literal('SELECT 1') == '"""SELECT 1"""'
+    assert identity_module._sql_string_literal('SELECT 1') == '"""SELECT 1"""'
     for hostile in ('SELECT """x"""', 'SELECT "col"', "SELECT E'\\n'"):
-        rendered = gen._sql_string_literal(hostile)
+        rendered = identity_module._sql_string_literal(hostile)
         assert eval(rendered) == hostile  # noqa: S307 -- the point is that it parses back
 
 
@@ -250,7 +251,7 @@ def test_nothing_recorded_emits_the_plain_create_form():
 
 def test_a_current_recorded_digest_emits_nothing():
     command = Command()
-    _, digest = gen._operation(
+    _, digest = identity_module._operation(
         '# Updated at Trigger on "shop_order" table!',
         'CREATE TRIGGER updated_at_trigger ...',
         'DROP TRIGGER updated_at_trigger ON shop_order',
@@ -284,7 +285,7 @@ def test_adopt_emits_the_guarded_form_even_with_nothing_recorded():
 def test_adopt_re_emits_even_a_record_that_is_already_current():
     """Otherwise the flag does nothing on the tables an adopter most needs it for."""
     command = Command()
-    _, digest = gen._operation(
+    _, digest = identity_module._operation(
         '# Updated at Trigger on "shop_order" table!',
         'CREATE TRIGGER updated_at_trigger ...',
         'DROP TRIGGER updated_at_trigger ON shop_order',
@@ -426,7 +427,7 @@ def test_the_generated_migrations_import_nothing_from_the_kit():
     change, are what the upgrade path has to keep recognising.
     """
     migrations = sorted((Path(__file__).parent / 'testapp' / 'migrations').glob('0*.py'))
-    inlined = [path for path in migrations if gen._RE_SQL_IDENTITY.search(path.read_text())]
+    inlined = [path for path in migrations if headers_module._RE_SQL_IDENTITY.search(path.read_text())]
 
     assert inlined, 'no inlined enforcement migrations found -- has generation been run?'
     for path in inlined:
@@ -442,8 +443,8 @@ def test_the_scan_recovers_the_most_recent_digest_across_files():
         'migrations.RunSQL(sql="""y"""),\n'
     )
     recorded = {
-        match.group(1): gen._recorded_sql_identity(content, match)
-        for match in gen._RE_SOFT_DELETE.finditer(content)
+        match.group(1): identity_module._recorded_sql_identity(content, match)
+        for match in headers_module._RE_SOFT_DELETE.finditer(content)
     }
 
     assert recorded == {'shop_order': 'bbbbbbbbbbbb'}
@@ -488,6 +489,6 @@ def test_unforced_policy_tables_still_reads_the_legacy_keyword_form():
 def test_the_sql_identity_pattern_only_reads_its_own_header_line():
     """A digest belongs to the header it sits on, not to whatever follows in the file."""
     content = '# Soft Delete Rule on "shop_order" table!\n# something else [SQL:cccccccccccc]\n'
-    match = gen._RE_SOFT_DELETE.search(content)
+    match = headers_module._RE_SOFT_DELETE.search(content)
 
-    assert gen._recorded_sql_identity(content, match) is None
+    assert identity_module._recorded_sql_identity(content, match) is None

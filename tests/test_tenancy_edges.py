@@ -18,7 +18,7 @@ from django.test import override_settings
 
 from guitars import sql
 from guitars.management import _generator
-from guitars.management.commands.makeguitarmigrations import _literal
+from guitars.management.enforcement.identity import _literal
 from guitars.models import GuitarModel, LiveManager
 from guitars.tenancy import (
     TenantedManager,
@@ -498,7 +498,7 @@ class TestGeneratorSettings:
         same database -- and so the reverse drops exactly what the forward created."""
         from django.apps import apps as django_apps
 
-        from guitars.management.commands.makeguitarmigrations import Command
+        from guitars.management.enforcement.command import Command
         from guitars.tenancy.discovery import app_coverage
 
         coverage = app_coverage(django_apps.get_app_config('testapp'))

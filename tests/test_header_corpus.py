@@ -20,7 +20,8 @@ from pathlib import Path
 
 import pytest
 
-from guitars.management.commands import makeguitarmigrations as gen
+from guitars.management.enforcement import headers as headers_module
+from guitars.management.enforcement import identity as identity_module
 
 _CORPUS_DIR = Path(__file__).parent / 'testapp' / 'migrations'
 
@@ -59,7 +60,7 @@ _EXPECTED_EMPTY = {'_RE_TENANT_FORCE'}
 #: reason that move is safe: the *shape* of the match changed on purpose, the *identity
 #: value it recovers* did not -- so this scanner is checked by round-tripping the identity
 #: each mechanism recovers, not by diffing capture groups.
-_IDENTITY_VIA_TAIL_SEARCH = {'_RE_TENANT_POLICY': gen._recorded_policy_identity}
+_IDENTITY_VIA_TAIL_SEARCH = {'_RE_TENANT_POLICY': identity_module._recorded_policy_identity}
 
 
 def _corpus_text() -> str:
@@ -70,7 +71,7 @@ def _corpus_text() -> str:
 def test_scanner_matches_the_real_migration_corpus_like_its_pre_derivation_baseline(name):
     content = _corpus_text()
     baseline = _BASELINE[name]
-    current = getattr(gen, name)
+    current = getattr(headers_module, name)
 
     baseline_matches = list(baseline.finditer(content))
     current_matches = list(current.finditer(content))

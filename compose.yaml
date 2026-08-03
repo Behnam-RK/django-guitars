@@ -38,3 +38,32 @@ services:
       interval: 2s
       timeout: 3s
       retries: 20
+
+  # Opt-in: `docker compose --profile pooling up -d --wait`. Not part of the default
+  # `docker compose up -d`, so ordinary local dev and most CI jobs never pay for it.
+  #
+  # PGBOUNCER_POOL_MODE=transaction is the point, not an arbitrary choice: session-level
+  # `SET` (what guitars.tenancy.guc publishes GUCs with) does not survive across
+  # statements the way it does on a direct connection under transaction pooling, which is
+  # the exact risk tests/test_concurrency.py's pgbouncer tests exist to demonstrate. See
+  # docs/tenancy.md and CLAUDE.md on tenancy/guc.py's cache -- this is the scenario M5's
+  # fix (startup check, always-SET LOCAL, or documentation-only) will be decided against.
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    profiles: [pooling]
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://guitars:guitars@db:5432/guitars
+      # DEFAULT_POOL_SIZE=1 is deliberate: tests/test_concurrency.py's
+      # TestPgbouncerTransactionPooling relies on exactly one shared PostgreSQL backend so
+      # that two sequential, non-overlapping clients are *guaranteed* to land on the same
+      # session -- turning the GUC-leak-across-clients demonstration into a two-line
+      # reproduction instead of a probabilistic race.
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: 100
+      DEFAULT_POOL_SIZE: 1
+      AUTH_TYPE: plain
+    ports:
+      - "6432:5432"

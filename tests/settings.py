@@ -16,7 +16,36 @@ from core.settings import *  # noqa: F401, F403
 # and migrates 'test_guitars_secondary' the same way it does the default test database.
 DATABASES['secondary'] = {**DATABASES['default'], 'NAME': 'guitars_secondary'}  # noqa: F405
 
-INSTALLED_APPS = [*INSTALLED_APPS, 'tests.testapp']  # noqa: F405
+# A third alias, same test database as 'default' (TEST.MIRROR skips creating a separate
+# one) but with the psycopg connection-pool option on -- tests/test_concurrency.py uses
+# this to exercise guitars' tenant-scope/GUC-cache correctness under Django 5.1+'s
+# `OPTIONS: {"pool": True}`, where each checkout is a distinct psycopg connection object
+# rather than one long-lived connection. Defined statically (not built at test runtime)
+# because Django validates `django_db(databases=[...])` against settings.DATABASES at
+# class setup, before any test body runs.
+DATABASES['pooled'] = {  # noqa: F405
+    **DATABASES['default'],  # noqa: F405
+    'OPTIONS': {**DATABASES['default'].get('OPTIONS', {}), 'pool': True},  # noqa: F405
+    'TEST': {'MIRROR': 'default'},
+}
+
+# 'tests.legacy_migrations' and 'tests.mti_incremental' are installed (so pytest-django
+# migrates them like any other app, giving their tests an already-migrated database for
+# free at session setup) but deliberately left out of LOCAL_APPS -- makeguitarmigrations/
+# audittenancy ignore them by default, and each test scopes to its app explicitly.
+#
+# 'tests.makemigrations_override' is deliberately NOT listed here: it has no migrations
+# checked in at all, and an app installed with a pending schema change fails the
+# *unscoped* `makemigrations --check` CI runs (see .github/workflows/ci.yml) regardless of
+# LOCAL_APPS -- that check isn't guitars' own scoping, it's Django's, over every installed
+# app. tests/test_makemigrations_override.py adds it to INSTALLED_APPS itself, only for
+# the duration of each test, via override_settings.
+INSTALLED_APPS = [  # noqa: F405
+    *INSTALLED_APPS,  # noqa: F405
+    'tests.testapp',
+    'tests.legacy_migrations',
+    'tests.mti_incremental',
+]
 
 LOCAL_APPS = ['tests.testapp']
 TRIGGER_FUNCTION_APP = 'tests.testapp'

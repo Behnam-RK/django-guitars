@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 import pytest
+from django.db import connection
 
 from guitars.tenancy import tenancy_bypassed, tenant
 from tests.testapp.models import Booking, Label, Release, StadiumTour, Track
@@ -90,3 +91,54 @@ def bookings(tenants) -> tuple[Booking, Booking]:
             Booking.objects.create(venue='Aardvark Arena', label=tenants.a),
             Booking.objects.create(venue='Basilisk Bowl', label=tenants.b),
         )
+
+
+# ─────────────────────────────── raw-cursor helpers ─────────────────────────────── #
+#
+# Several modules assert against the database directly rather than through the ORM --
+# the whole point of a raw DDL probe or a `pg_policies` check is that no Django manager
+# sits between the assertion and the row. That need was previously met by copy-pasted
+# `with connection.cursor() as cursor: ...` blocks in seven files (independently
+# redefined in two of them). One definition here, imported everywhere.
+
+
+def execute(*statements: str, params: list | None = None) -> None:
+    """Run one or more raw SQL statements against the default connection, ignoring results.
+
+    ``params`` binds placeholders and is only valid together with a single statement --
+    it exists for the rare write (e.g. a parametrized ``INSERT`` with no ``RETURNING``)
+    that would otherwise need its own ad hoc cursor block.
+    """
+    with connection.cursor() as cursor:
+        if params is not None:
+            if len(statements) != 1:
+                raise ValueError('params requires exactly one statement')
+            cursor.execute(statements[0], params)
+            return
+        for statement in statements:
+            cursor.execute(statement)
+
+
+def scalar(query: str, params: list | None = None):
+    """Run *query* and return the first column of its first row, or ``None`` if empty."""
+    with connection.cursor() as cursor:
+        cursor.execute(query, params)
+        row = cursor.fetchone()
+    return row[0] if row else None
+
+
+def rows(query: str, params: list | None = None) -> list:
+    """Run *query* and return every row as a list of tuples."""
+    with connection.cursor() as cursor:
+        cursor.execute(query, params)
+        return cursor.fetchall()
+
+
+@pytest.fixture
+def _execute(db):
+    """Fixture form of :func:`execute`, for call sites written as ``_execute(stmt)``.
+
+    Depends on ``db`` explicitly so a module that only ever injects this fixture (and
+    never ``db`` itself) still gets a migrated test database before its first statement.
+    """
+    return execute

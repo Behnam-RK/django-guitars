@@ -13,8 +13,11 @@ kind of asymmetry that ships.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from django.apps import apps as django_apps
+from django.conf import settings as django_settings
 from django.core.management import CommandError
 from django.db import connection, connections, transaction
 from django.test import override_settings
@@ -33,6 +36,7 @@ from guitars.tenancy import (
 )
 from guitars.tenancy.checks import TENANT_MODEL_ID, check_guitar_models_have_a_tenant
 from guitars.tenancy.discovery import _classify
+from tests.conftest import execute as _execute
 from tests.testapp.models import Band, Booking, Label, Release, Track
 
 
@@ -387,8 +391,7 @@ class TestPublisherGuards:
 
     def test_uninstall_forgets_the_cached_state(self, db):
         """A reinstall must not inherit a cache describing a session it no longer owns."""
-        with connection.cursor() as cursor:
-            cursor.execute('SELECT 1')
+        _execute('SELECT 1')
         assert hasattr(connection, guc._CACHE)
 
         guc.uninstall()
@@ -405,6 +408,7 @@ class TestPublisherGuards:
 
 
 class TestScaffolding:
+    @pytest.mark.xdist_group(name='makemigrations_override_dir')
     def test_it_returns_the_filename_django_printed(self, db):
         """Django prints the path it wrote rather than returning it, so it is parsed back out.
 
@@ -412,15 +416,28 @@ class TestScaffolding:
         re-entry into guitars' own ``makemigrations`` override -- then cleaned up. A test that
         mocked ``call_command`` would only prove the regex, not that the output still looks the
         way the regex expects.
-        """
-        app = django_apps.get_app_config('testapp')
 
-        filename = _generator.create_empty_migration_file(app, 'coverage_probe')
-        try:
-            assert filename.endswith('_coverage_probe.py')
-            assert (__import__('pathlib').Path(app.path) / 'migrations' / filename).exists()
-        finally:
-            (__import__('pathlib').Path(app.path) / 'migrations' / filename).unlink()
+        Scaffolds into ``tests.makemigrations_override``, not ``tests.testapp``:
+        ``tests/testapp/migrations`` is scanned (``iter_migration_files``) by
+        ``makeguitarmigrations``/drift tests that run concurrently under xdist, and this
+        test's file briefly existing and then vanishing there raced a ``FileNotFoundError``
+        out of an unrelated worker's scan. ``tests/test_makemigrations_override.py`` installs
+        the same throwaway app the same way and shares its ``migrations/`` directory, hence
+        the same ``xdist_group``: those tests diff the directory listing too, so this test
+        running on a different worker at the same moment could still leave a file for one of
+        them to trip over.
+        """
+        with override_settings(
+            INSTALLED_APPS=[*django_settings.INSTALLED_APPS, 'tests.makemigrations_override']
+        ):
+            app = django_apps.get_app_config('makemigrations_override')
+
+            filename = _generator.create_empty_migration_file(app, 'coverage_probe')
+            try:
+                assert filename.endswith('_coverage_probe.py')
+                assert (Path(app.path) / 'migrations' / filename).exists()
+            finally:
+                (Path(app.path) / 'migrations' / filename).unlink()
 
     def test_unparseable_output_is_an_error(self, monkeypatch):
         """Guessing -- rewriting whichever file a glob found first -- would corrupt an

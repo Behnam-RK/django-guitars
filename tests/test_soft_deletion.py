@@ -3,7 +3,7 @@
 import contextlib
 
 import pytest
-from django.db import connection, transaction
+from django.db import transaction
 from django.db.backends.utils import CursorWrapper
 
 from guitars.models.soft_deletion import (
@@ -14,6 +14,7 @@ from guitars.models.soft_deletion import (
     LiveQuerySet,
 )
 from guitars.sql import SWITCH_OFF_HARD_DELETION, SWITCH_ON_HARD_DELETION
+from tests.conftest import scalar as _scalar
 from tests.testapp.models import Album, Band, Genre, Merch, Orchestra, Riff
 
 
@@ -348,9 +349,7 @@ class TestTheHardDeletionSwitchCannotLeak:
 
     @staticmethod
     def _switch() -> str | None:
-        with connection.cursor() as cursor:
-            cursor.execute("SELECT current_setting('rules.hard_deletion', true)")
-            return cursor.fetchone()[0]
+        return _scalar("SELECT current_setting('rules.hard_deletion', true)")
 
     @pytest.mark.django_db(transaction=True)
     def test_a_rolled_back_hard_delete_leaves_soft_deletion_working(self):

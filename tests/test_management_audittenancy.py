@@ -13,13 +13,16 @@ from __future__ import annotations
 
 import types
 
+import pglast
 import pytest
 from django.core.management import CommandError, call_command
-from django.db import connection
+from pglast import ast, visitors
+from pglast.enums import AlterTableType, SubLinkType
 
 from guitars import sql
 from guitars.management.commands.audittenancy import Command as AuditCommand
 from guitars.tenancy import tenant
+from tests.conftest import execute
 from tests.testapp.models import Release
 
 
@@ -40,16 +43,6 @@ def _audit_failure(*args, **options) -> str:
     with pytest.raises(CommandError) as caught:
         call_command('audittenancy', *args, stdout=out, stderr=err, **options)
     return out.getvalue() + err.getvalue() + str(caught.value)
-
-
-@pytest.fixture
-def _execute(db):
-    def run(*statements: str) -> None:
-        with connection.cursor() as cursor:
-            for statement in statements:
-                cursor.execute(statement)
-
-    return run
 
 
 class TestAGoodDatabasePasses:
@@ -339,11 +332,11 @@ class TestAPolicyThatNoLongerMatchesTheModels:
             assert 'a cross-tenant write is accepted' in output
             assert 'audit failed' in output
             # Not merely reported: the write really does land, so the finding is not academic.
-            with tenant(label=tenants.a), connection.cursor() as cursor:
-                cursor.execute(
+            with tenant(label=tenants.a):
+                execute(
                     f'INSERT INTO {table} (title, label_id, _created_at, _updated_at) '
                     f'VALUES (%s, %s, NOW(), NOW())',
-                    ['smuggled', tenants.b.pk],
+                    params=['smuggled', tenants.b.pk],
                 )
         finally:
             _execute(
@@ -377,6 +370,107 @@ class TestAPolicyThatNoLongerMatchesTheModels:
                 sql.drop_tenant_policy(table=table),
                 *sql.create_table_rls(table=table, columns={'label': 'label_id'}),
             )
+
+
+class TestGeneratedPolicySQLIsStructurallySound:
+    """Parse ``sql.create_tenant_policy``'s own output rather than pattern-match it.
+
+    ``_predicate_drift`` (the audit logic above) deliberately compares a *live* policy by
+    its GUCs and column references rather than by text, because PostgreSQL rewrites a
+    stored expression when it deparses it -- see that method's docstring. The tests above
+    inherit that discipline for the database half.
+
+    The *generator's* half has no such excuse: nothing has rewritten this SQL yet, so a
+    substring assertion (``'DROP POLICY IF EXISTS tenant_scope' in operation``, used
+    elsewhere in this suite and in test_command.py) can still pass on output that is
+    subtly broken -- an extra paren, a misplaced clause -- because the substring survives
+    intact while the statement around it stops parsing. Parsing with ``pglast`` and
+    checking shape catches that class of error instead, alongside the substring checks
+    kept elsewhere; it does not replace them, since a few still document intent.
+    """
+
+    @staticmethod
+    def _parse(statement: str):
+        return pglast.parse_sql(statement)[0].stmt
+
+    @staticmethod
+    def _sublink_types(node) -> list:
+        found = []
+
+        class _Visitor(visitors.Visitor):
+            def visit_SubLink(self, ancestors, sublink):  # noqa: N802 -- pglast dispatches by this name
+                found.append(sublink.subLinkType)
+
+        _Visitor()(node)
+        return found
+
+    def test_an_own_table_policy_has_both_halves_and_no_owner_join(self):
+        stmt = self._parse(
+            sql.create_tenant_policy(table='testapp_release', columns={'label': 'label_id'})
+        )
+
+        assert isinstance(stmt, ast.CreatePolicyStmt)
+        assert stmt.policy_name == sql.TENANT_POLICY
+        assert stmt.table.relname == 'testapp_release'
+        assert stmt.cmd_name == 'all'
+        assert stmt.qual is not None, 'USING half is missing -- every read would be denied'
+        assert stmt.with_check is not None, (
+            'WITH CHECK half is missing -- see _predicate_drift: this is the half whose '
+            'absence lets a cross-tenant write through while reads still look scoped'
+        )
+        # No correlated owner subquery for a table that owns its own tenant column.
+        assert SubLinkType.EXISTS_SUBLINK not in self._sublink_types(stmt.qual)
+        assert SubLinkType.EXISTS_SUBLINK not in self._sublink_types(stmt.with_check)
+
+    def test_an_mti_owner_policy_correlates_through_an_exists_subquery(self):
+        """The MTI shape's one genuinely intricate piece of SQL, checked by structure.
+
+        A correlated ``EXISTS`` against the owner table is exactly what a child-only
+        statement needs (see test_tenancy_rls.py's module docstring on why the parent's
+        policy does not protect it transitively); asserting the subquery *exists* rather
+        than matching its exact text is what lets this survive a rewording of the join.
+        """
+        stmt = self._parse(
+            sql.create_tenant_policy(
+                table='testapp_orchestra',
+                columns={},
+                owner_table='testapp_ensemble',
+                owner_pk='id',
+                child_pk='ensemble_ptr_id',
+                owner_columns={'label': 'label_id'},
+            )
+        )
+
+        assert isinstance(stmt, ast.CreatePolicyStmt)
+        for half in (stmt.qual, stmt.with_check):
+            sublink_types = self._sublink_types(half)
+            assert SubLinkType.EXISTS_SUBLINK in sublink_types, (
+                'no correlated EXISTS subquery -- an MTI child policy without one cannot '
+                'reach the tenant column, which lives on the owner table'
+            )
+
+    def test_force_rls_statements_are_two_alter_table_commands_in_order(self):
+        """``create_table_rls(force=True)`` must enable RLS before forcing it.
+
+        Reversed, ``FORCE`` on a table RLS is not yet enabled for is still valid SQL and
+        still parses -- a substring check for both keywords would not catch the swap.
+        """
+        statements = sql.create_table_rls(
+            table='testapp_release', columns={'label': 'label_id'}, force=True
+        )
+        subtypes = [
+            cmd.subtype
+            for statement in statements
+            for stmt in [self._parse(statement)]
+            if isinstance(stmt, ast.AlterTableStmt)
+            for cmd in stmt.cmds
+        ]
+
+        assert AlterTableType.AT_EnableRowSecurity in subtypes
+        assert AlterTableType.AT_ForceRowSecurity in subtypes
+        assert subtypes.index(AlterTableType.AT_EnableRowSecurity) < subtypes.index(
+            AlterTableType.AT_ForceRowSecurity
+        )
 
 
 class TestScoping:

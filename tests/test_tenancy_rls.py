@@ -23,6 +23,9 @@ from django.db import ProgrammingError, connection, transaction
 
 from guitars import sql
 from guitars.tenancy import TenantScopeError, tenancy_bypassed, tenant
+from tests.conftest import execute as _execute
+from tests.conftest import rows as _rows
+from tests.conftest import scalar as _scalar
 
 
 TENANT_A, TENANT_B = 1, 2
@@ -41,25 +44,6 @@ CREATE TABLE {_CHILD_TABLE} (
     note text
 );
 """
-
-
-def _execute(*statements: str) -> None:
-    with connection.cursor() as cursor:
-        for statement in statements:
-            cursor.execute(statement)
-
-
-def _scalar(query: str, params: list | None = None):
-    with connection.cursor() as cursor:
-        cursor.execute(query, params)
-        row = cursor.fetchone()
-    return row[0] if row else None
-
-
-def _rows(query: str, params: list | None = None) -> list:
-    with connection.cursor() as cursor:
-        cursor.execute(query, params)
-        return cursor.fetchall()
 
 
 @pytest.fixture
@@ -270,6 +254,89 @@ class TestMtiOwnerJoinPolicy:
             assert _scalar(f'SELECT count(*) FROM {_CHILD_TABLE}') == 0  # noqa: S608
 
 
+class TestThreeLevelMTIOwnerJoin:
+    """``TestMtiOwnerJoinPolicy`` above proves the owner-join for a two-level chain built
+    from raw DDL: one owner table, one MTI child. ``Tour -> WorldTour -> StadiumTour``
+    (tests/testapp/models.py) is the real, three-level case -- the tenant column lives on
+    the grandparent, two tables up from ``testapp_stadiumtour`` -- and its real, generated
+    policy (tests/testapp/migrations/0010_auto_enforcement.py) already correlates directly
+    against ``testapp_tour``, skipping ``testapp_worldtour`` entirely, via the shared-PK
+    invariant every MTI chain satisfies. Proven the same way as everywhere else in this
+    file: directly against the grandchild table, never through ``StadiumTour.objects``, so
+    a leak here cannot be masked by the manager's own Python-side filtering.
+    """
+
+    @pytest.mark.django_db(transaction=True)
+    def test_a_grandchild_only_select_leaks_without_its_own_policy(self, tenants):
+        """Negative control: with the grandchild's own policy gone *and RLS disabled* --
+        dropping the policy alone leaves RLS enabled with nothing to enforce, which is
+        default-**deny** (see ``TestMtiOwnerJoinPolicy.test_rls_enabled_with_no_policy_
+        denies_everything`` above), the opposite of the leak this is meant to demonstrate
+        -- a statement touching only ``testapp_stadiumtour`` is not filtered by anything,
+        proving the ancestor two tables up was never what did the filtering for a
+        grandchild-only read.
+
+        ``transaction=True``: the fixture's own inserts must be committed before the
+        ``ALTER TABLE`` below runs, or Postgres refuses it outright with "cannot ALTER
+        TABLE because it has pending trigger events" from the same transaction.
+        """
+        _execute(
+            sql.drop_tenant_policy(table='testapp_stadiumtour'),
+            sql.disable_rls(table='testapp_stadiumtour'),
+        )
+        try:
+            with tenant(label=tenants.a):
+                capacities = _rows('SELECT capacity FROM testapp_stadiumtour')
+            assert len(capacities) == 2, (
+                'expected both tenants to leak once the grandchild lost its own policy'
+            )
+        finally:
+            _execute(
+                sql.create_tenant_policy(
+                    table='testapp_stadiumtour',
+                    columns={},
+                    owner_table='testapp_tour',
+                    owner_pk='id',
+                    child_pk='worldtour_ptr_id',
+                    owner_columns={'label': 'label_id'},
+                ),
+                sql.enable_rls(table='testapp_stadiumtour'),
+                sql.force_rls(table='testapp_stadiumtour'),
+            )
+
+    def test_a_grandchild_only_select_is_scoped_with_the_policy_in_place(self, tenants):
+        with tenant(label=tenants.a):
+            capacities = _rows('SELECT capacity FROM testapp_stadiumtour')
+
+        assert capacities == [(tenants.tour_a.capacity,)]
+
+    def test_a_grandchild_only_update_under_the_wrong_tenant_touches_nothing(self, tenants):
+        """The USING half, at the grandchild level: a statement that only ever touches
+        ``testapp_stadiumtour`` and names another tenant's row by primary key still
+        affects zero rows -- the owner-join predicate, two tables up, filters it out
+        before the ``UPDATE`` ever sees it."""
+        with tenant(label=tenants.a):
+            _execute(
+                'UPDATE testapp_stadiumtour SET capacity = 1 '
+                f'WHERE worldtour_ptr_id = {tenants.tour_b.pk}'  # noqa: S608
+            )
+
+        with tenancy_bypassed():
+            unchanged = _scalar(
+                'SELECT capacity FROM testapp_stadiumtour WHERE worldtour_ptr_id = %s',
+                [tenants.tour_b.pk],
+            )
+        assert unchanged == tenants.tour_b.capacity
+
+    def test_a_grandchild_only_update_under_its_own_tenant_succeeds(self, tenants):
+        with tenant(label=tenants.a):
+            _execute(
+                'UPDATE testapp_stadiumtour SET capacity = 12345 '
+                f'WHERE worldtour_ptr_id = {tenants.tour_a.pk}'  # noqa: S608
+            )
+            assert _scalar('SELECT capacity FROM testapp_stadiumtour') == 12345
+
+
 class TestRecoveryFromARejectedWrite:
     """A rejected write must leave the connection usable.
 
@@ -365,9 +432,7 @@ class TestReplacingAPolicyInPlace:
         no policy, which is default-DENY -- so the replacement touches only the policies.
         """
         _execute(
-            *sql.replace_table_rls(
-                table=_OWNER_TABLE, columns={'other': 'tenant_id'}, force=True
-            )
+            *sql.replace_table_rls(table=_OWNER_TABLE, columns={'other': 'tenant_id'}, force=True)
         )
 
         # Still enabled and still forced, without an intervening drop.
@@ -398,22 +463,26 @@ class TestReplacingAPolicyInPlace:
         of accumulating exemptions nobody asked for.
         """
         _execute(sql.create_exempt_policy(table=_OWNER_TABLE, role='guitars'))
-        assert _scalar(
-            'SELECT count(*) FROM pg_policies WHERE tablename = %s AND policyname LIKE %s',
-            [_OWNER_TABLE, f'{sql.EXEMPT_POLICY_PREFIX}%'],
-        ) == 1
+        assert (
+            _scalar(
+                'SELECT count(*) FROM pg_policies WHERE tablename = %s AND policyname LIKE %s',
+                [_OWNER_TABLE, f'{sql.EXEMPT_POLICY_PREFIX}%'],
+            )
+            == 1
+        )
 
         # Replaced with no exempt_roles at all, as if the setting had been emptied.
         _execute(
-            *sql.replace_table_rls(
-                table=_OWNER_TABLE, columns={'tenant': 'tenant_id'}, force=True
-            )
+            *sql.replace_table_rls(table=_OWNER_TABLE, columns={'tenant': 'tenant_id'}, force=True)
         )
 
-        assert _scalar(
-            'SELECT count(*) FROM pg_policies WHERE tablename = %s AND policyname LIKE %s',
-            [_OWNER_TABLE, f'{sql.EXEMPT_POLICY_PREFIX}%'],
-        ) == 0
+        assert (
+            _scalar(
+                'SELECT count(*) FROM pg_policies WHERE tablename = %s AND policyname LIKE %s',
+                [_OWNER_TABLE, f'{sql.EXEMPT_POLICY_PREFIX}%'],
+            )
+            == 0
+        )
 
     def test_dropping_all_exemptions_leaves_the_tenant_policy_alone(self, probe_tables):
         """It is prefix-scoped, so it must not take the policy that does the actual work."""

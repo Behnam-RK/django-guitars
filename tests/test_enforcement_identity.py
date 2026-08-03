@@ -32,7 +32,7 @@ from guitars.management.commands import makeguitarmigrations as gen
 from guitars.management.commands.makeguitarmigrations import Command
 from guitars.tenancy.discovery import app_coverage
 
-from .test_command import _command_with_scaffold
+from .test_command import _command_with_scaffold, _unforced_policy_tables
 
 
 # ---------------------------------------------------------------------------
@@ -467,7 +467,7 @@ def test_unforced_policy_tables_reads_the_inlined_form():
         'reverse_sql=["""ALTER TABLE b NO FORCE ROW LEVEL SECURITY"""]),\n'
     )
 
-    assert gen.unforced_policy_tables(forced) == {'b'}
+    assert _unforced_policy_tables(forced) == {'b'}
 
 
 def test_unforced_policy_tables_still_reads_the_legacy_keyword_form():
@@ -483,7 +483,7 @@ def test_unforced_policy_tables_still_reads_the_legacy_keyword_form():
         'migrations.RunSQL(sql=sql.create_table_rls(table=\'b\', force=False)),\n'
     )
 
-    assert gen.unforced_policy_tables(legacy) == {'b'}
+    assert _unforced_policy_tables(legacy) == {'b'}
 
 
 def test_the_sql_identity_pattern_only_reads_its_own_header_line():

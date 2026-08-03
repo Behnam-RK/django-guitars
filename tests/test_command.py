@@ -385,7 +385,7 @@ def test_handle_generates_only_for_named_apps(monkeypatch):
         command.existing.soft_delete_related.clear()
         # ...and the shared trigger-function migration is already in place.
         command.trigger_function_dependency = ('testapp', '0001_pretend')
-        monkeypatch.setattr(_generator, 'migration_with_digest_exists', lambda *a, **k: False)
+        command.existing.existing_digests.clear()
         monkeypatch.setattr(command, '_write_migration_file', lambda **k: None)
         monkeypatch.setattr(
             _generator,
@@ -583,7 +583,11 @@ def test_handle_skips_app_when_digest_already_exists(monkeypatch):
     command.existing.soft_deletes.clear()
     command.existing.soft_delete_related.clear()
     command.trigger_function_dependency = ('testapp', '0001_pretend')
-    monkeypatch.setattr(_generator, 'migration_with_digest_exists', lambda *a, **k: True)
+    # The exact digest handle() will compute for this app's operations, given the state
+    # above -- recorded ahead of time rather than faked, so _sql_digest (which the
+    # trigger-function-migration check also goes through) is untouched.
+    operations = command._build_operations(apps.get_app_config('testapp'))
+    command.existing.existing_digests['testapp'] = {_generator.digest_of(operations)}
     created: list[str] = []
     monkeypatch.setattr(
         _generator, 'create_empty_migration_file', lambda *a, **k: created.append(1)
@@ -605,7 +609,7 @@ def test_handle_check_only_reports_missing_migrations_and_mti_warnings(monkeypat
     command.existing.mti_soft_deletes.clear()
     command.trigger_function_dependency = ('testapp', '0001_pretend')
     command.parent_trigger_function_dependency = ('testapp', '0001_pretend_parent')
-    monkeypatch.setattr(_generator, 'migration_with_digest_exists', lambda *a, **k: False)
+    command.existing.existing_digests.clear()
     # Surfaced regardless of check_only -- seeded directly rather than relying on a real
     # MTI-cascade-limitation model, since that's covered at the unit level above.
     command._mti_cascade_warnings.append('some skipped MTI cascade rule')
@@ -640,7 +644,11 @@ def test_handle_writes_scoped_cascade_gap_warning_to_stdout(monkeypatch):
         'get_app_config',
         lambda label: fake_apps_by_label[label],
     )
-    monkeypatch.setattr(_generator, 'migration_with_digest_exists', lambda *a, **k: True)
+    # The exact digest handle() will compute for 'albumb', recorded ahead of time rather
+    # than faked, so _sql_digest (which the trigger-function-migration check also goes
+    # through) is untouched.
+    operations = command._build_operations(fake_album_app)
+    command.existing.existing_digests['albumb'] = {_generator.digest_of(operations)}
 
     command.handle('albumb', check_only=False)
 
@@ -803,7 +811,7 @@ def test_force_rls_stage_writes_a_migration_for_an_inert_policy(monkeypatch):
     command = Command()
     command.stdout = StringIO()
     command.existing.unforced_policies.add('testapp_release')
-    monkeypatch.setattr(_generator, 'migration_with_digest_exists', lambda *a, **k: False)
+    command.existing.existing_digests.clear()
     monkeypatch.setattr(command, '_write_migration_file', lambda **k: written.append(k))
     monkeypatch.setattr(
         _generator, 'create_empty_migration_file', lambda app, name: f'0011_{name}.py'
@@ -823,7 +831,7 @@ def test_force_rls_stage_check_only_reports_and_exits_non_zero(monkeypatch):
     command.stdout = StringIO()
     command.stderr = StringIO()
     command.existing.unforced_policies.add('testapp_release')
-    monkeypatch.setattr(_generator, 'migration_with_digest_exists', lambda *a, **k: False)
+    command.existing.existing_digests.clear()
 
     with pytest.raises(CommandError, match='makeguitarmigrations'):
         command.handle(check_only=True, force_rls=True)
@@ -990,7 +998,9 @@ def test_force_rls_stage_skips_an_operation_set_already_written(monkeypatch):
     command = Command()
     command.stdout = StringIO()
     command.existing.unforced_policies.add('testapp_release')
-    monkeypatch.setattr(_generator, 'migration_with_digest_exists', lambda *a, **k: True)
+    # The exact digest the FORCE stage will compute for 'testapp', recorded ahead of time.
+    force_operations = command._tenant_operations(apps.get_app_config('testapp'), force_rls=True)
+    command.existing.existing_digests['testapp'] = {_generator.digest_of(force_operations)}
 
     command.handle(check_only=False, force_rls=True)
 
@@ -998,6 +1008,19 @@ def test_force_rls_stage_skips_an_operation_set_already_written(monkeypatch):
 
 
 # --- Which policies shipped inert -----------------------------------------------
+
+
+def _unforced_policy_tables(content: str) -> set[str]:
+    """Find the ``_RE_TENANT_POLICY`` matches *content* needs, then defer to the real thing.
+
+    ``unforced_policy_tables`` takes them as an argument rather than finding them itself --
+    its caller (``Command._scan_existing_operations``) already scans for the same pattern
+    and passes its own matches in, so a second scan here would be exactly the double work
+    that changed.
+    """
+    matches = list(makeguitarmigrations_module._RE_TENANT_POLICY.finditer(content))
+    return unforced_policy_tables(content, matches)
+
 
 _TWO_POLICY_OPERATIONS = """
         # Tenant RLS on "table_a" table! [POLICY:aaaaaaaaaaaa]
@@ -1022,20 +1045,20 @@ def test_unforced_policy_tables_reads_each_operation_in_isolation():
     -- the already-forced table gets flagged and the inert one is missed -- so `--force-rls`
     would force what needs nothing and leave the unprotected table unprotected.
     """
-    assert unforced_policy_tables(_TWO_POLICY_OPERATIONS) == {'table_b'}
+    assert _unforced_policy_tables(_TWO_POLICY_OPERATIONS) == {'table_b'}
 
 
 def test_unforced_policy_tables_is_empty_when_everything_shipped_forced():
     forced_only = _TWO_POLICY_OPERATIONS.replace('force=False', 'force=True')
 
-    assert unforced_policy_tables(forced_only) == set()
+    assert _unforced_policy_tables(forced_only) == set()
 
 
 def test_unforced_policy_tables_handles_the_last_operation_in_a_file():
     """The final operation has no following header to bound it, so it is bounded by EOF."""
     only_unforced = _TWO_POLICY_OPERATIONS.replace('force=True', 'force=False')
 
-    assert unforced_policy_tables(only_unforced) == {'table_a', 'table_b'}
+    assert _unforced_policy_tables(only_unforced) == {'table_a', 'table_b'}
 
 
 def test_unforced_policy_tables_bounds_a_replacement_operation_too():
@@ -1050,7 +1073,7 @@ def test_unforced_policy_tables_bounds_a_replacement_operation_too():
         '# Tenant RLS on "table_b"', '# Tenant RLS replaced on "table_b"'
     )
 
-    assert unforced_policy_tables(with_replacement) == {'table_b'}
+    assert _unforced_policy_tables(with_replacement) == {'table_b'}
 
 
 def test_unforced_policy_tables_is_last_write_wins_within_one_file():
@@ -1073,7 +1096,7 @@ def test_unforced_policy_tables_is_last_write_wins_within_one_file():
 """
     )
 
-    assert unforced_policy_tables(inert_then_forced) == set()
+    assert _unforced_policy_tables(inert_then_forced) == set()
 
 
 def test_a_replacement_carrying_force_takes_a_table_off_the_backlog(tmp_path, monkeypatch):

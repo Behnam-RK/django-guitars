@@ -53,6 +53,8 @@ from guitars.tenancy.discovery import app_coverage
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from django.apps import AppConfig
 
     from guitars.tenancy.discovery import TableCoverage
@@ -309,8 +311,13 @@ def _recorded_policy_identity(content: str, match: re.Match) -> str | None:
     return found.group('identity') if found else None
 
 
-def unforced_policy_tables(content: str) -> set[str]:
+def unforced_policy_tables(content: str, matches: list[re.Match]) -> set[str]:
     """Tables whose policy operation in *content* was written without FORCE.
+
+    *matches* is every ``_RE_TENANT_POLICY`` match in *content*, computed by the caller and
+    passed in rather than re-found here: the caller (:meth:`Command._scan_existing_operations`)
+    already scans for the same pattern to build ``existing_tenant_policies``, and finding it a
+    second time here doubled the cost of every scan for no reason.
 
     The only kind ``--force-rls`` has anything to do for: the migration text is the record
     of what was decided when it was generated. Without this the flag emitted a redundant FORCE
@@ -337,7 +344,6 @@ def unforced_policy_tables(content: str) -> set[str]:
     FORCE backlog forever -- a redundant migration for a table that is already forced, which
     is the bug this function was extracted to fix, one scope smaller.
     """
-    matches = list(_RE_TENANT_POLICY.finditer(content))
     state: dict[str, bool] = {}
     for index, match in enumerate(matches):
         end = matches[index + 1].start() if index + 1 < len(matches) else len(content)
@@ -415,6 +421,12 @@ class ExistingOperations(NamedTuple):
     #: :func:`unforced_policy_tables`. These are the only ones a second FORCE stage can act on.
     unforced_policies: set[str]
     tenant_forces: set[str]
+    #: App label -> every ``[DIGEST:...]`` already stamped on one of its migration files.
+    #: Harvested during the same file-by-file pass as everything else above, so a later
+    #: "has this operation set already been written" check is a dict lookup instead of a
+    #: fresh directory re-scan (see ``handle()`` and ``_handle_force_rls_stage``, which
+    #: previously called ``_generator.migration_with_digest_exists`` for this).
+    existing_digests: dict[str, set[str]]
     trigger_function_dependency: tuple[str, str] | None
     parent_trigger_function_dependency: tuple[str, str] | None
     #: The ``[SQL:...]`` digest of the most recent migration defining each singleton trigger
@@ -594,6 +606,22 @@ class Command(BaseCommand):
         existing_soft_delete_related: dict[tuple[str, str, str | None], str | None] = {}
         existing_mti_triggers: dict[str, str | None] = {}
         existing_mti_soft_deletes: dict[str, str | None] = {}
+        # (regex, dict, key_fn) for every scan that is a plain "finditer, record by key"
+        # pass -- the singleton-function searches and the tenant-policy/force blocks below
+        # do not fit this shape (a `.search` rather than `.finditer`, or extra bookkeeping
+        # per match) and stay as their own code.
+        scan_table: list[tuple[re.Pattern, dict, Callable[[re.Match], object]]] = [
+            (_RE_UPDATED_AT, existing_triggers, lambda m: m.group(1)),
+            (_RE_SOFT_DELETE, existing_soft_deletes, lambda m: m.group(1)),
+            (
+                _RE_SOFT_DELETE_RELATED,
+                existing_soft_delete_related,
+                lambda m: (m.group(1), m.group(2), m.group('foreign_key')),
+            ),
+            (_RE_MTI_UPDATED_AT, existing_mti_triggers, lambda m: m.group(1)),
+            (_RE_MTI_SOFT_DELETE, existing_mti_soft_deletes, lambda m: m.group(1)),
+        ]
+
         existing_tenant_policies: set[str] = set()
         existing_policy_identities: dict[str, str] = {}
         existing_policy_sql: dict[str, str | None] = {}
@@ -602,6 +630,7 @@ class Command(BaseCommand):
         #: FORCE backlog; see where it is filled.
         existing_policy_force: dict[str, bool] = {}
         existing_tenant_forces: set[str] = set()
+        existing_digests: defaultdict[str, set[str]] = defaultdict(set)
         trigger_function_dep: tuple[str, str] | None = None
         parent_trigger_function_dep: tuple[str, str] | None = None
         trigger_function_sql: str | None = None
@@ -611,6 +640,10 @@ class Command(BaseCommand):
             if not _generator.is_local(app):
                 continue
             for path, content in _generator.iter_migration_files(app):
+                digest_match = _generator.RE_DIGEST.search(content.split('\n', 1)[0])
+                if digest_match:
+                    existing_digests[app.label].add(digest_match.group('digest'))
+
                 function_match = _RE_TRIGGER_FUNCTION.search(content)
                 if function_match:
                     trigger_function_dep = (app.label, path.stem)
@@ -620,22 +653,13 @@ class Command(BaseCommand):
                     parent_trigger_function_dep = (app.label, path.stem)
                     parent_trigger_function_sql = _recorded_sql_identity(content, parent_match)
 
-                for match in _RE_UPDATED_AT.finditer(content):
-                    existing_triggers[match.group(1)] = _recorded_sql_identity(content, match)
-                for match in _RE_SOFT_DELETE.finditer(content):
-                    existing_soft_deletes[match.group(1)] = _recorded_sql_identity(content, match)
-                for match in _RE_SOFT_DELETE_RELATED.finditer(content):
-                    existing_soft_delete_related[
-                        (match.group(1), match.group(2), match.group('foreign_key'))
-                    ] = _recorded_sql_identity(content, match)
-                for match in _RE_MTI_UPDATED_AT.finditer(content):
-                    existing_mti_triggers[match.group(1)] = _recorded_sql_identity(content, match)
-                for match in _RE_MTI_SOFT_DELETE.finditer(content):
-                    existing_mti_soft_deletes[match.group(1)] = _recorded_sql_identity(
-                        content, match
-                    )
-                unforced_in_file = unforced_policy_tables(content)
-                for match in _RE_TENANT_POLICY.finditer(content):
+                for pattern, target, key_fn in scan_table:
+                    for match in pattern.finditer(content):
+                        target[key_fn(match)] = _recorded_sql_identity(content, match)
+
+                policy_matches = list(_RE_TENANT_POLICY.finditer(content))
+                unforced_in_file = unforced_policy_tables(content, policy_matches)
+                for match in policy_matches:
                     table = match.group(1)
                     existing_tenant_policies.add(table)
                     # Last write wins, within a file and across them -- files arrive in
@@ -674,6 +698,7 @@ class Command(BaseCommand):
                 table for table, unforced in existing_policy_force.items() if unforced
             },
             tenant_forces=existing_tenant_forces,
+            existing_digests=dict(existing_digests),
             trigger_function_dependency=trigger_function_dep,
             parent_trigger_function_dependency=parent_trigger_function_dep,
             trigger_function_sql=trigger_function_sql,
@@ -1394,7 +1419,7 @@ class Command(BaseCommand):
 
             operations_blob = '\n'.join(operations)
             operations_digest = _generator.digest_of(operations)
-            if _generator.migration_with_digest_exists(app, operations_digest):
+            if operations_digest in self.existing.existing_digests.get(app.label, set()):
                 continue
 
             if check_only:
@@ -1490,7 +1515,7 @@ class Command(BaseCommand):
                 continue
 
             operations_digest = _generator.digest_of(operations)
-            if _generator.migration_with_digest_exists(app, operations_digest):
+            if operations_digest in self.existing.existing_digests.get(app.label, set()):
                 continue
 
             if check_only:

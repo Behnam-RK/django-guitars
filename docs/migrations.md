@@ -216,6 +216,14 @@ The generated import is inserted after the scaffold's **last** import rather tha
 at a fixed offset, so a change to Django's `--empty` template cannot land it
 inside the class body.
 
+**A scaffold can fail after Django has already written it** — if the stdout-parsing
+step that recovers the filename doesn't match, the empty file is already on disk with
+nothing to reference it by. It is left in place rather than deleted: cleaning up a file
+this command didn't stamp is a bigger footgun than leaving it, and an unstamped scaffold
+carries no `[DIGEST:...]`, so a later run can never mistake it for already covering
+anything — it just sits as visible dead weight, and the raised error names the directory
+to check by hand.
+
 ## Staging row-level security
 
 `GUITARS_RLS_FORCE` defaults to `True`, so policies bind on first migrate. For a

@@ -186,6 +186,14 @@ def create_empty_migration_file(app: AppConfig, name: str) -> str:
     prose mentioning a filename -- and on Windows the path Django prints is separated by
     backslashes, where insisting on ``/`` turns every generation into the CommandError
     below.
+
+    By the time that CommandError can be raised, Django has already written the empty
+    scaffold to disk -- this function has no reference to its name to clean it up, and
+    deleting a file this command didn't stamp is a bigger footgun than leaving it (a
+    write interrupted between "file exists" and "our marker is on it" should never be
+    guessed at and removed out from under whatever produced it). It is left in place,
+    on purpose: unstamped, it carries no ``[DIGEST:...]``, so a later run can never
+    mistake it for already covering anything, and the message below names where to look.
     """
     buf = StringIO()
     call_command('makemigrations', app.label, '--name', name, '--empty', stdout=buf)
@@ -193,7 +201,10 @@ def create_empty_migration_file(app: AppConfig, name: str) -> str:
 
     match = re.search(rf'[\\/](?P<filename>\d{{4}}_{re.escape(name)}\.py)', output)
     if not match:
-        raise CommandError(f'Could not find the created migration file! Command output: {output}')
+        raise CommandError(
+            f'Could not find the created migration file! Command output: {output}\n'
+            f'Check {migrations_dir(app)} for an unstamped scaffold matching "{name}".'
+        )
 
     return match.group('filename')
 
@@ -241,7 +252,13 @@ def write_migration_file(
         # and what a ruff- or black-free formatter leaves alone. The scan above accepts
         # either quoting, so a file written by an older version still dedupes.
         dep_line = f"        ('{dependency[0]}', '{dependency[1]}'),\n"
-        dep_idx = next(i for i, line in enumerate(lines) if 'dependencies = [' in line)
+        try:
+            dep_idx = next(i for i, line in enumerate(lines) if 'dependencies = [' in line)
+        except StopIteration as err:
+            raise CommandError(
+                "Could not find 'dependencies = [' in the scaffolded migration; "
+                "makemigrations' --empty template may have changed."
+            ) from err
         lines.insert(dep_idx + 1, dep_line)
 
     # Write to a temp file and swap it in: a process killed mid-write leaves the temp file

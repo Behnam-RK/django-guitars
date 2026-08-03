@@ -99,9 +99,11 @@ def test_check_reports_needed_changes_for_both_layers_and_writes_nothing(_scoped
 
 @pytest.mark.django_db
 def test_dry_run_writes_nothing_for_either_layer(_scoped_app):
-    call_command('makemigrations', APP_LABEL, '--dry-run', stdout=StringIO())
+    out = StringIO()
+    call_command('makemigrations', APP_LABEL, '--dry-run', stdout=out)
 
     assert _generated_files(_scoped_app) == set()
+    assert 'Enforcement-migration status was not checked because of --dry-run.' in out.getvalue()
 
 
 @pytest.mark.django_db

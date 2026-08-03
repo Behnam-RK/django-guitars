@@ -18,16 +18,33 @@ from django.core.management.commands.makemigrations import Command as MakeMigrat
 
 
 class Command(MakeMigrationsCommand):
+    help = (
+        MakeMigrationsCommand.help
+        + ' Also generates the enforcement migrations (timestamp triggers, soft-delete '
+        'rules, tenant policies) unless GUITARS_AUTO_MAKE_MIGRATIONS is False.'
+    )
+
     def handle(self, *args, **options):
         # 1. Always run the real makemigrations first: the schema migrations must exist
         #    before the enforcement migrations that attach behaviour to those tables.
+        #
+        #    If Django's own --check finds changes, this raises SystemExit(1) before the
+        #    guitar step below ever runs -- so --check currently cannot report both layers
+        #    failing in the same invocation, only whichever one Django's half catches first.
         super().handle(*args, **options)
 
         # 2. Recursion + correctness guards. makeguitarmigrations scaffolds its migrations
         #    via `makemigrations --empty`, which re-enters THIS command; skipping on --empty
         #    breaks that cycle and is also the right behaviour (an explicit empty migration
-        #    should not trigger generation). --dry-run: the generator has no no-write mode.
-        if options.get('empty') or options.get('dry_run'):
+        #    should not trigger generation). self.empty/self.dry_run are the attributes
+        #    Django's own handle() (just called above) sets from the same options.
+        if self.empty:
+            return
+        if self.dry_run:
+            # The generator has no no-write mode of its own, so it cannot honestly report
+            # under --dry-run -- but silently skipping it left the one command a cautious
+            # operator runs to preview changes unable to say a soft-delete rule is missing.
+            self.stdout.write('Enforcement-migration status was not checked because of --dry-run.')
             return
 
         # 3. Opt-out setting, default True for DX.
@@ -40,10 +57,15 @@ class Command(MakeMigrationsCommand):
         #
         #    --force-rls is deliberately NOT forwarded: it is a staged-retrofit step run by
         #    hand once a soak is clean, not something a routine makemigrations should do.
+        #
+        #    options['check_changes'] rather than .get(..., False): the dest is a private
+        #    argparse detail of Django's own --check flag, and a silently-wrong default
+        #    would make --check run in write mode the moment a future Django release
+        #    renames it. Indexing fails loudly instead.
         call_command(
             'makeguitarmigrations',
             *args,
-            check_only=options.get('check_changes', False),
+            check_only=options['check_changes'],
             stdout=self.stdout,
             stderr=self.stderr,
         )

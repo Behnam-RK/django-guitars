@@ -255,9 +255,9 @@ _RE_MTI_SOFT_DELETE = re.compile(r'# MTI Soft Delete Rule on "([^"]+)" table')
 # two header forms via one optional group, which a single-template deriver cannot express.
 #
 # The FORCE header carries an extra token before "RLS", so it can never match this pattern.
-_RE_TENANT_POLICY = re.compile(
-    r'# Tenant RLS (?:replaced )?on "([^"]+)" table! \[POLICY:(?P<identity>\w+)\]'
-)
+# Note this leaves [POLICY:...] itself out of the pattern -- read separately, the same way
+# as [SQL:...] below; see _recorded_policy_identity for why.
+_RE_TENANT_POLICY = re.compile(r'# Tenant RLS (?:replaced )?on "([^"]+)" table! \[POLICY:\w+\]')
 # The [DIGEST:...] marker is matched by _generator.RE_DIGEST.
 
 # The per-operation content digest, read off whatever remains of the header line after one
@@ -269,10 +269,27 @@ _RE_TENANT_POLICY = re.compile(
 # the 1.0.0 soft-delete guard fix finally generates itself on an existing project.
 _RE_SQL_IDENTITY = re.compile(r'\[SQL:(?P<sql>\w+)\]')
 
+# The tenant-policy header's own identity token -- the coverage *shape* a policy was
+# written with (table, predicate, exempt roles; deliberately not `force`, see
+# Command._policy_identity). Read the same way as [SQL:...] above: a pattern applied to
+# the header line's own tail, rather than a capture group folded into _RE_TENANT_POLICY
+# itself. The two tokens answer different questions and neither replaces the other, but
+# there is no reason for one to be read out via a bespoke named group on its header regex
+# while the other is read via a generic tail search -- unifying *how* both are read is what
+# lets the header/identity split (see the package layout in #10) draw one clean line
+# instead of two different ones.
+_RE_POLICY_IDENTITY = re.compile(r'\[POLICY:(?P<identity>\w+)\]')
+
 # Whether a policy operation's forward SQL forces row-level security. The lookbehind is not
 # optional: every policy operation's ``reverse_sql`` carries ``NO FORCE ROW LEVEL SECURITY``
 # in the same slice of text, and without it every table reads as forced.
 _RE_FORCED = re.compile(r'(?<!NO )FORCE ROW LEVEL SECURITY')
+
+
+def _recorded_line(content: str, match: re.Match) -> str:
+    """The full text of the line *match* landed on, from its start to the next newline."""
+    line_end = content.find('\n', match.start())
+    return content[match.start() : line_end if line_end != -1 else len(content)]
 
 
 def _recorded_sql_identity(content: str, match: re.Match) -> str | None:
@@ -282,10 +299,14 @@ def _recorded_sql_identity(content: str, match: re.Match) -> str | None:
     never written to. Callers treat it as stale rather than as covered, which is the whole
     point: the previous behaviour was to treat any recognised header as current forever.
     """
-    line_end = content.find('\n', match.end())
-    tail = content[match.end() : line_end if line_end != -1 else len(content)]
-    found = _RE_SQL_IDENTITY.search(tail)
+    found = _RE_SQL_IDENTITY.search(_recorded_line(content, match))
     return found.group('sql') if found else None
+
+
+def _recorded_policy_identity(content: str, match: re.Match) -> str | None:
+    """The ``[POLICY:...]`` identity on the header line *match* landed on, or ``None``."""
+    found = _RE_POLICY_IDENTITY.search(_recorded_line(content, match))
+    return found.group('identity') if found else None
 
 
 def unforced_policy_tables(content: str) -> set[str]:
@@ -601,7 +622,15 @@ class Command(BaseCommand):
                     existing_tenant_policies.add(table)
                     # Last write wins, within a file and across them -- files arrive in
                     # filename order, which is application order.
-                    existing_policy_identities[table] = match.group('identity')
+                    # Unlike [SQL:...], [POLICY:...] is not optional -- HEADER_TENANT_POLICY
+                    # always carries it, so a match of _RE_TENANT_POLICY always has one.
+                    policy_identity = _recorded_policy_identity(content, match)
+                    if policy_identity is None:
+                        raise RuntimeError(
+                            f'Tenant RLS header for "{table}" matched but carried no '
+                            f'[POLICY:...] identity -- HEADER_TENANT_POLICY always writes one.'
+                        )
+                    existing_policy_identities[table] = policy_identity
                     existing_policy_sql[table] = _recorded_sql_identity(content, match)
                     # Last write wins here too, and for the same reason. Accumulating these
                     # by union instead left a table on the backlog forever once any migration

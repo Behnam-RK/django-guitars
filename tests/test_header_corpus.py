@@ -51,6 +51,16 @@ _BASELINE = {
 #: agreeing on zero matches is the whole assertion for it, not a weaker check.
 _EXPECTED_EMPTY = {'_RE_TENANT_FORCE'}
 
+#: ``_RE_TENANT_POLICY``'s own baseline still captures ``[POLICY:...]`` inline as a named
+#: group (that was the *other* half of commit 4's "3 need explicit handling" list); commit 5
+#: moved reading it out to a separate tail search (``_recorded_policy_identity``), the same
+#: mechanism ``[SQL:...]`` already used, so the two tokens are read the same way even though
+#: they mean different things. Comparing raw ``groupdict()`` here would fail for exactly the
+#: reason that move is safe: the *shape* of the match changed on purpose, the *identity
+#: value it recovers* did not -- so this scanner is checked by round-tripping the identity
+#: each mechanism recovers, not by diffing capture groups.
+_IDENTITY_VIA_TAIL_SEARCH = {'_RE_TENANT_POLICY': gen._recorded_policy_identity}
+
 
 def _corpus_text() -> str:
     return '\n'.join(path.read_text() for path in sorted(_CORPUS_DIR.glob('*.py')))
@@ -72,6 +82,14 @@ def test_scanner_matches_the_real_migration_corpus_like_its_pre_derivation_basel
         f'{name} matches different text in the real migration corpus than its '
         f'pre-derivation baseline -- derivation changed matching behaviour'
     )
+
+    identity_extractor = _IDENTITY_VIA_TAIL_SEARCH.get(name)
     for base_match, cur_match in zip(baseline_matches, current_matches, strict=True):
-        assert cur_match.groups() == base_match.groups()
-        assert cur_match.groupdict() == base_match.groupdict()
+        if identity_extractor is None:
+            assert cur_match.groups() == base_match.groups()
+            assert cur_match.groupdict() == base_match.groupdict()
+        else:
+            # The table name (group 1) is still positionally captured by both; only the
+            # identity token's own extraction mechanism moved.
+            assert cur_match.group(1) == base_match.group(1)
+            assert identity_extractor(content, cur_match) == base_match.group('identity')

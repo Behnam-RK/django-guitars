@@ -425,6 +425,24 @@ class ExistingOperations(NamedTuple):
     parent_trigger_function_sql: str | None
 
 
+class _OperationRow(NamedTuple):
+    """One row bound for :meth:`Command._append_if_stale`, built by :meth:`_build_operations`.
+
+    Named rather than passed as separate positional arguments at each of the four call
+    sites (trigger own-table/MTI, soft-delete own-table/MTI): those four sites differ only
+    in which constants they name, so building one of these and routing it through a single
+    loop reads that difference at a glance instead of repeating the call shape four times.
+    """
+
+    recorded: dict
+    key: object
+    header: str
+    forward: str | list[str]
+    reverse: str | list[str]
+    replace: str | list[str] | None = None
+    adopt: str | list[str] | None = None
+
+
 class Command(BaseCommand):
     """Generates the enforcement migrations: triggers, rules and tenant policies.
 
@@ -1007,6 +1025,23 @@ class Command(BaseCommand):
             source, _ = _operation(header, forward, reverse, emit=replace or forward)
         operations.append(source)
 
+    @staticmethod
+    def _mti_context(model: type[models.Model], table: str, column: str) -> dict[str, str | None]:
+        """The ``{child_table, child_pk, parent_table, parent_pk}`` an MTI operation needs.
+
+        Parametrized on *column* rather than computed once per model: an MTI child's
+        ``_updated_at`` and ``_deleted_at`` are resolved independently via
+        :func:`column_owner`, and nothing guarantees the same ancestor owns both, so this
+        must be called once per column rather than shared across the two kinds below.
+        """
+        owner = column_owner(model, column)
+        return {
+            'child_table': table,
+            'child_pk': model._meta.pk.column,
+            'parent_table': owner._meta.db_table,
+            'parent_pk': owner._meta.pk.column,
+        }
+
     def _build_operations(self, app: AppConfig) -> list[str]:
         """Return a list of SQL operation snippets needed for *app*'s models."""
         operations: list[str] = []
@@ -1021,39 +1056,39 @@ class Command(BaseCommand):
             # exist and failed at ``migrate``. The MTI branches below already used ``.column``.
             primary_key = model._meta.pk.column
 
+            rows: list[_OperationRow] = []
+
             # --- updated_at trigger: own table vs. MTI parent-propagation ---
             if owns_column(model, '_updated_at'):
-                self._append_if_stale(
-                    operations,
-                    self.existing.triggers,
-                    table,
-                    HEADER_UPDATED_AT.format(table=table),
-                    sql.CREATE_UPDATED_AT_TRIGGER.format(table=table, primary_key=primary_key),
-                    sql.DROP_UPDATED_AT_TRIGGER.format(table=table),
-                    replace=sql.REPLACE_UPDATED_AT_TRIGGER.format(
-                        table=table, primary_key=primary_key
-                    ),
-                    adopt=sql.ADOPT_UPDATED_AT_TRIGGER.format(
-                        table=table, primary_key=primary_key
-                    ),
+                rows.append(
+                    _OperationRow(
+                        recorded=self.existing.triggers,
+                        key=table,
+                        header=HEADER_UPDATED_AT.format(table=table),
+                        forward=sql.CREATE_UPDATED_AT_TRIGGER.format(
+                            table=table, primary_key=primary_key
+                        ),
+                        reverse=sql.DROP_UPDATED_AT_TRIGGER.format(table=table),
+                        replace=sql.REPLACE_UPDATED_AT_TRIGGER.format(
+                            table=table, primary_key=primary_key
+                        ),
+                        adopt=sql.ADOPT_UPDATED_AT_TRIGGER.format(
+                            table=table, primary_key=primary_key
+                        ),
+                    )
                 )
             elif is_mti_child(model, '_updated_at'):
-                owner = column_owner(model, '_updated_at')
-                mti = {
-                    'child_table': table,
-                    'child_pk': model._meta.pk.column,
-                    'parent_table': owner._meta.db_table,
-                    'parent_pk': owner._meta.pk.column,
-                }
-                self._append_if_stale(
-                    operations,
-                    self.existing.mti_triggers,
-                    table,
-                    HEADER_MTI_UPDATED_AT.format(**mti),
-                    sql.CREATE_PARENT_UPDATED_AT_TRIGGER.format(**mti),
-                    sql.DROP_PARENT_UPDATED_AT_TRIGGER.format(child_table=table),
-                    replace=sql.REPLACE_PARENT_UPDATED_AT_TRIGGER.format(**mti),
-                    adopt=sql.ADOPT_PARENT_UPDATED_AT_TRIGGER.format(**mti),
+                mti = self._mti_context(model, table, '_updated_at')
+                rows.append(
+                    _OperationRow(
+                        recorded=self.existing.mti_triggers,
+                        key=table,
+                        header=HEADER_MTI_UPDATED_AT.format(**mti),
+                        forward=sql.CREATE_PARENT_UPDATED_AT_TRIGGER.format(**mti),
+                        reverse=sql.DROP_PARENT_UPDATED_AT_TRIGGER.format(child_table=table),
+                        replace=sql.REPLACE_PARENT_UPDATED_AT_TRIGGER.format(**mti),
+                        adopt=sql.ADOPT_PARENT_UPDATED_AT_TRIGGER.format(**mti),
+                    )
                 )
 
             # --- soft-delete rule: own table vs. MTI redirect-to-owner ---
@@ -1061,29 +1096,39 @@ class Command(BaseCommand):
             # not defensiveness but the only safe way to redefine one -- an instant without a
             # ``soft_delete`` rule is an instant in which DELETE destroys rows.
             if owns_column(model, '_deleted_at'):
-                self._append_if_stale(
-                    operations,
-                    self.existing.soft_deletes,
-                    table,
-                    HEADER_SOFT_DELETE.format(table=table),
-                    sql.CREATE_SOFT_DELETE_RULE.format(table=table, primary_key=primary_key),
-                    sql.DROP_SOFT_DELETE_RULE.format(table=table),
+                rows.append(
+                    _OperationRow(
+                        recorded=self.existing.soft_deletes,
+                        key=table,
+                        header=HEADER_SOFT_DELETE.format(table=table),
+                        forward=sql.CREATE_SOFT_DELETE_RULE.format(
+                            table=table, primary_key=primary_key
+                        ),
+                        reverse=sql.DROP_SOFT_DELETE_RULE.format(table=table),
+                    )
                 )
             elif is_mti_child(model, '_deleted_at'):
-                owner = column_owner(model, '_deleted_at')
-                mti = {
-                    'child_table': table,
-                    'child_pk': model._meta.pk.column,
-                    'parent_table': owner._meta.db_table,
-                    'parent_pk': owner._meta.pk.column,
-                }
+                mti = self._mti_context(model, table, '_deleted_at')
+                rows.append(
+                    _OperationRow(
+                        recorded=self.existing.mti_soft_deletes,
+                        key=table,
+                        header=HEADER_MTI_SOFT_DELETE.format(**mti),
+                        forward=sql.CREATE_MTI_SOFT_DELETE_RULE.format(**mti),
+                        reverse=sql.DROP_MTI_SOFT_DELETE_RULE.format(child_table=table),
+                    )
+                )
+
+            for row in rows:
                 self._append_if_stale(
                     operations,
-                    self.existing.mti_soft_deletes,
-                    table,
-                    HEADER_MTI_SOFT_DELETE.format(**mti),
-                    sql.CREATE_MTI_SOFT_DELETE_RULE.format(**mti),
-                    sql.DROP_MTI_SOFT_DELETE_RULE.format(child_table=table),
+                    row.recorded,
+                    row.key,
+                    row.header,
+                    row.forward,
+                    row.reverse,
+                    replace=row.replace,
+                    adopt=row.adopt,
                 )
 
             # --- cascade rules for CASCADE FKs pointing at this model (deferred so they

@@ -171,7 +171,10 @@ def scan_existing_operations() -> ExistingOperations:
                 # Unlike [SQL:...], [POLICY:...] is not optional -- HEADER_TENANT_POLICY
                 # always carries it, so a match of _RE_TENANT_POLICY always has one.
                 policy_identity = _recorded_policy_identity(content, match)
-                if policy_identity is None:
+                if policy_identity is None:  # pragma: no cover - unreachable: see note below
+                    # HEADER_TENANT_POLICY always writes [POLICY:...] inline, so a match of
+                    # _RE_TENANT_POLICY always has one -- this guards the invariant rather
+                    # than a real code path, in case a future header edit ever breaks it.
                     raise RuntimeError(
                         f'Tenant RLS header for "{table}" matched but carried no '
                         f'[POLICY:...] identity -- HEADER_TENANT_POLICY always writes one.'

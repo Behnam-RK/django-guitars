@@ -661,6 +661,30 @@ def test_check_reports_both_function_and_app_level_gaps_in_one_run():
     assert 'Missing or outdated enforcement migrations' in stderr
 
 
+def test_check_reports_a_missing_parent_trigger_function_migration_alongside_app_gaps():
+    """The MTI parent function migration goes through its own try/except in handle() --
+    covered independently of the base function migration's, since the two are separate
+    call sites collecting into the same function_check_messages list."""
+    command = Command()
+    command.stdout = StringIO()
+    command.stderr = StringIO()
+    command.existing.triggers.clear()
+    command.existing.soft_deletes.clear()
+    command.existing.soft_delete_related.clear()
+    command.existing.mti_triggers.clear()
+    command.existing.mti_soft_deletes.clear()
+    # The base function migration is current, so only the parent one is missing.
+    _pretend_function_migrations_are_current(command)
+    command.parent_trigger_function_dependency = None
+    command.parent_trigger_function_sql = None
+
+    with pytest.raises(CommandError, match='Run `manage.py makeguitarmigrations`'):
+        command.handle('testapp', check_only=True)
+
+    stderr = command.stderr.getvalue()
+    assert 'MTI parent trigger function migration' in stderr
+
+
 @override_settings(LOCAL_APPS=['fake.banda', 'fake.albumb'])
 def test_handle_writes_scoped_cascade_gap_warning_to_stdout(monkeypatch):
     command = Command()
@@ -815,6 +839,14 @@ def test_ensure_trigger_function_migration_writes_and_records_the_dependency(
     assert getattr(command, dependency_attr) == ('testapp', filename.removesuffix('.py'))
     # Second call is a no-op: the singleton is a singleton, and it is now current.
     assert getattr(command, method_name)() is False
+
+
+def test_tenant_force_operations_is_empty_when_policies_are_disabled():
+    """``_handle_force_rls_stage`` already gates on this before ever calling here -- covered
+    directly since a future caller reaching this method any other way must see the same
+    guard, not assume tenant policies are enabled."""
+    with override_settings(GUITARS_TENANT_POLICIES=False):
+        assert Command()._tenant_force_operations(django_apps.get_app_config('testapp')) == []
 
 
 def test_tenant_operations_force_stage_only_touches_policies_that_shipped_unforced():

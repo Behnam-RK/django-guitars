@@ -7,10 +7,13 @@ about a *silent* failure -- a generator that emits nothing while reporting succe
   digest it could not: the per-table ``_RE_*`` scan reported the table covered, so no
   operation was built and the file-level ``[DIGEST:...]`` was never reached. That is how the
   1.0.0 soft-delete guard rewrite reached every existing database as a no-op.
-* The comment headers the scan keys on must agree with the templates that emit them. The
-  two are hand-written copies in one module and nothing derived one from the other;
-  ``CLAUDE.md`` and ``docs/migrations.md`` both claimed ``tests/test_sql_interface.py``
-  guarded this, and it never did.
+* The comment headers the scan keys on must agree with the templates that emit them. Most
+  scanners are now mechanically derived from their template (see ``_derive_scanner``); the
+  handful that resist derivation -- because they fuse two header forms, or must not capture
+  one of their own placeholders -- are still hand-written, each with its own reason
+  commented at the definition. ``CLAUDE.md`` and ``docs/migrations.md`` both once claimed
+  ``tests/test_sql_interface.py`` guarded this, and it never did; ``test_header_corpus.py``
+  now does, against the project's own committed migration history.
 * ``IF EXISTS`` and ``OR REPLACE`` must appear only where the generator genuinely does not
   know what the database holds, which is under ``--adopt`` and nowhere else. Used on a path
   where the answer is known they turn "your database has diverged from its migration
@@ -37,9 +40,10 @@ from .test_command import _command_with_scaffold
 # ---------------------------------------------------------------------------
 
 #: ``(header template, scanner, placeholder values)`` for every kind of enforcement
-#: operation. The emitter and the scanner are independent hand-written strings in one
-#: module, so nothing but this table stops them drifting apart -- and a drift is invisible
-#: until a consuming project's next run silently duplicates every operation it already has.
+#: operation. Most scanners are derived from their template and cannot drift from it by
+#: construction; this table is what proves the round trip for all nine anyway, including
+#: the hand-written ones, where nothing else stops emitter and scanner drifting apart -- a
+#: drift invisible until a consuming project's next run silently duplicates an operation.
 HEADER_SCANNERS = [
     (gen.HEADER_TRIGGER_FUNCTION, gen._RE_TRIGGER_FUNCTION, {}),
     (gen.HEADER_PARENT_TRIGGER_FUNCTION, gen._RE_PARENT_TRIGGER_FUNCTION, {}),

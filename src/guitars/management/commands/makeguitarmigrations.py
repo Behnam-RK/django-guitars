@@ -190,21 +190,60 @@ def _operation(
 # Regex patterns for recognising enforcement operations already written to migration files.
 # These headers are the dedupe keys -- see the module docstring on why they are frozen.
 #
+# Most are *derived* from the HEADER_* template they recognise, rather than hand-typed a
+# second time: the two used to be independent copies of the same information with nothing
+# keeping them in sync, which is how a header could be reworded (or a regex "cleaned up")
+# without its counterpart changing to match -- a silent duplicate-migration or silent
+# no-op, the worst failure this tool has. Deriving one from the other makes that class of
+# drift impossible for every pair that can be derived at all.
+_PLACEHOLDER_IN_ESCAPED_TEMPLATE = re.compile(r'\\\{(\w+)\\\}')
+
+
+def _derive_scanner(header_template: str) -> re.Pattern[str]:
+    """Turn a frozen ``HEADER_*`` template into the regex that recognises it.
+
+    Escapes the template's literal text, then turns each escaped ``{field}``
+    placeholder into a positional, quote-delimited capture group -- every placeholder
+    in the templates this is applied to sits inside a pair of double quotes, so that is
+    the only shape handled. A header that fuses two forms, needs a *named* group, or
+    must NOT capture one of its own placeholders (see the MTI, soft-delete-related and
+    tenant-policy patterns below) resists derivation for a specific, commented reason,
+    and stays hand-written.
+    """
+    escaped = re.escape(header_template)
+    pattern = _PLACEHOLDER_IN_ESCAPED_TEMPLATE.sub(r'([^"]+)', escaped)
+    return re.compile(pattern)
+
+
 # The two function patterns used to match the *constant reference*
 # (``sql.CREATE_UPDATED_AT_TRIGGER_FUNCTION``) rather than the comment header. Now that
 # generated migrations inline their SQL there is no such reference to find, so they match
 # the header like every other kind. Both forms of migration carry the header, so this
 # recognises the ones already written as well as the ones written from here on.
-_RE_TRIGGER_FUNCTION = re.compile(r'# Define function for updated at triggers!')
-_RE_PARENT_TRIGGER_FUNCTION = re.compile(r'# Define function for MTI parent updated at triggers!')
-_RE_UPDATED_AT = re.compile(r'# Updated at Trigger on "([^"]+)" table!')
-_RE_SOFT_DELETE = re.compile(r'# Soft Delete Rule on "([^"]+)" table!')
+_RE_TRIGGER_FUNCTION = _derive_scanner(HEADER_TRIGGER_FUNCTION)
+_RE_PARENT_TRIGGER_FUNCTION = _derive_scanner(HEADER_PARENT_TRIGGER_FUNCTION)
+_RE_UPDATED_AT = _derive_scanner(HEADER_UPDATED_AT)
+_RE_SOFT_DELETE = _derive_scanner(HEADER_SOFT_DELETE)
+_RE_TENANT_FORCE = _derive_scanner(HEADER_TENANT_FORCE)
+
+# Fuses HEADER_SOFT_DELETE_RELATED and HEADER_SOFT_DELETE_RELATED_VIA -- one optional
+# trailing group standing in for two header forms -- so hand-written rather than
+# mechanically derived from either alone. Deliberately does not consume the header's
+# trailing ``!``: it stops right after the (optional) foreign_key's closing quote, one
+# character short of the literal text. That is harmless, not an oversight to "fix" -- the
+# ``[SQL:...]`` identity below is read from the *tail* of the header line independently of
+# where this match ends, so an unconsumed ``!`` in between changes nothing it reads.
 _RE_SOFT_DELETE_RELATED = re.compile(
     r'# Soft Delete Related Rule on "([^"]+)" that is related to "([^"]+)"'
     r'(?: via "(?P<foreign_key>[^"]+)")?'
 )
 # MTI headers carry a leading "MTI " token, so they never collide with the single-table
-# patterns above (which anchor on ``# Updated`` / ``# Soft`` immediately after the comment mark).
+# patterns above (which anchor on ``# Updated`` / ``# Soft`` immediately after the comment
+# mark). Hand-written rather than derived: naively deriving HEADER_MTI_UPDATED_AT /
+# HEADER_MTI_SOFT_DELETE would also capture ``parent_table`` out of ``(parent "...")!``,
+# and matching on it would mean a parent model's own restructuring (e.g. a table rename)
+# reads an MTI child's still-correct trigger as "not covered" and duplicates it. Both stop
+# right after the child table's closing quote, before ``(parent "..."`` even starts.
 _RE_MTI_UPDATED_AT = re.compile(r'# MTI Updated at Trigger on "([^"]+)" table')
 _RE_MTI_SOFT_DELETE = re.compile(r'# MTI Soft Delete Rule on "([^"]+)" table')
 # Matches both policy forms -- the initial CREATE and a later replacement -- because for
@@ -212,13 +251,13 @@ _RE_MTI_SOFT_DELETE = re.compile(r'# MTI Soft Delete Rule on "([^"]+)" table')
 # migration, and this is the shape it was written with". The ``[POLICY:...]`` identity is
 # what makes a *changed* shape detectable at all; without it the table name alone said only
 # that some policy existed, so a model gaining a tenant dimension silently kept the old,
-# weaker predicate while --check reported nothing to do.
+# weaker predicate while --check reported nothing to do. Hand-written, not derived: it fuses
+# two header forms via one optional group, which a single-template deriver cannot express.
 #
 # The FORCE header carries an extra token before "RLS", so it can never match this pattern.
 _RE_TENANT_POLICY = re.compile(
     r'# Tenant RLS (?:replaced )?on "([^"]+)" table! \[POLICY:(?P<identity>\w+)\]'
 )
-_RE_TENANT_FORCE = re.compile(r'# Tenant FORCE RLS on "([^"]+)" table!')
 # The [DIGEST:...] marker is matched by _generator.RE_DIGEST.
 
 # The per-operation content digest, read off whatever remains of the header line after one

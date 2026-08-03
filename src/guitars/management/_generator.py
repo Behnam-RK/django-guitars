@@ -33,6 +33,7 @@ each command's own business.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import textwrap
 from io import StringIO
@@ -243,4 +244,8 @@ def write_migration_file(
         dep_idx = next(i for i, line in enumerate(lines) if 'dependencies = [' in line)
         lines.insert(dep_idx + 1, dep_line)
 
-    file_path.write_text(''.join(lines), encoding=_ENCODING)
+    # Write to a temp file and swap it in: a process killed mid-write leaves the temp file
+    # truncated, never the migration Django's loader will actually read.
+    tmp_path = file_path.with_suffix(file_path.suffix + '.tmp')
+    tmp_path.write_text(''.join(lines), encoding=_ENCODING)
+    os.replace(tmp_path, file_path)

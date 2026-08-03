@@ -941,8 +941,43 @@ class Command(BaseCommand):
             else None,
         )
 
-    def _tenant_operations(self, app: AppConfig, *, force_rls: bool) -> list[str]:
-        """Tenant-policy operations *app* is missing or has outdated, for the requested stage."""
+    def _tenant_force_operations(self, app: AppConfig) -> list[str]:
+        """FORCE-only operations for *app* -- the ``--force-rls`` retrofit stage.
+
+        Only ever touches a table already policied whose policy shipped without FORCE
+        inline (``GUITARS_RLS_FORCE`` was ``False`` at the time). New policies emit FORCE
+        themselves, so this is purely the legacy backlog.
+        """
+        if not self._tenant_policies_enabled():
+            return []
+
+        coverage = app_coverage(app)
+        self._tenancy_notes.extend(coverage.notes)
+
+        operations: list[str] = []
+        for table in sorted(coverage.tables):
+            # Three ways there is nothing to do, and each would otherwise write a
+            # migration that changes nothing:
+            #   * FORCE already has its own operation;
+            #   * no policy operation exists yet -- a coverage gap FORCE must not paper
+            #     over by forcing a table that nothing scopes;
+            #   * the policy shipped with FORCE inline, which is the default.
+            if (
+                table in self.existing.tenant_forces
+                or table not in self.existing.tenant_policies
+                or table not in self.existing.unforced_policies
+            ):
+                continue
+            force_source, _ = _operation(
+                HEADER_TENANT_FORCE.format(table=table),
+                sql.force_rls(table=table),
+                sql.no_force_rls(table=table),
+            )
+            operations.append(force_source)
+        return operations
+
+    def _tenant_policy_operations(self, app: AppConfig) -> list[str]:
+        """Tenant-policy create/replace operations *app* is missing or has outdated."""
         if not self._tenant_policies_enabled():
             return []
 
@@ -951,27 +986,6 @@ class Command(BaseCommand):
 
         operations: list[str] = []
         for table, table_coverage in sorted(coverage.tables.items()):
-            if force_rls:
-                # Three ways there is nothing to do, and each would otherwise write a
-                # migration that changes nothing:
-                #   * FORCE already has its own operation;
-                #   * no policy operation exists yet -- a coverage gap FORCE must not paper
-                #     over by forcing a table that nothing scopes;
-                #   * the policy shipped with FORCE inline, which is the default.
-                if (
-                    table in self.existing.tenant_forces
-                    or table not in self.existing.tenant_policies
-                    or table not in self.existing.unforced_policies
-                ):
-                    continue
-                force_source, _ = _operation(
-                    HEADER_TENANT_FORCE.format(table=table),
-                    sql.force_rls(table=table),
-                    sql.no_force_rls(table=table),
-                )
-                operations.append(force_source)
-                continue
-
             # Two independent reasons to replace, and both must be checked. The identity
             # answers "does the policy still say what the models imply" -- a dimension added
             # or dropped, a tenant column renamed, an exempt role edited. The SQL digest
@@ -1163,7 +1177,7 @@ class Command(BaseCommand):
 
         # Tenant policies last: they are independent of the triggers and rules above (a
         # policy references neither), so they sort to the end where they read as a group.
-        return operations + deferred + self._tenant_operations(app, force_rls=False)
+        return operations + deferred + self._tenant_policy_operations(app)
 
     @staticmethod
     def _is_cascade_candidate(related_model, fk_field, on_delete) -> bool:
@@ -1539,7 +1553,7 @@ class Command(BaseCommand):
         changes_made, check_missing = self._generate_stage(
             requested,
             migration_name='auto_tenant_force',
-            build_ops=lambda app: self._tenant_operations(app, force_rls=True),
+            build_ops=self._tenant_force_operations,
             check_only=check_only,
         )
 

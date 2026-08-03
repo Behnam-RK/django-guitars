@@ -790,18 +790,18 @@ def test_tenant_operations_force_stage_only_touches_policies_that_shipped_unforc
     command = Command()
     command.stdout = StringIO()
     # As shipped: policies carry FORCE inline, so the stage has nothing to do.
-    assert command._tenant_operations(app, force_rls=True) == []
+    assert command._tenant_force_operations(app) == []
 
     # Now pretend one of them shipped inert.
     command.existing.unforced_policies.add('testapp_release')
-    operations = command._tenant_operations(app, force_rls=True)
+    operations = command._tenant_force_operations(app)
 
     assert len(operations) == 1
     assert 'Tenant FORCE RLS on "testapp_release"' in operations[0]
 
     # And once its FORCE operation exists, it is done.
     command.existing.tenant_forces.add('testapp_release')
-    assert command._tenant_operations(app, force_rls=True) == []
+    assert command._tenant_force_operations(app) == []
 
 
 def test_force_rls_stage_writes_a_migration_for_an_inert_policy(monkeypatch):
@@ -881,7 +881,7 @@ def test_tenant_policy_operations_are_emitted_for_uncovered_tables():
     command.existing.tenant_policies.clear()
     command.existing.tenant_policy_identities.clear()
 
-    operations = command._tenant_operations(app, force_rls=False)
+    operations = command._tenant_policy_operations(app)
     headers = [line for op in operations for line in op.splitlines() if line.startswith('#')]
 
     assert any(header.startswith('# Tenant RLS on "testapp_release" table!') for header in headers)
@@ -902,7 +902,7 @@ def test_a_policy_whose_shape_is_unchanged_emits_nothing():
     command = Command()
     command.stdout = StringIO()
 
-    assert command._tenant_operations(app, force_rls=False) == []
+    assert command._tenant_policy_operations(app) == []
 
 
 def test_a_changed_coverage_shape_emits_a_replacement_not_nothing():
@@ -921,7 +921,7 @@ def test_a_changed_coverage_shape_emits_a_replacement_not_nothing():
     # Pretend the recorded policy was written for a different shape.
     command.existing.tenant_policy_identities['testapp_release'] = 'stale00000000'
 
-    operations = command._tenant_operations(app, force_rls=False)
+    operations = command._tenant_policy_operations(app)
     headers = [line for op in operations for line in op.splitlines() if line.startswith('#')]
 
     assert len(headers) == 1
@@ -999,7 +999,7 @@ def test_force_rls_stage_skips_an_operation_set_already_written(monkeypatch):
     command.stdout = StringIO()
     command.existing.unforced_policies.add('testapp_release')
     # The exact digest the FORCE stage will compute for 'testapp', recorded ahead of time.
-    force_operations = command._tenant_operations(apps.get_app_config('testapp'), force_rls=True)
+    force_operations = command._tenant_force_operations(apps.get_app_config('testapp'))
     command.existing.existing_digests['testapp'] = {_generator.digest_of(force_operations)}
 
     command.handle(check_only=False, force_rls=True)

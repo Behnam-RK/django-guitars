@@ -312,7 +312,7 @@ def test_adopt_emits_the_replacement_policy_form():
     command.stdout = StringIO()
     command._adopt = True
 
-    operations = command._tenant_operations(django_apps.get_app_config('testapp'), force_rls=False)
+    operations = command._tenant_policy_operations(django_apps.get_app_config('testapp'))
 
     assert operations
     for operation in operations:
@@ -340,7 +340,7 @@ def test_a_changed_policy_sql_emits_a_replacement_even_when_the_identity_is_unch
 
     headers = [
         line
-        for operation in command._tenant_operations(app, force_rls=False)
+        for operation in command._tenant_policy_operations(app)
         for line in operation.splitlines()
         if line.startswith('#')
     ]

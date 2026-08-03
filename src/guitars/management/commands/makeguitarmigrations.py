@@ -1404,42 +1404,17 @@ class Command(BaseCommand):
                 self._ensure_parent_trigger_function_migration(check_only=check_only)
                 or changes_made
             )
-        check_missing: list[tuple[str, list[str]]] = []
-
         # Step 2: per-app trigger / soft-delete migrations, scoped to `requested`.
         # Intentionally skips cross-app CASCADE rules whose parent app isn't in
         # scope (see `_scoped_cascade_gap_notes`) -- surfaced below, not silent.
-        for app in django_apps.get_app_configs():
-            if not _generator.is_in_scope(app, requested):
-                continue
-
-            operations = self._build_operations(app)
-            if not operations:
-                continue
-
-            operations_blob = '\n'.join(operations)
-            operations_digest = _generator.digest_of(operations)
-            if operations_digest in self.existing.existing_digests.get(app.label, set()):
-                continue
-
-            if check_only:
-                check_missing.append((app.label, operations))
-                continue
-
-            migration_file = _generator.create_empty_migration_file(app, 'auto_enforcement')
-            self._write_migration_file(
-                app=app,
-                migration_file=migration_file,
-                operations=operations,
-                operations_digest=operations_digest,
-                dependencies=self._function_dependencies_for(operations_blob),
-            )
-
-            self.stdout.write(
-                self.style.MIGRATE_HEADING(f"Enforcement migrations for '{app.label}':")
-            )
-            self.stdout.write(f'  migrations/{migration_file}')
-            changes_made = True
+        stage_changed, check_missing = self._generate_stage(
+            requested,
+            migration_name='auto_enforcement',
+            build_ops=self._build_operations,
+            check_only=check_only,
+            dependencies_for=self._function_dependencies_for,
+        )
+        changes_made = changes_made or stage_changed
 
         # Step 3: surface cross-app cascade rules this scoped run intentionally
         # did not create, so the "pragmatic scope" tradeoff is never silent.
@@ -1459,6 +1434,63 @@ class Command(BaseCommand):
 
         if not changes_made and not check_only:
             self.stdout.write('No changes detected')
+
+    def _generate_stage(
+        self,
+        requested: set[str],
+        *,
+        migration_name: str,
+        build_ops: Callable[[AppConfig], list[str]],
+        check_only: bool,
+        dependencies_for: Callable[[str], list[tuple[str, str]]] | None = None,
+    ) -> tuple[bool, list[tuple[str, list[str]]]]:
+        """Scaffold-and-write one migration per in-scope app whose operations are new.
+
+        Shared by ``handle()``'s per-app loop and :meth:`_handle_force_rls_stage`'s -- the
+        two used to be an almost line-for-line copy of each other, differing only in which
+        method built the operations, what name the scaffolded migration got, and whether it
+        declared a dependency on the singleton trigger-function migration(s).
+
+        Returns ``(changes_made, check_missing)`` for the caller to fold into its own
+        bookkeeping rather than writing either itself: the two callers flush different sets
+        of warning-note lists afterward (``handle()`` flushes three, the FORCE stage only
+        one), and getting that difference right matters more than deduplicating it away too.
+        """
+        changes_made = False
+        check_missing: list[tuple[str, list[str]]] = []
+        for app in django_apps.get_app_configs():
+            if not _generator.is_in_scope(app, requested):
+                continue
+
+            operations = build_ops(app)
+            if not operations:
+                continue
+
+            operations_digest = _generator.digest_of(operations)
+            if operations_digest in self.existing.existing_digests.get(app.label, set()):
+                continue
+
+            if check_only:
+                check_missing.append((app.label, operations))
+                continue
+
+            migration_file = _generator.create_empty_migration_file(app, migration_name)
+            dependencies = dependencies_for('\n'.join(operations)) if dependencies_for else None
+            self._write_migration_file(
+                app=app,
+                migration_file=migration_file,
+                operations=operations,
+                operations_digest=operations_digest,
+                dependencies=dependencies,
+            )
+
+            self.stdout.write(
+                self.style.MIGRATE_HEADING(f"Enforcement migrations for '{app.label}':")
+            )
+            self.stdout.write(f'  migrations/{migration_file}')
+            changes_made = True
+
+        return changes_made, check_missing
 
     def _report_missing(self, check_missing: list[tuple[str, list[str]]]) -> None:
         """Print what ``--check`` found and exit non-zero.
@@ -1504,36 +1536,12 @@ class Command(BaseCommand):
             )
             return
 
-        changes_made = False
-        check_missing: list[tuple[str, list[str]]] = []
-        for app in django_apps.get_app_configs():
-            if not _generator.is_in_scope(app, requested):
-                continue
-
-            operations = self._tenant_operations(app, force_rls=True)
-            if not operations:
-                continue
-
-            operations_digest = _generator.digest_of(operations)
-            if operations_digest in self.existing.existing_digests.get(app.label, set()):
-                continue
-
-            if check_only:
-                check_missing.append((app.label, operations))
-                continue
-
-            migration_file = _generator.create_empty_migration_file(app, 'auto_tenant_force')
-            self._write_migration_file(
-                app=app,
-                migration_file=migration_file,
-                operations=operations,
-                operations_digest=operations_digest,
-            )
-            self.stdout.write(
-                self.style.MIGRATE_HEADING(f"Enforcement migrations for '{app.label}':")
-            )
-            self.stdout.write(f'  migrations/{migration_file}')
-            changes_made = True
+        changes_made, check_missing = self._generate_stage(
+            requested,
+            migration_name='auto_tenant_force',
+            build_ops=lambda app: self._tenant_operations(app, force_rls=True),
+            check_only=check_only,
+        )
 
         for note in self._tenancy_notes:
             self.stdout.write(self.style.WARNING(note))

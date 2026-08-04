@@ -180,19 +180,30 @@ def test_the_constant_and_callable_sets_do_not_overlap():
 
 
 def test_generator_templates_reference_only_names_that_resolve():
-    """Cross-check the command's operation templates against the module.
+    """Cross-check the generator's operation templates against the module.
 
     The templates are strings, so a renamed constant is not a Python error here --
     it becomes a broken generated migration that only fails when someone runs
     ``migrate`` on a fresh database.
+
+    Scans every module in ``guitars.management.enforcement`` (the generator's own
+    package, split by concern in #10/M3) rather than a single file: a ``sql.*``
+    reference can live in any of them, and a scan bounded to one file would silently
+    stop checking most references the moment they moved to another.
     """
-    command = _PACKAGE_ROOT / 'management' / 'commands' / 'makeguitarmigrations.py'
-    referenced = _referenced_names(command.read_text(encoding='utf-8'))
+    enforcement_dir = _PACKAGE_ROOT / 'management' / 'enforcement'
+    modules = sorted(enforcement_dir.glob('*.py'))
+    assert modules, 'found no modules under guitars/management/enforcement/'
+
+    referenced: set[str] = set()
+    for path in modules:
+        referenced |= _referenced_names(path.read_text(encoding='utf-8'))
 
     assert referenced, 'found no sql.* references in the generator -- has the regex rotted?'
     unresolved = sorted(name for name in referenced if not hasattr(sql, name))
     assert not unresolved, (
-        f'{command.name} emits migrations referencing sql names that do not exist: {unresolved}'
+        f'guitars.management.enforcement emits migrations referencing sql names that do '
+        f'not exist: {unresolved}'
     )
 
 

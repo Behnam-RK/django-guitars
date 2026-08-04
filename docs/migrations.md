@@ -127,8 +127,13 @@ it once.
 > ⚠️ **Those header strings are frozen.** Reword one and every existing migration
 > stops being recognised, and the next run emits duplicates.
 > `tests/test_enforcement_identity.py` asserts every emitted header is matched by
-> the scanner meant to read it — the two are hand-written copies in one module and
-> nothing else stops them drifting.
+> the scanner meant to read it. Most scanners in
+> `guitars.management.enforcement.headers` are mechanically derived from their
+> `HEADER_*` template, so they cannot drift from it by construction; the few that
+> fuse two header forms or must not capture their own placeholder stay
+> hand-written. `tests/test_header_corpus.py` additionally guards every scanner —
+> derived or hand-written — against the project's own committed migration
+> history.
 >
 > The public names in `guitars.sql` are frozen for a different reason: migrations
 > generated before 1.1.0 and committed in consuming projects do
@@ -215,6 +220,14 @@ happened to find first.
 The generated import is inserted after the scaffold's **last** import rather than
 at a fixed offset, so a change to Django's `--empty` template cannot land it
 inside the class body.
+
+**A scaffold can fail after Django has already written it** — if the stdout-parsing
+step that recovers the filename doesn't match, the empty file is already on disk with
+nothing to reference it by. It is left in place rather than deleted: cleaning up a file
+this command didn't stamp is a bigger footgun than leaving it, and an unstamped scaffold
+carries no `[DIGEST:...]`, so a later run can never mistake it for already covering
+anything — it just sits as visible dead weight, and the raised error names the directory
+to check by hand.
 
 ## Staging row-level security
 

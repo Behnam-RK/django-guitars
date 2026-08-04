@@ -1,9 +1,9 @@
 """Frozen header templates and the scanners that recognise them.
 
 These headers are the dedupe keys the whole generator relies on -- see
-``guitars.management.commands.makeguitarmigrations``'s module docstring for the full
-three-layer idempotency account. Reword one and every existing migration stops being
-recognised; the next run emits duplicates.
+``guitars.management.enforcement.command``'s module docstring for the full three-layer
+idempotency account. Reword one and every existing migration stops being recognised; the
+next run emits duplicates.
 """
 
 from __future__ import annotations

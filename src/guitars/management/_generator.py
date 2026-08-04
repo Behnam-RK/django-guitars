@@ -58,7 +58,6 @@ __all__ = [
     'is_in_scope',
     'is_local',
     'iter_migration_files',
-    'migration_with_digest_exists',
     'migrations_dir',
     'validate_app_labels',
     'write_migration_file',
@@ -141,19 +140,6 @@ def iter_migration_files(app: AppConfig) -> Iterator[tuple[Path, str]]:
         return
     for path in sorted(app_migrations_dir.glob('*.py')):
         yield path, path.read_text(encoding=_ENCODING)
-
-
-def migration_with_digest_exists(app: AppConfig, operations_digest: str) -> bool:
-    """Whether *app* already has a generated migration stamped with this digest."""
-    app_migrations_dir = migrations_dir(app)
-    if not app_migrations_dir.is_dir():
-        return False
-    for path in app_migrations_dir.glob('*.py'):
-        first_line = path.read_text(encoding=_ENCODING).split('\n', 1)[0]
-        match = RE_DIGEST.search(first_line)
-        if match and match.group('digest') == operations_digest:
-            return True
-    return False
 
 
 def digest_of(operations: list[str]) -> str:

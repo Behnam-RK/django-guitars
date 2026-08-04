@@ -74,7 +74,7 @@ def test_upgrading_an_already_migrated_legacy_project():
         # The *replace* form specifically, not a plain create: the generator knows this
         # object already exists (a header was found, just with no matching digest), and a
         # plain CREATE here would fail `migrate` with "already exists".
-        assert 'DROP TRIGGER updated_at_trigger ON legacy_migrations_legacyband' in content
+        assert 'DROP TRIGGER updated_at_trigger ON "legacy_migrations_legacyband"' in content
 
         call_command('migrate', 'legacy_migrations', stdout=StringIO())
 

@@ -31,6 +31,13 @@ more; see ``docs/soft-deletion.md``.
 
 The MTI redirect rule at the bottom preserves the child row and stamps the *owner*
 instead -- see the package docstring for the shared-PK invariant it relies on.
+
+Every quoted ``"{table}"``-shaped placeholder here is an identifier position, escaped by
+the caller via ``guitars.sql._identifiers._escape_ident`` before ``.format()``. The one
+exception is the rule name itself (``soft_delete_related_{related_table}``/``_{foreign_key}``)
+-- left bare and unquoted for now, because it also needs NAMEDATALEN-safe truncation
+(a >63-byte related-table name would otherwise collide with another one sharing a long
+prefix); that treatment is applied at the call site, not here.
 """
 
 # *********************************************************************************
@@ -50,33 +57,33 @@ CHECK_RULE_EXISTS_ON_TABLE = """
 
 CREATE_SOFT_DELETE_RULE = """
     CREATE OR REPLACE RULE soft_delete
-        AS ON DELETE TO {table}
+        AS ON DELETE TO "{table}"
         WHERE COALESCE(current_setting('rules.hard_deletion', true), '') <> 'on'
         DO INSTEAD (
-            UPDATE {table}
+            UPDATE "{table}"
             SET _deleted_at = NOW()
-            WHERE {primary_key} = old.{primary_key} AND _deleted_at IS NULL
+            WHERE "{primary_key}" = old."{primary_key}" AND _deleted_at IS NULL
         );
 """
 
 DROP_SOFT_DELETE_RULE = """
-    DROP RULE soft_delete ON {table};
+    DROP RULE soft_delete ON "{table}";
 """
 
 CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE = """
     CREATE OR REPLACE RULE soft_delete_related_{related_table}
-        AS ON UPDATE TO {table}
+        AS ON UPDATE TO "{table}"
         WHERE old._deleted_at IS NULL AND new._deleted_at IS NOT NULL AND
               COALESCE(current_setting('rules.hard_deletion', true), '') <> 'on'
         DO ALSO (
-            UPDATE {related_table}
+            UPDATE "{related_table}"
             SET _deleted_at = NOW()
-            WHERE {foreign_key} = old.{primary_key}
+            WHERE "{foreign_key}" = old."{primary_key}"
         );
 """
 
 DROP_SOFT_DELETE_RELATED_OBJECTS_RULE = """
-    DROP RULE soft_delete_related_{related_table} ON {table};
+    DROP RULE soft_delete_related_{related_table} ON "{table}";
 """
 
 # A second CASCADE FK from the same related table to the same parent needs a rule name
@@ -90,18 +97,18 @@ DROP_SOFT_DELETE_RELATED_OBJECTS_RULE = """
 
 CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE_VIA = """
     CREATE OR REPLACE RULE soft_delete_related_{related_table}_{foreign_key}
-        AS ON UPDATE TO {table}
+        AS ON UPDATE TO "{table}"
         WHERE old._deleted_at IS NULL AND new._deleted_at IS NOT NULL AND
               COALESCE(current_setting('rules.hard_deletion', true), '') <> 'on'
         DO ALSO (
-            UPDATE {related_table}
+            UPDATE "{related_table}"
             SET _deleted_at = NOW()
-            WHERE {foreign_key} = old.{primary_key}
+            WHERE "{foreign_key}" = old."{primary_key}"
         );
 """
 
 DROP_SOFT_DELETE_RELATED_OBJECTS_RULE_VIA = """
-    DROP RULE soft_delete_related_{related_table}_{foreign_key} ON {table};
+    DROP RULE soft_delete_related_{related_table}_{foreign_key} ON "{table}";
 """
 
 # ---- MTI soft-delete rule (on the child table, soft-deletes the owner, preserves child row) ----
@@ -111,15 +118,15 @@ DROP_SOFT_DELETE_RELATED_OBJECTS_RULE_VIA = """
 
 CREATE_MTI_SOFT_DELETE_RULE = """
     CREATE OR REPLACE RULE soft_delete
-        AS ON DELETE TO {child_table}
+        AS ON DELETE TO "{child_table}"
         WHERE COALESCE(current_setting('rules.hard_deletion', true), '') <> 'on'
         DO INSTEAD (
-            UPDATE {parent_table}
+            UPDATE "{parent_table}"
             SET _deleted_at = NOW()
-            WHERE {parent_pk} = old.{child_pk} AND _deleted_at IS NULL
+            WHERE "{parent_pk}" = old."{child_pk}" AND _deleted_at IS NULL
         );
 """
 
 DROP_MTI_SOFT_DELETE_RULE = """
-    DROP RULE soft_delete ON {child_table};
+    DROP RULE soft_delete ON "{child_table}";
 """

@@ -63,6 +63,20 @@ def _bare_or_qualified(kind: str, name: str) -> tuple[str | None, str]:
     return _bare(f'{kind} schema', schema), _bare(kind, rest)
 
 
+def _escape_ident(name: str) -> str:
+    """Escape an identifier's *inner* content, without wrapping it in quotes.
+
+    For templates that already own their surrounding ``"..."`` (e.g. the trigger and
+    soft-delete templates' quoted ``ON "{table}"`` positions) -- wrapping again here would
+    double the quotes. Same escaping rule as :func:`_quote_ident`, split out for the same
+    reason :func:`_escape_literal` is: a value substituted into an already-quoted template
+    position needs escaping but not another layer of wrapping.
+    """
+    if '\x00' in name:
+        raise ValueError('SQL identifiers cannot contain a NUL byte.')
+    return name.replace('"', '""')
+
+
 def _quote_ident(name: str) -> str:
     """Double-quote an identifier, PostgreSQL's ``quote_ident``.
 
@@ -72,9 +86,7 @@ def _quote_ident(name: str) -> str:
     quoted; bare, the first silently becomes ``bi_reader`` and the second is a syntax
     error.
     """
-    if '\x00' in name:
-        raise ValueError('SQL identifiers cannot contain a NUL byte.')
-    return '"' + name.replace('"', '""') + '"'
+    return '"' + _escape_ident(name) + '"'
 
 
 def _quote_qualified(schema: str | None, name: str) -> str:

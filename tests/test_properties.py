@@ -4,13 +4,14 @@ Two independent gaps neither example-based tests nor 100% coverage can see:
 
 * **Identifiers.** ``sql/policy.py``'s ``_bare()`` raises a build-time ``ValueError`` for
   anything failing ``^[a-z_][a-z0-9_$]*$`` -- the "clear build-time error" for a hostile
-  ``db_table``/``db_column``. But ``_bare()`` is applied *only* on the tenant-policy path
-  (every call site is in ``sql/policy.py``); the trigger and rule SQL
-  ``makeguitarmigrations.py`` builds via ``sql.CREATE_UPDATED_AT_TRIGGER.format(table=...)``
-  and friends has no validation at all. So ``db_table = 'Order Items'`` raises cleanly on a
-  ``GuitarModel`` and silently generates broken SQL on a ``SetarModel``. See CLAUDE.md's
-  "Findings that change the issue's plan", finding 3 -- fixing this is M4's job; this file
-  only pins the asymmetry so M4 lands against a red test rather than a blind spot.
+  ``db_table``/``db_column``. Before M4, ``_bare()`` was applied *only* on the
+  tenant-policy path: the trigger and rule SQL ``makeguitarmigrations.py`` builds via
+  ``sql.CREATE_UPDATED_AT_TRIGGER.format(table=...)`` and friends had no validation at
+  all, so ``db_table = 'Order Items'`` raised cleanly on a ``GuitarModel`` and silently
+  generated broken SQL on a ``SetarModel``. M4 closed that asymmetry by baking quoting
+  into the trigger/rule templates themselves (see ``sql/triggers.py``/``sql/soft_delete.py``),
+  so ``test_trigger_rule_path_is_defensible_against_hostile_identifiers`` below now passes
+  for real rather than as a pinned ``xfail``.
 
   Separately, ``_bare()`` checks *shape* only -- never reservedness or length -- so a
   lowercase reserved word or a >=63-byte name passes it silently on *both* paths alike;
@@ -32,7 +33,7 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from guitars import sql
-from guitars.sql._identifiers import _BARE_IDENTIFIER
+from guitars.sql._identifiers import _BARE_IDENTIFIER, _escape_ident, _escape_literal
 from tests.testapp.models import Band
 
 
@@ -73,21 +74,41 @@ class TestIdentifierValidation:
         assert _BARE_IDENTIFIER.match(name)
         assert sql.enable_rls(table=name) == f'ALTER TABLE {name} ENABLE ROW LEVEL SECURITY'
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            'M4: makeguitarmigrations._build_operations interpolates db_table bare into '
-            'sql.CREATE_UPDATED_AT_TRIGGER/CREATE_SOFT_DELETE_RULE with no _bare()-equivalent '
-            'guard, unlike the tenant-policy path. Flip this once M4 adds one there.'
-        ),
-    )
     @given(name=_shape_invalid_identifiers)
     def test_trigger_rule_path_is_defensible_against_hostile_identifiers(self, name):
+        """M4: the template now bakes quote characters around its bare-identifier
+        positions, so a hostile ``table`` renders safely quoted rather than interpolated
+        bare -- even called directly on the raw constant, bypassing the generator's own
+        escaping. NOTE: for a schema-qualified name (``'public.mytable'``) this currently
+        renders as one quoted blob (``"public.mytable"``), a single wrong-but-safe
+        identifier rather than a real two-part schema reference -- that distinction is
+        M4's schema-qualified-support commit, not this one.
+        """
         assert not _BARE_IDENTIFIER.match(name)
         rendered = sql.CREATE_UPDATED_AT_TRIGGER.format(table=name, primary_key='id')
-        # "Defensible" = either this call would have raised above (it never does today), or
-        # the identifier comes back safely quoted rather than interpolated bare.
         assert f'"{name}"' in rendered
+
+    def test_embedded_quote_in_a_literal_position_is_doubled_not_broken(self):
+        """``'{primary_key}'`` in the trigger templates is a string-literal argument to
+        ``set_updated_at()``/``set_parent_updated_at()``, not a bare identifier -- a value
+        with an embedded ``'`` must come back escaped via ``_escape_literal`` (doubled),
+        the same way ``operations.py`` escapes it before calling ``.format()``, or the
+        statement's own quote boundary breaks.
+        """
+        rendered = sql.CREATE_UPDATED_AT_TRIGGER.format(
+            table='band', primary_key=_escape_literal("weird'pk")
+        )
+        assert "set_updated_at('weird''pk')" in rendered
+
+    def test_embedded_quote_in_a_bare_identifier_position_is_doubled_not_broken(self):
+        """``"{table}"`` is a bare-identifier position -- a value with an embedded ``"``
+        must come back escaped via ``_escape_ident`` (doubled), the same way
+        ``operations.py`` escapes it before calling ``.format()``.
+        """
+        rendered = sql.CREATE_SOFT_DELETE_RULE.format(
+            table=_escape_ident('weird"table'), primary_key='id'
+        )
+        assert 'ON DELETE TO "weird""table"' in rendered
 
 
 class TestUpdateFlagCombinatorics:

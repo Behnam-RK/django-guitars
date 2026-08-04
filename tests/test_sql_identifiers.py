@@ -44,6 +44,21 @@ class TestQuoteQualified:
         assert _identifiers._quote_qualified('analytics', 'events') == '"analytics"."events"'
 
 
+class TestEscapeIdent:
+    def test_returns_unwrapped_content(self):
+        assert _identifiers._escape_ident('plain') == 'plain'
+
+    def test_doubles_embedded_double_quotes(self):
+        assert _identifiers._escape_ident('weird"table') == 'weird""table'
+
+    def test_rejects_a_nul_byte(self):
+        with pytest.raises(ValueError, match='identifiers cannot contain a NUL byte'):
+            _identifiers._escape_ident('bad\x00value')
+
+    def test_quote_ident_wraps_the_escaped_content(self):
+        assert _identifiers._quote_ident('weird"table') == '"weird""table"'
+
+
 class TestEscapeLiteral:
     def test_returns_unwrapped_content(self):
         assert _identifiers._escape_literal('plain') == 'plain'

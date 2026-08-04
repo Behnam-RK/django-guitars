@@ -14,7 +14,7 @@ bookkeeping, not data these methods are meaningfully reusable over independently
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, NamedTuple, cast
 
 from django.apps import apps as django_apps
 from django.db import models
@@ -36,6 +36,7 @@ from guitars.management.enforcement.headers import (
     HEADER_UPDATED_AT,
 )
 from guitars.management.enforcement.identity import _literal, _operation
+from guitars.sql import _identifiers
 from guitars.tenancy.discovery import app_coverage
 
 
@@ -297,20 +298,25 @@ class OperationsMixin:
         operations.append(source)
 
     @staticmethod
-    def _mti_context(model: type[models.Model], table: str, column: str) -> dict[str, str | None]:
+    def _mti_context(model: type[models.Model], table: str, column: str) -> dict[str, str]:
         """The ``{child_table, child_pk, parent_table, parent_pk}`` an MTI operation needs.
 
         Parametrized on *column* rather than computed once per model: an MTI child's
         ``_updated_at`` and ``_deleted_at`` are resolved independently via
         :func:`column_owner`, and nothing guarantees the same ancestor owns both, so this
         must be called once per column rather than shared across the two kinds below.
+
+        ``.pk.column`` is typed ``str | None`` by Django's own stubs (a field can exist
+        without a resolved column), but every concrete, registered model passed in here
+        always has one -- cast rather than re-validate a framework guarantee already relied
+        on everywhere else this attribute is read.
         """
         owner = column_owner(model, column)
         return {
             'child_table': table,
-            'child_pk': model._meta.pk.column,
+            'child_pk': cast(str, model._meta.pk.column),
             'parent_table': owner._meta.db_table,
-            'parent_pk': owner._meta.pk.column,
+            'parent_pk': cast(str, owner._meta.pk.column),
         }
 
     def _build_operations(self, app: AppConfig, *, adopt: bool = False) -> list[str]:
@@ -325,40 +331,56 @@ class OperationsMixin:
             # or is a ``OneToOneField(primary_key=True)`` (name ``owner``, column
             # ``owner_id``), would have produced a rule referencing a column that does not
             # exist and failed at ``migrate``. The MTI branches below already used ``.column``.
-            primary_key = model._meta.pk.column
+            # Cast rather than re-validate: see _mti_context's docstring on why `.pk.column`
+            # is always populated for a concrete, registered model despite its stub type.
+            primary_key = cast(str, model._meta.pk.column)
 
             rows: list[_OperationRow] = []
 
             # --- updated_at trigger: own table vs. MTI parent-propagation ---
+            # `table`/`child_table` are bare-identifier template positions (escaped via
+            # _escape_ident); `primary_key`/`parent_table`/`parent_pk`/`child_pk` are
+            # string-literal arguments to set_updated_at()/set_parent_updated_at()
+            # (escaped via _escape_literal) -- see triggers.py's module docstring.
             if owns_column(model, '_updated_at'):
+                ident_table = _identifiers._escape_ident(table)
+                literal_primary_key = _identifiers._escape_literal(primary_key)
                 rows.append(
                     _OperationRow(
                         recorded=self.existing.triggers,
                         key=table,
                         header=HEADER_UPDATED_AT.format(table=table),
                         forward=sql.CREATE_UPDATED_AT_TRIGGER.format(
-                            table=table, primary_key=primary_key
+                            table=ident_table, primary_key=literal_primary_key
                         ),
-                        reverse=sql.DROP_UPDATED_AT_TRIGGER.format(table=table),
+                        reverse=sql.DROP_UPDATED_AT_TRIGGER.format(table=ident_table),
                         replace=sql.REPLACE_UPDATED_AT_TRIGGER.format(
-                            table=table, primary_key=primary_key
+                            table=ident_table, primary_key=literal_primary_key
                         ),
                         adopt=sql.ADOPT_UPDATED_AT_TRIGGER.format(
-                            table=table, primary_key=primary_key
+                            table=ident_table, primary_key=literal_primary_key
                         ),
                     )
                 )
             elif is_mti_child(model, '_updated_at'):
                 mti = self._mti_context(model, table, '_updated_at')
+                mti_sql = {
+                    'child_table': _identifiers._escape_ident(mti['child_table']),
+                    'parent_table': _identifiers._escape_literal(mti['parent_table']),
+                    'parent_pk': _identifiers._escape_literal(mti['parent_pk']),
+                    'child_pk': _identifiers._escape_literal(mti['child_pk']),
+                }
                 rows.append(
                     _OperationRow(
                         recorded=self.existing.mti_triggers,
                         key=table,
                         header=HEADER_MTI_UPDATED_AT.format(**mti),
-                        forward=sql.CREATE_PARENT_UPDATED_AT_TRIGGER.format(**mti),
-                        reverse=sql.DROP_PARENT_UPDATED_AT_TRIGGER.format(child_table=table),
-                        replace=sql.REPLACE_PARENT_UPDATED_AT_TRIGGER.format(**mti),
-                        adopt=sql.ADOPT_PARENT_UPDATED_AT_TRIGGER.format(**mti),
+                        forward=sql.CREATE_PARENT_UPDATED_AT_TRIGGER.format(**mti_sql),
+                        reverse=sql.DROP_PARENT_UPDATED_AT_TRIGGER.format(
+                            child_table=_identifiers._escape_ident(table)
+                        ),
+                        replace=sql.REPLACE_PARENT_UPDATED_AT_TRIGGER.format(**mti_sql),
+                        adopt=sql.ADOPT_PARENT_UPDATED_AT_TRIGGER.format(**mti_sql),
                     )
                 )
 
@@ -366,6 +388,9 @@ class OperationsMixin:
             # Rules need no replace or adopt form: they are created ``OR REPLACE``, which is
             # not defensiveness but the only safe way to redefine one -- an instant without a
             # ``soft_delete`` rule is an instant in which DELETE destroys rows.
+            # --- soft-delete rule: every placeholder here is a bare-identifier position
+            #     (escaped via _escape_ident) -- soft_delete.py's templates have no
+            #     string-literal-argument positions, unlike the trigger templates above.
             if owns_column(model, '_deleted_at'):
                 rows.append(
                     _OperationRow(
@@ -373,20 +398,26 @@ class OperationsMixin:
                         key=table,
                         header=HEADER_SOFT_DELETE.format(table=table),
                         forward=sql.CREATE_SOFT_DELETE_RULE.format(
-                            table=table, primary_key=primary_key
+                            table=_identifiers._escape_ident(table),
+                            primary_key=_identifiers._escape_ident(primary_key),
                         ),
-                        reverse=sql.DROP_SOFT_DELETE_RULE.format(table=table),
+                        reverse=sql.DROP_SOFT_DELETE_RULE.format(
+                            table=_identifiers._escape_ident(table)
+                        ),
                     )
                 )
             elif is_mti_child(model, '_deleted_at'):
                 mti = self._mti_context(model, table, '_deleted_at')
+                mti_sql = {key: _identifiers._escape_ident(value) for key, value in mti.items()}
                 rows.append(
                     _OperationRow(
                         recorded=self.existing.mti_soft_deletes,
                         key=table,
                         header=HEADER_MTI_SOFT_DELETE.format(**mti),
-                        forward=sql.CREATE_MTI_SOFT_DELETE_RULE.format(**mti),
-                        reverse=sql.DROP_MTI_SOFT_DELETE_RULE.format(child_table=table),
+                        forward=sql.CREATE_MTI_SOFT_DELETE_RULE.format(**mti_sql),
+                        reverse=sql.DROP_MTI_SOFT_DELETE_RULE.format(
+                            child_table=_identifiers._escape_ident(table)
+                        ),
                     )
                 )
 
@@ -498,24 +529,31 @@ class OperationsMixin:
         """
         owner = column_owner(model, '_deleted_at')
         owner_table = owner._meta.db_table
-        owner_pk = owner._meta.pk.column
+        owner_pk = cast(str, owner._meta.pk.column)
 
         ops: list[str] = []
         for related_model, fk_field, is_primary in self._cascade_candidates(model, owner_table):
             related_table = related_model._meta.db_table
+            # Headers stay on the raw (unescaped) names -- they're comments the scanner
+            # regex-matches back to a table name, not SQL, so escaping them would break
+            # that round-trip. The SQL itself uses the escaped forms throughout.
+            ident_owner_table = _identifiers._escape_ident(owner_table)
+            ident_related_table = _identifiers._escape_ident(related_table)
+            ident_owner_pk = _identifiers._escape_ident(owner_pk)
+            ident_foreign_key = _identifiers._escape_ident(fk_field.column)
             if is_primary:
                 key = (related_table, owner_table, None)
                 header = HEADER_SOFT_DELETE_RELATED.format(
                     related_table=related_table, table=owner_table
                 )
                 forward = sql.CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE.format(
-                    table=owner_table,
-                    related_table=related_table,
-                    primary_key=owner_pk,
-                    foreign_key=fk_field.column,
+                    table=ident_owner_table,
+                    related_table=ident_related_table,
+                    primary_key=ident_owner_pk,
+                    foreign_key=ident_foreign_key,
                 )
                 reverse = sql.DROP_SOFT_DELETE_RELATED_OBJECTS_RULE.format(
-                    table=owner_table, related_table=related_table
+                    table=ident_owner_table, related_table=ident_related_table
                 )
             else:
                 key = (related_table, owner_table, fk_field.column)
@@ -523,13 +561,15 @@ class OperationsMixin:
                     related_table=related_table, table=owner_table, foreign_key=fk_field.column
                 )
                 forward = sql.CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE_VIA.format(
-                    table=owner_table,
-                    related_table=related_table,
-                    primary_key=owner_pk,
-                    foreign_key=fk_field.column,
+                    table=ident_owner_table,
+                    related_table=ident_related_table,
+                    primary_key=ident_owner_pk,
+                    foreign_key=ident_foreign_key,
                 )
                 reverse = sql.DROP_SOFT_DELETE_RELATED_OBJECTS_RULE_VIA.format(
-                    table=owner_table, related_table=related_table, foreign_key=fk_field.column
+                    table=ident_owner_table,
+                    related_table=ident_related_table,
+                    foreign_key=ident_foreign_key,
                 )
             self._append_if_stale(
                 ops,

@@ -10,6 +10,14 @@ The MTI pair at the bottom exists because the metadata columns live only on the
 ancestor that declares them, while a child-only ``QuerySet.update()`` writes only
 the child table -- see the package docstring for the shared-PK invariant that lets
 a trigger on the child address the owning ancestor row directly.
+
+Two placeholder kinds, escaped differently by the caller before ``.format()``:
+``"{table}"``/``"{child_table}"`` are **identifier** positions (``guitars.sql._identifiers
+._escape_ident``); ``'{primary_key}'``/``'{parent_table}'``/``'{parent_pk}'``/
+``'{child_pk}'`` inside the ``set_updated_at(...)``/``set_parent_updated_at(...)`` calls are
+**string-literal** arguments to those functions (``_escape_literal``) -- the function itself
+re-quotes them as identifiers at trigger-fire time via ``%I``, so they must not be
+double-quoted here too.
 """
 
 # *****************************************************************************************
@@ -81,14 +89,14 @@ CHECK_TRIGGER_EXISTS_ON_TABLE = """
 
 CREATE_UPDATED_AT_TRIGGER = """
     CREATE TRIGGER updated_at_trigger
-        AFTER UPDATE ON {table} REFERENCING NEW TABLE AS new_table
+        AFTER UPDATE ON "{table}" REFERENCING NEW TABLE AS new_table
         FOR EACH STATEMENT
         WHEN (pg_trigger_depth() = 0)
         EXECUTE FUNCTION set_updated_at('{primary_key}');
 """
 
 DROP_UPDATED_AT_TRIGGER = """
-    DROP TRIGGER updated_at_trigger ON {table};
+    DROP TRIGGER updated_at_trigger ON "{table}";
 """
 
 # PostgreSQL has no ``CREATE OR REPLACE TRIGGER`` before 14, and this package declares no
@@ -106,14 +114,14 @@ DROP_UPDATED_AT_TRIGGER = """
 #   uncertainty is real and was opted into explicitly, so ``IF EXISTS`` states it honestly.
 REPLACE_UPDATED_AT_TRIGGER = (
     """
-    DROP TRIGGER updated_at_trigger ON {table};
+    DROP TRIGGER updated_at_trigger ON "{table}";
 """
     + CREATE_UPDATED_AT_TRIGGER
 )
 
 ADOPT_UPDATED_AT_TRIGGER = (
     """
-    DROP TRIGGER IF EXISTS updated_at_trigger ON {table};
+    DROP TRIGGER IF EXISTS updated_at_trigger ON "{table}";
 """
     + CREATE_UPDATED_AT_TRIGGER
 )
@@ -170,27 +178,27 @@ REPLACE_PARENT_UPDATED_AT_TRIGGER_FUNCTION = """
 
 CREATE_PARENT_UPDATED_AT_TRIGGER = """
     CREATE TRIGGER updated_at_trigger
-        AFTER UPDATE ON {child_table} REFERENCING NEW TABLE AS new_table
+        AFTER UPDATE ON "{child_table}" REFERENCING NEW TABLE AS new_table
         FOR EACH STATEMENT
         WHEN (pg_trigger_depth() = 0)
         EXECUTE FUNCTION set_parent_updated_at('{parent_table}', '{parent_pk}', '{child_pk}');
 """
 
 DROP_PARENT_UPDATED_AT_TRIGGER = """
-    DROP TRIGGER updated_at_trigger ON {child_table};
+    DROP TRIGGER updated_at_trigger ON "{child_table}";
 """
 
 # Same two-form split as REPLACE_/ADOPT_UPDATED_AT_TRIGGER above.
 REPLACE_PARENT_UPDATED_AT_TRIGGER = (
     """
-    DROP TRIGGER updated_at_trigger ON {child_table};
+    DROP TRIGGER updated_at_trigger ON "{child_table}";
 """
     + CREATE_PARENT_UPDATED_AT_TRIGGER
 )
 
 ADOPT_PARENT_UPDATED_AT_TRIGGER = (
     """
-    DROP TRIGGER IF EXISTS updated_at_trigger ON {child_table};
+    DROP TRIGGER IF EXISTS updated_at_trigger ON "{child_table}";
 """
     + CREATE_PARENT_UPDATED_AT_TRIGGER
 )

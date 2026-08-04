@@ -35,9 +35,8 @@ same value, NULL included -- so the fail-closed reasoning above is untouched.
 
 from __future__ import annotations
 
-import re
-
 from guitars.gucs import BYPASS_GUC, VALUE_SEPARATOR, guc_name
+from guitars.sql._identifiers import _bare, _quote_ident, _quote_literal
 
 
 __all__ = [
@@ -66,59 +65,6 @@ EXEMPT_POLICY_PREFIX = 'rls_exempt_'
 #: Alias for the ancestor table in an MTI owner-join policy. Prefixed so it cannot collide
 #: with a real table or alias in the statement being filtered.
 _OWNER_ALIAS = '_guitars_owner'
-
-#: A bare SQL identifier: safe to interpolate unquoted, and case-stable because PostgreSQL
-#: folds an unquoted identifier to lower case. Anything outside this is either a mistake or
-#: something that has to be quoted to work at all.
-_BARE_IDENTIFIER = re.compile(r'^[a-z_][a-z0-9_$]*$')
-
-
-def _bare(kind: str, name: str) -> str:
-    """Return *name* unchanged, having proved it needs no quoting.
-
-    Nothing untrusted reaches these functions -- tables, columns and primary keys are
-    resolved from Django's ``model._meta``, and the result is written into a migration file
-    for review -- so this is not an injection boundary. It is a *correctness* one:
-    ``db_table = 'Order Items'`` is legal Django, and interpolating it bare produces SQL
-    that fails at ``migrate`` time or, worse, binds a different table than the one named.
-
-    Raising here moves that from a puzzling migrate-time error to a build-time one that
-    names the setting or field responsible. Bare rather than auto-quoted on purpose:
-    quoting would change the SQL every existing generated migration already contains, for
-    the sake of a shape the kit does not otherwise support.
-    """
-    if not _BARE_IDENTIFIER.match(name):
-        raise ValueError(
-            f'{kind} {name!r} is not a plain lower-case SQL identifier, so it cannot be '
-            f'used in a policy definition unquoted. Rename it, or set an explicit '
-            f'db_table / db_column that is one.'
-        )
-    return name
-
-
-def _quote_ident(name: str) -> str:
-    """Double-quote an identifier, PostgreSQL's ``quote_ident``.
-
-    Used for role-derived names, which -- unlike tables and columns -- are free-form
-    ``settings`` text rather than something Django derived. ``BI_Reader`` and
-    ``metabase-ro`` are both perfectly ordinary PostgreSQL roles that only bind when
-    quoted; bare, the first silently becomes ``bi_reader`` and the second is a syntax
-    error.
-    """
-    if '\x00' in name:
-        raise ValueError('SQL identifiers cannot contain a NUL byte.')
-    return '"' + name.replace('"', '""') + '"'
-
-
-def _quote_literal(value: str) -> str:
-    """Single-quote a string literal, PostgreSQL's ``quote_literal``.
-
-    Applied to the whole ``EXECUTE`` payload as well as to individual values, so the two
-    nesting levels inside the ``DO`` block below each get escaped exactly once.
-    """
-    if '\x00' in value:
-        raise ValueError('SQL string literals cannot contain a NUL byte.')
-    return "'" + value.replace("'", "''") + "'"
 
 
 def _setting(name: str) -> str:

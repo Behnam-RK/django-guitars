@@ -32,7 +32,7 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from guitars import sql
-from guitars.sql.policy import _BARE_IDENTIFIER
+from guitars.sql._identifiers import _BARE_IDENTIFIER
 from tests.testapp.models import Band
 
 

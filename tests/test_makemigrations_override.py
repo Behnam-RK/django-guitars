@@ -30,7 +30,7 @@ from pathlib import Path
 import pytest
 from django.apps import apps
 from django.conf import settings as django_settings
-from django.core.management import call_command
+from django.core.management import CommandError, call_command
 from django.test import override_settings
 
 
@@ -95,6 +95,32 @@ def test_check_reports_needed_changes_for_both_layers_and_writes_nothing(_scoped
         call_command('makemigrations', APP_LABEL, '--check', stdout=StringIO(), stderr=StringIO())
 
     assert _generated_files(_scoped_app) == set()
+
+
+@pytest.mark.django_db
+def test_check_reports_missing_enforcement_when_schema_is_already_current(_scoped_app):
+    """The schema and enforcement layers are checked independently: the schema layer can
+    already be up to date (nothing for Django's own --check to exit non-zero over) while
+    the enforcement layer is still missing, and --check must still fail in that case.
+
+    Regression test: step 2 used to gate on ``self.dry_run``, which Django's own handle()
+    forces to ``True`` whenever --check is passed (check implies dry-run for the schema
+    half) -- so this exact case exited 0 silently, printing "not checked because of
+    --dry-run" without ever running the enforcement check.
+    """
+    with override_settings(GUITARS_AUTO_MAKE_MIGRATIONS=False):
+        call_command('makemigrations', APP_LABEL, stdout=StringIO())
+
+    written = _generated_files(_scoped_app)
+    assert len(written) == 1, written
+
+    out, err = StringIO(), StringIO()
+    with pytest.raises(CommandError):
+        call_command('makemigrations', APP_LABEL, '--check', stdout=out, stderr=err)
+
+    assert 'not checked because of --dry-run' not in out.getvalue()
+    # --check must never write, even though it found something missing.
+    assert _generated_files(_scoped_app) == written
 
 
 @pytest.mark.django_db

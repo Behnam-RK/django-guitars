@@ -37,6 +37,7 @@ from guitars.management.enforcement.headers import (
 )
 from guitars.management.enforcement.identity import _literal, _operation
 from guitars.sql import _identifiers
+from guitars.sql import soft_delete as _soft_delete
 from guitars.tenancy.discovery import app_coverage
 
 
@@ -67,6 +68,27 @@ class _OperationRow(NamedTuple):
     reverse: str | list[str]
     replace: str | list[str] | None = None
     adopt: str | list[str] | None = None
+
+
+def _related_rule_name(related_table: str, foreign_key: str | None = None) -> str:
+    """The cascade rule's identifier: quoted, and NAMEDATALEN-safe truncated.
+
+    One function computing the plain and ``_VIA`` forms alike (``foreign_key=None`` for the
+    first CASCADE FK from a given related table, set for every subsequent one -- see
+    ``sql.CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE_VIA``'s comment), called once per rule and
+    passed to both its create and drop operation, so the two can never disagree about the
+    name -- the same discipline :func:`guitars.sql.policy._exempt_policy_name` uses.
+
+    Truncation happens *before* quoting, on the plain, unquoted name: quoting first would let
+    the doubled inner quotes of a hostile ``related_table`` count against the 63-byte budget
+    unpredictably, and would make two names differing only in how many quotes they contain
+    hash to different truncated forms for reasons that have nothing to do with actually
+    being different rules.
+    """
+    name = f'soft_delete_related_{related_table}'
+    if foreign_key is not None:
+        name = f'{name}_{foreign_key}'
+    return _identifiers._quote_ident(_identifiers._safe_identifier(name))
 
 
 class OperationsMixin:
@@ -546,31 +568,27 @@ class OperationsMixin:
                 header = HEADER_SOFT_DELETE_RELATED.format(
                     related_table=related_table, table=owner_table
                 )
-                forward = sql.CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE.format(
-                    table=ident_owner_table,
-                    related_table=ident_related_table,
-                    primary_key=ident_owner_pk,
-                    foreign_key=ident_foreign_key,
-                )
-                reverse = sql.DROP_SOFT_DELETE_RELATED_OBJECTS_RULE.format(
-                    table=ident_owner_table, related_table=ident_related_table
-                )
+                rule_name = _related_rule_name(related_table)
             else:
                 key = (related_table, owner_table, fk_field.column)
                 header = HEADER_SOFT_DELETE_RELATED_VIA.format(
                     related_table=related_table, table=owner_table, foreign_key=fk_field.column
                 )
-                forward = sql.CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE_VIA.format(
-                    table=ident_owner_table,
-                    related_table=ident_related_table,
-                    primary_key=ident_owner_pk,
-                    foreign_key=ident_foreign_key,
-                )
-                reverse = sql.DROP_SOFT_DELETE_RELATED_OBJECTS_RULE_VIA.format(
-                    table=ident_owner_table,
-                    related_table=ident_related_table,
-                    foreign_key=ident_foreign_key,
-                )
+                rule_name = _related_rule_name(related_table, fk_field.column)
+            # One template pair for both cases -- see soft_delete.py's private
+            # _CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE/_DROP_... docstring for why the
+            # public, frozen constants of the same name (used only by pre-2.0.0 migrations
+            # that call them with the old, rule_name-less signature) are not used here.
+            forward = _soft_delete._CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE.format(
+                rule_name=rule_name,
+                table=ident_owner_table,
+                related_table=ident_related_table,
+                primary_key=ident_owner_pk,
+                foreign_key=ident_foreign_key,
+            )
+            reverse = _soft_delete._DROP_SOFT_DELETE_RELATED_OBJECTS_RULE.format(
+                rule_name=rule_name, table=ident_owner_table
+            )
             self._append_if_stale(
                 ops,
                 self.existing.soft_delete_related,

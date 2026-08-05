@@ -118,7 +118,7 @@ def test_cascade_operations_disambiguates_two_fks_to_the_same_related_table():
     """Merch has two independent CASCADE FKs to Album -- ``album`` and ``bonus_album`` --
     which is the exact shape the ``_via`` naming scheme exists for: a PostgreSQL rule is
     namespaced by name alone, not by what it references, so without disambiguation the
-    second FK's ``CREATE OR REPLACE RULE soft_delete_related_testapp_merch`` would silently
+    second FK's ``CREATE OR REPLACE RULE "soft_delete_related_testapp_merch"`` would silently
     replace the first FK's rule, leaving one of the two relations uncascaded with no error
     anywhere (see ``sql.CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE_VIA``'s comment).
     """
@@ -138,8 +138,8 @@ def test_cascade_operations_disambiguates_two_fks_to_the_same_related_table():
     # Two distinct rule names -- neither op's CREATE OR REPLACE can silently clobber the
     # other's.
     blob = '\n'.join(merch_ops)
-    assert 'RULE soft_delete_related_testapp_merch\n' in blob
-    assert 'RULE soft_delete_related_testapp_merch_bonus_album_id' in blob
+    assert 'RULE "soft_delete_related_testapp_merch"\n' in blob
+    assert 'RULE "soft_delete_related_testapp_merch_bonus_album_id"' in blob
 
 
 def test_cascade_operation_warns_when_related_model_is_mti_child_without_own_deleted_at(

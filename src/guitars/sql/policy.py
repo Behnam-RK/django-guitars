@@ -36,7 +36,7 @@ same value, NULL included -- so the fail-closed reasoning above is untouched.
 from __future__ import annotations
 
 from guitars.gucs import BYPASS_GUC, VALUE_SEPARATOR, guc_name
-from guitars.sql._identifiers import _bare, _quote_ident, _quote_literal
+from guitars.sql._identifiers import _bare, _quote_ident, _quote_literal, _safe_identifier
 
 
 __all__ = [
@@ -236,8 +236,14 @@ def _exempt_policy_name(role: str) -> str:
     One function so the ``CREATE`` and the ``DROP`` can never disagree about how a role
     name was spelled -- a mismatch would leave an exemption policy behind that nothing
     knows how to remove.
+
+    Truncated through :func:`_safe_identifier` before quoting: ``role`` is free-form
+    ``settings`` text with no length limit of its own, and a name over PostgreSQL's 63-byte
+    NAMEDATALEN would otherwise be silently truncated by PostgreSQL itself -- two distinct
+    long role names could collide onto the same truncated policy name with no error either
+    at generation or at ``migrate`` time.
     """
-    return _quote_ident(f'{EXEMPT_POLICY_PREFIX}{role}')
+    return _quote_ident(_safe_identifier(f'{EXEMPT_POLICY_PREFIX}{role}'))
 
 
 def drop_exempt_policy(table: str, role: str) -> str:

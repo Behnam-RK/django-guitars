@@ -48,8 +48,11 @@ def _bare(kind: str, name: str) -> str:
 _QUOTED_QUALIFIED = re.compile(r'^"((?:[^"]|"")*)"\.\"((?:[^"]|"")*)"$')
 
 
-def _bare_or_qualified(kind: str, name: str) -> tuple[str | None, str]:
-    """Return ``(schema, table)`` for a possibly schema-qualified identifier.
+def _split_qualified(name: str) -> tuple[str | None, str]:
+    """Return ``(schema, table)`` for a possibly schema-qualified identifier, performing no
+    content validation on either part -- only :func:`_bare_or_qualified` validates; this is
+    the shared parser underneath it, and the entry point for a caller that has no unquoted
+    interpolation of its own to protect (see that function's docstring for why one exists).
 
     Two ways *name* can be schema-qualified, checked in this order:
 
@@ -60,20 +63,13 @@ def _bare_or_qualified(kind: str, name: str) -> tuple[str | None, str]:
        generated SQL agree on the same physical relation. A model meant to be read and
        written through the Django ORM, not just have enforcement SQL generated for it,
        needs this form -- see ``_quote_table``'s docstring for what breaks otherwise.
-       Each side's quoted content is returned as-is (unescaping a doubled ``""``), with no
-       further shape restriction: quoting is what makes an otherwise-hostile schema or
-       table name safe here, the same permissive reasoning ``_quote_table``'s no-dot
-       branch already uses for an unqualified name.
+       Each side's quoted content is returned as-is (unescaping a doubled ``""``).
     2. **A bare, unquoted ``schema.table``**, split on the first ``.``. Lighter-weight than
        the quoted form, for a table this project's ORM never queries directly (only
-       enforcement SQL is generated against it) -- each side is still validated via
-       :func:`_bare`, so a hostile part fails at build time rather than producing DDL that
-       parses but binds the wrong relation. A second ``.`` describes a shape (``a.b.c``)
-       neither form supports and is rejected the same way a non-bare part is.
-
-    ``_bare()`` itself stays single-part-only (see its docstring) so every call site that
-    predates schema-qualified support keeps behaving exactly as before; this is the
-    schema-aware entry point new call sites opt into.
+       enforcement SQL is generated against it). A second ``.`` describes a shape
+       (``a.b.c``) neither form supports and is rejected outright -- that much is a
+       structural question, not a content one, so it is checked here rather than left to
+       each caller.
     """
     quoted = _QUOTED_QUALIFIED.match(name)
     if quoted is not None:
@@ -81,14 +77,47 @@ def _bare_or_qualified(kind: str, name: str) -> tuple[str | None, str]:
         return schema_part.replace('""', '"'), table_part.replace('""', '"')
     schema, sep, rest = name.partition('.')
     if not sep:
-        return None, _bare(kind, name)
+        return None, name
     if '.' in rest:
         raise ValueError(
-            f'{kind} {name!r} has more than one schema-qualifying "." -- only a single '
+            f'{name!r} has more than one schema-qualifying "." -- only a single '
             f'"schema.table" shape (or Django\'s own quoted \'"schema"."table"\' form) is '
             f'supported.'
         )
-    return _bare(f'{kind} schema', schema), _bare(kind, rest)
+    return schema, rest
+
+
+def _bare_or_qualified(kind: str, name: str) -> tuple[str | None, str]:
+    """Return ``(schema, table)`` for a possibly schema-qualified identifier, validating any
+    part that is not already quoted.
+
+    Built on :func:`_split_qualified` for the shape (see its docstring for the two forms
+    recognised and the second-``.`` rejection). What this adds is validation of the *content*
+    of a part that came back unquoted:
+
+    * Django's pre-quoted ``'"schema"."table"'`` form needs none -- quoting is what makes an
+      otherwise-hostile schema or table name safe here, the same permissive reasoning
+      ``_quote_table``'s no-dot branch already uses for an unqualified name.
+    * A bare, unquoted part is validated via :func:`_bare`, so a hostile part fails at build
+      time rather than producing DDL that parses but binds the wrong relation.
+
+    ``_bare()`` itself stays single-part-only (see its docstring) so every call site that
+    predates schema-qualified support keeps behaving exactly as before; this is the
+    schema-aware entry point new call sites opt into -- specifically, ones that go on to
+    interpolate the returned parts *unquoted* (:func:`_quote_table`'s dotted branch,
+    ``sql/policy.py``'s ``_qualified_table``). A caller that quotes or escapes the result
+    itself regardless of content (a rule name, a trigger-function literal argument later
+    re-quoted by PostgreSQL's own ``%I``) wants :func:`_split_qualified` directly instead --
+    this function's validation would otherwise reject a legal, unqualified ``db_table`` like
+    ``'Order Items'`` that caller was never going to render unquoted in the first place.
+    """
+    quoted = _QUOTED_QUALIFIED.match(name) is not None
+    schema, table = _split_qualified(name)
+    if schema is None:
+        return None, _bare(kind, table)
+    if quoted:
+        return schema, table
+    return _bare(f'{kind} schema', schema), _bare(kind, table)
 
 
 def _escape_ident(name: str) -> str:

@@ -94,8 +94,13 @@ def _related_rule_name(related_table: str, foreign_key: str | None = None) -> st
     tables that share a bare name in different schemas, both cascading to the same owner,
     would otherwise compute the identical name and silently collide the same way a
     NAMEDATALEN truncation could -- so the schema is folded in as its own component instead.
+
+    Split via :func:`_identifiers._split_qualified`, not the validating ``_bare_or_qualified``:
+    the result is quoted via ``_quote_ident`` below regardless of content, so a hostile-but-
+    legal, unqualified ``related_table`` (``'Order Items'``) must not be rejected here the way
+    it would be if this fed an unquoted position -- see ``_bare_or_qualified``'s docstring.
     """
-    schema, bare_related_table = _identifiers._bare_or_qualified('table', related_table)
+    schema, bare_related_table = _identifiers._split_qualified(related_table)
     name = (
         f'soft_delete_related_{bare_related_table}'
         if schema is None
@@ -404,8 +409,13 @@ class OperationsMixin:
                 )
             elif is_mti_child(model, '_updated_at'):
                 mti = self._mti_context(model, table, '_updated_at')
-                parent_schema, parent_bare_table = _identifiers._bare_or_qualified(
-                    'table', mti['parent_table']
+                # _split_qualified, not the validating _bare_or_qualified: parent_schema/
+                # parent_table below become escaped *literal* arguments to
+                # set_parent_updated_at(), re-quoted as identifiers by its own %I at
+                # trigger-fire time -- not an unquoted position here, so a hostile-but-legal,
+                # unqualified ancestor db_table must not be rejected at build time.
+                parent_schema, parent_bare_table = _identifiers._split_qualified(
+                    mti['parent_table']
                 )
                 mti_sql = {
                     'child_table': _identifiers._quote_table(mti['child_table']),

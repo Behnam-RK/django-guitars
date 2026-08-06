@@ -13,9 +13,60 @@ import pytest
 from guitars.sql import _identifiers
 
 
+class TestSplitQualified:
+    """The permissive parser underneath ``_bare_or_qualified`` -- same shape recognition,
+    no content validation. ``operations.py`` uses this directly (not ``_bare_or_qualified``)
+    for a value it goes on to quote or escape itself regardless of content: a cascade rule
+    name (``_related_rule_name``, always quoted via ``_quote_ident``) and an MTI ancestor's
+    schema/table (always an escaped literal argument, re-quoted by PostgreSQL's own ``%I``
+    at trigger-fire time). Neither position is rendered unquoted, so neither should reject a
+    legal-but-hostile, unqualified ``db_table`` the way an unquoted position must.
+    """
+
+    def test_unqualified_name_is_returned_as_is(self):
+        assert _identifiers._split_qualified('events') == (None, 'events')
+
+    def test_unqualified_hostile_name_is_not_rejected(self):
+        """The exact gap this function closes: ``_bare_or_qualified`` raises for this same
+        input (see ``TestBareOrQualified.test_hostile_unqualified_name_is_rejected`` below),
+        but a caller that quotes/escapes the result itself never needed that rejection.
+        """
+        assert _identifiers._split_qualified('Order Items') == (None, 'Order Items')
+
+    def test_schema_qualified_name_splits_in_two(self):
+        assert _identifiers._split_qualified('analytics.events') == ('analytics', 'events')
+
+    def test_hostile_qualified_parts_are_not_rejected(self):
+        assert _identifiers._split_qualified('Analytics.My Events') == (
+            'Analytics',
+            'My Events',
+        )
+
+    def test_two_dots_are_still_rejected(self):
+        """The second-'.' rejection is a structural question, not a content one, so it stays
+        even in the unvalidated parser.
+        """
+        with pytest.raises(ValueError, match='more than one schema-qualifying'):
+            _identifiers._split_qualified('a.b.c')
+
+    def test_djangos_pre_quoted_form_splits_in_two(self):
+        assert _identifiers._split_qualified('"analytics"."events"') == (
+            'analytics',
+            'events',
+        )
+
+
 class TestBareOrQualified:
     def test_unqualified_name_behaves_like_bare(self):
         assert _identifiers._bare_or_qualified('table', 'events') == (None, 'events')
+
+    def test_hostile_unqualified_name_is_rejected(self):
+        """Unlike ``_split_qualified``, this function's result is meant for an unquoted
+        interpolation position (``_quote_table``'s dotted branch, ``policy.py``'s
+        ``_qualified_table``), so it must still reject what ``_bare()`` always has.
+        """
+        with pytest.raises(ValueError, match='not a plain lower-case SQL identifier'):
+            _identifiers._bare_or_qualified('table', 'Order Items')
 
     def test_schema_qualified_name_splits_in_two(self):
         assert _identifiers._bare_or_qualified('table', 'analytics.events') == (

@@ -114,6 +114,22 @@ def test_cascade_operations_skip_non_cascade_and_non_deletable_relations():
     assert 'testapp_riff' not in ops  # Riff has no _deleted_at to cascade into
 
 
+def test_related_rule_name_does_not_reject_a_hostile_unqualified_table():
+    """Regression: ``_related_rule_name`` must not require ``related_table`` to already be a
+    bare SQL identifier -- the returned name is quoted via ``_quote_ident`` regardless of
+    content, so a legal-but-hostile, *unqualified* Django ``db_table`` like ``'Order Items'``
+    (mixed case, an embedded space -- exactly what ``_quote_table`` elsewhere in this module
+    quotes rather than rejects) must render safely quoted here too, not raise at build time.
+    """
+    name = operations_module._related_rule_name('Order Items')
+    assert name == '"soft_delete_related_Order Items"'
+
+
+def test_related_rule_name_folds_in_a_hostile_schema_qualified_table():
+    name = operations_module._related_rule_name('analytics.Weird Table')
+    assert name == '"soft_delete_related_analytics_Weird Table"'
+
+
 def test_cascade_operations_disambiguates_two_fks_to_the_same_related_table():
     """Merch has two independent CASCADE FKs to Album -- ``album`` and ``bonus_album`` --
     which is the exact shape the ``_via`` naming scheme exists for: a PostgreSQL rule is

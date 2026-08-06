@@ -136,6 +136,20 @@ def _escape_ident(name: str) -> str:
     return name.replace('"', '""')
 
 
+def _unescape_ident(escaped: str) -> str:
+    """Inverse of :func:`_escape_ident`: undouble a doubled embedded quote.
+
+    Used where a value :func:`_escape_ident` wrote into a generated migration's comment
+    header has to be read back byte-for-byte as the original, unescaped table/column name --
+    see ``guitars.management.enforcement.headers``'s module docstring on why the header is
+    the dedupe key a later run's freshly-computed ``model._meta.db_table`` must exactly
+    equal for idempotency to hold. Unambiguous in the same way ``_QUOTED_QUALIFIED``'s own
+    unescaping is: every ``"`` in an escaped string is part of a doubled pair, so undoubling
+    has no other way to read.
+    """
+    return escaped.replace('""', '"')
+
+
 def _quote_ident(name: str) -> str:
     """Double-quote an identifier, PostgreSQL's ``quote_ident``.
 
@@ -161,16 +175,33 @@ def _quote_qualified(schema: str | None, name: str) -> str:
     return f'{_quote_ident(schema)}.{_quote_ident(name)}'
 
 
+#: Django's own single-part self-quoting convention: a ``db_table`` the caller already
+#: wrapped in ``"..."`` -- e.g. ``'"Order Items"'`` -- so ``connection.ops.quote_name()``
+#: (which only passes a string through unchanged when it already starts and ends with
+#: ``"``) leaves it alone on every ORM query. Unqualified, so this is the one-part sibling
+#: of ``_QUOTED_QUALIFIED`` above; ``len(name) >= 2`` excludes the degenerate single``"``
+#: character, which would otherwise satisfy both ``startswith`` and ``endswith`` at once.
+def _is_self_quoted(name: str) -> bool:
+    return len(name) >= 2 and name.startswith('"') and name.endswith('"')
+
+
 def _quote_table(name: str) -> str:
     """Full DDL-ready identifier for a *possibly* schema-qualified table name.
 
-    Two behaviours, deliberately different, split on whether *name* contains a ``.`` at
-    all:
+    Three shapes, split on whether *name* contains a ``.`` and, if not, whether it is
+    already self-quoted:
 
-    * **No ``.``**: quoted as one opaque identifier via :func:`_quote_ident`, with no shape
-      validation -- the permissive, whole-string-blob quoting the trigger/rule templates
-      have used since quoting was first added to them. An unqualified ``db_table`` with
-      reserved-word or mixed-case content (``'Order Items'``) keeps working exactly as
+    * **No ``.``, already self-quoted** (``'"Order Items"'``): returned unchanged. This is
+      Django's own single-part pre-quoting convention (see below) -- re-quoting it via
+      :func:`_quote_ident` would double-wrap it, producing a *different*, wrong identifier
+      (the literal quote characters become part of the name, rather than delimiting it).
+      Before this kit quoted anything, a self-quoted ``db_table`` passed straight through a
+      raw ``.format()`` and worked by accident; recognising it here keeps that working on
+      purpose.
+    * **No ``.``, otherwise**: quoted as one opaque identifier via :func:`_quote_ident`, with
+      no shape validation -- the permissive, whole-string-blob quoting the trigger/rule
+      templates have used since quoting was first added to them. An unqualified ``db_table``
+      with reserved-word or mixed-case content (``'Order Items'``) keeps working exactly as
       before; nothing about adding schema support should make that *narrower*.
     * **Contains a ``.``**: routed through :func:`_bare_or_qualified`, which recognises
       either Django's own pre-quoted ``'"schema"."table"'`` convention or a bare
@@ -180,16 +211,16 @@ def _quote_table(name: str) -> str:
       correctly splitting it into two requires knowing where the boundary actually is.
 
     A model meant to be read and written through the Django ORM -- not just have
-    enforcement SQL generated for it -- must use the pre-quoted form: Django's own query
-    compiler calls ``connection.ops.quote_name()`` on ``db_table`` for *every* ORM query
-    (not only the ``CREATE TABLE`` migrations write), and that function only passes a
+    enforcement SQL generated for it -- must use one of the two pre-quoted forms: Django's
+    own query compiler calls ``connection.ops.quote_name()`` on ``db_table`` for *every* ORM
+    query (not only the ``CREATE TABLE`` migrations write), and that function only passes a
     string through unchanged when it already starts and ends with ``"``. An unquoted
     ``'schema.table'`` therefore gets wrapped by Django itself as one wrong identifier on
     every ORM read or write, regardless of what this kit emits -- it only ever works for a
     table this project's ORM never queries directly.
     """
     if '.' not in name:
-        return _quote_ident(name)
+        return name if _is_self_quoted(name) else _quote_ident(name)
     schema, table = _bare_or_qualified('table', name)
     return _quote_qualified(schema, table)
 
@@ -257,3 +288,17 @@ def _safe_identifier(candidate: str, max_bytes: int = 63) -> str:
     budget = max_bytes - 1 - len(digest)  # 1 byte for the '_' separator
     base = _truncate_utf8(candidate, budget)
     return f'{base}_{digest}'
+
+
+def _safe_ident(candidate: str) -> str:
+    """A derived, unbounded-length name as a NAMEDATALEN-safe, quoted identifier.
+
+    ``_safe_identifier`` then ``_quote_ident`` in one call -- the same two-step discipline
+    :func:`guitars.sql.policy._exempt_policy_name` and
+    :func:`guitars.management.enforcement.operations._related_rule_name` each need for a
+    name assembled from free-form parts (a role, a table, a schema) with no length limit of
+    its own. Truncating *before* quoting, on the plain, unquoted candidate, is what makes
+    this safe to share: quoting first would let a hostile part's doubled inner quotes count
+    against the 63-byte budget unpredictably.
+    """
+    return _quote_ident(_safe_identifier(candidate))

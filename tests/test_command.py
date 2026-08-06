@@ -13,6 +13,7 @@ from io import StringIO
 import pytest
 from django.apps import apps
 from django.apps import apps as django_apps
+from django.conf import settings as django_settings
 from django.core.management import CommandError, call_command
 from django.db.models import CASCADE
 from django.test import override_settings
@@ -24,6 +25,7 @@ from guitars.management.enforcement import headers as headers_module
 from guitars.management.enforcement import identity as identity_module
 from guitars.management.enforcement import operations as operations_module
 from guitars.management.enforcement.command import Command
+from guitars.sql import _identifiers
 from guitars.tenancy.discovery import app_coverage
 from tests.testapp.models import Album, Band, Ensemble, Orchestra
 
@@ -99,6 +101,71 @@ def test_build_operations_emits_mti_ops_for_child_models():
     )
     # The MTI parent-link is structural, not a user cascade FK: no cascade rule for it.
     assert 'related to "testapp_orchestra"' not in ops
+
+
+def test_schema_qualified_table_headers_round_trip_and_stay_idempotent():
+    """Regression for a gap in M4's schema-qualified support: a header built from a table
+    containing a literal ``"`` -- Django's own pre-quoted schema-qualified ``db_table``
+    convention, e.g. ``'"analytics"."events"'`` -- used to embed that quote raw inside the
+    header's own quote-delimited slot (``# ... on "{table}" table!``). The scanner's capture
+    group excludes ``"`` by design, so it never matched its own freshly-written header, and
+    every subsequent run re-emitted a duplicate operation that fails ``migrate`` with
+    "already exists" instead of recognising the table as covered.
+
+    ``tests.schema_qualified`` is installed only for this test, the same
+    ``override_settings`` pattern ``tests/test_schema_qualified.py`` uses -- see that
+    module's docstring for why the app cannot simply live in ``INSTALLED_APPS``. Nothing
+    here touches the database: ``_build_operations`` only reads model ``_meta``.
+    """
+    with override_settings(
+        INSTALLED_APPS=[*django_settings.INSTALLED_APPS, 'tests.schema_qualified']
+    ):
+        from tests.schema_qualified.models import Event  # noqa: F401 -- registers the app's model
+
+        app = apps.get_app_config('schema_qualified')
+        command = Command()
+        command.existing.triggers.clear()
+        command.existing.soft_deletes.clear()
+
+        first_run = command._build_operations(app)
+        blob = '\n'.join(first_run)
+        assert blob, (
+            'Event (GuitarModel, db_table="\\"analytics\\".\\"events\\"") should '
+            'produce at least a trigger, a soft-delete rule and a tenant policy'
+        )
+
+        trigger_match = headers_module._RE_UPDATED_AT.search(blob)
+        assert trigger_match, f'schema-qualified header not matched by its own scanner: {blob!r}'
+        # The captured, still-escaped text must undo back to the real, unescaped db_table --
+        # the same value a later run recomputes fresh as its dict key.
+        assert _identifiers._unescape_ident(trigger_match.group(1)) == '"analytics"."events"'
+
+        # Simulate a second run reading this run's own output back, the same way
+        # scanning.py really does: extract every header, unescape its captured table name,
+        # and record its [SQL:...] digest.
+        for match in headers_module._RE_UPDATED_AT.finditer(blob):
+            key = _identifiers._unescape_ident(match.group(1))
+            command.existing.triggers[key] = identity_module._recorded_sql_identity(blob, match)
+        for match in headers_module._RE_SOFT_DELETE.finditer(blob):
+            key = _identifiers._unescape_ident(match.group(1))
+            command.existing.soft_deletes[key] = identity_module._recorded_sql_identity(
+                blob, match
+            )
+        policy_matches = list(headers_module._RE_TENANT_POLICY.finditer(blob))
+        for match in policy_matches:
+            table = _identifiers._unescape_ident(match.group(1))
+            command.existing.tenant_policies.add(table)
+            command.existing.tenant_policy_identities[table] = (
+                identity_module._recorded_policy_identity(blob, match)
+            )
+            command.existing.tenant_policy_sql[table] = identity_module._recorded_sql_identity(
+                blob, match
+            )
+
+        second_run = command._build_operations(app)
+        assert second_run == [], (
+            f'a table already covered was re-emitted as a duplicate operation: {second_run!r}'
+        )
 
 
 def test_cascade_operations_skip_non_cascade_and_non_deletable_relations():
@@ -570,9 +637,7 @@ def test_scoped_cascade_gap_notes(
         command.existing.soft_delete_related.clear()
         if setup is not None:
             setup(command)
-        monkeypatch.setattr(
-            command_module.django_apps, 'get_app_configs', app_configs
-        )
+        monkeypatch.setattr(command_module.django_apps, 'get_app_configs', app_configs)
 
         notes = command._scoped_cascade_gap_notes(requested)
 

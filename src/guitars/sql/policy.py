@@ -43,7 +43,7 @@ from guitars.sql._identifiers import (
     _quote_ident,
     _quote_literal,
     _quote_qualified,
-    _safe_identifier,
+    _safe_ident,
 )
 
 
@@ -274,13 +274,15 @@ def _exempt_policy_name(role: str) -> str:
     name was spelled -- a mismatch would leave an exemption policy behind that nothing
     knows how to remove.
 
-    Truncated through :func:`_safe_identifier` before quoting: ``role`` is free-form
-    ``settings`` text with no length limit of its own, and a name over PostgreSQL's 63-byte
-    NAMEDATALEN would otherwise be silently truncated by PostgreSQL itself -- two distinct
-    long role names could collide onto the same truncated policy name with no error either
-    at generation or at ``migrate`` time.
+    Truncated through :func:`_safe_ident` before quoting: ``role`` is free-form ``settings``
+    text with no length limit of its own, and a name over PostgreSQL's 63-byte NAMEDATALEN
+    would otherwise be silently truncated by PostgreSQL itself -- two distinct long role
+    names could collide onto the same truncated policy name with no error either at
+    generation or at ``migrate`` time. Shared with
+    :func:`guitars.management.enforcement.operations._related_rule_name`, which needs the
+    identical truncate-then-quote discipline for a different derived name.
     """
-    return _quote_ident(_safe_identifier(f'{EXEMPT_POLICY_PREFIX}{role}'))
+    return _safe_ident(f'{EXEMPT_POLICY_PREFIX}{role}')
 
 
 def drop_exempt_policy(table: str, role: str) -> str:
@@ -302,8 +304,14 @@ def drop_all_exempt_policies(table: str) -> str:
     read as a single-character wildcard.
     """
     table = _qualified_table(table)
-    # Suppressed below as DDL, not a query: *table* is proved bare per part above and the
-    # prefix is a module constant. The policy names are read from the catalog and quoted by
+    # Suppressed below as DDL, not a query: *table* is proved bare per part above (the
+    # unqualified/bare-qualified shapes) or quoted by _qualified_table itself (Django's
+    # pre-quoted shape) -- either way it is not interpolated unescaped. It is spliced as a
+    # %s *argument* to format(), not into the format string itself, and quoted as a literal
+    # via _quote_literal for the regclass cast -- so neither an embedded single quote (which
+    # would otherwise terminate the surrounding SQL string literal early) nor an embedded
+    # '%' (which format() would otherwise try to read as its own directive) can corrupt the
+    # statement it builds. The policy names are read from the catalog and quoted by
     # format(%I).
     return (  # noqa: S608
         'DO $$\n'  # nosec B608
@@ -311,10 +319,10 @@ def drop_all_exempt_policies(table: str) -> str:
         '    exempt_policy text;\n'
         'BEGIN\n'
         '    FOR exempt_policy IN\n'
-        f"        SELECT polname FROM pg_policy WHERE polrelid = '{table}'::regclass\n"
+        f'        SELECT polname FROM pg_policy WHERE polrelid = {_quote_literal(table)}::regclass\n'
         f'          AND starts_with(polname, {_quote_literal(EXEMPT_POLICY_PREFIX)})\n'
         '    LOOP\n'
-        f"        EXECUTE format('DROP POLICY %I ON {table}', exempt_policy);\n"
+        f"        EXECUTE format('DROP POLICY %I ON %s', exempt_policy, {_quote_literal(table)});\n"
         '    END LOOP;\n'
         'END $$'
     )

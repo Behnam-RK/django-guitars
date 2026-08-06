@@ -147,6 +147,35 @@ class TestQuoteTable:
         with pytest.raises(ValueError, match='not a plain lower-case SQL identifier'):
             _identifiers._quote_table('Analytics.events')
 
+    def test_unqualified_self_quoted_name_round_trips_unchanged(self):
+        """Regression: before this, the no-dot branch re-quoted an already-quoted name
+        (Django's own single-part pre-quoting convention -- see _is_self_quoted's
+        docstring), double-wrapping it into a different, wrong identifier. A self-quoted
+        db_table worked by accident pre-M4 (a raw, unvalidated .format() let it straight
+        through); this keeps that working on purpose.
+        """
+        assert _identifiers._quote_table('"Order Items"') == '"Order Items"'
+
+    def test_unqualified_self_quoted_name_with_an_embedded_escaped_quote_round_trips(self):
+        assert _identifiers._quote_table('"weird""table"') == '"weird""table"'
+
+
+class TestIsSelfQuoted:
+    def test_plain_name_is_not_self_quoted(self):
+        assert _identifiers._is_self_quoted('events') is False
+
+    def test_wrapped_name_is_self_quoted(self):
+        assert _identifiers._is_self_quoted('"Order Items"') is True
+
+    def test_a_single_quote_character_is_not_self_quoted(self):
+        """The degenerate one-character case: '"' satisfies both startswith('"') and
+        endswith('"') on its own, but is not a wrapped pair.
+        """
+        assert _identifiers._is_self_quoted('"') is False
+
+    def test_empty_string_is_not_self_quoted(self):
+        assert _identifiers._is_self_quoted('') is False
+
 
 class TestEscapeIdent:
     def test_returns_unwrapped_content(self):
@@ -161,6 +190,22 @@ class TestEscapeIdent:
 
     def test_quote_ident_wraps_the_escaped_content(self):
         assert _identifiers._quote_ident('weird"table') == '"weird""table"'
+
+
+class TestUnescapeIdent:
+    """The inverse of _escape_ident, used to recover a header's original table name --
+    see headers.py's module docstring on why the header must round-trip byte-for-byte.
+    """
+
+    def test_returns_content_with_no_doubled_quote_unchanged(self):
+        assert _identifiers._unescape_ident('plain') == 'plain'
+
+    def test_undoubles_an_escaped_quote(self):
+        assert _identifiers._unescape_ident('weird""table') == 'weird"table'
+
+    def test_round_trips_with_escape_ident(self):
+        original = '"analytics"."events"'
+        assert _identifiers._unescape_ident(_identifiers._escape_ident(original)) == original
 
 
 class TestEscapeLiteral:
@@ -223,3 +268,23 @@ class TestSafeIdentifier:
         result = _identifiers._safe_identifier(candidate)
         assert len(result.encode('utf-8')) <= 63
         result.encode('utf-8').decode('utf-8')  # must not raise
+
+
+class TestSafeIdent:
+    """``_safe_identifier`` then ``_quote_ident`` in one call -- the shared helper
+    ``policy._exempt_policy_name`` and ``operations._related_rule_name`` each use for a
+    derived, unbounded-length name.
+    """
+
+    def test_short_candidate_is_truncated_then_quoted(self):
+        assert _identifiers._safe_ident('rls_exempt_reporting') == '"rls_exempt_reporting"'
+
+    def test_long_candidate_is_truncated_before_being_quoted(self):
+        candidate = 'rls_exempt_' + 'x' * 60
+        result = _identifiers._safe_ident(candidate)
+        # Quoted, and the unquoted content is exactly what _safe_identifier would produce.
+        assert result == f'"{_identifiers._safe_identifier(candidate)}"'
+        assert len(result) <= 65  # 63-byte identifier + 2 quote characters
+
+    def test_a_hostile_candidate_is_quoted_rather_than_rejected(self):
+        assert _identifiers._safe_ident('rls_exempt_Weird Role') == '"rls_exempt_Weird Role"'

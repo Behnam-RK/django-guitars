@@ -96,9 +96,11 @@ def _related_rule_name(related_table: str, foreign_key: str | None = None) -> st
     NAMEDATALEN truncation could -- so the schema is folded in as its own component instead.
 
     Split via :func:`_identifiers._split_qualified`, not the validating ``_bare_or_qualified``:
-    the result is quoted via ``_quote_ident`` below regardless of content, so a hostile-but-
-    legal, unqualified ``related_table`` (``'Order Items'``) must not be rejected here the way
-    it would be if this fed an unquoted position -- see ``_bare_or_qualified``'s docstring.
+    the result is quoted via :func:`_identifiers._safe_ident` below regardless of content, so
+    a hostile-but-legal, unqualified ``related_table`` (``'Order Items'``) must not be
+    rejected here the way it would be if this fed an unquoted position -- see
+    ``_bare_or_qualified``'s docstring. ``_safe_ident`` is the same truncate-then-quote
+    helper :func:`guitars.sql.policy._exempt_policy_name` uses for its own derived name.
     """
     schema, bare_related_table = _identifiers._split_qualified('table', related_table)
     name = (
@@ -108,7 +110,7 @@ def _related_rule_name(related_table: str, foreign_key: str | None = None) -> st
     )
     if foreign_key is not None:
         name = f'{name}_{foreign_key}'
-    return _identifiers._quote_ident(_identifiers._safe_identifier(name))
+    return _identifiers._safe_ident(name)
 
 
 class OperationsMixin:
@@ -199,8 +201,16 @@ class OperationsMixin:
             table=table, force=force, exempt_roles=exempt_roles, **coverage_kwargs
         )
         reverse = sql.drop_table_rls(table=table, exempt_roles=exempt_roles)
+        # The header's `{table}` slot is itself quote-delimited (`"{table}"`), so a table
+        # already containing a literal `"` -- Django's own pre-quoted schema-qualified
+        # convention -- must be escaped the same way an already-quoted SQL template
+        # position is (_escape_ident), or the embedded quote prematurely closes the header's
+        # own delimiter and the scanner that reads it back (headers.py's _RE_TENANT_POLICY)
+        # never matches. `scanning.py` undoes this with _unescape_ident before using the
+        # captured text as a dict key, so it round-trips back to this exact `table`.
         header = (HEADER_TENANT_POLICY_REPLACED if replacing else HEADER_TENANT_POLICY).format(
-            table=table, identity=self._policy_identity(table, coverage)
+            table=_identifiers._escape_ident(table),
+            identity=self._policy_identity(table, coverage),
         )
         return _operation(
             header,
@@ -241,7 +251,10 @@ class OperationsMixin:
             ):
                 continue
             force_source, _ = _operation(
-                HEADER_TENANT_FORCE.format(table=table),
+                # See _tenant_policy_operation's comment: the header's `{table}` slot needs
+                # escaping (not the SQL's, built separately below), or a table containing a
+                # literal `"` breaks the scanner's round trip back to this dict key.
+                HEADER_TENANT_FORCE.format(table=_identifiers._escape_ident(table)),
                 sql.force_rls(table=table),
                 sql.no_force_rls(table=table),
             )
@@ -394,7 +407,12 @@ class OperationsMixin:
                     _OperationRow(
                         recorded=self.existing.triggers,
                         key=table,
-                        header=HEADER_UPDATED_AT.format(table=table),
+                        # The header's `{table}` slot is itself quote-delimited, so it needs
+                        # _escape_ident the same way an already-quoted SQL template position
+                        # does -- unlike `qualified_table` above, which is a full DDL-ready
+                        # identifier for the SQL body, not a header comment. See
+                        # scanning.py's matching _unescape_ident for the read-back half.
+                        header=HEADER_UPDATED_AT.format(table=_identifiers._escape_ident(table)),
                         forward=sql.CREATE_UPDATED_AT_TRIGGER.format(
                             table=qualified_table, primary_key=literal_primary_key
                         ),
@@ -417,24 +435,29 @@ class OperationsMixin:
                 parent_schema, parent_bare_table = _identifiers._split_qualified(
                     'table', mti['parent_table']
                 )
-                mti_sql = {
+                mti_literal = {
                     'child_table': _identifiers._quote_table(mti['child_table']),
                     'parent_schema': _identifiers._escape_literal(parent_schema or ''),
                     'parent_table': _identifiers._escape_literal(parent_bare_table),
                     'parent_pk': _identifiers._escape_literal(mti['parent_pk']),
                     'child_pk': _identifiers._escape_literal(mti['child_pk']),
                 }
+                # Header placeholders only -- see the plain-table branch above for why.
+                mti_header = {
+                    'child_table': _identifiers._escape_ident(mti['child_table']),
+                    'parent_table': _identifiers._escape_ident(mti['parent_table']),
+                }
                 rows.append(
                     _OperationRow(
                         recorded=self.existing.mti_triggers,
                         key=table,
-                        header=HEADER_MTI_UPDATED_AT.format(**mti),
-                        forward=_triggers._CREATE_PARENT_UPDATED_AT_TRIGGER.format(**mti_sql),
+                        header=HEADER_MTI_UPDATED_AT.format(**mti_header),
+                        forward=_triggers._CREATE_PARENT_UPDATED_AT_TRIGGER.format(**mti_literal),
                         reverse=_triggers._DROP_PARENT_UPDATED_AT_TRIGGER.format(
                             child_table=_identifiers._quote_table(table)
                         ),
-                        replace=_triggers._REPLACE_PARENT_UPDATED_AT_TRIGGER.format(**mti_sql),
-                        adopt=_triggers._ADOPT_PARENT_UPDATED_AT_TRIGGER.format(**mti_sql),
+                        replace=_triggers._REPLACE_PARENT_UPDATED_AT_TRIGGER.format(**mti_literal),
+                        adopt=_triggers._ADOPT_PARENT_UPDATED_AT_TRIGGER.format(**mti_literal),
                     )
                 )
 
@@ -446,34 +469,39 @@ class OperationsMixin:
             #     (_quote_table); primary_key/parent_pk/child_pk stay bare-identifier
             #     positions (_escape_ident) -- columns are never schema-qualified.
             if owns_column(model, '_deleted_at'):
+                qualified_table = _identifiers._quote_table(table)
                 rows.append(
                     _OperationRow(
                         recorded=self.existing.soft_deletes,
                         key=table,
-                        header=HEADER_SOFT_DELETE.format(table=table),
+                        header=HEADER_SOFT_DELETE.format(table=_identifiers._escape_ident(table)),
                         forward=sql.CREATE_SOFT_DELETE_RULE.format(
-                            table=_identifiers._quote_table(table),
+                            table=qualified_table,
                             primary_key=_identifiers._escape_ident(primary_key),
                         ),
-                        reverse=sql.DROP_SOFT_DELETE_RULE.format(
-                            table=_identifiers._quote_table(table)
-                        ),
+                        reverse=sql.DROP_SOFT_DELETE_RULE.format(table=qualified_table),
                     )
                 )
             elif is_mti_child(model, '_deleted_at'):
                 mti = self._mti_context(model, table, '_deleted_at')
-                mti_sql = {
+                mti_ident = {
                     'child_table': _identifiers._quote_table(mti['child_table']),
                     'parent_table': _identifiers._quote_table(mti['parent_table']),
                     'child_pk': _identifiers._escape_ident(mti['child_pk']),
                     'parent_pk': _identifiers._escape_ident(mti['parent_pk']),
                 }
+                # Header placeholders only -- see the updated_at branch above for why this
+                # is separate from mti_ident (which quotes for the SQL body, not a comment).
+                mti_header = {
+                    'child_table': _identifiers._escape_ident(mti['child_table']),
+                    'parent_table': _identifiers._escape_ident(mti['parent_table']),
+                }
                 rows.append(
                     _OperationRow(
                         recorded=self.existing.mti_soft_deletes,
                         key=table,
-                        header=HEADER_MTI_SOFT_DELETE.format(**mti),
-                        forward=sql.CREATE_MTI_SOFT_DELETE_RULE.format(**mti_sql),
+                        header=HEADER_MTI_SOFT_DELETE.format(**mti_header),
+                        forward=sql.CREATE_MTI_SOFT_DELETE_RULE.format(**mti_ident),
                         reverse=sql.DROP_MTI_SOFT_DELETE_RULE.format(
                             child_table=_identifiers._quote_table(table)
                         ),
@@ -589,27 +617,38 @@ class OperationsMixin:
         owner = column_owner(model, '_deleted_at')
         owner_table = owner._meta.db_table
         owner_pk = cast(str, owner._meta.pk.column)
+        # Loop-invariant: owner_table/owner_pk are fixed for every candidate below, so their
+        # quoted/escaped SQL forms and header-escaped form are each computed once rather than
+        # once per FK.
+        ident_owner_table = _identifiers._quote_table(owner_table)
+        ident_owner_pk = _identifiers._escape_ident(owner_pk)
+        header_owner_table = _identifiers._escape_ident(owner_table)
 
         ops: list[str] = []
         for related_model, fk_field, is_primary in self._cascade_candidates(model, owner_table):
             related_table = related_model._meta.db_table
-            # Headers stay on the raw (unescaped) names -- they're comments the scanner
-            # regex-matches back to a table name, not SQL, so escaping them would break
-            # that round-trip. The SQL itself uses the escaped/quoted forms throughout.
-            ident_owner_table = _identifiers._quote_table(owner_table)
+            # The SQL body uses the escaped/quoted forms throughout (_quote_table/
+            # _escape_ident). The header's `{table}`/`{related_table}` slots are themselves
+            # quote-delimited comment text, not SQL, but still need the same _escape_ident
+            # treatment -- a table containing a literal `"` (Django's pre-quoted
+            # schema-qualified convention) would otherwise close the header's own delimiter
+            # early and break the scanner's round trip back to this exact dict key. See
+            # scanning.py's matching _unescape_ident for the read-back half.
             ident_related_table = _identifiers._quote_table(related_table)
-            ident_owner_pk = _identifiers._escape_ident(owner_pk)
             ident_foreign_key = _identifiers._escape_ident(fk_field.column)
+            header_related_table = _identifiers._escape_ident(related_table)
             if is_primary:
                 key = (related_table, owner_table, None)
                 header = HEADER_SOFT_DELETE_RELATED.format(
-                    related_table=related_table, table=owner_table
+                    related_table=header_related_table, table=header_owner_table
                 )
                 rule_name = _related_rule_name(related_table)
             else:
                 key = (related_table, owner_table, fk_field.column)
                 header = HEADER_SOFT_DELETE_RELATED_VIA.format(
-                    related_table=related_table, table=owner_table, foreign_key=fk_field.column
+                    related_table=header_related_table,
+                    table=header_owner_table,
+                    foreign_key=_identifiers._escape_ident(fk_field.column),
                 )
                 rule_name = _related_rule_name(related_table, fk_field.column)
             # One template pair for both cases -- see soft_delete.py's private

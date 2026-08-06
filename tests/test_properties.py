@@ -86,6 +86,20 @@ class TestIdentifierValidation:
             'ALTER TABLE public.mytable ENABLE ROW LEVEL SECURITY'
         )
 
+    def test_policy_path_quotes_a_hostile_pre_quoted_schema_qualified_table(self):
+        """Regression: a tenanted model's ``db_table`` in Django's pre-quoted
+        ``'"schema"."table"'`` convention is *not* re-validated as bare by
+        ``_bare_or_qualified`` (quoting is what already made hostile content safe -- see its
+        docstring), so the tenant-policy path must re-quote the parts it gets back rather than
+        joining them bare. Joining bare rendered exactly the unquoted, case-folding bug this
+        milestone exists to fix, just relocated from the trigger/rule path to this one -- and
+        every table exercised by ``tests/test_schema_qualified.py`` happens to be all-lowercase,
+        so it never caught this.
+        """
+        assert sql.enable_rls(table='"Analytics"."My Events"') == (
+            'ALTER TABLE "Analytics"."My Events" ENABLE ROW LEVEL SECURITY'
+        )
+
     @given(
         name=st.one_of(
             st.sampled_from(['select', 'table', 'order', 'group', 'user']),

@@ -37,10 +37,12 @@ from __future__ import annotations
 
 from guitars.gucs import BYPASS_GUC, VALUE_SEPARATOR, guc_name
 from guitars.sql._identifiers import (
+    _QUOTED_QUALIFIED,
     _bare,
     _bare_or_qualified,
     _quote_ident,
     _quote_literal,
+    _quote_qualified,
     _safe_identifier,
 )
 
@@ -74,17 +76,31 @@ _OWNER_ALIAS = '_guitars_owner'
 
 
 def _qualified_table(table: str) -> str:
-    """A possibly schema-qualified table name, each part validated bare -- unquoted.
+    """A possibly schema-qualified table name.
 
-    Unquoted because a validated-bare part never needs quoting to be interpolated safely
-    (see :func:`_bare`'s docstring) -- this module has never quoted table/column positions,
-    only role-derived ones, and schema-qualification doesn't change that. Dotted rather than
-    combined some other way because ``schema.table`` is both PostgreSQL's own unquoted
-    two-part identifier syntax (an ``ON``/``ALTER TABLE`` target) and, unchanged, what a
-    ``::regclass`` cast expects as text (:func:`drop_all_exempt_policies`'s catalog lookup)
-    -- one representation serves both roles this module puts a table name in.
+    Two input shapes, two different outputs, because :func:`_bare_or_qualified` treats them
+    differently (see its docstring):
+
+    * A bare ``'schema.table'`` (or unqualified ``'table'``) comes back with each part
+      already proved bare via :func:`_bare`, so it is joined -- or returned -- unquoted, the
+      same as this module has always interpolated a table/column position. Quoting an
+      already-lowercase, already-validated identifier would change the SQL text every
+      already-generated migration contains for no behavioural gain.
+    * Django's own pre-quoted ``'"schema"."table"'`` convention is explicitly *not*
+      re-validated as bare by :func:`_bare_or_qualified` -- quoting is what already made a
+      hostile part safe, so re-checking it against ``_BARE_IDENTIFIER`` would reject
+      legitimate mixed-case/reserved-word content this form exists to carry. That trust has
+      to be repaid by re-quoting here: joining the raw, unescaped parts with a bare ``.``
+      would render exactly the unquoted, case-folding bug this milestone exists to fix,
+      just relocated from the trigger/rule path to the tenant-policy one. A model meant to
+      be read and written through the Django ORM *must* use this form for its ``db_table``
+      (see :func:`guitars.sql._identifiers._quote_table`'s docstring for why), so this is
+      not a corner this module could decline to cover.
     """
+    pre_quoted = _QUOTED_QUALIFIED.match(table) is not None
     schema, name = _bare_or_qualified('table', table)
+    if pre_quoted:
+        return _quote_qualified(schema, name)
     return f'{schema}.{name}' if schema else name
 
 

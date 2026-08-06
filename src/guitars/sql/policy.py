@@ -36,7 +36,13 @@ same value, NULL included -- so the fail-closed reasoning above is untouched.
 from __future__ import annotations
 
 from guitars.gucs import BYPASS_GUC, VALUE_SEPARATOR, guc_name
-from guitars.sql._identifiers import _bare, _quote_ident, _quote_literal, _safe_identifier
+from guitars.sql._identifiers import (
+    _bare,
+    _bare_or_qualified,
+    _quote_ident,
+    _quote_literal,
+    _safe_identifier,
+)
 
 
 __all__ = [
@@ -65,6 +71,21 @@ EXEMPT_POLICY_PREFIX = 'rls_exempt_'
 #: Alias for the ancestor table in an MTI owner-join policy. Prefixed so it cannot collide
 #: with a real table or alias in the statement being filtered.
 _OWNER_ALIAS = '_guitars_owner'
+
+
+def _qualified_table(table: str) -> str:
+    """A possibly schema-qualified table name, each part validated bare -- unquoted.
+
+    Unquoted because a validated-bare part never needs quoting to be interpolated safely
+    (see :func:`_bare`'s docstring) -- this module has never quoted table/column positions,
+    only role-derived ones, and schema-qualification doesn't change that. Dotted rather than
+    combined some other way because ``schema.table`` is both PostgreSQL's own unquoted
+    two-part identifier syntax (an ``ON``/``ALTER TABLE`` target) and, unchanged, what a
+    ``::regclass`` cast expects as text (:func:`drop_all_exempt_policies`'s catalog lookup)
+    -- one representation serves both roles this module puts a table name in.
+    """
+    schema, name = _bare_or_qualified('table', table)
+    return f'{schema}.{name}' if schema else name
 
 
 def _setting(name: str) -> str:
@@ -115,7 +136,7 @@ def _owner_exists(
     the same tenant and denies for any other -- the two layers agree instead of one
     quietly widening the other.
     """
-    owner_table = _bare('owner table', owner_table)
+    owner_table = _qualified_table(owner_table)
     owner_pk = _bare('owner primary key', owner_pk)
     child_pk = _bare('child primary key', child_pk)
     matches = ' AND '.join(
@@ -153,7 +174,7 @@ def _predicate(
     value -- those held on this table directly, and those held on an MTI ancestor through
     the correlated subquery. A model may legitimately have both.
     """
-    table = _bare('table', table)
+    table = _qualified_table(table)
     terms = [
         _match(f'{table}.{_bare("tenant column", column)}', dimension)
         for dimension, column in sorted(columns.items())
@@ -186,14 +207,14 @@ def create_tenant_policy(
     """``CREATE POLICY tenant_scope`` -- both reads (USING) and writes (WITH CHECK)."""
     predicate = _predicate(table, columns, owner_table, owner_pk, child_pk, owner_columns)
     return (
-        f'CREATE POLICY {TENANT_POLICY} ON {_bare("table", table)} FOR ALL TO PUBLIC\n'
+        f'CREATE POLICY {TENANT_POLICY} ON {_qualified_table(table)} FOR ALL TO PUBLIC\n'
         f'    USING ({predicate})\n'
         f'    WITH CHECK ({predicate})'
     )
 
 
 def drop_tenant_policy(table: str) -> str:
-    return f'DROP POLICY IF EXISTS {TENANT_POLICY} ON {_bare("table", table)}'
+    return f'DROP POLICY IF EXISTS {TENANT_POLICY} ON {_qualified_table(table)}'
 
 
 def create_exempt_policy(table: str, role: str) -> str:
@@ -207,7 +228,7 @@ def create_exempt_policy(table: str, role: str) -> str:
     make ``CREATE POLICY ... TO <missing role>`` fail migrate everywhere else -- so local
     and CI databases skip the exemption instead of erroring.
     """
-    table = _bare('table', table)
+    table = _qualified_table(table)
     # Every role-derived name is quoted rather than trusted to be bare, and the inner
     # statement is escaped as a whole because EXECUTE takes a string literal -- so the two
     # nesting levels are each escaped once, by the same rules PostgreSQL's own
@@ -247,7 +268,7 @@ def _exempt_policy_name(role: str) -> str:
 
 
 def drop_exempt_policy(table: str, role: str) -> str:
-    return f'DROP POLICY IF EXISTS {_exempt_policy_name(role)} ON {_bare("table", table)}'
+    return f'DROP POLICY IF EXISTS {_exempt_policy_name(role)} ON {_qualified_table(table)}'
 
 
 def drop_all_exempt_policies(table: str) -> str:
@@ -264,9 +285,10 @@ def drop_all_exempt_policies(table: str) -> str:
     ``starts_with`` rather than ``LIKE``: the prefix ends in ``_``, which ``LIKE`` would
     read as a single-character wildcard.
     """
-    table = _bare('table', table)
-    # Suppressed below as DDL, not a query: *table* is proved bare above and the prefix is a
-    # module constant. The policy names are read from the catalog and quoted by format(%I).
+    table = _qualified_table(table)
+    # Suppressed below as DDL, not a query: *table* is proved bare per part above and the
+    # prefix is a module constant. The policy names are read from the catalog and quoted by
+    # format(%I).
     return (  # noqa: S608
         'DO $$\n'  # nosec B608
         'DECLARE\n'
@@ -283,11 +305,11 @@ def drop_all_exempt_policies(table: str) -> str:
 
 
 def enable_rls(table: str) -> str:
-    return f'ALTER TABLE {_bare("table", table)} ENABLE ROW LEVEL SECURITY'
+    return f'ALTER TABLE {_qualified_table(table)} ENABLE ROW LEVEL SECURITY'
 
 
 def disable_rls(table: str) -> str:
-    return f'ALTER TABLE {_bare("table", table)} DISABLE ROW LEVEL SECURITY'
+    return f'ALTER TABLE {_qualified_table(table)} DISABLE ROW LEVEL SECURITY'
 
 
 def force_rls(table: str) -> str:
@@ -301,11 +323,11 @@ def force_rls(table: str) -> str:
 
     Emitted by default. Rollback is ``NO FORCE`` -- seconds, not a migration rewrite.
     """
-    return f'ALTER TABLE {_bare("table", table)} FORCE ROW LEVEL SECURITY'
+    return f'ALTER TABLE {_qualified_table(table)} FORCE ROW LEVEL SECURITY'
 
 
 def no_force_rls(table: str) -> str:
-    return f'ALTER TABLE {_bare("table", table)} NO FORCE ROW LEVEL SECURITY'
+    return f'ALTER TABLE {_qualified_table(table)} NO FORCE ROW LEVEL SECURITY'
 
 
 def create_table_rls(

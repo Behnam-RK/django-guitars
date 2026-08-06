@@ -35,6 +35,35 @@ class TestBareOrQualified:
         with pytest.raises(ValueError, match='not a plain lower-case SQL identifier'):
             _identifiers._bare_or_qualified('table', '.events')
 
+    def test_djangos_pre_quoted_form_splits_in_two(self):
+        """'"schema"."table"' is Django's own db_table convention for a table meant to be
+        read and written through the ORM -- see _quote_table's docstring for why the bare
+        'schema.table' form above can never work for that.
+        """
+        assert _identifiers._bare_or_qualified('table', '"analytics"."events"') == (
+            'analytics',
+            'events',
+        )
+
+    def test_pre_quoted_form_allows_content_bare_would_reject(self):
+        """Quoting is what makes an otherwise-hostile part safe -- unlike the bare form,
+        mixed case and embedded spaces need no rejection here.
+        """
+        assert _identifiers._bare_or_qualified('table', '"Analytics"."My Events"') == (
+            'Analytics',
+            'My Events',
+        )
+
+    def test_pre_quoted_form_unescapes_a_doubled_quote(self):
+        assert _identifiers._bare_or_qualified('table', '"weird""schema"."events"') == (
+            'weird"schema',
+            'events',
+        )
+
+    def test_three_pre_quoted_parts_are_rejected(self):
+        with pytest.raises(ValueError, match='more than one schema-qualifying'):
+            _identifiers._bare_or_qualified('table', '"a"."b"."c"')
+
 
 class TestQuoteQualified:
     def test_unqualified_quotes_one_part(self):
@@ -42,6 +71,27 @@ class TestQuoteQualified:
 
     def test_qualified_quotes_both_parts_joined_by_a_bare_dot(self):
         assert _identifiers._quote_qualified('analytics', 'events') == '"analytics"."events"'
+
+
+class TestQuoteTable:
+    def test_unqualified_name_is_quoted_as_one_opaque_identifier(self):
+        assert _identifiers._quote_table('events') == '"events"'
+
+    def test_unqualified_hostile_name_is_still_quoted_not_rejected(self):
+        """No shape validation for the no-dot branch -- see the docstring: nothing about
+        adding schema support should make an already-working unqualified db_table fail.
+        """
+        assert _identifiers._quote_table('Order Items') == '"Order Items"'
+
+    def test_bare_qualified_name_renders_as_two_quoted_parts(self):
+        assert _identifiers._quote_table('analytics.events') == '"analytics"."events"'
+
+    def test_pre_quoted_qualified_name_round_trips(self):
+        assert _identifiers._quote_table('"analytics"."events"') == '"analytics"."events"'
+
+    def test_bare_qualified_name_with_a_hostile_part_raises(self):
+        with pytest.raises(ValueError, match='not a plain lower-case SQL identifier'):
+            _identifiers._quote_table('Analytics.events')
 
 
 class TestEscapeIdent:

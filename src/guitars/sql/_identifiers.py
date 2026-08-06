@@ -40,25 +40,53 @@ def _bare(kind: str, name: str) -> str:
     return name
 
 
+#: Django's own convention for a schema-qualified ``db_table``: each side already
+#: double-quoted, joined by a bare ``.`` -- see ``_bare_or_qualified``'s docstring for why
+#: this, and not an unquoted ``schema.table``, is the form a *Django-ORM-usable* model
+#: needs. ``(?:[^"]|"")*`` inside each side allows an embedded, doubled ``""`` the same way
+#: Postgres's own identifier-quoting escape works.
+_QUOTED_QUALIFIED = re.compile(r'^"((?:[^"]|"")*)"\.\"((?:[^"]|"")*)"$')
+
+
 def _bare_or_qualified(kind: str, name: str) -> tuple[str | None, str]:
     """Return ``(schema, table)`` for a possibly schema-qualified identifier.
 
-    Splits on the first ``.`` only. A second ``.`` describes a shape (``a.b.c``) this
-    dialect does not support and is rejected the same way a non-bare part is -- a
-    build-time error naming the offending value, rather than DDL that parses but binds
-    the wrong relation.
+    Two ways *name* can be schema-qualified, checked in this order:
+
+    1. **Django's own pre-quoted convention**, ``'"schema"."table"'`` -- recognised first
+       because it is the *only* ``db_table`` shape for which Django's own query compiler
+       (which calls ``connection.ops.quote_name()`` on ``db_table`` for every ORM query,
+       and passes an already ``"``-wrapped string through unchanged) and this kit's
+       generated SQL agree on the same physical relation. A model meant to be read and
+       written through the Django ORM, not just have enforcement SQL generated for it,
+       needs this form -- see ``_quote_table``'s docstring for what breaks otherwise.
+       Each side's quoted content is returned as-is (unescaping a doubled ``""``), with no
+       further shape restriction: quoting is what makes an otherwise-hostile schema or
+       table name safe here, the same permissive reasoning ``_quote_table``'s no-dot
+       branch already uses for an unqualified name.
+    2. **A bare, unquoted ``schema.table``**, split on the first ``.``. Lighter-weight than
+       the quoted form, for a table this project's ORM never queries directly (only
+       enforcement SQL is generated against it) -- each side is still validated via
+       :func:`_bare`, so a hostile part fails at build time rather than producing DDL that
+       parses but binds the wrong relation. A second ``.`` describes a shape (``a.b.c``)
+       neither form supports and is rejected the same way a non-bare part is.
 
     ``_bare()`` itself stays single-part-only (see its docstring) so every call site that
     predates schema-qualified support keeps behaving exactly as before; this is the
     schema-aware entry point new call sites opt into.
     """
+    quoted = _QUOTED_QUALIFIED.match(name)
+    if quoted is not None:
+        schema_part, table_part = quoted.groups()
+        return schema_part.replace('""', '"'), table_part.replace('""', '"')
     schema, sep, rest = name.partition('.')
     if not sep:
         return None, _bare(kind, name)
     if '.' in rest:
         raise ValueError(
             f'{kind} {name!r} has more than one schema-qualifying "." -- only a single '
-            f'"schema.table" shape is supported.'
+            f'"schema.table" shape (or Django\'s own quoted \'"schema"."table"\' form) is '
+            f'supported.'
         )
     return _bare(f'{kind} schema', schema), _bare(kind, rest)
 
@@ -100,6 +128,39 @@ def _quote_qualified(schema: str | None, name: str) -> str:
     if schema is None:
         return _quote_ident(name)
     return f'{_quote_ident(schema)}.{_quote_ident(name)}'
+
+
+def _quote_table(name: str) -> str:
+    """Full DDL-ready identifier for a *possibly* schema-qualified table name.
+
+    Two behaviours, deliberately different, split on whether *name* contains a ``.`` at
+    all:
+
+    * **No ``.``**: quoted as one opaque identifier via :func:`_quote_ident`, with no shape
+      validation -- the permissive, whole-string-blob quoting the trigger/rule templates
+      have used since quoting was first added to them. An unqualified ``db_table`` with
+      reserved-word or mixed-case content (``'Order Items'``) keeps working exactly as
+      before; nothing about adding schema support should make that *narrower*.
+    * **Contains a ``.``**: routed through :func:`_bare_or_qualified`, which recognises
+      either Django's own pre-quoted ``'"schema"."table"'`` convention or a bare
+      ``'schema.table'``, and raises a build-time ``ValueError`` for a hostile bare part or
+      a second ``.``. A two-part reference cannot be permissively quoted the way a single
+      opaque string can -- ``"schema.table"`` quoted whole is one wrong identifier, and
+      correctly splitting it into two requires knowing where the boundary actually is.
+
+    A model meant to be read and written through the Django ORM -- not just have
+    enforcement SQL generated for it -- must use the pre-quoted form: Django's own query
+    compiler calls ``connection.ops.quote_name()`` on ``db_table`` for *every* ORM query
+    (not only the ``CREATE TABLE`` migrations write), and that function only passes a
+    string through unchanged when it already starts and ends with ``"``. An unquoted
+    ``'schema.table'`` therefore gets wrapped by Django itself as one wrong identifier on
+    every ORM read or write, regardless of what this kit emits -- it only ever works for a
+    table this project's ORM never queries directly.
+    """
+    if '.' not in name:
+        return _quote_ident(name)
+    schema, table = _bare_or_qualified('table', name)
+    return _quote_qualified(schema, table)
 
 
 def _escape_literal(value: str) -> str:

@@ -33,20 +33,32 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from guitars import sql
-from guitars.sql._identifiers import _BARE_IDENTIFIER, _escape_ident, _escape_literal
+from guitars.sql._identifiers import _BARE_IDENTIFIER, _escape_literal, _quote_table
 from tests.testapp.models import Band
 
 
-# Mixed case, schema-qualified, and an embedded space -- all legal as a Django `db_table`,
-# and all fail _BARE_IDENTIFIER's *shape* check (`^[a-z_][a-z0-9_$]*$`). Deliberately
-# excludes reserved words and long names: _BARE_IDENTIFIER checks shape only, so a
-# lowercase reserved word like 'select' matches it and a >=63-byte all-lowercase name does
-# too -- both pass *both* paths silently. Those are real gaps, but a different one from the
-# shape asymmetry below; see test_bare_identifier_only_checks_shape.
+# Mixed case and an embedded space -- both legal as a Django `db_table`, and both fail
+# _BARE_IDENTIFIER's *shape* check (`^[a-z_][a-z0-9_$]*$`). Deliberately excludes reserved
+# words and long names: _BARE_IDENTIFIER checks shape only, so a lowercase reserved word
+# like 'select' matches it and a >=63-byte all-lowercase name does too -- both pass *both*
+# paths silently. Those are real gaps, but a different one from the shape asymmetry below;
+# see test_bare_identifier_only_checks_shape. Deliberately excludes anything containing a
+# '.' too -- a schema-qualified name is a different shape question, covered separately by
+# _shape_invalid_qualified_identifiers below, since M4 treats "no dot" and "one dot" as two
+# different validation paths (see _identifiers._quote_table's docstring).
 _shape_invalid_identifiers = st.one_of(
     st.sampled_from(['Table', 'ORDER', 'Group', 'User']),
-    st.just('public.mytable'),
     st.just('Order Items'),
+)
+
+# A hostile schema or table part, or more than one qualifying '.' -- all rejected once a
+# name is treated as schema-qualified at all, on both the policy and trigger/rule paths
+# alike (see test_policy_path_raises_a_build_time_error_for_a_hostile_schema_qualified_name
+# and test_trigger_rule_path_raises_for_a_hostile_schema_qualified_name).
+_shape_invalid_qualified_identifiers = st.one_of(
+    st.just('Public.mytable'),
+    st.just('public.MyTable'),
+    st.just('a.b.c'),
 )
 
 
@@ -56,6 +68,23 @@ class TestIdentifierValidation:
         assert not _BARE_IDENTIFIER.match(name)
         with pytest.raises(ValueError, match='not a plain lower-case SQL identifier'):
             sql.enable_rls(table=name)
+
+    @given(name=_shape_invalid_qualified_identifiers)
+    def test_policy_path_raises_a_build_time_error_for_a_hostile_schema_qualified_name(self, name):
+        """M4: schema-qualified support validates each side of the '.' -- a hostile schema
+        or table part, or more than one '.', raises exactly like an unqualified hostile name
+        always has, rather than silently binding the wrong relation.
+        """
+        with pytest.raises(ValueError):
+            sql.enable_rls(table=name)
+
+    def test_policy_path_accepts_a_schema_qualified_table(self):
+        """M4: 'schema.table' is now an ordinary, valid `table` -- the contradiction with
+        `audittenancy`'s own schema-per-tenant support this milestone resolves.
+        """
+        assert sql.enable_rls(table='public.mytable') == (
+            'ALTER TABLE public.mytable ENABLE ROW LEVEL SECURITY'
+        )
 
     @given(
         name=st.one_of(
@@ -76,17 +105,28 @@ class TestIdentifierValidation:
 
     @given(name=_shape_invalid_identifiers)
     def test_trigger_rule_path_is_defensible_against_hostile_identifiers(self, name):
-        """M4: the template now bakes quote characters around its bare-identifier
-        positions, so a hostile ``table`` renders safely quoted rather than interpolated
-        bare -- even called directly on the raw constant, bypassing the generator's own
-        escaping. NOTE: for a schema-qualified name (``'public.mytable'``) this currently
-        renders as one quoted blob (``"public.mytable"``), a single wrong-but-safe
-        identifier rather than a real two-part schema reference -- that distinction is
-        M4's schema-qualified-support commit, not this one.
+        """An unqualified hostile ``table`` (no ``.``) still renders safely quoted as one
+        opaque identifier via ``_quote_table``'s permissive, no-dot branch -- unaffected by
+        M4's schema-qualified support, which only adds validation once a name is treated as
+        schema-qualified at all (see ``_shape_invalid_qualified_identifiers``'s tests). The
+        template itself owns no quote characters from M4 on (see triggers.py's module
+        docstring), so the caller -- here, ``_quote_table`` directly -- is what defends it.
         """
         assert not _BARE_IDENTIFIER.match(name)
-        rendered = sql.CREATE_UPDATED_AT_TRIGGER.format(table=name, primary_key='id')
+        rendered = sql.CREATE_UPDATED_AT_TRIGGER.format(table=_quote_table(name), primary_key='id')
         assert f'"{name}"' in rendered
+
+    @given(name=_shape_invalid_qualified_identifiers)
+    def test_trigger_rule_path_raises_for_a_hostile_schema_qualified_name(self, name):
+        with pytest.raises(ValueError):
+            _quote_table(name)
+
+    def test_trigger_rule_path_renders_a_schema_qualified_table_as_two_quoted_parts(self):
+        """A genuine two-part reference can't be permissively quoted as one blob -- quoting
+        ``"schema.table"`` whole would target one wrong relation instead of two correct
+        ones, so a valid qualified name renders as two independently-quoted parts.
+        """
+        assert _quote_table('public.mytable') == '"public"."mytable"'
 
     def test_embedded_quote_in_a_literal_position_is_doubled_not_broken(self):
         """``'{primary_key}'`` in the trigger templates is a string-literal argument to
@@ -101,12 +141,13 @@ class TestIdentifierValidation:
         assert "set_updated_at('weird''pk')" in rendered
 
     def test_embedded_quote_in_a_bare_identifier_position_is_doubled_not_broken(self):
-        """``"{table}"`` is a bare-identifier position -- a value with an embedded ``"``
-        must come back escaped via ``_escape_ident`` (doubled), the same way
-        ``operations.py`` escapes it before calling ``.format()``.
+        """``{table}`` in the soft-delete templates is a table-DDL position, filled by
+        ``_quote_table`` -- a value with an embedded ``"`` must come back escaped (doubled)
+        by that same permissive, no-dot branch, the same way ``operations.py`` quotes it
+        before calling ``.format()``.
         """
         rendered = sql.CREATE_SOFT_DELETE_RULE.format(
-            table=_escape_ident('weird"table'), primary_key='id'
+            table=_quote_table('weird"table'), primary_key='id'
         )
         assert 'ON DELETE TO "weird""table"' in rendered
 

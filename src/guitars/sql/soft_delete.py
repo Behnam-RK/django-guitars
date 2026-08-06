@@ -32,8 +32,17 @@ more; see ``docs/soft-deletion.md``.
 The MTI redirect rule at the bottom preserves the child row and stamps the *owner*
 instead -- see the package docstring for the shared-PK invariant it relies on.
 
-Every quoted ``"{table}"``-shaped placeholder here is an identifier position, escaped by
-the caller via ``guitars.sql._identifiers._escape_ident`` before ``.format()``.
+Two placeholder kinds. Column positions (``"{primary_key}"``, ``"{parent_pk}"``,
+``"{child_pk}"``, ``"{foreign_key}"``) keep their template-owned quotes, escaped by the
+caller via ``guitars.sql._identifiers._escape_ident`` before ``.format()`` -- a column is
+never schema-qualified, so a single pair of quotes is always correct. Table-DDL positions
+(``{table}``, ``{related_table}``, ``{child_table}``, ``{parent_table}`` where each names a
+table rather than a column) own no quote characters of their own: the caller supplies an
+already-quoted, already-qualified string via ``guitars.sql._identifiers._quote_table``,
+which may render as ``"table"`` or ``"schema"."table"`` -- a baked-in single pair of quotes
+would quote a ``"schema.table"`` string as one wrong identifier instead of two correct ones.
+Changing a public constant's rendered text this way (no ``.format()`` kwarg added or
+removed) is safe; see the package docstring on what "frozen" actually covers.
 
 The public ``CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE``/``_VIA`` constants and their
 ``DROP`` counterparts keep their pre-2.0.0 calling convention -- rule name embedded
@@ -67,17 +76,17 @@ CHECK_RULE_EXISTS_ON_TABLE = """
 
 CREATE_SOFT_DELETE_RULE = """
     CREATE OR REPLACE RULE soft_delete
-        AS ON DELETE TO "{table}"
+        AS ON DELETE TO {table}
         WHERE COALESCE(current_setting('rules.hard_deletion', true), '') <> 'on'
         DO INSTEAD (
-            UPDATE "{table}"
+            UPDATE {table}
             SET _deleted_at = NOW()
             WHERE "{primary_key}" = old."{primary_key}" AND _deleted_at IS NULL
         );
 """
 
 DROP_SOFT_DELETE_RULE = """
-    DROP RULE soft_delete ON "{table}";
+    DROP RULE soft_delete ON {table};
 """
 
 CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE = """
@@ -133,18 +142,18 @@ DROP_SOFT_DELETE_RELATED_OBJECTS_RULE_VIA = """
 
 _CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE = """
     CREATE OR REPLACE RULE {rule_name}
-        AS ON UPDATE TO "{table}"
+        AS ON UPDATE TO {table}
         WHERE old._deleted_at IS NULL AND new._deleted_at IS NOT NULL AND
               COALESCE(current_setting('rules.hard_deletion', true), '') <> 'on'
         DO ALSO (
-            UPDATE "{related_table}"
+            UPDATE {related_table}
             SET _deleted_at = NOW()
             WHERE "{foreign_key}" = old."{primary_key}"
         );
 """
 
 _DROP_SOFT_DELETE_RELATED_OBJECTS_RULE = """
-    DROP RULE {rule_name} ON "{table}";
+    DROP RULE {rule_name} ON {table};
 """
 
 # ---- MTI soft-delete rule (on the child table, soft-deletes the owner, preserves child row) ----
@@ -154,15 +163,15 @@ _DROP_SOFT_DELETE_RELATED_OBJECTS_RULE = """
 
 CREATE_MTI_SOFT_DELETE_RULE = """
     CREATE OR REPLACE RULE soft_delete
-        AS ON DELETE TO "{child_table}"
+        AS ON DELETE TO {child_table}
         WHERE COALESCE(current_setting('rules.hard_deletion', true), '') <> 'on'
         DO INSTEAD (
-            UPDATE "{parent_table}"
+            UPDATE {parent_table}
             SET _deleted_at = NOW()
             WHERE "{parent_pk}" = old."{child_pk}" AND _deleted_at IS NULL
         );
 """
 
 DROP_MTI_SOFT_DELETE_RULE = """
-    DROP RULE soft_delete ON "{child_table}";
+    DROP RULE soft_delete ON {child_table};
 """

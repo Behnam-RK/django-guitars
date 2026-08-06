@@ -38,6 +38,7 @@ from guitars.management.enforcement.headers import (
 from guitars.management.enforcement.identity import _literal, _operation
 from guitars.sql import _identifiers
 from guitars.sql import soft_delete as _soft_delete
+from guitars.sql import triggers as _triggers
 from guitars.tenancy.discovery import app_coverage
 
 
@@ -84,8 +85,22 @@ def _related_rule_name(related_table: str, foreign_key: str | None = None) -> st
     unpredictably, and would make two names differing only in how many quotes they contain
     hash to different truncated forms for reasons that have nothing to do with actually
     being different rules.
+
+    A rule name is never itself schema-qualified -- Postgres has no such concept, a rule's
+    name only has to be unique on the one table it is created on. The bare part of a
+    schema-qualified ``related_table`` is what feeds the name for that reason, matching the
+    unqualified case exactly (so an existing deployment's rule names are untouched by this
+    feature). The schema, when present, is *not* simply dropped though: two distinct related
+    tables that share a bare name in different schemas, both cascading to the same owner,
+    would otherwise compute the identical name and silently collide the same way a
+    NAMEDATALEN truncation could -- so the schema is folded in as its own component instead.
     """
-    name = f'soft_delete_related_{related_table}'
+    schema, bare_related_table = _identifiers._bare_or_qualified('table', related_table)
+    name = (
+        f'soft_delete_related_{bare_related_table}'
+        if schema is None
+        else f'soft_delete_related_{schema}_{bare_related_table}'
+    )
     if foreign_key is not None:
         name = f'{name}_{foreign_key}'
     return _identifiers._quote_ident(_identifiers._safe_identifier(name))
@@ -360,12 +375,15 @@ class OperationsMixin:
             rows: list[_OperationRow] = []
 
             # --- updated_at trigger: own table vs. MTI parent-propagation ---
-            # `table`/`child_table` are bare-identifier template positions (escaped via
-            # _escape_ident); `primary_key`/`parent_table`/`parent_pk`/`child_pk` are
-            # string-literal arguments to set_updated_at()/set_parent_updated_at()
-            # (escaped via _escape_literal) -- see triggers.py's module docstring.
+            # `table`/`child_table` are table-DDL positions (caller-quoted-and-qualified via
+            # _quote_table -- a table may be schema-qualified); `primary_key`/`parent_pk`/
+            # `child_pk` are string-literal arguments to set_updated_at()/
+            # set_parent_updated_at() (escaped via _escape_literal) -- see triggers.py's
+            # module docstring. The MTI branch uses the private, schema-aware
+            # _CREATE_PARENT_UPDATED_AT_TRIGGER family (4-arg set_parent_updated_at, separate
+            # parent_schema/parent_table), not the public 3-arg constants: see triggers.py.
             if owns_column(model, '_updated_at'):
-                ident_table = _identifiers._escape_ident(table)
+                qualified_table = _identifiers._quote_table(table)
                 literal_primary_key = _identifiers._escape_literal(primary_key)
                 rows.append(
                     _OperationRow(
@@ -373,22 +391,26 @@ class OperationsMixin:
                         key=table,
                         header=HEADER_UPDATED_AT.format(table=table),
                         forward=sql.CREATE_UPDATED_AT_TRIGGER.format(
-                            table=ident_table, primary_key=literal_primary_key
+                            table=qualified_table, primary_key=literal_primary_key
                         ),
-                        reverse=sql.DROP_UPDATED_AT_TRIGGER.format(table=ident_table),
+                        reverse=sql.DROP_UPDATED_AT_TRIGGER.format(table=qualified_table),
                         replace=sql.REPLACE_UPDATED_AT_TRIGGER.format(
-                            table=ident_table, primary_key=literal_primary_key
+                            table=qualified_table, primary_key=literal_primary_key
                         ),
                         adopt=sql.ADOPT_UPDATED_AT_TRIGGER.format(
-                            table=ident_table, primary_key=literal_primary_key
+                            table=qualified_table, primary_key=literal_primary_key
                         ),
                     )
                 )
             elif is_mti_child(model, '_updated_at'):
                 mti = self._mti_context(model, table, '_updated_at')
+                parent_schema, parent_bare_table = _identifiers._bare_or_qualified(
+                    'table', mti['parent_table']
+                )
                 mti_sql = {
-                    'child_table': _identifiers._escape_ident(mti['child_table']),
-                    'parent_table': _identifiers._escape_literal(mti['parent_table']),
+                    'child_table': _identifiers._quote_table(mti['child_table']),
+                    'parent_schema': _identifiers._escape_literal(parent_schema or ''),
+                    'parent_table': _identifiers._escape_literal(parent_bare_table),
                     'parent_pk': _identifiers._escape_literal(mti['parent_pk']),
                     'child_pk': _identifiers._escape_literal(mti['child_pk']),
                 }
@@ -397,12 +419,12 @@ class OperationsMixin:
                         recorded=self.existing.mti_triggers,
                         key=table,
                         header=HEADER_MTI_UPDATED_AT.format(**mti),
-                        forward=sql.CREATE_PARENT_UPDATED_AT_TRIGGER.format(**mti_sql),
-                        reverse=sql.DROP_PARENT_UPDATED_AT_TRIGGER.format(
-                            child_table=_identifiers._escape_ident(table)
+                        forward=_triggers._CREATE_PARENT_UPDATED_AT_TRIGGER.format(**mti_sql),
+                        reverse=_triggers._DROP_PARENT_UPDATED_AT_TRIGGER.format(
+                            child_table=_identifiers._quote_table(table)
                         ),
-                        replace=sql.REPLACE_PARENT_UPDATED_AT_TRIGGER.format(**mti_sql),
-                        adopt=sql.ADOPT_PARENT_UPDATED_AT_TRIGGER.format(**mti_sql),
+                        replace=_triggers._REPLACE_PARENT_UPDATED_AT_TRIGGER.format(**mti_sql),
+                        adopt=_triggers._ADOPT_PARENT_UPDATED_AT_TRIGGER.format(**mti_sql),
                     )
                 )
 
@@ -410,9 +432,9 @@ class OperationsMixin:
             # Rules need no replace or adopt form: they are created ``OR REPLACE``, which is
             # not defensiveness but the only safe way to redefine one -- an instant without a
             # ``soft_delete`` rule is an instant in which DELETE destroys rows.
-            # --- soft-delete rule: every placeholder here is a bare-identifier position
-            #     (escaped via _escape_ident) -- soft_delete.py's templates have no
-            #     string-literal-argument positions, unlike the trigger templates above.
+            # --- soft-delete rule: table positions are caller-quoted-and-qualified
+            #     (_quote_table); primary_key/parent_pk/child_pk stay bare-identifier
+            #     positions (_escape_ident) -- columns are never schema-qualified.
             if owns_column(model, '_deleted_at'):
                 rows.append(
                     _OperationRow(
@@ -420,17 +442,22 @@ class OperationsMixin:
                         key=table,
                         header=HEADER_SOFT_DELETE.format(table=table),
                         forward=sql.CREATE_SOFT_DELETE_RULE.format(
-                            table=_identifiers._escape_ident(table),
+                            table=_identifiers._quote_table(table),
                             primary_key=_identifiers._escape_ident(primary_key),
                         ),
                         reverse=sql.DROP_SOFT_DELETE_RULE.format(
-                            table=_identifiers._escape_ident(table)
+                            table=_identifiers._quote_table(table)
                         ),
                     )
                 )
             elif is_mti_child(model, '_deleted_at'):
                 mti = self._mti_context(model, table, '_deleted_at')
-                mti_sql = {key: _identifiers._escape_ident(value) for key, value in mti.items()}
+                mti_sql = {
+                    'child_table': _identifiers._quote_table(mti['child_table']),
+                    'parent_table': _identifiers._quote_table(mti['parent_table']),
+                    'child_pk': _identifiers._escape_ident(mti['child_pk']),
+                    'parent_pk': _identifiers._escape_ident(mti['parent_pk']),
+                }
                 rows.append(
                     _OperationRow(
                         recorded=self.existing.mti_soft_deletes,
@@ -438,7 +465,7 @@ class OperationsMixin:
                         header=HEADER_MTI_SOFT_DELETE.format(**mti),
                         forward=sql.CREATE_MTI_SOFT_DELETE_RULE.format(**mti_sql),
                         reverse=sql.DROP_MTI_SOFT_DELETE_RULE.format(
-                            child_table=_identifiers._escape_ident(table)
+                            child_table=_identifiers._quote_table(table)
                         ),
                     )
                 )
@@ -558,9 +585,9 @@ class OperationsMixin:
             related_table = related_model._meta.db_table
             # Headers stay on the raw (unescaped) names -- they're comments the scanner
             # regex-matches back to a table name, not SQL, so escaping them would break
-            # that round-trip. The SQL itself uses the escaped forms throughout.
-            ident_owner_table = _identifiers._escape_ident(owner_table)
-            ident_related_table = _identifiers._escape_ident(related_table)
+            # that round-trip. The SQL itself uses the escaped/quoted forms throughout.
+            ident_owner_table = _identifiers._quote_table(owner_table)
+            ident_related_table = _identifiers._quote_table(related_table)
             ident_owner_pk = _identifiers._escape_ident(owner_pk)
             ident_foreign_key = _identifiers._escape_ident(fk_field.column)
             if is_primary:

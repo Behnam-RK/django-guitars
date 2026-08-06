@@ -100,7 +100,7 @@ def _related_rule_name(related_table: str, foreign_key: str | None = None) -> st
     legal, unqualified ``related_table`` (``'Order Items'``) must not be rejected here the way
     it would be if this fed an unquoted position -- see ``_bare_or_qualified``'s docstring.
     """
-    schema, bare_related_table = _identifiers._split_qualified(related_table)
+    schema, bare_related_table = _identifiers._split_qualified('table', related_table)
     name = (
         f'soft_delete_related_{bare_related_table}'
         if schema is None
@@ -415,7 +415,7 @@ class OperationsMixin:
                 # trigger-fire time -- not an unquoted position here, so a hostile-but-legal,
                 # unqualified ancestor db_table must not be rejected at build time.
                 parent_schema, parent_bare_table = _identifiers._split_qualified(
-                    mti['parent_table']
+                    'table', mti['parent_table']
                 )
                 mti_sql = {
                     'child_table': _identifiers._quote_table(mti['child_table']),

@@ -24,20 +24,23 @@ class TestSplitQualified:
     """
 
     def test_unqualified_name_is_returned_as_is(self):
-        assert _identifiers._split_qualified('events') == (None, 'events')
+        assert _identifiers._split_qualified('table', 'events') == (None, 'events')
 
     def test_unqualified_hostile_name_is_not_rejected(self):
         """The exact gap this function closes: ``_bare_or_qualified`` raises for this same
         input (see ``TestBareOrQualified.test_hostile_unqualified_name_is_rejected`` below),
         but a caller that quotes/escapes the result itself never needed that rejection.
         """
-        assert _identifiers._split_qualified('Order Items') == (None, 'Order Items')
+        assert _identifiers._split_qualified('table', 'Order Items') == (None, 'Order Items')
 
     def test_schema_qualified_name_splits_in_two(self):
-        assert _identifiers._split_qualified('analytics.events') == ('analytics', 'events')
+        assert _identifiers._split_qualified('table', 'analytics.events') == (
+            'analytics',
+            'events',
+        )
 
     def test_hostile_qualified_parts_are_not_rejected(self):
-        assert _identifiers._split_qualified('Analytics.My Events') == (
+        assert _identifiers._split_qualified('table', 'Analytics.My Events') == (
             'Analytics',
             'My Events',
         )
@@ -47,10 +50,10 @@ class TestSplitQualified:
         even in the unvalidated parser.
         """
         with pytest.raises(ValueError, match='more than one schema-qualifying'):
-            _identifiers._split_qualified('a.b.c')
+            _identifiers._split_qualified('table', 'a.b.c')
 
     def test_djangos_pre_quoted_form_splits_in_two(self):
-        assert _identifiers._split_qualified('"analytics"."events"') == (
+        assert _identifiers._split_qualified('table', '"analytics"."events"') == (
             'analytics',
             'events',
         )

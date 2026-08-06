@@ -48,11 +48,13 @@ def _bare(kind: str, name: str) -> str:
 _QUOTED_QUALIFIED = re.compile(r'^"((?:[^"]|"")*)"\.\"((?:[^"]|"")*)"$')
 
 
-def _split_qualified(name: str) -> tuple[str | None, str]:
+def _split_qualified(kind: str, name: str) -> tuple[str | None, str]:
     """Return ``(schema, table)`` for a possibly schema-qualified identifier, performing no
     content validation on either part -- only :func:`_bare_or_qualified` validates; this is
     the shared parser underneath it, and the entry point for a caller that has no unquoted
     interpolation of its own to protect (see that function's docstring for why one exists).
+    *kind* is used only to name the offending value in the "more than one dot" error below --
+    it plays no role in shape recognition, since that check has no content to validate.
 
     Two ways *name* can be schema-qualified, checked in this order:
 
@@ -80,7 +82,7 @@ def _split_qualified(name: str) -> tuple[str | None, str]:
         return None, name
     if '.' in rest:
         raise ValueError(
-            f'{name!r} has more than one schema-qualifying "." -- only a single '
+            f'{kind} {name!r} has more than one schema-qualifying "." -- only a single '
             f'"schema.table" shape (or Django\'s own quoted \'"schema"."table"\' form) is '
             f'supported.'
         )
@@ -112,7 +114,7 @@ def _bare_or_qualified(kind: str, name: str) -> tuple[str | None, str]:
     ``'Order Items'`` that caller was never going to render unquoted in the first place.
     """
     quoted = _QUOTED_QUALIFIED.match(name) is not None
-    schema, table = _split_qualified(name)
+    schema, table = _split_qualified(kind, name)
     if schema is None:
         return None, _bare(kind, table)
     if quoted:

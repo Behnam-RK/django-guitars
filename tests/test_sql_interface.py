@@ -26,13 +26,19 @@ from guitars import sql
 #: migrations call ``.format()`` on. Append-only: add when a feature adds SQL, never
 #: remove. A removal here is the one change that silently breaks already-applied
 #: migrations elsewhere.
+#:
+#: Exception, recorded rather than silently done: 2.0.0 removed
+#: ``CHECK_TRIGGER_FUNCTION_EXISTS``, ``CHECK_PARENT_TRIGGER_FUNCTION_EXISTS``,
+#: ``CHECK_TRIGGER_EXISTS_ON_TABLE`` and ``CHECK_RULE_EXISTS_ON_TABLE`` -- confirmed to have
+#: zero consumers anywhere in ``guitars.management.enforcement`` (nothing ever called
+#: ``.format()`` on them to build a migration operation) and zero references in any checked-in
+#: migration. Removing an *unused* name breaks nothing a fresh ``migrate`` depends on; this
+#: comment is the paper trail so a future reader does not mistake the gap for an oversight.
 FROZEN_SQL_CONSTANTS = frozenset(
     {
         # _updated_at trigger function + per-table statement trigger
-        'CHECK_TRIGGER_FUNCTION_EXISTS',
         'CREATE_UPDATED_AT_TRIGGER_FUNCTION',
         'DROP_UPDATED_AT_TRIGGER_FUNCTION',
-        'CHECK_TRIGGER_EXISTS_ON_TABLE',
         'CREATE_UPDATED_AT_TRIGGER',
         'DROP_UPDATED_AT_TRIGGER',
         # Refresh and adoption forms. Generated migrations inline their SQL rather than
@@ -45,7 +51,6 @@ FROZEN_SQL_CONSTANTS = frozenset(
         # soft deletion: the ON DELETE rule, the cascade rule, the session switch
         'SWITCH_ON_HARD_DELETION',
         'SWITCH_OFF_HARD_DELETION',
-        'CHECK_RULE_EXISTS_ON_TABLE',
         'CREATE_SOFT_DELETE_RULE',
         'DROP_SOFT_DELETE_RULE',
         'CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE',
@@ -53,7 +58,6 @@ FROZEN_SQL_CONSTANTS = frozenset(
         'CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE_VIA',
         'DROP_SOFT_DELETE_RELATED_OBJECTS_RULE_VIA',
         # multi-table inheritance: parent trigger function, trigger, redirect rule
-        'CHECK_PARENT_TRIGGER_FUNCTION_EXISTS',
         'CREATE_PARENT_UPDATED_AT_TRIGGER_FUNCTION',
         'DROP_PARENT_UPDATED_AT_TRIGGER_FUNCTION',
         'CREATE_PARENT_UPDATED_AT_TRIGGER',
@@ -165,7 +169,9 @@ def test_every_rule_is_created_or_replace():
 
     assert creating_rules, 'found no rule-creating constants -- has a name changed?'
     plain = [name for name in creating_rules if 'CREATE OR REPLACE RULE' not in getattr(sql, name)]
-    assert not plain, f'these create a rule without OR REPLACE, so replacing one is unsafe: {plain}'
+    assert not plain, (
+        f'these create a rule without OR REPLACE, so replacing one is unsafe: {plain}'
+    )
 
 
 def test_every_frozen_callable_is_callable():

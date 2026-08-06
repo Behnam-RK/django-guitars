@@ -45,12 +45,6 @@ for the pre-2.0.0 3-arg form it must go on understanding forever.
 # ****************************** Updated At Trigger Function ******************************
 # *****************************************************************************************
 
-CHECK_TRIGGER_FUNCTION_EXISTS = """
-    SELECT proname
-    FROM pg_proc
-    WHERE proname = 'set_updated_at';
-"""
-
 CREATE_UPDATED_AT_TRIGGER_FUNCTION = """
     CREATE FUNCTION set_updated_at()
        RETURNS TRIGGER
@@ -99,14 +93,6 @@ REPLACE_UPDATED_AT_TRIGGER_FUNCTION = """
 # ********************************************************************************
 # ****************************** Updated At Trigger ******************************
 # ********************************************************************************
-
-CHECK_TRIGGER_EXISTS_ON_TABLE = """
-    SELECT tgname
-    FROM pg_trigger
-    WHERE tgname = '{trigger}' AND
-          tgrelid = '{table}'::regclass AND
-          tgisinternal IS FALSE;
-"""
 
 CREATE_UPDATED_AT_TRIGGER = """
     CREATE TRIGGER updated_at_trigger
@@ -171,12 +157,6 @@ ADOPT_UPDATED_AT_TRIGGER = (
 # trying to make one placeholder do both jobs. An empty first arg is the unqualified case --
 # the 4-arg form always passes exactly four args, never conditionally omits the schema, so
 # ``TG_ARGV[0] = ''`` is unambiguous there.
-
-CHECK_PARENT_TRIGGER_FUNCTION_EXISTS = """
-    SELECT proname
-    FROM pg_proc
-    WHERE proname = 'set_parent_updated_at';
-"""
 
 CREATE_PARENT_UPDATED_AT_TRIGGER_FUNCTION = """
     CREATE FUNCTION set_parent_updated_at()

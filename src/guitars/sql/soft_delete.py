@@ -67,13 +67,6 @@ SWITCH_ON_HARD_DELETION = "SELECT set_config('rules.hard_deletion', 'on', TRUE);
 
 SWITCH_OFF_HARD_DELETION = "SELECT set_config('rules.hard_deletion', 'off', TRUE);"
 
-CHECK_RULE_EXISTS_ON_TABLE = """
-    SELECT rulename
-    FROM pg_rules
-    WHERE rulename = '{rule}' AND
-          tablename = '{table}';
-"""
-
 CREATE_SOFT_DELETE_RULE = """
     CREATE OR REPLACE RULE soft_delete
         AS ON DELETE TO {table}

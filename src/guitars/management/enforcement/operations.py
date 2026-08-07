@@ -95,6 +95,17 @@ def _related_rule_name(related_table: str, foreign_key: str | None = None) -> st
     would otherwise compute the identical name and silently collide the same way a
     NAMEDATALEN truncation could -- so the schema is folded in as its own component instead.
 
+    Folded in **length-prefixed**, not just underscore-joined: plain
+    ``f'{schema}_{bare_related_table}'`` reintroduces the exact collision this exists to
+    prevent whenever either part itself contains an underscore -- schema ``'tenant_a'``/table
+    ``'events'`` and schema ``'tenant'``/table ``'a_events'`` both fold to
+    ``'tenant_a_events'``, indistinguishable to a caller that only sees the joined string.
+    Prefixing with ``len(schema)`` fixes the split point: two different ``(schema, table)``
+    pairs can only produce the same encoded string if ``len(schema)`` is also the same, and
+    then the next ``len(schema)`` characters -- and therefore the remainder -- are pinned to
+    one reading. No fixed-width padding needed, since the digits are always the caller's own
+    and are terminated by the first ``_`` that follows them.
+
     Split via :func:`_identifiers._split_qualified`, not the validating ``_bare_or_qualified``:
     the result is quoted via :func:`_identifiers._safe_ident` below regardless of content, so
     a hostile-but-legal, unqualified ``related_table`` (``'Order Items'``) must not be
@@ -106,7 +117,7 @@ def _related_rule_name(related_table: str, foreign_key: str | None = None) -> st
     name = (
         f'soft_delete_related_{bare_related_table}'
         if schema is None
-        else f'soft_delete_related_{schema}_{bare_related_table}'
+        else f'soft_delete_related_{len(schema)}_{schema}_{bare_related_table}'
     )
     if foreign_key is not None:
         name = f'{name}_{foreign_key}'

@@ -194,7 +194,19 @@ def test_related_rule_name_does_not_reject_a_hostile_unqualified_table():
 
 def test_related_rule_name_folds_in_a_hostile_schema_qualified_table():
     name = operations_module._related_rule_name('analytics.Weird Table')
-    assert name == '"soft_delete_related_analytics_Weird Table"'
+    assert name == '"soft_delete_related_9_analytics_Weird Table"'
+
+
+def test_related_rule_name_does_not_collide_across_the_schema_table_boundary():
+    """Regression: a plain ``f'{schema}_{table}'`` join is ambiguous whenever either part
+    contains an underscore -- schema ``'tenant_a'``/table ``'events'`` and schema
+    ``'tenant'``/table ``'a_events'`` both fold to the same joined string, which would
+    silently collide two distinct related tables' cascade rules onto one name (see the
+    docstring). The length-prefixed encoding must keep them apart.
+    """
+    first = operations_module._related_rule_name('tenant_a.events')
+    second = operations_module._related_rule_name('tenant.a_events')
+    assert first != second
 
 
 def test_cascade_operations_disambiguates_two_fks_to_the_same_related_table():

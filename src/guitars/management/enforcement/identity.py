@@ -17,6 +17,7 @@ from guitars.management.enforcement.headers import (
     _RE_POLICY_IDENTITY,
     _RE_SQL_IDENTITY,
 )
+from guitars.sql import _identifiers
 
 
 def _as_list(statements: str | list[str]) -> list[str]:
@@ -160,7 +161,11 @@ def unforced_policy_tables(content: str, matches: list[re.Match]) -> set[str]:
     for index, match in enumerate(matches):
         end = matches[index + 1].start() if index + 1 < len(matches) else len(content)
         operation = content[match.end() : end]
-        state[match.group(1)] = (
+        # _unescape_ident: match.group(1) is the header's escaped form (see headers.py's
+        # _QUOTED_CONTENT); the caller compares this set's members against the unescaped
+        # table names scanning.py already builds, so the two must agree on which form they
+        # use.
+        state[_identifiers._unescape_ident(match.group(1))] = (
             'force=False' in operation
             if 'force=' in operation
             else not _RE_FORCED.search(operation)

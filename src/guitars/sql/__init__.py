@@ -19,14 +19,8 @@ Organised by concern:
 
 Multi-table inheritance (the ``*_MTI_*`` and ``*_PARENT_*`` names) spans both,
 because it needs the same treatment for timestamps and for deletion. It rests on
-one invariant, stated once here rather than in each submodule:
-
-    In Django MTI a concrete child model gets its OWN table whose primary key is a
-    ``OneToOneField(parent_link=True)`` referencing the parent's table; the metadata
-    columns (``_updated_at`` / ``_deleted_at``) live ONLY on the ancestor that
-    declares them. Because every table in an MTI chain shares the SAME primary-key
-    value, a rule or trigger on any descendant table can address the owning ancestor
-    row directly via ``owner_pk = old.<child_pk>``.
+one invariant -- see "The shared-PK invariant" in ``docs/mti.md`` for the full
+statement and why it is what makes every MTI rule/trigger here sound.
 """
 
 from .policy import (
@@ -46,7 +40,6 @@ from .policy import (
     replace_table_rls,
 )
 from .soft_delete import (
-    CHECK_RULE_EXISTS_ON_TABLE,
     CREATE_MTI_SOFT_DELETE_RULE,
     CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE,
     CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE_VIA,
@@ -61,9 +54,6 @@ from .soft_delete import (
 from .triggers import (
     ADOPT_PARENT_UPDATED_AT_TRIGGER,
     ADOPT_UPDATED_AT_TRIGGER,
-    CHECK_PARENT_TRIGGER_FUNCTION_EXISTS,
-    CHECK_TRIGGER_EXISTS_ON_TABLE,
-    CHECK_TRIGGER_FUNCTION_EXISTS,
     CREATE_PARENT_UPDATED_AT_TRIGGER,
     CREATE_PARENT_UPDATED_AT_TRIGGER_FUNCTION,
     CREATE_UPDATED_AT_TRIGGER,
@@ -84,10 +74,6 @@ from .triggers import (
 __all__ = [
     'ADOPT_PARENT_UPDATED_AT_TRIGGER',
     'ADOPT_UPDATED_AT_TRIGGER',
-    'CHECK_PARENT_TRIGGER_FUNCTION_EXISTS',
-    'CHECK_RULE_EXISTS_ON_TABLE',
-    'CHECK_TRIGGER_EXISTS_ON_TABLE',
-    'CHECK_TRIGGER_FUNCTION_EXISTS',
     'CREATE_MTI_SOFT_DELETE_RULE',
     'CREATE_PARENT_UPDATED_AT_TRIGGER',
     'CREATE_PARENT_UPDATED_AT_TRIGGER_FUNCTION',

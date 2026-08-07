@@ -34,12 +34,17 @@ DATABASES['pooled'] = {  # noqa: F405
 # free at session setup) but deliberately left out of LOCAL_APPS -- makeguitarmigrations/
 # audittenancy ignore them by default, and each test scopes to its app explicitly.
 #
-# 'tests.makemigrations_override' is deliberately NOT listed here: it has no migrations
-# checked in at all, and an app installed with a pending schema change fails the
+# 'tests.makemigrations_override' and 'tests.schema_qualified' are deliberately NOT listed
+# here: both have no migrations checked in at all, and an app installed that way fails the
 # *unscoped* `makemigrations --check` CI runs (see .github/workflows/ci.yml) regardless of
 # LOCAL_APPS -- that check isn't guitars' own scoping, it's Django's, over every installed
-# app. tests/test_makemigrations_override.py adds it to INSTALLED_APPS itself, only for
-# the duration of each test, via override_settings.
+# app. tests/test_makemigrations_override.py and tests/test_schema_qualified.py each add
+# their app to INSTALLED_APPS themselves, only for the duration of each test, via
+# override_settings -- schema_qualified's table is additionally created and dropped inside
+# the test's own (rolled-back) transaction rather than through a real migration, so it
+# never persists in the shared session database at all; see test_schema_qualified.py for
+# why a persisted schema-qualified table breaks Django's own flush() for every other
+# transaction=True test in the suite, not just this one.
 INSTALLED_APPS = [  # noqa: F405
     *INSTALLED_APPS,  # noqa: F405
     'tests.testapp',

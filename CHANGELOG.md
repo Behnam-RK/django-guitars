@@ -5,6 +5,55 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-08-06
+
+M4: SQL identifier quoting + schema-qualified support (#11).
+
+### ⚠️ BREAKING
+
+**Every generated trigger, rule, and policy statement now quotes and validates
+its SQL identifiers, and `db_table` may now be schema-qualified.** Before this,
+`sql/policy.py` validated and quoted every identifier it interpolated, but
+`sql/triggers.py` and `sql/soft_delete.py` did raw, unvalidated `.format()` calls
+fed the same `model._meta.db_table` values — a mixed-case table name generated
+DDL targeting the wrong (lowercase-folded) relation, a reserved word produced a
+syntax error, and a schema-qualified name built an invalid identifier by
+splicing the dot straight in. Every project upgrading to 2.0.0 will see
+`makeguitarmigrations` generate one new enforcement migration per app with any
+enforced table, re-issuing the now-quoted/schema-aware forms of its triggers,
+rules, and policies. No column, data, or behavior for an already-working
+lowercase/unqualified name changes — only the SQL text's quoting.
+
+To upgrade:
+
+```bash
+python manage.py makeguitarmigrations   # or just makemigrations
+python manage.py migrate
+```
+
+`makeguitarmigrations --check` should report no further changes afterward.
+
+`guitars.sql.CHECK_TRIGGER_FUNCTION_EXISTS`, `CHECK_PARENT_TRIGGER_FUNCTION_EXISTS`,
+`CHECK_TRIGGER_EXISTS_ON_TABLE`, and `CHECK_RULE_EXISTS_ON_TABLE` are removed —
+they had zero consumers in `makeguitarmigrations` or anywhere else in the kit.
+
+### Added
+
+- Schema-qualified `db_table` values are supported end-to-end: triggers
+  (including the MTI parent-propagating trigger), soft-delete rules, cascade
+  rules, and tenant RLS policies all correctly target the qualified table.
+  Two forms are recognised — a bare `'schema.table'` for a table this project's
+  ORM never queries directly, and Django's own pre-quoted `'"schema"."table"'`
+  convention for a table meant to be read and written through the ORM (the only
+  form Django's own query compiler can resolve correctly on every query, not
+  just at `migrate` time). See [`docs/mti.md`](docs/mti.md) for the one
+  remaining, pre-existing caveat this makes visible: an own-table (non-MTI)
+  trigger resolves its target through the firing session's `search_path`, the
+  same as any other unqualified reference.
+- Rule names derived from long table names are now truncated with a
+  content-hash suffix when they would exceed PostgreSQL's 63-byte identifier
+  limit, so two long names can no longer silently collide onto the same rule.
+
 ## [1.3.0] - 2026-08-02
 
 M2: new behavioural test families (#9) -- dev/test-only, no production code path changes

@@ -38,6 +38,7 @@ from __future__ import annotations
 from guitars.gucs import BYPASS_GUC, VALUE_SEPARATOR, guc_name
 from guitars.sql._identifiers import (
     _QUOTED_QUALIFIED,
+    _QUOTED_UNQUALIFIED,
     _bare,
     _bare_or_qualified,
     _quote_ident,
@@ -78,8 +79,21 @@ _OWNER_ALIAS = '_guitars_owner'
 def _qualified_table(table: str) -> str:
     """A possibly schema-qualified table name.
 
-    Two input shapes, two different outputs, because :func:`_bare_or_qualified` treats them
-    differently (see its docstring):
+    Checked first, ahead of either shape :func:`_bare_or_qualified` distinguishes: *table*
+    is one well-formed, self-quoted segment (:data:`~guitars.sql._identifiers._QUOTED_UNQUALIFIED`)
+    -- an unqualified table pre-wrapped by the caller, e.g. ``'"my.table"'`` with a literal
+    ``.`` embedded in its own name. Returned unchanged for the same reason
+    :func:`guitars.sql._identifiers._quote_table` checks this first: a dot inside an
+    already-self-quoted, schema-less table must not be mistaken for a schema separator and
+    split on, which is what happens if this table is instead routed into
+    :func:`_bare_or_qualified` below. Deliberately the stricter ``_QUOTED_UNQUALIFIED``, not
+    the looser :func:`~guitars.sql._identifiers._is_self_quoted` -- a malformed or
+    three-or-more-part string like ``'"a"."b"."c"'`` also starts and ends with ``"`` without
+    being one legitimate quoted identifier, and must still reach ``_bare_or_qualified`` below
+    to be rejected there.
+
+    Otherwise, two input shapes, two different outputs, because :func:`_bare_or_qualified`
+    treats them differently (see its docstring):
 
     * A bare ``'schema.table'`` (or unqualified ``'table'``) comes back with each part
       already proved bare via :func:`_bare`, so it is joined -- or returned -- unquoted, the
@@ -97,6 +111,8 @@ def _qualified_table(table: str) -> str:
       (see :func:`guitars.sql._identifiers._quote_table`'s docstring for why), so this is
       not a corner this module could decline to cover.
     """
+    if _QUOTED_UNQUALIFIED.match(table) is not None:
+        return table
     pre_quoted = _QUOTED_QUALIFIED.match(table) is not None
     schema, name = _bare_or_qualified('table', table)
     if pre_quoted:

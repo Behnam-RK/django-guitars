@@ -47,6 +47,17 @@ def _bare(kind: str, name: str) -> str:
 #: Postgres's own identifier-quoting escape works.
 _QUOTED_QUALIFIED = re.compile(r'^"((?:[^"]|"")*)"\.\"((?:[^"]|"")*)"$')
 
+#: Django's single-part self-quoting convention: one well-formed quoted segment, not two --
+#: the unqualified sibling of ``_QUOTED_QUALIFIED`` above, and *not* the same test as
+#: :func:`_is_self_quoted`. That function only checks the outer characters, which a
+#: malformed or multi-part string (``'"a"."b"."c"'``) can satisfy too -- it starts and ends
+#: with ``"`` without being one legitimate quoted identifier. Requiring the *entire* string
+#: to fully match this pattern (every inner ``"`` part of a doubled ``""`` pair) is what
+#: correctly excludes that case and falls through to the "more than one schema-qualifying
+#: dot" rejection below, while still matching a genuine single self-quoted table -- with or
+#: without a literal ``.`` embedded in its own content.
+_QUOTED_UNQUALIFIED = re.compile(r'^"((?:[^"]|"")*)"$')
+
 
 def _split_qualified(kind: str, name: str) -> tuple[str | None, str]:
     """Return ``(schema, table)`` for a possibly schema-qualified identifier, performing no
@@ -56,7 +67,7 @@ def _split_qualified(kind: str, name: str) -> tuple[str | None, str]:
     *kind* is used only to name the offending value in the "more than one dot" error below --
     it plays no role in shape recognition, since that check has no content to validate.
 
-    Two ways *name* can be schema-qualified, checked in this order:
+    Three ways *name* can arrive, checked in this order:
 
     1. **Django's own pre-quoted convention**, ``'"schema"."table"'`` -- recognised first
        because it is the *only* ``db_table`` shape for which Django's own query compiler
@@ -66,7 +77,20 @@ def _split_qualified(kind: str, name: str) -> tuple[str | None, str]:
        written through the Django ORM, not just have enforcement SQL generated for it,
        needs this form -- see ``_quote_table``'s docstring for what breaks otherwise.
        Each side's quoted content is returned as-is (unescaping a doubled ``""``).
-    2. **A bare, unquoted ``schema.table``**, split on the first ``.``. Lighter-weight than
+    2. **Django's single-part self-quoting convention** (:data:`_QUOTED_UNQUALIFIED`) --
+       ``'"my.table"'``, an *unqualified* table name that itself contains a literal ``.``,
+       pre-wrapped by the caller so ``quote_name()`` leaves it alone. Checked before any
+       dot in *name* is treated as a schema separator, or a table with no schema at all
+       would be split on its own embedded ``.`` as if that dot meant something -- the exact
+       bug this shape exists to avoid. Returned as ``(None, ...)`` with the wrapping quotes
+       stripped and a doubled ``""`` unescaped, the same as the quoted-qualified form above,
+       since every caller of this function re-quotes or re-escapes the table part itself
+       regardless of which of these three shapes produced it. Deliberately the stricter
+       :data:`_QUOTED_UNQUALIFIED`, not the looser :func:`_is_self_quoted` -- a malformed or
+       three-or-more-part string like ``'"a"."b"."c"'`` also starts and ends with ``"``, and
+       must still fall through to the second-``.`` rejection below rather than being
+       swallowed here as if it were one legitimate quoted identifier.
+    3. **A bare, unquoted ``schema.table``**, split on the first ``.``. Lighter-weight than
        the quoted form, for a table this project's ORM never queries directly (only
        enforcement SQL is generated against it). A second ``.`` describes a shape
        (``a.b.c``) neither form supports and is rejected outright -- that much is a
@@ -77,6 +101,9 @@ def _split_qualified(kind: str, name: str) -> tuple[str | None, str]:
     if quoted is not None:
         schema_part, table_part = quoted.groups()
         return schema_part.replace('""', '"'), table_part.replace('""', '"')
+    self_quoted = _QUOTED_UNQUALIFIED.match(name)
+    if self_quoted is not None:
+        return None, self_quoted.group(1).replace('""', '"')
     schema, sep, rest = name.partition('.')
     if not sep:
         return None, name
@@ -188,16 +215,19 @@ def _is_self_quoted(name: str) -> bool:
 def _quote_table(name: str) -> str:
     """Full DDL-ready identifier for a *possibly* schema-qualified table name.
 
-    Three shapes, split on whether *name* contains a ``.`` and, if not, whether it is
-    already self-quoted:
+    Four shapes, checked in this order:
 
-    * **No ``.``, already self-quoted** (``'"Order Items"'``): returned unchanged. This is
-      Django's own single-part pre-quoting convention (see below) -- re-quoting it via
-      :func:`_quote_ident` would double-wrap it, producing a *different*, wrong identifier
-      (the literal quote characters become part of the name, rather than delimiting it).
-      Before this kit quoted anything, a self-quoted ``db_table`` passed straight through a
-      raw ``.format()`` and worked by accident; recognising it here keeps that working on
-      purpose.
+    * **Already self-quoted, and not Django's two-part ``'"schema"."table"'`` form**
+      (``'"Order Items"'``, or ``'"my.table"'`` with a literal ``.`` embedded): returned
+      unchanged. This is Django's own single-part pre-quoting convention -- re-quoting it
+      via :func:`_quote_ident` would double-wrap it, producing a *different*, wrong
+      identifier (the literal quote characters become part of the name, rather than
+      delimiting it). Checked before the ``.`` branch below, and independently of whether
+      *name* happens to contain a ``.`` of its own, for exactly that reason: an unqualified
+      self-quoted table whose literal content contains a ``.`` must not be mistaken for a
+      schema-qualified reference and split on it. Before this kit quoted anything, a
+      self-quoted ``db_table`` passed straight through a raw ``.format()`` and worked by
+      accident; recognising it here -- for both cases -- keeps that working on purpose.
     * **No ``.``, otherwise**: quoted as one opaque identifier via :func:`_quote_ident`, with
       no shape validation -- the permissive, whole-string-blob quoting the trigger/rule
       templates have used since quoting was first added to them. An unqualified ``db_table``
@@ -218,9 +248,17 @@ def _quote_table(name: str) -> str:
     ``'schema.table'`` therefore gets wrapped by Django itself as one wrong identifier on
     every ORM read or write, regardless of what this kit emits -- it only ever works for a
     table this project's ORM never queries directly.
+
+    The self-quoted check is :data:`_QUOTED_UNQUALIFIED`, not the looser
+    :func:`_is_self_quoted` -- a malformed three-or-more-part string like
+    ``'"a"."b"."c"'`` also starts and ends with ``"`` without being one legitimate quoted
+    identifier, and must still reach :func:`_bare_or_qualified` below to be rejected there,
+    the same as it always was.
     """
+    if _QUOTED_UNQUALIFIED.match(name) is not None:
+        return name
     if '.' not in name:
-        return name if _is_self_quoted(name) else _quote_ident(name)
+        return _quote_ident(name)
     schema, table = _bare_or_qualified('table', name)
     return _quote_qualified(schema, table)
 

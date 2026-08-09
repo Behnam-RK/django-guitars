@@ -106,7 +106,7 @@ def test_the_checks_are_registered_with_django(check):
     """Registered, not merely defined -- otherwise ``manage.py check`` never runs them."""
     from django.core.checks import registry
 
-    from guitars.tenancy import register_checks
+    from guitars.tenancy.testing import register_checks
 
     register_checks()
 

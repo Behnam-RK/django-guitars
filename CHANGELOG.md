@@ -121,6 +121,40 @@ only signal. Every call site needs the mechanical rename:
 +objects = tenanted_manager(_manager_class=LiveManager, org="org")
 ```
 
+**`guitars.tenancy.__all__` is trimmed from 23 names to 16, splitting one
+export list that served four different audiences.**
+
+- `BYPASS_GUC`, `GUC_PREFIX`, `VALUE_SEPARATOR`, `guc_name` are no longer
+  re-exported from `guitars.tenancy` at all — `from guitars.tenancy import
+  BYPASS_GUC` now raises `ImportError`. Import them from `guitars.gucs`
+  directly, which is the whole reason that leaf module exists: a generated
+  migration's `from guitars import sql` can reach these four names without
+  pulling in the tenancy runtime (connection handling, a signal receiver, a
+  `ContextVar`), and re-exporting them from `guitars.tenancy` defeated that.
+- `tenant_spec` and `local_tenant_fields` move to `guitars.tenancy.spec` and
+  are no longer reachable from `guitars.tenancy` either. They answer a
+  generator-facing question ("what is this model tenanted on?"), read by the
+  RLS policy generator and by `discovery`/`checks` — not one guitars ever
+  documented as application-facing. Import them from `guitars.tenancy.spec`.
+- `uninstall`, `install_tenant_guc`, `uninstall_tenant_guc`,
+  `install_write_guards`, `uninstall_write_guards`, and `register_checks` move
+  to a new `guitars.tenancy.testing` submodule, documented in its own
+  docstring as existing for test setup/teardown and not part of the
+  application-facing surface. `install()` is the one entry point that stays
+  on `guitars.tenancy` itself — it is what a real project actually calls (or
+  `GuitarsConfig.ready()` calls for it).
+
+```diff
+-from guitars.gucs import BYPASS_GUC        # already worked; now the only way
++from guitars.gucs import BYPASS_GUC
+
+-from guitars.tenancy import tenant_spec
++from guitars.tenancy.spec import tenant_spec
+
+-from guitars.tenancy import uninstall
++from guitars.tenancy.testing import uninstall
+```
+
 ### Changed
 
 - The audit-mode `Reporter` now receives structured context alongside the

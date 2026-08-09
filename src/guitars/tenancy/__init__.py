@@ -30,15 +30,32 @@ State lives in a ``ContextVar`` so a scope survives ``await`` / ``sync_to_async`
 Portability: this package imports only the standard library and Django. Anything
 host-specific arrives through ``reporting.set_reporter``, so it can move as a unit.
 
+**This module's ``__all__`` is the application-facing surface only.** Three things
+consumers sometimes reach for live elsewhere on purpose:
+
+* ``guitars.gucs`` (``BYPASS_GUC``, ``GUC_PREFIX``, ``VALUE_SEPARATOR``, ``guc_name``) --
+  a leaf module a generated migration's ``from guitars import sql`` can read without
+  pulling in this whole runtime. Re-exporting the names here would defeat that.
+* ``guitars.tenancy.spec`` (``tenant_spec``, ``local_tenant_fields``) -- what a model is
+  tenanted on, read by the RLS policy generator and by ``discovery``/``checks``. A
+  generator-facing internal question, not an application-facing one.
+* ``guitars.tenancy.testing`` -- ``uninstall`` and the lower-level install/uninstall hooks
+  for one layer at a time, for a test suite that needs to install and tear down
+  enforcement per test. Not part of the application-facing API surface -- a real project
+  calls :func:`install` (below) once, or lets ``GuitarsConfig.ready()`` do it.
+
 See ``docs/tenancy.md``.
 """
 
 from __future__ import annotations
 
-from guitars.gucs import BYPASS_GUC, GUC_PREFIX, VALUE_SEPARATOR, guc_name
-
 from .checks import register_checks
-from .enforcement import TenantEnforcement, install_write_guards, uninstall_write_guards
+from .enforcement import (
+    TenantEnforcement,
+    ViolationKind,
+    install_write_guards,
+    uninstall_write_guards,
+)
 from .guc import install as install_tenant_guc
 from .guc import uninstall as uninstall_tenant_guc
 from .manager import TenantedManagerBase, tenanted_manager
@@ -54,13 +71,9 @@ from .scope import (
     tenant,
     tenanted,
 )
-from .spec import local_tenant_fields, tenant_spec
 
 
 __all__ = [
-    'BYPASS_GUC',
-    'GUC_PREFIX',
-    'VALUE_SEPARATOR',
     'Reporter',
     'TenantEnforcement',
     'TenantScopeError',
@@ -68,23 +81,15 @@ __all__ = [
     'TenantScopeViolation',
     'TenantValueError',
     'TenantedManagerBase',
+    'ViolationKind',
     'get_tenant',
-    'guc_name',
     'install',
-    'install_tenant_guc',
-    'install_write_guards',
     'is_bypassed',
-    'local_tenant_fields',
-    'register_checks',
     'set_reporter',
     'tenancy_bypassed',
     'tenant',
-    'tenant_spec',
     'tenanted',
     'tenanted_manager',
-    'uninstall',
-    'uninstall_tenant_guc',
-    'uninstall_write_guards',
 ]
 
 
@@ -104,6 +109,6 @@ def install() -> None:
 
 
 def uninstall() -> None:
-    """Deactivate enforcement. For tests."""
+    """Deactivate enforcement. For tests -- see ``guitars.tenancy.testing``."""
     uninstall_tenant_guc()
     uninstall_write_guards()

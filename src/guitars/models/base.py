@@ -135,8 +135,8 @@ class UpdatableModel(Model):
             from django.db.models.signals import post_save, pre_save
 
             from guitars.signals import DisableSignals
-            from guitars.tenancy import tenant_spec
             from guitars.tenancy.reporting import report_once
+            from guitars.tenancy.spec import tenant_spec
 
             signals_context = (
                 DisableSignals(signals=[pre_save, post_save])

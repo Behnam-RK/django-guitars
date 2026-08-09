@@ -556,17 +556,17 @@ class TestScaffoldingFailsLoudly:
 class TestUncoverableModelsStillScope:
     def test_the_multi_hop_model_has_no_local_tenant_field(self):
         """What makes it uncoverable, asserted at the source rather than via the note."""
-        from guitars.tenancy import local_tenant_fields, tenant_spec
+        from guitars.tenancy.spec import local_tenant_fields, tenant_spec
 
         assert tenant_spec(Review) == {'label': 'release__label'}
         assert local_tenant_fields(Review) == {}
 
     def test_a_hand_declared_manager_reports_its_local_field(self):
-        from guitars.tenancy import local_tenant_fields
+        from guitars.tenancy.spec import local_tenant_fields
 
         assert local_tenant_fields(Booking) == {'label': 'label'}
 
     def test_an_untenanted_model_has_no_spec(self):
-        from guitars.tenancy import tenant_spec
+        from guitars.tenancy.spec import tenant_spec
 
         assert tenant_spec(Label) == {}

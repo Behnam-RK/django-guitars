@@ -42,6 +42,7 @@ from .scope import (
 __all__ = [
     'TenantEnforcement',
     'TenantedManager',
+    'ViolationKind',
     'apply_write_guard',
     'install_write_guards',
     'local_tenant_fields',
@@ -72,6 +73,32 @@ class TenantEnforcement(str, Enum):
     __str__ = str.__str__
 
 
+class ViolationKind(str, Enum):
+    """What kind of write-guard violation this is.
+
+    Previously computed by :func:`apply_write_guard` for internal dedup only, and thrown
+    away before reaching the ``Reporter`` -- a custom reporter (one forwarding to Sentry,
+    say) had nothing to classify on but regexing the message string. Now passed straight
+    through as structured ``kind=`` context; see :func:`_violation`.
+    """
+
+    UNSCOPED = 'unscoped'
+    """No active tenant scope at all -- nothing to take a value from."""
+
+    MISSING = 'missing'
+    """A scope is active, but this field is unset and autofill is off."""
+
+    AMBIGUOUS = 'ambiguous'
+    """A scope is active but names several tenants, so there is no one value to autofill."""
+
+    MISMATCH = 'mismatch'
+    """An explicit value contradicts the active scope."""
+
+    # StrEnum parity on Python 3.10 -- see TenantEnforcement's own copy of this trick,
+    # immediately above, for why.
+    __str__ = str.__str__
+
+
 def _enforcement() -> TenantEnforcement:
     return TenantEnforcement(getattr(settings, 'GUITARS_TENANT_ENFORCE', TenantEnforcement.STRICT))
 
@@ -82,16 +109,26 @@ def _autofill_default() -> bool:
     return bool(getattr(settings, 'GUITARS_TENANT_AUTOFILL', False))
 
 
-def _violation(message: str, *, key: object, exception: type[TenantScopeError]) -> None:
-    """Raise ``exception``, or merely report, depending on the enforcement mode.
+def _violation(
+    message: str,
+    *,
+    key: object,
+    exception: type[TenantScopeError],
+    kind: ViolationKind,
+    **context: object,
+) -> None:
+    """Raise ``exception``, or merely report ``kind``/``context``, depending on the mode.
 
     ``exception`` is the caller's choice between :class:`TenantScopeMissing` (no scope
     satisfies this) and :class:`TenantScopeViolation` (a scope is active but this write
-    contradicts it) -- audit mode reports the same message regardless of which, since
-    nothing here raises in that mode at all.
+    contradicts it) -- audit mode reports the same finding regardless of which, since
+    nothing here raises in that mode at all. ``kind`` and any extra ``context`` (typically
+    ``model=`` and ``dimension=``) reach the ``Reporter`` as structured keyword arguments
+    rather than being folded into the message string alone, so a reporter that forwards
+    to Sentry or similar can classify programmatically instead of regexing it.
     """
     if _enforcement() is TenantEnforcement.AUDIT:
-        report_once(key, message, mode=TenantEnforcement.AUDIT.value)
+        report_once(key, message, mode=TenantEnforcement.AUDIT.value, kind=kind, **context)
         return
     raise exception(message)
 
@@ -204,6 +241,9 @@ def apply_write_guard(instance: models.Model) -> None:
                     f'for a deliberate cross-tenant write.',
                     key=(label, dimension, 'unscoped'),
                     exception=TenantScopeMissing,
+                    kind=ViolationKind.UNSCOPED,
+                    model=label,
+                    dimension=dimension,
                 )
             # An explicit value with no active scope is the pre-existing "create takes an
             # explicit tenant" path; the database still checks it.
@@ -216,6 +256,9 @@ def apply_write_guard(instance: models.Model) -> None:
                     f'enable GUITARS_TENANT_AUTOFILL to take it from the active scope.',
                     key=(label, dimension, 'missing'),
                     exception=TenantScopeViolation,
+                    kind=ViolationKind.MISSING,
+                    model=label,
+                    dimension=dimension,
                 )
             elif isinstance(expected, MULTI_VALUE_TYPES):
                 # A collection scope reads as "either of these", which a column holding one
@@ -228,6 +271,9 @@ def apply_write_guard(instance: models.Model) -> None:
                     f'one value to autofill. Pass {dimension!r} explicitly.',
                     key=(label, dimension, 'ambiguous'),
                     exception=TenantScopeViolation,
+                    kind=ViolationKind.AMBIGUOUS,
+                    model=label,
+                    dimension=dimension,
                 )
             else:
                 setattr(instance, attname, _pk(expected))
@@ -238,6 +284,9 @@ def apply_write_guard(instance: models.Model) -> None:
                 f'tenancy_bypassed() if that is genuinely intended.',
                 key=(label, dimension, 'mismatch'),
                 exception=TenantScopeViolation,
+                kind=ViolationKind.MISMATCH,
+                model=label,
+                dimension=dimension,
             )
 
 
@@ -538,6 +587,14 @@ def _untenanted_queryset_class(base: type[models.QuerySet]) -> type[models.Query
                 self._message(action),
                 key=(model_name, action, 'unscoped-write'),
                 exception=TenantScopeMissing,
+                kind=ViolationKind.UNSCOPED,
+                model=model_name,
+                action=action,
+                # No single `dimension` -- the whole queryset has no active scope on any
+                # of `self._missing`, not one field disagreeing with an otherwise-active
+                # scope. `_message` already names them; `missing` repeats that as
+                # structured context a reporter can read without parsing the message.
+                missing=sorted(self._missing),
             )
 
         def create(self, **kwargs):

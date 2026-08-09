@@ -104,6 +104,16 @@ separator one, which is now `TenantValueError` — not a scope failure at all,
 so it is deliberately **not** a `TenantScopeError` subclass. See
 [`docs/tenancy.md`](docs/tenancy.md#exceptions) for handling guidance.
 
+### Changed
+
+- The audit-mode `Reporter` now receives structured context alongside the
+  message instead of a string to regex: `kind` (a new `ViolationKind` enum —
+  `UNSCOPED`, `MISSING`, `AMBIGUOUS`, `MISMATCH`), `model`, and, where one
+  specific field is at fault, `dimension`. A custom reporter forwarding to
+  Sentry or similar can now classify a finding programmatically. Not breaking
+  for a reporter already accepting `**context` (the documented shape); one
+  matching only specific keyword names needs to accept the new ones too.
+
 ## [1.3.0] - 2026-08-02
 
 M2: new behavioural test families (#9) -- dev/test-only, no production code path changes

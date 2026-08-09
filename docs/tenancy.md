@@ -312,6 +312,11 @@ from guitars.tenancy import set_reporter
 set_reporter(lambda message, **context: sentry_sdk.capture_message(message, extras=context))
 ```
 
+`context` carries structured fields alongside the message, not just prose to regex:
+`kind` (a `ViolationKind` — `UNSCOPED`, `MISSING`, `AMBIGUOUS`, or `MISMATCH`), `model`,
+and, where one specific field is at fault, `dimension`. A reporter can group or alert on
+`kind` directly instead of parsing the message.
+
 **2. Fix the call sites. Then switch to `strict`.**
 
 > ⚠️ **Audit mode does not soften the database.** There is no session variable

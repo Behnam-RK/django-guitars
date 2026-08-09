@@ -29,6 +29,7 @@ from guitars.tenancy import (
 )
 from guitars.tenancy.checks import TENANT_MODEL_ID, check_guitar_models_have_a_tenant
 from guitars.tenancy.discovery import _classify
+from guitars.tenancy.manager import ViolationKind
 from tests.conftest import execute as _execute
 from tests.testapp.models import Booking, Label, Release, Review, StadiumTour
 
@@ -201,10 +202,32 @@ class TestAuditMode:
         with tenancy_bypassed():
             assert Release.objects.filter(title='crossing').exists()
 
+    def test_a_cross_tenant_write_reports_structured_context_not_just_a_message(
+        self, unpolicied, tenants, sink
+    ):
+        """A reporter that forwards to Sentry needs to classify programmatically, not
+        regex the message -- ``kind``/``model``/``dimension`` are what make that possible.
+        """
+        with tenant(label=tenants.a):
+            Release(title='crossing', label=tenants.b).save()
+
+        _, context = next(pair for pair in sink if 'may not cross tenants' in pair[0])
+        assert context['kind'] is ViolationKind.MISMATCH
+        assert context['dimension'] == 'label'
+        assert 'Release' in context['model']
+
     def test_an_unscoped_create_is_reported_and_proceeds(self, unpolicied, tenants, sink):
         Release.objects.create(title='unscoped', label=tenants.a)
 
         assert any('needs an active tenant scope' in message for message, _ in sink)
+
+    def test_an_unscoped_create_reports_its_kind_as_unscoped(self, unpolicied, tenants, sink):
+        Release.objects.create(title='unscoped', label=tenants.a)
+
+        _, context = next(pair for pair in sink if 'needs an active tenant scope' in pair[0])
+        assert context['kind'] is ViolationKind.UNSCOPED
+        assert context['action'] == 'create'
+        assert context['model'] == 'Release'
 
     def test_an_unscoped_bulk_create_is_reported_and_still_guarded(
         self, unpolicied, tenants, sink

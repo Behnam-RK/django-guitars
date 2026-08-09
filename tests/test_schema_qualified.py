@@ -34,6 +34,7 @@ from django.test import override_settings
 
 from guitars import sql
 from guitars.sql import _identifiers
+from guitars.sql import triggers as _triggers
 from guitars.tenancy import tenancy_bypassed, tenant
 from tests.testapp.models import Label
 
@@ -224,3 +225,73 @@ def test_updated_at_trigger_genuinely_advances_across_committed_statements():
             with connection.cursor() as cursor:
                 cursor.execute('RESET search_path')
                 cursor.execute('DROP SCHEMA IF EXISTS analytics CASCADE')
+
+
+def test_mti_parent_trigger_fires_the_schema_qualified_branch(analytics_events_table):
+    """The one runtime path nothing else in the suite fires: ``set_parent_updated_at()``'s
+    4-arg, non-empty-``parent_schema`` branch (``UPDATE %I.%I ...``), reached only when an
+    MTI child whose *ancestor* lives outside ``public`` has one of its own, child-only
+    columns written -- exactly the scenario the function's ``TG_NARGS``/schema branching
+    exists for (see ``triggers.py``'s module docstring). ``tests/test_command.py`` and
+    ``tests/test_sql_identifiers.py`` only compare the *generated SQL text* for this
+    branch; nothing before this proved it actually fires against a real trigger.
+
+    Deliberately not a Django MTI model: a real ``class SpecialEvent(Event)`` subclass
+    registers a permanent parent-link relation on ``Event._meta`` for the rest of the test
+    process, regardless of ``INSTALLED_APPS`` -- Django's model graph has no way to
+    un-register a class once defined. That relation makes every *other* test's
+    ``Event.delete()`` (e.g. ``test_delete_soft_deletes_rather_than_removing_the_row``
+    above) try to cascade into the child's table too, which does not exist outside this
+    one test's transaction -- confirmed by hand while writing this test, which is why it
+    is a bare table instead. All this needs is the trigger's own SQL contract (a table
+    whose pk value matches the ancestor's), not real Django MTI machinery.
+
+    Also sidesteps the need for ``transaction=True``'s real wall-clock gap (see the
+    committed-statements test above): the ancestor row starts with an explicit sentinel
+    timestamp rather than ``_updated_at``'s ``db_default=Now()``, so any change away from
+    it -- not specifically a *later* value -- already proves the trigger fired, within one
+    ordinary, savepoint-rolled-back transaction.
+    """
+    table = analytics_events_table._meta.db_table
+    # analytics_events_table's fixture also enables the tenant RLS policy on this table
+    # (see its own docstring) -- bypassed here because this test is about the trigger, not
+    # tenancy, and a raw cursor INSERT/SELECT is not exempted by a Django-ORM tenant()
+    # scope the way an ORM call would be. label_id is still required (NOT NULL), so a real
+    # tenant row is created to satisfy it.
+    with tenancy_bypassed():
+        label = Label.objects.create(name='Analytics Co')
+    with tenancy_bypassed(), connection.cursor() as cursor:
+        cursor.execute(
+            'INSERT INTO "analytics"."events" (name, _updated_at, label_id) '
+            "VALUES ('probe', '2000-01-01T00:00:00Z', %s) RETURNING id, _updated_at",
+            [label.pk],
+        )
+        event_id, before = cursor.fetchone()
+
+        cursor.execute('CREATE TABLE mti_child_probe (id integer PRIMARY KEY, venue text)')
+        cursor.execute(
+            'INSERT INTO mti_child_probe (id, venue) VALUES (%s, %s)', [event_id, 'hall']
+        )
+
+        parent_schema, parent_table = _identifiers._split_qualified('table', table)
+        cursor.execute(
+            _triggers._CREATE_PARENT_UPDATED_AT_TRIGGER.format(
+                child_table=_identifiers._quote_table('mti_child_probe'),
+                parent_schema=_identifiers._escape_literal(parent_schema or ''),
+                parent_table=_identifiers._escape_literal(parent_table),
+                parent_pk=_identifiers._escape_literal('id'),
+                child_pk=_identifiers._escape_literal('id'),
+            )
+        )
+
+        # Child-only write: only mti_child_probe is touched, never "analytics"."events" --
+        # exactly the write set_parent_updated_at() exists to propagate.
+        cursor.execute(
+            'UPDATE mti_child_probe SET venue = %s WHERE id = %s', ['loud hall', event_id]
+        )
+
+        cursor.execute('SELECT _updated_at FROM "analytics"."events" WHERE id = %s', [event_id])
+        (after,) = cursor.fetchone()
+
+    assert after is not None
+    assert after != before

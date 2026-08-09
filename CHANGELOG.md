@@ -161,6 +161,11 @@ when nothing is saved that call — and silently computed `update_fields=None`,
 then never used it. Breaking only for a call site that happened to pass both
 together; every other combination of `update()`'s four flags is unaffected.
 
+**`SoftDeletableModel.cls` is removed.** An undocumented `self.__class__`
+alias with no test coverage of intent beyond confirming it returned
+`self.__class__`, and a plausible field-name collision risk on a concrete
+model. Use `self.__class__` or `type(self)` directly.
+
 ### Added
 
 - **A system check for the connection-pooling GUC leak.**
@@ -214,6 +219,12 @@ together; every other combination of `update()`'s four flags is unaffected.
   `tenancy_bypassed()`..." remediation sentence (new
   `guitars.tenancy.messages.remediation`, previously four independently-typed
   copies that had already drifted into two different wordings — now one).
+- Type annotations added to `update()`/`aupdate()` (previously unannotated
+  while the private `_prepare_update` above them was fully annotated),
+  `signals.py` (previously zero annotations anywhere in the file), and the
+  `connection` parameter throughout `tenancy/guc.py` (now `BaseDatabaseWrapper`
+  rather than untyped, making downstream `connection.savepoint_ids`/
+  `run_on_commit`/`execute_wrappers` usages checkable). No behavior change.
 
 ## [1.3.0] - 2026-08-02
 

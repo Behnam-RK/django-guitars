@@ -129,12 +129,12 @@ class UpdatableModel(Model):
 
     def update(
         self,
-        _save=True,
-        _save_all_fields=False,
-        _raise_for_excessive=True,
-        _disable_signals=False,
-        **attrs,
-    ):
+        _save: bool = True,
+        _save_all_fields: bool = False,
+        _raise_for_excessive: bool = True,
+        _disable_signals: bool = False,
+        **attrs: object,
+    ) -> None:
         """Set attributes on the instance and optionally persist to the database.
 
         Only the fields passed as ``**attrs`` are written to the DB (via
@@ -200,12 +200,12 @@ class UpdatableModel(Model):
 
     async def aupdate(
         self,
-        _save=True,
-        _save_all_fields=False,
-        _raise_for_excessive=True,
-        _disable_signals=False,
-        **attrs,
-    ):
+        _save: bool = True,
+        _save_all_fields: bool = False,
+        _raise_for_excessive: bool = True,
+        _disable_signals: bool = False,
+        **attrs: object,
+    ) -> None:
         """A thread hop onto ``.update()`` -- not native async I/O.
 
         ``asgiref.sync.sync_to_async`` runs ``.update()`` on a worker thread and awaits

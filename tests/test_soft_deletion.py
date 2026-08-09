@@ -55,13 +55,6 @@ def test_queryset_lives_and_archives_helpers():
 
 
 @pytest.mark.django_db
-def test_cls_property_returns_the_model_class():
-    band = Band.objects.create(name='Rush')
-
-    assert band.cls is Band
-
-
-@pytest.mark.django_db
 def test_delete_cascades_soft_delete_to_related():
     band = Band.objects.create(name='Rush')
     album = Album.objects.create(title='Hemispheres', band=band)

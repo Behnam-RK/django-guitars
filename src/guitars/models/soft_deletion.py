@@ -266,10 +266,6 @@ class SoftDeletableModel(Model):
         ]
 
     @property
-    def cls(self):
-        return self.__class__
-
-    @property
     def is_deleted(self):
         return bool(self._deleted_at)
 

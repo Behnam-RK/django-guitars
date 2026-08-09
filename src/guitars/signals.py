@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 import threading
+from typing import TYPE_CHECKING, TypedDict
 
 from django.db.models.signals import (
     post_delete,
@@ -13,6 +16,15 @@ from django.db.models.signals import (
 from django.dispatch import Signal
 
 
+if TYPE_CHECKING:
+    from types import TracebackType
+
+
+class _Stash(TypedDict):
+    count: int
+    original: list
+
+
 # Process-global, keyed by signal, so overlapping DisableSignals() instances -- on
 # different threads, or nested on the same one -- agree on one true stash per signal
 # instead of each keeping its own. `signal.receivers` is itself process-global mutable
@@ -22,7 +34,7 @@ from django.dispatch import Signal
 # receiver. `_lock` serialises every read/write of both this dict and `signal.receivers`
 # so "stash it" and "count the stash" never interleave across threads.
 _lock = threading.Lock()
-_state: dict[Signal, dict] = {}
+_state: dict[Signal, _Stash] = {}
 
 
 class DisableSignals:
@@ -45,7 +57,7 @@ class DisableSignals:
             instance.save()  # only post_save is suppressed
     """
 
-    DEFAULT_SIGNALS = [
+    DEFAULT_SIGNALS: list[Signal] = [
         pre_init,
         post_init,
         pre_save,
@@ -56,19 +68,24 @@ class DisableSignals:
         post_migrate,
     ]
 
-    def __init__(self, signals: list[Signal] | None = None):
-        self.disabled_signals = signals or self.DEFAULT_SIGNALS
+    def __init__(self, signals: list[Signal] | None = None) -> None:
+        self.disabled_signals: list[Signal] = signals or self.DEFAULT_SIGNALS
 
-    def __enter__(self):
+    def __enter__(self) -> DisableSignals:
         for signal in self.disabled_signals:
             self.disconnect(signal)
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
         for signal in self.disabled_signals:
             self.reconnect(signal)
 
-    def disconnect(self, signal):
+    def disconnect(self, signal: Signal) -> None:
         with _lock:
             entry = _state.setdefault(signal, {'count': 0, 'original': signal.receivers})
             if entry['count'] == 0:
@@ -76,7 +93,7 @@ class DisableSignals:
                 signal.receivers = []
             entry['count'] += 1
 
-    def reconnect(self, signal):
+    def reconnect(self, signal: Signal) -> None:
         with _lock:
             entry = _state[signal]
             entry['count'] -= 1

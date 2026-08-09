@@ -60,7 +60,9 @@ from .scope import (
 
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
+
+    from django.db.backends.base.base import BaseDatabaseWrapper
 
 
 __all__ = [
@@ -122,13 +124,15 @@ def desired_state() -> dict[str, str]:
     return state
 
 
-def _fingerprint(connection) -> tuple:
+def _fingerprint(connection: BaseDatabaseWrapper) -> tuple:
     # savepoint_ids shrinks on ROLLBACK TO SAVEPOINT, which also reverts any SET made
     # after that savepoint -- so its shape is part of the signal we need.
     return (connection.in_atomic_block, tuple(connection.savepoint_ids))
 
 
-def _transaction_marker(connection, superseded=None):
+def _transaction_marker(
+    connection: BaseDatabaseWrapper, superseded: Callable[[], None] | None = None
+) -> Callable[[], None]:
     """Register a no-op commit hook whose *presence* identifies this transaction.
 
     Django exposes no transaction counter, and the fingerprint above only describes the
@@ -165,19 +169,22 @@ def _transaction_marker(connection, superseded=None):
         entry = (set(connection.savepoint_ids), marker, False)
         for index, existing in enumerate(connection.run_on_commit):
             if existing[1] is superseded:
-                connection.run_on_commit[index] = entry
+                # django-stubs' run_on_commit entry is a 2-tuple; real Django (since the
+                # `robust` kwarg was added to on_commit) writes a 3-tuple, which this
+                # mirrors on purpose -- see the docstring above.
+                connection.run_on_commit[index] = entry  # ty: ignore[invalid-assignment]
                 return marker
     transaction.on_commit(marker, using=connection.alias)
     return marker
 
 
-def _marker_live(connection, marker) -> bool:
+def _marker_live(connection: BaseDatabaseWrapper, marker: Callable[[], None] | None) -> bool:
     if marker is None:  # published at session level; no transaction to outlive
         return True
     return any(hook is marker for _, hook, *_ in connection.run_on_commit)
 
 
-def _publish(connection, state: dict[str, str]) -> None:
+def _publish(connection: BaseDatabaseWrapper, state: dict[str, str]) -> None:
     cached = getattr(connection, _CACHE, None)
     previous = cached[0] if cached else {}
     updates = dict(state)
@@ -190,7 +197,7 @@ def _publish(connection, state: dict[str, str]) -> None:
     # rollback can't leave a value we'd wrongly believe is still set.
     is_local = connection.in_atomic_block
     fragments = ', '.join(['set_config(%s, %s, %s)'] * len(updates))
-    params: list[object] = []
+    params: list[str | bool] = []
     for name, value in updates.items():
         params += [name, value, is_local]
 
@@ -232,7 +239,7 @@ def _aborted_transaction(exc: BaseException) -> bool:
     return any(_sqlstate(link) == _ABORTED_SQLSTATE for link in _walk_chain(exc))
 
 
-def _ensure(connection) -> None:
+def _ensure(connection: BaseDatabaseWrapper) -> None:
     if connection.vendor != 'postgresql':
         return
     state = desired_state()
@@ -283,8 +290,10 @@ def _rls_violation(exc: BaseException) -> BaseException | None:
     return None
 
 
-def _wrapper(execute, sql, params, many, context):
-    connection = context['connection']
+def _wrapper(
+    execute: Callable, sql: str, params: object, many: bool, context: dict[str, object]
+) -> object:
+    connection: BaseDatabaseWrapper = context['connection']  # ty: ignore[invalid-assignment]
     # Re-entrancy guard: _publish issues SQL of its own through this same path.
     if not getattr(connection, _SYNCING, False):
         _ensure(connection)
@@ -309,7 +318,7 @@ def _wrapper(execute, sql, params, many, context):
         ) from exc
 
 
-def install_on(connection) -> None:
+def install_on(connection: BaseDatabaseWrapper) -> None:
     """Attach the wrapper to one connection and forget its cached GUC state."""
     if hasattr(connection, _CACHE):
         delattr(connection, _CACHE)
@@ -317,7 +326,9 @@ def install_on(connection) -> None:
         connection.execute_wrappers.append(_wrapper)
 
 
-def _on_connection_created(sender, connection, **kwargs) -> None:
+def _on_connection_created(
+    sender: object, connection: BaseDatabaseWrapper, **kwargs: object
+) -> None:
     # A brand-new session has no GUCs set, so the cache must start empty -- install_on()
     # clears it. This is also what makes a reconnect safe.
     install_on(connection)

@@ -24,6 +24,7 @@ from django.conf import settings
 from django.db import models
 from django.db.models.signals import pre_save
 
+from .messages import remediation
 from .reporting import report_once
 from .scope import (
     MULTI_VALUE_TYPES,
@@ -151,8 +152,7 @@ def apply_write_guard(instance: models.Model) -> None:
             if actual is None:
                 _violation(
                     f'{label} write has no {dimension!r} and no active tenant scope to '
-                    f'take one from -- wrap it in tenant(...), or tenancy_bypassed() '
-                    f'for a deliberate cross-tenant write.',
+                    f'take one from -- {remediation("write")}',
                     key=(label, dimension, 'unscoped'),
                     exception=TenantScopeMissing,
                     kind=ViolationKind.UNSCOPED,
@@ -194,8 +194,8 @@ def apply_write_guard(instance: models.Model) -> None:
         elif not _matches(expected, actual):
             _violation(
                 f'{label} write sets {dimension}={actual!r} while the active scope is '
-                f'{_pk(expected)!r} -- a write may not cross tenants. Use '
-                f'tenancy_bypassed() if that is genuinely intended.',
+                f'{_pk(expected)!r} -- a write may not cross tenants. '
+                f'{remediation("write", scope_is_active=True)}',
                 key=(label, dimension, 'mismatch'),
                 exception=TenantScopeViolation,
                 kind=ViolationKind.MISMATCH,

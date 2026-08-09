@@ -22,6 +22,7 @@ import functools
 from django.db import models
 
 from .enforcement import ViolationKind, _guarded, _violation
+from .messages import remediation
 from .scope import TenantScopeMissing
 
 
@@ -245,8 +246,7 @@ def _untenanted_queryset_class(base: type[models.QuerySet]) -> type[models.Query
             model_name = self.model.__name__ if self.model else 'Query'
             return (
                 f'{model_name} {action} needs an active tenant scope on '
-                f'{", ".join(sorted(self._missing))} -- wrap it in tenant(...), or '
-                f'tenancy_bypassed() for a deliberate cross-tenant {action}.'
+                f'{", ".join(sorted(self._missing))} -- {remediation(action)}'
             )
 
         def _deny(self, *args, **kwargs):

@@ -180,6 +180,17 @@ together; every other combination of `update()`'s four flags is unaffected.
   `aupdate(_disable_signals=True)` calls: safe to overlap (`DisableSignals` is
   reference-counted under a lock since M0), but the suppression itself is
   still shared while any one call's block is open. No behavior change.
+- Four small duplications extracted to one place each, no behavior change:
+  the exception-chain-walking loop (`guc._walk_chain`, previously duplicated
+  verbatim in `_aborted_transaction` and `_rls_violation`); MTI-root-finding
+  (`guitars.introspection.mti_root`, previously duplicated in two sites in
+  `models/soft_deletion.py`); `is_local` (new leaf module
+  `guitars.local_apps`, following the `guitars.gucs` precedent, re-exported
+  from both `guitars.tenancy.discovery` and `guitars.management._generator`
+  so existing imports are unaffected); and the "wrap it in `tenant(...)`, or
+  `tenancy_bypassed()`..." remediation sentence (new
+  `guitars.tenancy.messages.remediation`, previously four independently-typed
+  copies that had already drifted into two different wordings — now one).
 
 ## [1.3.0] - 2026-08-02
 

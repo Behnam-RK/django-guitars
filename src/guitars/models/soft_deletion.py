@@ -5,6 +5,7 @@ from django.db import connections, transaction
 from django.db.models import CASCADE, DateTimeField, Index, Manager, Q, QuerySet, sql
 from django.db.models.base import Model
 
+from guitars.introspection import mti_root
 from guitars.sql import SWITCH_OFF_HARD_DELETION, SWITCH_ON_HARD_DELETION
 
 
@@ -33,9 +34,7 @@ def _mti_table_chain(model: type[Model]) -> list[tuple[str, str]]:
             raise TypeError(f'{m!r} has no primary key column')
         return column
 
-    root = model
-    while root._meta.parents:
-        root = next(iter(root._meta.parents))
+    root = mti_root(model)
 
     chain: list[tuple[str, str]] = []
     seen: set[type[Model]] = set()
@@ -333,9 +332,7 @@ class SoftDeletableModel(Model):
 
         # Start the DFS from the MTI root so ancestor tables (reachable only via the parent-link
         # reverse CASCADE relation) are collected too; ``root is self.__class__`` for non-MTI.
-        root = self.__class__
-        while root._meta.parents:
-            root = next(iter(root._meta.parents))
+        root = mti_root(self.__class__)
 
         with transaction.atomic(using=using):
             # Phase 1 — soft-delete first (idempotent; PG rules cascade to related objects).

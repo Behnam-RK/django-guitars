@@ -31,11 +31,14 @@ can fail open. Do not simplify it without a test that fails first.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from django.db import connections, transaction
 from django.db.backends.signals import connection_created
 
 from guitars.gucs import BYPASS_GUC, VALUE_SEPARATOR, guc_name
 
+from .messages import remediation
 from .scope import (
     BYPASS,
     MULTI_VALUE_TYPES,
@@ -43,6 +46,10 @@ from .scope import (
     get_tenant,
     reject_separator,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 __all__ = [
@@ -193,16 +200,25 @@ def _publish(connection, state: dict[str, str]) -> None:
     setattr(connection, _CACHE, (state, _fingerprint(connection), marker))
 
 
-def _aborted_transaction(exc: BaseException) -> bool:
-    """Whether *exc* is "the transaction is already aborted", anywhere in its chain."""
+def _walk_chain(exc: BaseException) -> Iterator[BaseException]:
+    """Walk *exc*'s cause/context chain, cycle-safe.
+
+    Both links are followed: ``__cause__`` for an explicit ``raise ... from``, which is
+    what Django uses, and ``__context__`` for an error re-raised inside another ``except``
+    block without one. Tracked by identity -- a chain can cycle, and an exception free to
+    define ``__eq__`` would otherwise let two distinct links look like the same one.
+    """
     seen: set[int] = set()
     current: BaseException | None = exc
     while current is not None and id(current) not in seen:
         seen.add(id(current))
-        if _sqlstate(current) == _ABORTED_SQLSTATE:
-            return True
+        yield current
         current = current.__cause__ or current.__context__
-    return False
+
+
+def _aborted_transaction(exc: BaseException) -> bool:
+    """Whether *exc* is "the transaction is already aborted", anywhere in its chain."""
+    return any(_sqlstate(link) == _ABORTED_SQLSTATE for link in _walk_chain(exc))
 
 
 def _ensure(connection) -> None:
@@ -241,9 +257,7 @@ def _rls_violation(exc: BaseException) -> BaseException | None:
     """The RLS-violating error in ``exc``'s chain, if any.
 
     Django wraps backend errors, so the driver error carrying ``sqlstate`` is usually a
-    link down the chain rather than the exception we are handed. Both links are followed:
-    ``__cause__`` for an explicit ``raise ... from``, which is what Django uses, and
-    ``__context__`` for an error re-raised inside another ``except`` block without one.
+    link down the chain rather than the exception we are handed -- see :func:`_walk_chain`.
 
     The message test is what separates an RLS rejection from an ordinary
     ``permission denied``, which shares SQLSTATE 42501. It is English-only: on a server
@@ -252,15 +266,9 @@ def _rls_violation(exc: BaseException) -> BaseException | None:
     -- the write is refused either way -- and PostgreSQL offers no distinct SQLSTATE or
     diagnostic field to key on instead.
     """
-    # Tracked by identity -- a chain can cycle, and an exception free to define __eq__
-    # would otherwise let two distinct links look like the same one.
-    seen: set[int] = set()
-    current: BaseException | None = exc
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        if _sqlstate(current) == _RLS_SQLSTATE and 'row-level security' in str(current).lower():
-            return current
-        current = current.__cause__ or current.__context__
+    for link in _walk_chain(exc):
+        if _sqlstate(link) == _RLS_SQLSTATE and 'row-level security' in str(link).lower():
+            return link
     return None
 
 
@@ -285,9 +293,8 @@ def _wrapper(execute, sql, params, many, context):
         # refused this write" reads as an alerting signal here regardless of which.
         raise TenantScopeViolation(
             f'write rejected by a tenant policy -- the row does not belong to the '
-            f'active tenant, or no tenant scope is active. Wrap the call in '
-            f'tenant(...), or tenancy_bypassed() for a deliberate cross-tenant '
-            f'write. Database said: {violation}'
+            f'active tenant, or no tenant scope is active -- {remediation("write")} '
+            f'Database said: {violation}'
         ) from exc
 
 

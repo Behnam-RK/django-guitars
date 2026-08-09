@@ -314,6 +314,35 @@ class TestTheEncodingRefusesWhatItCannotCarry:
         assert guc.encode_value(None) == ''
 
 
+class TestWalkChain:
+    """M5 (#12): the exception-chain walk used to be duplicated verbatim in
+    ``_aborted_transaction`` and ``_rls_violation``; both now delegate to this."""
+
+    def test_yields_the_exception_itself_first(self):
+        exc = ValueError('leaf')
+
+        assert list(guc._walk_chain(exc)) == [exc]
+
+    def test_follows_cause_then_context(self):
+        root = ValueError('root')
+        middle = ValueError('middle')
+        middle.__cause__ = root
+        leaf = ValueError('leaf')
+        leaf.__context__ = middle  # not __cause__ -- proves __cause__ is preferred first
+
+        # leaf has no __cause__, so __context__ is followed; middle has __cause__, so
+        # that wins over any __context__ it might also carry.
+        assert list(guc._walk_chain(leaf)) == [leaf, middle, root]
+
+    def test_a_cycle_terminates_instead_of_looping_forever(self):
+        a = ValueError('a')
+        b = ValueError('b')
+        a.__cause__ = b
+        b.__cause__ = a  # cycle
+
+        assert list(guc._walk_chain(a)) == [a, b]
+
+
 class TestPublisherGuards:
     def test_a_non_postgresql_connection_is_left_alone(self):
         """The policies are PostgreSQL-only, so there is nothing to publish elsewhere -- and

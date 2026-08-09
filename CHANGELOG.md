@@ -846,6 +846,7 @@ carry the old SQL — see *Fixed* below for why that matters and how to replace 
 - `makeguitarmigrations` management command — generates the PostgreSQL
   trigger/rule migrations behind the timestamps and soft deletion.
 
+[2.0.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.0.0
 [Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v0.7.0...HEAD
 [0.7.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v0.7.0
 [0.6.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v0.6.0

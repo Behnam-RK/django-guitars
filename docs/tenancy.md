@@ -278,6 +278,53 @@ Dimensions spread across **two** different ancestors are reported rather than
 covered: one correlated subquery reaches one ancestor, and which one it reached
 would come down to field declaration order.
 
+## Connection pooling
+
+`tenancy/guc.py` publishes the active scope as `tenant.*` PostgreSQL session
+settings, and its cache is careful about *this process's one connection* — the
+fingerprint/marker machinery it uses is proven correct under `CONN_MAX_AGE`
+(a connection reused across logical requests) and under Django's own psycopg
+pool (`OPTIONS: {"pool": True}`, Django 5.1+), both directly by
+`tests/test_concurrency.py`.
+
+What it has no visibility into is an **external, transaction-pooling connection
+pooler** in front of that connection — pgbouncer with `POOL_MODE: transaction`,
+say. Under transaction pooling, a physical PostgreSQL backend is handed to a
+different logical client between transactions, and a session-level `SET` one
+client made is not automatically reset for the next one. If that leftover
+setting is `tenant.org = 'acme'`, the next client's queries run as if they had
+opened `tenant(org=acme)` themselves — silently, and **fails open**: the row-
+level-security policy does not deny, it matches the wrong tenant.
+
+`tests/test_concurrency.py::TestPgbouncerTransactionPooling` demonstrates both
+halves directly against a real pgbouncer (opt-in via
+`docker compose --profile pooling up -d --wait`): the leak itself, and that
+`DISCARD ALL` as the pooler's reset query closes it.
+
+**The fix lives in the pooler's configuration, not in Django or guitars.**
+Configure the pooler's reset query to run between clients:
+
+```ini
+# pgbouncer.ini
+server_reset_query = DISCARD ALL
+```
+
+This is standard pgbouncer guidance independent of guitars — `DISCARD ALL`
+clears every session-level `SET`, prepared statement, and temporary table, not
+just `tenant.*` — so it is very likely already the right configuration for
+any application pooling through pgbouncer in transaction mode, tenanted or
+not.
+
+`guitars.tenancy.checks` registers `guitars.tenancy.W002`
+(`check_pooling_leaks_tenant_gucs`), which warns when a database's
+`DISABLE_SERVER_SIDE_CURSORS` setting is on — Django's own documented
+recommendation for exactly this pooling mode, and the one signal available
+from `DATABASES` that correlates with an external pooler being present without
+also flagging guitars' own already-safe mechanisms (`CONN_MAX_AGE`,
+`OPTIONS['pool']`). It is a nudge, not a verdict: the risk above applies to
+*every* tenanted deployment behind a transaction-pooling external pooler,
+whether or not that setting happens to be configured.
+
 ## Settings
 
 | Setting | Default | Effect |

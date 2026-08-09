@@ -25,8 +25,19 @@ Two things guard the cache:
   transaction-locally in the first would otherwise be assumed still live in the second --
   after the commit that discarded it. See ``_transaction_marker``.
 
-None of this is incidental complexity: every guard here corresponds to a way the cache
-can fail open. Do not simplify it without a test that fails first.
+None of this is incidental complexity: every guard here corresponds to a way *this
+connection's own cache* can fail open. Do not simplify it without a test that fails
+first.
+
+**What none of it guards against: an external, transaction-pooling connection pooler**
+(pgbouncer with ``POOL_MODE: transaction``, say) sitting in front of the connection. That
+handed this process a different logical client's session-level ``SET`` from one
+transaction to the next, which this module has no visibility into -- the cache is correct
+about a connection whose identity is stable; a pooled connection's identity is not.
+``guitars.tenancy.checks.check_pooling_leaks_tenant_gucs`` (``guitars.tenancy.W002``)
+warns on the one signal available from ``DATABASES``; see ``docs/tenancy.md``'s
+"Connection pooling" section for the mechanism and the mitigation (the pooler's own reset
+query, not anything Django or guitars can do).
 """
 
 from __future__ import annotations

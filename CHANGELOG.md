@@ -161,6 +161,29 @@ when nothing is saved that call — and silently computed `update_fields=None`,
 then never used it. Breaking only for a call site that happened to pass both
 together; every other combination of `update()`'s four flags is unaffected.
 
+### Added
+
+- **A system check for the connection-pooling GUC leak.**
+  `guitars.tenancy.W002` (`check_pooling_leaks_tenant_gucs`) warns when a
+  `DATABASES` alias sets `DISABLE_SERVER_SIDE_CURSORS` — Django's own
+  documented recommendation for a transaction-pooling connection pooler (e.g.
+  pgbouncer with `POOL_MODE: transaction`), and the one signal available from
+  `DATABASES` that correlates with an external pooler without also flagging
+  guitars' own already-safe mechanisms (`CONN_MAX_AGE`, `OPTIONS['pool']`,
+  both proven safe by `tests/test_concurrency.py`). Under transaction
+  pooling, a previous client's published `tenant.*` session setting can
+  still be resident on the physical backend handed to the next one — a
+  proven, fail-**open** leak
+  (`tests/test_concurrency.py::TestPgbouncerTransactionPooling`) that
+  `tenancy/guc.py`'s own cache has no visibility into, since it is correct
+  about *this* connection's identity and a pooled connection's identity is
+  exactly what changes underneath it. See `docs/tenancy.md`'s new
+  "Connection pooling" section for the mechanism and the mitigation (the
+  pooler's `server_reset_query = DISCARD ALL`, not anything Django or
+  guitars can do). A nudge, not a verdict: the risk applies to every
+  tenanted deployment behind such a pooler whether or not this setting is
+  configured.
+
 ### Changed
 
 - The audit-mode `Reporter` now receives structured context alongside the

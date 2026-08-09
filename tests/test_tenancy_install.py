@@ -23,7 +23,7 @@ from django.db.models.signals import pre_save
 import guitars
 from guitars import gucs as names
 from guitars import tenancy
-from guitars.tenancy.manager import _WRITE_GUARD_UID, _on_pre_save
+from guitars.tenancy.enforcement import _WRITE_GUARD_UID, _on_pre_save
 
 
 def _write_guard_receiver_count() -> int:

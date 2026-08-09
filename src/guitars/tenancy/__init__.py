@@ -2,11 +2,11 @@
 
 Fail-closed defence against cross-tenant leaks, in two cooperating layers:
 
-* **Python** (``scope`` + ``manager``) -- a model built with ``TenantedManager`` refuses
-  reads unless the required dimension is active (``tenant(...)`` / ``@tenanted``),
-  raising ``TenantScopeError`` on a forgotten filter, and guards writes so a row cannot
-  be created into another tenant. Loud and greppable: this is the layer that tells a
-  developer they got it wrong.
+* **Python** (``scope``, ``spec``, ``enforcement``, ``querysets`` and ``manager``) -- a
+  model built with ``TenantedManager`` refuses reads unless the required dimension is
+  active (``tenant(...)`` / ``@tenanted``), raising ``TenantScopeError`` on a forgotten
+  filter, and guards writes so a row cannot be created into another tenant. Loud and
+  greppable: this is the layer that tells a developer they got it wrong.
 * **PostgreSQL** (``guc`` + row-level-security policies from ``guitars.sql.policy``) --
   the same frame is published as ``tenant.*`` session settings, and policies enforce it
   on every statement. This is the layer that is actually *complete*: it covers joins,
@@ -38,16 +38,10 @@ from __future__ import annotations
 from guitars.gucs import BYPASS_GUC, GUC_PREFIX, VALUE_SEPARATOR, guc_name
 
 from .checks import register_checks
+from .enforcement import TenantEnforcement, install_write_guards, uninstall_write_guards
 from .guc import install as install_tenant_guc
 from .guc import uninstall as uninstall_tenant_guc
-from .manager import (
-    TenantedManager,
-    TenantEnforcement,
-    install_write_guards,
-    local_tenant_fields,
-    tenant_spec,
-    uninstall_write_guards,
-)
+from .manager import TenantedManager
 from .reporting import Reporter, set_reporter
 from .scope import (
     TenantScopeError,
@@ -60,6 +54,7 @@ from .scope import (
     tenant,
     tenanted,
 )
+from .spec import local_tenant_fields, tenant_spec
 
 
 __all__ = [

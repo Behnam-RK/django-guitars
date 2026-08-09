@@ -28,11 +28,11 @@ from django.db.models import QuerySet as DjangoQuerySet
 
 from guitars.models import HardDeletableQuerySet, LiveQuerySet
 from guitars.tenancy import TenantScopeError, tenancy_bypassed
-from guitars.tenancy.manager import _ALLOWED_UNSCOPED, _untenanted_queryset_class
+from guitars.tenancy.querysets import _ALLOWED_UNSCOPED, _untenanted_queryset_class
 from tests.testapp.models import Release
 
 
-#: The runtime allow-list (guitars/tenancy/manager.py) is the source of truth the sweep
+#: The runtime allow-list (guitars/tenancy/querysets.py) is the source of truth the sweep
 #: actually reads; this module's classification below documents and cross-checks it, but
 #: does not duplicate it -- see test_allowed_unscoped_methods_still_exist_upstream and
 #: test_allowed_unscoped_methods_all_carry_a_reason.
@@ -102,7 +102,7 @@ def _denying_class(base):
 # surface -- the gap on the save() path it describes is real, but it is a Model method
 # (_do_insert/_do_update), not a Manager one, and out of scope for a QuerySet drift test.
 
-#: Explicitly overridden with _deny / _deny_query_write in guitars/tenancy/manager.py.
+#: Explicitly overridden with _deny / _deny_query_write in guitars/tenancy/querysets.py.
 DJANGO_DENIED_DIRECTLY = {
     'aaggregate',
     'abulk_update',
@@ -128,7 +128,7 @@ DJANGO_DENIED_DIRECTLY = {
 #: class. get/first/last/earliest/latest/in_bulk/contains/get_or_create/update_or_create
 #: all build a clone of self (same denying class) and then iterate, .get(), or .exists()
 #: it, which is the _fetch_all/exists chokepoint again. No production code needed these
-#: added to manager.py; TestDeniedViaChainActuallyRaises below proves it behaviorally
+#: added to querysets.py; TestDeniedViaChainActuallyRaises below proves it behaviorally
 #: rather than trusting this reasoning statically.
 DJANGO_DENIED_VIA_CHAIN = {
     'acontains',
@@ -152,7 +152,7 @@ DJANGO_DENIED_VIA_CHAIN = {
     'update_or_create',
 }
 
-#: Overridden individually in manager.py, not aliased to a bare denial, so audit mode can
+#: Overridden individually in querysets.py, not aliased to a bare denial, so audit mode can
 #: report and proceed instead of hard-raising. Asserted specially in
 #: test_row_creating_writes_are_intercepted_rather_than_plainly_denied and
 #: test_none_stays_usable_on_an_unscoped_queryset, below.
@@ -199,7 +199,7 @@ DJANGO_LAZY_SAFE = {
 #: inconsistency with hard_delete (denied on the same "the database's job" reasoning) by
 #: denying raw() too: it is simply absent from _ALLOWED_UNSCOPED, so
 #: _apply_default_deny_sweep denies it like any other unclassified Django method -- no
-#: explicit alias in guitars/tenancy/manager.py needed. See
+#: explicit alias in guitars/tenancy/querysets.py needed. See
 #: test_raw_is_denied_without_a_scope_and_permitted_under_bypass.
 DJANGO_DENIED_BY_SWEEP = {'raw'}
 
@@ -236,7 +236,7 @@ def test_djangos_own_queryset_surface_is_fully_classified():
     assert not unclassified, (
         f'django.db.models.QuerySet gained public member(s) {unclassified} that no bucket '
         f'in tests/test_tenancy_denylist.py names. Decide, do not default: if it can reach '
-        f'the database on an unscoped queryset, deny it in guitars/tenancy/manager.py and '
+        f'the database on an unscoped queryset, deny it in guitars/tenancy/querysets.py and '
         f'add it to DJANGO_DENIED_DIRECTLY -- or confirm it already raises by delegating to '
         f'a denied primitive and add it to DJANGO_DENIED_VIA_CHAIN, proven by a new case in '
         f'TestDeniedViaChainActuallyRaises. Otherwise it is lazy: add it to DJANGO_LAZY_SAFE '
@@ -358,7 +358,7 @@ def test_every_guitars_queryset_member_is_classified(queryset_class):
     assert not unclassified, (
         f'{queryset_class.__name__} declares {unclassified}, which the tenancy deny-list '
         f'neither overrides nor declares safe. Decide, do not default: if it can reach '
-        f'the database, add it to the deny-list in guitars/tenancy/manager.py; if it is '
+        f'the database, add it to the deny-list in guitars/tenancy/querysets.py; if it is '
         f'lazy or otherwise harmless, add it to SAFE_BY_DESIGN with the reason.'
     )
 
@@ -419,7 +419,7 @@ def test_hard_delete_is_denied_and_has_no_async_twin():
     assert 'hard_delete' in _own_members(denying)
     assert not hasattr(HardDeletableQuerySet, 'ahard_delete'), (
         'HardDeletableQuerySet gained an async hard_delete -- add it to the deny-list in '
-        'guitars/tenancy/manager.py and to MUST_BE_DENIED here.'
+        'guitars/tenancy/querysets.py and to MUST_BE_DENIED here.'
     )
 
 
@@ -462,7 +462,7 @@ def test_row_creating_writes_are_intercepted_rather_than_plainly_denied():
 
 
 def test_allowed_unscoped_methods_still_exist_upstream():
-    """_ALLOWED_UNSCOPED is the sweep's actual source of truth (guitars/tenancy/manager.py);
+    """_ALLOWED_UNSCOPED is the sweep's actual source of truth (guitars/tenancy/querysets.py);
     a name it lists that exists nowhere -- Django renamed or removed it, or a guitars
     queryset method was renamed -- is dead weight silently no longer meaning anything.
     """

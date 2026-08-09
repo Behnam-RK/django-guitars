@@ -29,7 +29,7 @@ from guitars.tenancy import (
 )
 from guitars.tenancy.checks import TENANT_MODEL_ID, check_guitar_models_have_a_tenant
 from guitars.tenancy.discovery import _classify
-from guitars.tenancy.manager import ViolationKind
+from guitars.tenancy.enforcement import ViolationKind
 from tests.conftest import execute as _execute
 from tests.testapp.models import Booking, Label, Release, Review, StadiumTour
 
@@ -109,7 +109,7 @@ class TestDimensionsOnTwoAncestors:
         spec = {'label': 'label', 'region': 'continents'}
         # Patched in both namespaces: discovery imported the function object, and
         # local_tenant_fields calls its own module-level reference.
-        for module in ('guitars.tenancy.discovery', 'guitars.tenancy.manager'):
+        for module in ('guitars.tenancy.discovery', 'guitars.tenancy.spec'):
             monkeypatch.setattr(f'{module}.tenant_spec', lambda model, _spec=spec: _spec)
         return spec
 

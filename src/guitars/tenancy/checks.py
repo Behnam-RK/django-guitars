@@ -14,7 +14,8 @@ from django.apps import apps as django_apps
 from django.conf import settings
 from django.core.checks import Error, Warning, register
 
-from .manager import TenantEnforcement, tenant_spec
+from .enforcement import TenantEnforcement
+from .spec import tenant_spec
 
 
 __all__ = [

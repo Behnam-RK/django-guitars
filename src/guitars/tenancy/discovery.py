@@ -45,7 +45,7 @@ from django.conf import settings
 from guitars.gucs import BYPASS_GUC, guc_name
 from guitars.introspection import column_owner, owns_column
 
-from .manager import _meta, local_tenant_fields, tenant_spec
+from .spec import _meta, local_tenant_fields, tenant_spec
 
 
 if TYPE_CHECKING:

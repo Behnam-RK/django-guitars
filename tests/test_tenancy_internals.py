@@ -7,8 +7,8 @@ branch, it is used; where it genuinely cannot -- because an earlier guard fires 
 internal is called and the docstring says why.
 
 Async methods get their own tests rather than being assumed equivalent to the sync ones. They
-are separate code in ``manager.py``, and a guard added to one and not the other is exactly the
-kind of asymmetry that ships.
+are separate code in ``querysets.py``, and a guard added to one and not the other is exactly
+the kind of asymmetry that ships.
 """
 
 from __future__ import annotations
@@ -30,8 +30,8 @@ from guitars.tenancy import (
     TenantValueError,
     get_tenant,
     guc,
-    manager,
     reporting,
+    spec,
     tenancy_bypassed,
     tenant,
 )
@@ -95,9 +95,9 @@ class TestPartiallyCoveredModel:
 
     @pytest.fixture
     def mixed_spec(self, monkeypatch):
-        spec = {'label': 'label', 'via_release': 'release__label'}
-        for module in ('guitars.tenancy.discovery', 'guitars.tenancy.manager'):
-            monkeypatch.setattr(f'{module}.tenant_spec', lambda model, _spec=spec: _spec)
+        stub_spec = {'label': 'label', 'via_release': 'release__label'}
+        for module in ('guitars.tenancy.discovery', 'guitars.tenancy.spec'):
+            monkeypatch.setattr(f'{module}.tenant_spec', lambda model, _spec=stub_spec: _spec)
 
     def test_the_covered_dimension_still_gets_a_policy(self, mixed_spec):
         coverage, _ = _classify(Track)
@@ -126,10 +126,10 @@ class TestLocalTenantFields:
         ``Exception``, so a genuine bug in the surrounding code still surfaces.
         """
         monkeypatch.setattr(
-            'guitars.tenancy.manager.tenant_spec', lambda model: {'label': 'no_such_field'}
+            'guitars.tenancy.spec.tenant_spec', lambda model: {'label': 'no_such_field'}
         )
 
-        assert manager.local_tenant_fields(Release) == {}
+        assert spec.local_tenant_fields(Release) == {}
 
     def test_a_lookup_naming_a_non_concrete_field_is_not_local(self, monkeypatch):
         """A lookup with no ``__`` is not automatically a column.
@@ -140,14 +140,14 @@ class TestLocalTenantFields:
         typo cases above, not treated as local because it happened to resolve.
         """
         monkeypatch.setattr(
-            'guitars.tenancy.manager.tenant_spec', lambda model: {'label': 'albums'}
+            'guitars.tenancy.spec.tenant_spec', lambda model: {'label': 'albums'}
         )
 
-        assert manager.local_tenant_fields(Band) == {}
+        assert spec.local_tenant_fields(Band) == {}
 
     def test_an_untenanted_model_never_autofills(self):
         """``_autofills`` walks the managers looking for a tenanted one and finds none."""
-        assert manager._autofills(Label) is False
+        assert spec._autofills(Label) is False
 
 
 class TestAWriteWithNoTenantAndNoScope:

@@ -2,7 +2,7 @@
 
 - **Status:** proposed
 - **Date:** 2026-07-30
-- **Affects:** `guitars.sql.triggers`, `makeguitarmigrations`, `guitars.tenancy.manager`,
+- **Affects:** `guitars.sql.triggers`, `makeguitarmigrations`, `guitars.tenancy.enforcement`,
   `GUITARS_TENANT_AUTOFILL`
 
 ## Context
@@ -38,7 +38,7 @@ feature can switch off by accident is the same shape as the `_queryset_class` bu
 1.0.0 fixed — one that reads as installed and silently does nothing.
 
 `bulk_create` shows the other half of the problem. It sends no `pre_save`, so
-`manager.py` has to override it on the queryset *and* re-invoke the guard by hand.
+`querysets.py` has to override it on the queryset *and* re-invoke the guard by hand.
 Raw `INSERT`, `INSERT … SELECT` and anything outside the ORM get nothing.
 
 ## Decision

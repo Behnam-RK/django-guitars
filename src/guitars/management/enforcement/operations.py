@@ -1,7 +1,7 @@
 """Building enforcement operations for an app's models.
 
 The write side: turning what the models declare (an ``_updated_at``/``_deleted_at``
-column, a ``TenantedManager``) into the ``RunSQL`` operation snippets a migration needs,
+column, a ``tenanted_manager()``) into the ``RunSQL`` operation snippets a migration needs,
 by comparing against what :func:`guitars.management.enforcement.scanning.scan_existing_operations`
 already found on disk.
 

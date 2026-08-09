@@ -70,7 +70,7 @@ class LiveManager(Manager):
 
     That is load-bearing, not style. ``_queryset_class`` is Django's documented seam for
     swapping the queryset a manager hands out, and a subclass that sets it expects to be
-    obeyed — ``guitars.tenancy.TenantedManager`` sets it to a subclass whose
+    obeyed — ``guitars.tenancy.tenanted_manager()`` sets it to a subclass whose
     ``bulk_create`` carries the tenant write guard, then calls ``super().get_queryset()``.
     Naming ``LiveQuerySet`` here directly would hand back an unguarded queryset while the
     manager still advertised the guarded one: a security guard that reads as installed and

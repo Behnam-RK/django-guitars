@@ -341,7 +341,7 @@ class TestTheSystemCheck:
         """The case that needs it most, and the one it used to miss.
 
         The checks used to be registered only by ``tenancy.install()``, which reaches this
-        module two ways -- ``GuitarsConfig.ready()`` and ``TenantedManager()``. With
+        module two ways -- ``GuitarsConfig.ready()`` and ``tenanted_manager()``. With
         GUITARS_TENANT_MODEL unset the manager is never constructed, and a project using
         guitars as a pure library has no INSTALLED_APPS entry for the AppConfig hook. So the
         one configuration where a model is silently untenanted was the one configuration

@@ -66,7 +66,7 @@ The shape of the model *is* the opt-in. There is no registry:
 - `_updated_at` → a statement-level timestamp trigger
 - `_deleted_at` → a soft-delete rule, plus cascade rules for related
   soft-deletable models whose FK is `on_delete=CASCADE`
-- a `TenantedManager` → a row-level-security tenant policy
+- a `tenanted_manager()` → a row-level-security tenant policy
 
 ## Generated migrations carry their SQL literally
 

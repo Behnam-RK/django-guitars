@@ -21,11 +21,11 @@ from guitars.management import _generator
 from guitars.management.enforcement.identity import _literal
 from guitars.models import GuitarModel, LiveManager
 from guitars.tenancy import (
-    TenantedManager,
     TenantScopeError,
     reporting,
     tenancy_bypassed,
     tenant,
+    tenanted_manager,
 )
 from guitars.tenancy.checks import TENANT_MODEL_ID, check_guitar_models_have_a_tenant
 from guitars.tenancy.discovery import _classify
@@ -378,7 +378,7 @@ class TestAutofillRefusals:
         """Not silently ignored. There is no column to fill, so asking for it is a mistake
         worth naming where it was made rather than where it fails to happen."""
         with pytest.raises(TypeError, match='needs a dimension stored on this table'):
-            TenantedManager(_manager_class=LiveManager, autofill=True, label='release__label')
+            tenanted_manager(_manager_class=LiveManager, autofill=True, label='release__label')
 
     def test_a_queryset_as_a_scope_value_is_rejected(self):
         """``str()`` on a QuerySet runs a query -- inside the publish, which re-enters the
@@ -390,7 +390,7 @@ class TestAutofillRefusals:
     def test_a_manager_instance_is_accepted_as_well_as_a_class(self):
         """``QuerySet.as_manager()`` hands back an instance, and subclassing one fails with a
         baffling ``BaseManager.__init__() takes 1 positional argument``."""
-        manager = TenantedManager(_manager_class=LiveManager(), label='label')
+        manager = tenanted_manager(_manager_class=LiveManager(), label='label')
 
         assert manager._tenant_dimensions == {'label': 'label'}
 

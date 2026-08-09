@@ -1,10 +1,10 @@
 """The manager that scopes reads.
 
-``TenantedManager`` filters ``get_queryset()`` by the active frame, and returns a queryset
-(``guitars.tenancy.querysets``) that refuses to run at all when the frame is missing. Write
-guarding lives in ``guitars.tenancy.enforcement``; what a model is tenanted *on* lives in
-``guitars.tenancy.spec``. This module is the thin factory that ties the three together into
-one manager class.
+``tenanted_manager()`` filters ``get_queryset()`` by the active frame, and returns a
+queryset (``guitars.tenancy.querysets``) that refuses to run at all when the frame is
+missing. Write guarding lives in ``guitars.tenancy.enforcement``; what a model is tenanted
+*on* lives in ``guitars.tenancy.spec``. This module is the thin factory that ties the three
+together into one manager class.
 """
 
 from __future__ import annotations
@@ -15,13 +15,26 @@ from .querysets import _guarded_queryset_class, _untenanted_queryset_class
 from .scope import MULTI_VALUE_TYPES, get_tenant, is_bypassed
 
 
-__all__ = ['TenantedManager']
+__all__ = ['TenantedManagerBase', 'tenanted_manager']
+
+
+class TenantedManagerBase:
+    """Marker mixed into every manager ``tenanted_manager()`` builds.
+
+    Contributes no behaviour of its own -- the base queryset, dimensions, and autofill
+    setting all still come from ``_manager_class`` and the dynamic class body below, which
+    ``tenanted_manager()`` has to build fresh per call regardless. What this buys is a real
+    type: ``isinstance(Model.objects, TenantedManagerBase)`` recognises a tenant-scoped
+    manager without relying on ``_tenant_dimensions`` -- a private attribute -- as the only
+    signal, and subclassing it is a documented way to build a custom tenant-aware manager
+    by hand rather than through the factory.
+    """
 
 
 def _self_install() -> None:
     """Activate enforcement because a tenanted model was just declared.
 
-    Declaring a ``TenantedManager`` *is* the opt-in, so nothing needs remembering and
+    Declaring a tenant-scoped manager *is* the opt-in, so nothing needs remembering and
     guitars needs no ``INSTALLED_APPS`` entry. ``GuitarsConfig.ready()`` calls the same
     idempotent ``install()`` when the app *is* installed; whichever fires first wins and
     the second is a no-op.
@@ -36,21 +49,22 @@ def _self_install() -> None:
     tenancy.install()
 
 
-def TenantedManager(  # noqa: N802 - returns a manager instance; PascalCase reads as a type
+def tenanted_manager(
     _manager_class: type[models.Manager] | models.Manager = models.Manager,
     autofill: bool | None = None,
     **dimensions: str,
 ):
     """Build a manager enforcing ``dimensions`` (``name='orm__lookup'``).
 
-    Returns an instance subclassing ``_manager_class`` so the underlying queryset
-    (soft-delete filtering, custom methods) is preserved; the tenant filter layers on top
+    Returns an instance subclassing ``_manager_class`` and :class:`TenantedManagerBase` so
+    the underlying queryset (soft-delete filtering, custom methods) is preserved and
+    ``isinstance()``/``issubclass()`` recognise the result; the tenant filter layers on top
     of ``super().get_queryset()``. Multi-hop lookups and several dimensions are allowed::
 
-        TenantedManager(shop='shop')
-        TenantedManager(_manager_class=LiveManager, shop='shop')
-        TenantedManager(shop='post__shop')
-        TenantedManager(shop='shop', user='author')
+        tenanted_manager(shop='shop')
+        tenanted_manager(_manager_class=LiveManager, shop='shop')
+        tenanted_manager(shop='post__shop')
+        tenanted_manager(shop='shop', user='author')
 
     ``autofill`` overrides ``GUITARS_TENANT_AUTOFILL`` for this model -- pass ``False``
     where taking the tenant implicitly would be wrong (an append-only archive, say).
@@ -78,7 +92,10 @@ def TenantedManager(  # noqa: N802 - returns a manager instance; PascalCase read
     base_queryset = getattr(_manager_class, '_queryset_class', models.QuerySet)
     denying = _untenanted_queryset_class(base_queryset)
 
-    class _TenantedManager(_manager_class):  # ty: ignore[unsupported-base]  # dynamic base
+    class _TenantedManager(
+        _manager_class,  # ty: ignore[unsupported-base]  # dynamic base
+        TenantedManagerBase,
+    ):
         #: Read by tenant_spec() and by the RLS policy generator.
         _tenant_dimensions = dict(dimensions)
         _tenant_autofill = autofill

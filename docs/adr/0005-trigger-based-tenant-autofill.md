@@ -109,7 +109,7 @@ table until you notice `GUITARS_TENANT_FIELD` is a single project-wide setting: 
 `GuitarModel` subclass in a project shares the same column name. So "one per distinct
 (column, GUC) pair" is **one function** for a typical project, and mirrors how
 `set_updated_at` is a single shared function rather than a per-table one. Only
-hand-rolled `TenantedManager` models on other columns add more.
+hand-rolled `tenanted_manager()` models on other columns add more.
 
 **`COPY FROM` needs no consideration.** PostgreSQL refuses it outright on any table
 with row-level security — `FeatureNotSupported: COPY FROM not supported with
@@ -163,7 +163,7 @@ being the thing correctness depends on — which is the whole point.
   command exists to catch, and it is invisible to every current check.
 - **Multi-hop dimensions still cannot be autofilled**, by the same reasoning that
   excludes them from policies: there is no column on this table to write. Unchanged
-  from today, where `TenantedManager` rejects `autofill` with a multi-hop lookup.
+  from today, where `tenanted_manager()` rejects `autofill` with a multi-hop lookup.
 
 ## Related
 

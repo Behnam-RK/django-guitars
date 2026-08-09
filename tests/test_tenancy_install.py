@@ -1,6 +1,6 @@
 """Activation, and the GUC names that are baked into generated SQL.
 
-``install()`` is reached two ways -- ``GuitarsConfig.ready()`` and ``TenantedManager()`` --
+``install()`` is reached two ways -- ``GuitarsConfig.ready()`` and ``tenanted_manager()`` --
 so it has to be genuinely idempotent rather than merely usually-called-once. A
 double-connected ``pre_save`` receiver would run the write guard twice per save, which is
 harmless today but would double-report in audit mode.

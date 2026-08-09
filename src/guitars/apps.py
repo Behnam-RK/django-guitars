@@ -9,7 +9,7 @@ class GuitarsConfig(AppConfig):
     def ready(self) -> None:
         """Activate tenancy enforcement.
 
-        One of two entry points -- ``TenantedManager()`` calls the same idempotent
+        One of two entry points -- ``tenanted_manager()`` calls the same idempotent
         ``install()`` at model-definition time, which is what covers projects using
         guitars as a pure library with no ``INSTALLED_APPS`` entry. Neither alone is
         sufficient: this hook does not run in that configuration, and the manager hook

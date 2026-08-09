@@ -9,7 +9,7 @@ from django.db.models import (
 from django.utils.functional import cached_property
 
 from guitars.models import DutarModel, GuitarModel, LiveManager, SetarModel, TarModel
-from guitars.tenancy import TenantedManager
+from guitars.tenancy import tenanted_manager
 
 
 class Riff(TarModel):
@@ -239,7 +239,7 @@ class StadiumTour(WorldTour):
 
 
 class Booking(SetarModel):
-    """Hand-declared `TenantedManager` over `LiveManager`, tenant FK declared by hand.
+    """Hand-declared `tenanted_manager()` over `LiveManager`, tenant FK declared by hand.
 
     The composition path a project takes when it wants scoping without the `GuitarModel`
     rung -- a tenant FK it declares itself (so `editable=False` and the templated
@@ -252,7 +252,7 @@ class Booking(SetarModel):
     venue = CharField(max_length=100)
     label = ForeignKey(Label, on_delete=CASCADE, related_name='bookings')
 
-    objects = TenantedManager(_manager_class=LiveManager, label='label')
+    objects = tenanted_manager(_manager_class=LiveManager, label='label')
 
     def __str__(self) -> str:
         return self.venue
@@ -269,7 +269,7 @@ class Review(SetarModel):
     body = CharField(max_length=200)
     release = ForeignKey(Release, on_delete=CASCADE, related_name='reviews')
 
-    objects = TenantedManager(_manager_class=LiveManager, label='release__label')
+    objects = tenanted_manager(_manager_class=LiveManager, label='release__label')
 
     def __str__(self) -> str:
         return self.body
@@ -312,7 +312,7 @@ class HeadlineFestival(TouringFestival):
 
     sponsor = ForeignKey(Label, on_delete=CASCADE, related_name='headline_festivals')
 
-    objects = TenantedManager(
+    objects = tenanted_manager(
         _manager_class=LiveManager, market='market', promoter='promoter', sponsor='sponsor'
     )
 

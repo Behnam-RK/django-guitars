@@ -277,7 +277,7 @@ class TestManagerQuerySetClass:
     """Every soft-delete manager must instantiate ``self._queryset_class``.
 
     Not a style preference. ``_queryset_class`` is Django's seam for swapping the queryset
-    a manager hands out, and ``guitars.tenancy.TenantedManager`` uses it to install the
+    a manager hands out, and ``guitars.tenancy.tenanted_manager()`` uses it to install the
     tenant write guard on ``bulk_create``. A manager that names its queryset class
     literally in ``get_queryset()`` ignores the swap and returns an *unguarded* queryset
     while still advertising the guarded one on the class -- so the guard reads as installed

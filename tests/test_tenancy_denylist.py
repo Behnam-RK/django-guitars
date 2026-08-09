@@ -1,6 +1,6 @@
 """The deny-list must not fall behind the querysets it guards.
 
-When a required tenant scope is missing, ``TenantedManager`` hands back a queryset whose
+When a required tenant scope is missing, ``tenanted_manager()`` hands back a queryset whose
 database-touching methods raise ``TenantScopeError``. That list is maintained **by name**,
 which is a standing hazard: adding a method to one of guitars' querysets, or upgrading
 Django, silently produces a path that reaches the database unscoped. Before

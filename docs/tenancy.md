@@ -2,8 +2,8 @@
 
 Two cooperating layers, neither redundant.
 
-- **Python** fails **loudly**. A model with a `TenantedManager` refuses to read
-  without an active scope, and refuses a write that would land in another
+- **Python** fails **loudly**. A model with a `tenanted_manager()`-built manager refuses
+  to read without an active scope, and refuses a write that would land in another
   tenant. This is the layer that tells a developer they got it wrong.
 - **PostgreSQL** is the layer that is actually **complete**. The same scope is
   published as session settings, and row-level-security policies enforce it on
@@ -174,17 +174,17 @@ set-wide writes (`update`, `delete`, `bulk_update`), and on `hard_delete()`.
 
 ### Scoping a model without the GuitarModel rung
 
-`TenantedManager` composes onto any manager:
+`tenanted_manager()` composes onto any manager:
 
 ```python
 from guitars.models import LiveManager, SetarModel
-from guitars.tenancy import TenantedManager
+from guitars.tenancy import tenanted_manager
 
 
 class Booking(SetarModel):
     org = models.ForeignKey("accounts.Organization", on_delete=models.CASCADE)
 
-    objects = TenantedManager(_manager_class=LiveManager, org="org")
+    objects = tenanted_manager(_manager_class=LiveManager, org="org")
 ```
 
 Declaring the manager *is* the opt-in — there is no registry to keep in step, and
@@ -204,7 +204,7 @@ Two things to know if you do this by hand:
 Multi-hop dimensions work in Python:
 
 ```python
-objects = TenantedManager(_manager_class=LiveManager, org="release__org")
+objects = tenanted_manager(_manager_class=LiveManager, org="release__org")
 ```
 
 …but **cannot** be covered by a policy: there is no column on this table to

@@ -104,6 +104,23 @@ separator one, which is now `TenantValueError` — not a scope failure at all,
 so it is deliberately **not** a `TenantScopeError` subclass. See
 [`docs/tenancy.md`](docs/tenancy.md#exceptions) for handling guidance.
 
+**`TenantedManager` is renamed to `tenanted_manager`.** It always returned a
+manager *instance*, not a type — the PascalCase name carried a `# noqa: N802`
+suppressing the naming-convention warning it was flagging on itself. The
+factory now has an honest lowercase name, and the manager class it builds
+additionally inherits a new `TenantedManagerBase` marker, so
+`isinstance(Model.objects, TenantedManagerBase)` recognises a tenant-scoped
+manager without relying on the private `_tenant_dimensions` attribute as the
+only signal. Every call site needs the mechanical rename:
+
+```diff
+-from guitars.tenancy import TenantedManager
++from guitars.tenancy import tenanted_manager
+
+-objects = TenantedManager(_manager_class=LiveManager, org="org")
++objects = tenanted_manager(_manager_class=LiveManager, org="org")
+```
+
 ### Changed
 
 - The audit-mode `Reporter` now receives structured context alongside the

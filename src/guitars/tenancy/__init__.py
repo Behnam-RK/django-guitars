@@ -3,7 +3,7 @@
 Fail-closed defence against cross-tenant leaks, in two cooperating layers:
 
 * **Python** (``scope``, ``spec``, ``enforcement``, ``querysets`` and ``manager``) -- a
-  model built with ``TenantedManager`` refuses reads unless the required dimension is
+  model built with ``tenanted_manager()`` refuses reads unless the required dimension is
   active (``tenant(...)`` / ``@tenanted``), raising ``TenantScopeError`` on a forgotten
   filter, and guards writes so a row cannot be created into another tenant. Loud and
   greppable: this is the layer that tells a developer they got it wrong.
@@ -41,7 +41,7 @@ from .checks import register_checks
 from .enforcement import TenantEnforcement, install_write_guards, uninstall_write_guards
 from .guc import install as install_tenant_guc
 from .guc import uninstall as uninstall_tenant_guc
-from .manager import TenantedManager
+from .manager import TenantedManagerBase, tenanted_manager
 from .reporting import Reporter, set_reporter
 from .scope import (
     TenantScopeError,
@@ -67,7 +67,7 @@ __all__ = [
     'TenantScopeMissing',
     'TenantScopeViolation',
     'TenantValueError',
-    'TenantedManager',
+    'TenantedManagerBase',
     'get_tenant',
     'guc_name',
     'install',
@@ -81,6 +81,7 @@ __all__ = [
     'tenant',
     'tenant_spec',
     'tenanted',
+    'tenanted_manager',
     'uninstall',
     'uninstall_tenant_guc',
     'uninstall_write_guards',
@@ -91,7 +92,7 @@ def install() -> None:
     """Activate enforcement. Idempotent, and called for you two ways.
 
     ``GuitarsConfig.ready()`` calls this when ``guitars`` is in ``INSTALLED_APPS``, and
-    ``TenantedManager()`` calls it at model-definition time. Belt and braces on purpose:
+    ``tenanted_manager()`` calls it at model-definition time. Belt and braces on purpose:
     guitars is usable as a pure library with no ``INSTALLED_APPS`` entry, and in that
     configuration the AppConfig hook never runs. Relying on it alone would leave the
     models scoping their own reads while the write guards and the database layer silently

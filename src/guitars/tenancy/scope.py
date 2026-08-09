@@ -176,7 +176,7 @@ def tenant(**dimensions: object) -> Iterator[None]:
     :func:`tenancy_bypassed` re-enables scoping for its block.
 
     A ``None`` value is treated as *absent*, not "match everything" -- see
-    ``TenantedManager.get_queryset``. A deliberate unfiltered read must say so with
+    ``tenanted_manager()``'s ``get_queryset``. A deliberate unfiltered read must say so with
     :func:`tenancy_bypassed`.
 
     Both guards below run before the frame is entered, so a value that could never be
@@ -227,7 +227,7 @@ def tenanted(func: Callable | None = None, *, arg: str = 'tenant', dimension: st
       right whenever the parameter is named after the dimension.
 
     They are distinct because the dimension must match what the model's
-    ``TenantedManager`` was declared with, while the parameter name belongs to the
+    ``tenanted_manager()`` was declared with, while the parameter name belongs to the
     function's own signature. Collapsing them would silently open a dimension no manager
     scopes on -- which fails *closed* on a scoped read, but only after the call has
     already done its work unscoped in every other respect.

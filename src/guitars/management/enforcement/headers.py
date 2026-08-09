@@ -70,6 +70,17 @@ HEADER_TENANT_FORCE = '# Tenant FORCE RLS on "{table}" table!'
 # drift impossible for every pair that can be derived at all.
 _PLACEHOLDER_IN_ESCAPED_TEMPLATE = re.compile(r'\\\{(\w+)\\\}')
 
+#: A quote-delimited capture group's content: any non-quote character, or a doubled ``""``
+#: standing for one escaped quote -- the same disambiguation ``_QUOTED_QUALIFIED`` (in
+#: ``sql/_identifiers.py``) uses. Plain ``[^"]+`` was sufficient while nothing that ever
+#: reached a header contained a literal ``"``; a schema-qualified table in Django's own
+#: pre-quoted ``'"schema"."table"'`` convention does, once M4's ``_escape_ident`` writes it
+#: into the header doubled (see ``operations.py``'s header-building call sites) so the round
+#: trip back to the original, unescaped table name (``scanning.py``'s ``_unescape_ident``) is
+#: unambiguous. A table with no embedded ``"`` matches identically under both patterns, so
+#: every already-committed migration's header is still recognised exactly as before.
+_QUOTED_CONTENT = r'(?:[^"]|"")*'
+
 
 def _derive_scanner(header_template: str) -> re.Pattern[str]:
     """Turn a frozen ``HEADER_*`` template into the regex that recognises it.
@@ -83,7 +94,7 @@ def _derive_scanner(header_template: str) -> re.Pattern[str]:
     and stays hand-written.
     """
     escaped = re.escape(header_template)
-    pattern = _PLACEHOLDER_IN_ESCAPED_TEMPLATE.sub(r'([^"]+)', escaped)
+    pattern = _PLACEHOLDER_IN_ESCAPED_TEMPLATE.sub(f'({_QUOTED_CONTENT})', escaped)
     return re.compile(pattern)
 
 
@@ -106,8 +117,8 @@ _RE_TENANT_FORCE = _derive_scanner(HEADER_TENANT_FORCE)
 # ``[SQL:...]`` identity below is read from the *tail* of the header line independently of
 # where this match ends, so an unconsumed ``!`` in between changes nothing it reads.
 _RE_SOFT_DELETE_RELATED = re.compile(
-    r'# Soft Delete Related Rule on "([^"]+)" that is related to "([^"]+)"'
-    r'(?: via "(?P<foreign_key>[^"]+)")?'
+    rf'# Soft Delete Related Rule on "({_QUOTED_CONTENT})" that is related to "({_QUOTED_CONTENT})"'
+    rf'(?: via "(?P<foreign_key>{_QUOTED_CONTENT})")?'
 )
 # MTI headers carry a leading "MTI " token, so they never collide with the single-table
 # patterns above (which anchor on ``# Updated`` / ``# Soft`` immediately after the comment
@@ -116,8 +127,8 @@ _RE_SOFT_DELETE_RELATED = re.compile(
 # and matching on it would mean a parent model's own restructuring (e.g. a table rename)
 # reads an MTI child's still-correct trigger as "not covered" and duplicates it. Both stop
 # right after the child table's closing quote, before ``(parent "..."`` even starts.
-_RE_MTI_UPDATED_AT = re.compile(r'# MTI Updated at Trigger on "([^"]+)" table')
-_RE_MTI_SOFT_DELETE = re.compile(r'# MTI Soft Delete Rule on "([^"]+)" table')
+_RE_MTI_UPDATED_AT = re.compile(rf'# MTI Updated at Trigger on "({_QUOTED_CONTENT})" table')
+_RE_MTI_SOFT_DELETE = re.compile(rf'# MTI Soft Delete Rule on "({_QUOTED_CONTENT})" table')
 # Matches both policy forms -- the initial CREATE and a later replacement -- because for
 # every purpose here they mean the same thing: "this table's policy is recorded in a
 # migration, and this is the shape it was written with". The ``[POLICY:...]`` identity is
@@ -129,7 +140,9 @@ _RE_MTI_SOFT_DELETE = re.compile(r'# MTI Soft Delete Rule on "([^"]+)" table')
 # The FORCE header carries an extra token before "RLS", so it can never match this pattern.
 # Note this leaves [POLICY:...] itself out of the pattern -- read separately, the same way
 # as [SQL:...] below; see _recorded_policy_identity for why.
-_RE_TENANT_POLICY = re.compile(r'# Tenant RLS (?:replaced )?on "([^"]+)" table! \[POLICY:\w+\]')
+_RE_TENANT_POLICY = re.compile(
+    rf'# Tenant RLS (?:replaced )?on "({_QUOTED_CONTENT})" table! \[POLICY:\w+\]'
+)
 # The [DIGEST:...] marker is matched by _generator.RE_DIGEST.
 
 # The per-operation content digest, read off whatever remains of the header line after one

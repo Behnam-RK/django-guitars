@@ -30,6 +30,7 @@ from guitars.management.enforcement.identity import (
     _recorded_sql_identity,
     unforced_policy_tables,
 )
+from guitars.sql import _identifiers
 
 
 if TYPE_CHECKING:
@@ -114,16 +115,41 @@ def scan_existing_operations() -> ExistingOperations:
     # pass -- the singleton-function searches and the tenant-policy/force blocks below
     # do not fit this shape (a `.search` rather than `.finditer`, or extra bookkeeping
     # per match) and stay as their own code.
+    # Every captured group here is _unescape_ident'd before use: operations.py writes a
+    # table containing a literal '"' (Django's pre-quoted schema-qualified convention) into
+    # its header doubled (_escape_ident), so headers.py's broadened `_QUOTED_CONTENT`
+    # pattern can match it without the embedded quote closing the header's own delimiter
+    # early -- undoing that here is what makes the captured text equal, byte-for-byte, the
+    # same `model._meta.db_table` a later run recomputes fresh as its dict key. A table with
+    # no embedded quote round-trips through _unescape_ident unchanged.
     scan_table: list[tuple[re.Pattern, dict, Callable[[re.Match], object]]] = [
-        (_RE_UPDATED_AT, existing_triggers, lambda m: m.group(1)),
-        (_RE_SOFT_DELETE, existing_soft_deletes, lambda m: m.group(1)),
+        (_RE_UPDATED_AT, existing_triggers, lambda m: _identifiers._unescape_ident(m.group(1))),
+        (
+            _RE_SOFT_DELETE,
+            existing_soft_deletes,
+            lambda m: _identifiers._unescape_ident(m.group(1)),
+        ),
         (
             _RE_SOFT_DELETE_RELATED,
             existing_soft_delete_related,
-            lambda m: (m.group(1), m.group(2), m.group('foreign_key')),
+            lambda m: (
+                _identifiers._unescape_ident(m.group(1)),
+                _identifiers._unescape_ident(m.group(2)),
+                _identifiers._unescape_ident(m.group('foreign_key'))
+                if m.group('foreign_key') is not None
+                else None,
+            ),
         ),
-        (_RE_MTI_UPDATED_AT, existing_mti_triggers, lambda m: m.group(1)),
-        (_RE_MTI_SOFT_DELETE, existing_mti_soft_deletes, lambda m: m.group(1)),
+        (
+            _RE_MTI_UPDATED_AT,
+            existing_mti_triggers,
+            lambda m: _identifiers._unescape_ident(m.group(1)),
+        ),
+        (
+            _RE_MTI_SOFT_DELETE,
+            existing_mti_soft_deletes,
+            lambda m: _identifiers._unescape_ident(m.group(1)),
+        ),
     ]
 
     existing_tenant_policies: set[str] = set()
@@ -164,7 +190,7 @@ def scan_existing_operations() -> ExistingOperations:
             policy_matches = list(_RE_TENANT_POLICY.finditer(content))
             unforced_in_file = unforced_policy_tables(content, policy_matches)
             for match in policy_matches:
-                table = match.group(1)
+                table = _identifiers._unescape_ident(match.group(1))
                 existing_tenant_policies.add(table)
                 # Last write wins, within a file and across them -- files arrive in
                 # filename order, which is application order.
@@ -188,7 +214,10 @@ def scan_existing_operations() -> ExistingOperations:
                 # ``tenant_forces`` to find, and ``--force-rls`` then wrote a redundant
                 # migration for a table that was already forced.
                 existing_policy_force[table] = table in unforced_in_file
-            existing_tenant_forces.update(m.group(1) for m in _RE_TENANT_FORCE.finditer(content))
+            existing_tenant_forces.update(
+                _identifiers._unescape_ident(m.group(1))
+                for m in _RE_TENANT_FORCE.finditer(content)
+            )
 
     return ExistingOperations(
         triggers=existing_triggers,

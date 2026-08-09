@@ -90,6 +90,29 @@ CREATE TRIGGER updated_at_trigger AFTER UPDATE ON <child>
 `FOR EACH STATEMENT` (not per row) and `pg_trigger_depth() = 0` (so the write it
 performs does not re-enter).
 
+**Schema-qualified `db_table` is fully supported here.** `set_parent_updated_at()`
+takes the parent's schema and table as two separate arguments (empty string for
+an unqualified parent) and builds `"schema"."table"` from them at trigger-fire
+time — a single `%I` cannot render a two-part name, only one (wrong) identifier
+covering the whole string. The function also still understands the older,
+three-argument form with no schema, and always will: a trigger's argument list
+is frozen into `pg_trigger` at `CREATE TRIGGER` time and does not change when
+this function's *body* is later replaced, so an MTI child trigger created before
+schema-qualified support existed keeps calling the function the way it always
+has, indefinitely, not just until the next `makeguitarmigrations` run.
+
+**The own-table (non-MTI) trigger is not the same story.** `set_updated_at()`
+updates `TG_TABLE_NAME` — the bare relation name Postgres hands a trigger
+function, with no schema-qualified equivalent — so that `UPDATE` resolves
+through the *firing session's* `search_path`, exactly like any other unqualified
+reference. This was already true before schema-qualified `db_table` existed;
+adding it only makes the assumption *visible*, not new. A table living outside
+the session's default `search_path` (`"$user", public`) needs that schema
+included in it for its own-table trigger to find the row — the same operational
+requirement any schema-per-tenant Postgres deployment already has for
+unqualified references elsewhere. See `tests/test_schema_qualified.py` for this
+pinned against a real, non-`public` schema.
+
 ### Tenancy — an owner-join policy
 
 The child gets its **own** row-level-security policy, correlated to the owner:

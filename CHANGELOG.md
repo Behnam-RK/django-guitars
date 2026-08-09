@@ -173,6 +173,13 @@ together; every other combination of `update()`'s four flags is unaffected.
 - `update(_raise_for_excessive=False)` now leaves a `DEBUG` log on the
   `guitars.models` logger naming the field(s) it dropped, so a typo'd kwarg no
   longer vanishes with zero trace.
+- `aupdate()`'s `sync_to_async` wrapper is now built once, at module import,
+  instead of freshly per call. Its docstring now says what it actually is — a
+  thread hop via asgiref, not native async I/O — and documents
+  `thread_sensitive=True`'s implication for concurrent
+  `aupdate(_disable_signals=True)` calls: safe to overlap (`DisableSignals` is
+  reference-counted under a lock since M0), but the suppression itself is
+  still shared while any one call's block is open. No behavior change.
 
 ## [1.3.0] - 2026-08-02
 

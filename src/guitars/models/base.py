@@ -206,14 +206,45 @@ class UpdatableModel(Model):
         _disable_signals=False,
         **attrs,
     ):
-        """Async version of ``.update()``. See ``.update()`` for full documentation."""
-        await sync_to_async(self.update)(
+        """A thread hop onto ``.update()`` -- not native async I/O.
+
+        ``asgiref.sync.sync_to_async`` runs ``.update()`` on a worker thread and awaits
+        the result; the database write still blocks a thread for its duration, the same
+        as ``.update()`` itself, just not necessarily *this* one. "Async version" was an
+        overclaim -- this does not make the write concurrent, it moves which thread waits
+        for it.
+
+        The wrapper (``_update_async``, module level, below) is built once at import, not
+        reconstructed on every call: ``sync_to_async`` is not free to construct, and
+        nothing about it is per-instance -- only the arguments passed through it are.
+
+        ``thread_sensitive=True`` (``sync_to_async``'s default, used here) means this and
+        every other ``a*`` ORM call in the process share one small worker-thread pool --
+        one thread outside an ASGI request, the request's own thread inside one -- so two
+        concurrent ``aupdate(_disable_signals=True)`` calls are not guaranteed to land on
+        the same thread. That is safe rather than merely quiet because ``DisableSignals``
+        (``guitars.signals``) is process-global and reference-counted under a lock, fixed
+        in M0 specifically for concurrent use: overlapping blocks nest instead of one
+        clobbering the other's restore. What does *not* change is the scope of the
+        suppression itself -- while any one call's ``_disable_signals=True`` block is
+        open, ``pre_save``/``post_save`` are suppressed for every concurrent caller's save
+        too, not just this one's. Reference-counting makes the shared suppression safe to
+        leave and re-enter correctly; it does not make it per-caller.
+        """
+        await _update_async(
+            self,
             _save=_save,
             _save_all_fields=_save_all_fields,
             _raise_for_excessive=_raise_for_excessive,
             _disable_signals=_disable_signals,
             **attrs,
         )
+
+
+#: Built once, not reconstructed on every ``aupdate()`` call -- see that method's
+#: docstring. ``UpdatableModel.update`` is the unbound function (its own first
+#: parameter is ``self``), so this is called as ``await _update_async(instance, ...)``.
+_update_async = sync_to_async(UpdatableModel.update)
 
 
 class HasCachedPropertyModel(Model):

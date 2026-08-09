@@ -50,7 +50,7 @@ with tenant(org=acme):
     Invoice.objects.all()                # acme's invoices
     Invoice.objects.create(amount=100)   # org filled in from the scope
 
-Invoice.objects.all()                    # TenantScopeError
+Invoice.objects.all()                    # TenantScopeMissing
 
 with tenancy_bypassed():                 # the one explicit cross-tenant path
     Invoice.objects.count()              # every tenant
@@ -113,6 +113,50 @@ the function's own signature. A tenant bound to `None` raises before the body
 runs. Generator functions are rejected at decoration time — their body runs at
 iteration, after the scope would have closed.
 
+## Exceptions
+
+Every failure this package raises deliberately is a `guitars.GuitarsError`
+subclass, from `guitars.tenancy`:
+
+```
+GuitarsError
+├── TenantScopeError            # base for every tenant-scope failure
+│   ├── TenantScopeMissing      # no scope satisfies the operation
+│   └── TenantScopeViolation    # an active scope's write disagrees with it
+└── TenantValueError            # a value cannot be safely published at all
+```
+
+| Class | When | Typical handling |
+| --- | --- | --- |
+| `TenantScopeMissing` | A read or write needed `tenant(...)` active — wholly absent, or missing the one dimension this operation requires — and found none. | A 403 in application code: the caller forgot to open a scope. |
+| `TenantScopeViolation` | A scope *is* active, but the write disagrees with it — an explicit value that does not match, an ambiguous multi-value scope with nothing to autofill, or PostgreSQL's own row-level-security policy rejecting the statement outright. | An alerting signal: something in the application computed the wrong tenant. |
+| `TenantValueError` | A dimension's value (its pk, typically) contains the GUC separator (`,`) and cannot be safely published. | A data-modeling bug — fix the value, this is not routine. |
+
+`TenantScopeError` is still raised nowhere directly — every raise site picks
+one of the two subclasses — but it stays the shared base so `except
+TenantScopeError` keeps working for any scope failure, missing or violated
+alike. `TenantValueError` is deliberately **not** a `TenantScopeError`: it is
+not about scope at all, so a handler written for scope failures should not
+silently swallow it too.
+
+```python
+from guitars.tenancy import TenantScopeMissing, TenantScopeViolation
+
+try:
+    with tenant(org=acme):
+        Invoice.objects.create(amount=100, org=initech)
+except TenantScopeViolation:
+    ...  # alert: the application computed the wrong tenant
+except TenantScopeMissing:
+    ...  # 403: the caller forgot to open a scope
+```
+
+> **Migrating from 1.x.** Every 1.x raise site used the single `TenantScopeError`
+> class. A consumer catching it by name for a specific failure needs to catch the
+> right subclass instead — see the mapping in the 2.0.0 changelog entry. Catching
+> the base class still works for every case except the separator one, which was
+> already the odd one out and is now `TenantValueError`.
+
 ## Managers
 
 All three managers are scoped, `_archives` and `_all_objects` included: they
@@ -125,7 +169,7 @@ Invoice._archives      # soft-deleted rows, this tenant
 Invoice._all_objects   # everything, this tenant
 ```
 
-Without a scope, every one of them raises `TenantScopeError` — on reads, on
+Without a scope, every one of them raises `TenantScopeMissing` — on reads, on
 set-wide writes (`update`, `delete`, `bulk_update`), and on `hard_delete()`.
 
 ### Scoping a model without the GuitarModel rung

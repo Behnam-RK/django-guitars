@@ -29,7 +29,14 @@ from django.db import models
 from django.db.models.signals import pre_save
 
 from .reporting import report_once
-from .scope import MULTI_VALUE_TYPES, TenantScopeError, get_tenant, is_bypassed
+from .scope import (
+    MULTI_VALUE_TYPES,
+    TenantScopeError,
+    TenantScopeMissing,
+    TenantScopeViolation,
+    get_tenant,
+    is_bypassed,
+)
 
 
 __all__ = [
@@ -75,12 +82,18 @@ def _autofill_default() -> bool:
     return bool(getattr(settings, 'GUITARS_TENANT_AUTOFILL', False))
 
 
-def _violation(message: str, *, key: object) -> None:
-    """Raise, or merely report, depending on the enforcement mode."""
+def _violation(message: str, *, key: object, exception: type[TenantScopeError]) -> None:
+    """Raise ``exception``, or merely report, depending on the enforcement mode.
+
+    ``exception`` is the caller's choice between :class:`TenantScopeMissing` (no scope
+    satisfies this) and :class:`TenantScopeViolation` (a scope is active but this write
+    contradicts it) -- audit mode reports the same message regardless of which, since
+    nothing here raises in that mode at all.
+    """
     if _enforcement() is TenantEnforcement.AUDIT:
         report_once(key, message, mode=TenantEnforcement.AUDIT.value)
         return
-    raise TenantScopeError(message)
+    raise exception(message)
 
 
 def _pk(value: object) -> object:
@@ -190,6 +203,7 @@ def apply_write_guard(instance: models.Model) -> None:
                     f'take one from -- wrap it in tenant(...), or tenancy_bypassed() '
                     f'for a deliberate cross-tenant write.',
                     key=(label, dimension, 'unscoped'),
+                    exception=TenantScopeMissing,
                 )
             # An explicit value with no active scope is the pre-existing "create takes an
             # explicit tenant" path; the database still checks it.
@@ -201,6 +215,7 @@ def apply_write_guard(instance: models.Model) -> None:
                     f'{label} write is missing {dimension!r}. Pass it explicitly, or '
                     f'enable GUITARS_TENANT_AUTOFILL to take it from the active scope.',
                     key=(label, dimension, 'missing'),
+                    exception=TenantScopeViolation,
                 )
             elif isinstance(expected, MULTI_VALUE_TYPES):
                 # A collection scope reads as "either of these", which a column holding one
@@ -212,6 +227,7 @@ def apply_write_guard(instance: models.Model) -> None:
                     f'several ({[_pk(item) for item in expected]!r}), so there is no '
                     f'one value to autofill. Pass {dimension!r} explicitly.',
                     key=(label, dimension, 'ambiguous'),
+                    exception=TenantScopeViolation,
                 )
             else:
                 setattr(instance, attname, _pk(expected))
@@ -221,6 +237,7 @@ def apply_write_guard(instance: models.Model) -> None:
                 f'{_pk(expected)!r} -- a write may not cross tenants. Use '
                 f'tenancy_bypassed() if that is genuinely intended.',
                 key=(label, dimension, 'mismatch'),
+                exception=TenantScopeViolation,
             )
 
 
@@ -377,7 +394,7 @@ def _unclassified_denier(name: str):
 
     def _denier(self, *args, **kwargs):
         model_name = self.model.__name__ if self.model else 'Query'
-        raise TenantScopeError(
+        raise TenantScopeMissing(
             f'{model_name}.{name}() is not classified as safe to call without an active '
             f'tenant scope, and guitars denies what it has not classified. If {name!r} '
             f'is lazy or otherwise harmless, add it to _ALLOWED_UNSCOPED in '
@@ -492,11 +509,13 @@ def _untenanted_queryset_class(base: type[models.QuerySet]) -> type[models.Query
             )
 
         def _deny(self, *args, **kwargs):
-            raise TenantScopeError(self._message('read'))
+            raise TenantScopeMissing(self._message('read'))
 
         def _deny_query_write(self, *args, **kwargs):
-            # Same refusal, honest wording: these mutate rows rather than read them.
-            raise TenantScopeError(self._message('write'))
+            # Same refusal, honest wording: these mutate rows rather than read them. Still
+            # TenantScopeMissing, not TenantScopeViolation -- the queryset itself has no
+            # scope, the same condition _deny above raises for.
+            raise TenantScopeMissing(self._message('write'))
 
         def _plain(self) -> models.QuerySet:
             """A non-denying queryset over the same model, of the manager's own type.
@@ -515,7 +534,11 @@ def _untenanted_queryset_class(base: type[models.QuerySet]) -> type[models.Query
         def _deny_write(self, action: str):
             """Deny a row-creating write, or report it in audit mode."""
             model_name = self.model.__name__ if self.model else 'Query'
-            _violation(self._message(action), key=(model_name, action, 'unscoped-write'))
+            _violation(
+                self._message(action),
+                key=(model_name, action, 'unscoped-write'),
+                exception=TenantScopeMissing,
+            )
 
         def create(self, **kwargs):
             self._deny_write('create')

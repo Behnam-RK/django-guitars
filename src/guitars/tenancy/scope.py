@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 from django.db.models import QuerySet
 
+from guitars import GuitarsError
 from guitars.gucs import VALUE_SEPARATOR
 
 
@@ -25,6 +26,9 @@ if TYPE_CHECKING:
 
 __all__ = [
     'TenantScopeError',
+    'TenantScopeMissing',
+    'TenantScopeViolation',
+    'TenantValueError',
     'get_tenant',
     'is_bypassed',
     'tenancy_bypassed',
@@ -33,8 +37,44 @@ __all__ = [
 ]
 
 
-class TenantScopeError(Exception):
-    """Raised when a tenant-scoped query runs without its required scope active."""
+class TenantScopeError(GuitarsError):
+    """Base for every tenant-scope failure.
+
+    Catch this to handle any of them alike; catch :class:`TenantScopeMissing` or
+    :class:`TenantScopeViolation` to handle just one. Never raised directly -- every
+    raise site in guitars raises one of the two subclasses below.
+    """
+
+
+class TenantScopeMissing(TenantScopeError):  # noqa: N818 - name fixed by issue #12, not a typo
+    """Raised when a tenant-scoped operation runs with no scope satisfying it.
+
+    The caller-facing case: a read or write needed ``tenant(...)`` active -- wholly
+    absent, or missing the one dimension this operation requires -- and found none. In a
+    request-handling application this is ordinarily a 403, not a 500: the caller forgot
+    to open a scope, nothing is broken.
+    """
+
+
+class TenantScopeViolation(TenantScopeError):  # noqa: N818 - name fixed by issue #12, not a typo
+    """Raised when a write disagrees with the tenant scope that *is* active.
+
+    Distinct from :class:`TenantScopeMissing`: a scope is active, but the write
+    contradicts it -- an explicit value that does not match, a multi-value scope with
+    nothing unambiguous to autofill, or PostgreSQL's own row-level-security policy
+    rejecting the statement outright. Ordinarily an alerting signal rather than routine
+    403 material: it means something in the application computed the wrong tenant.
+    """
+
+
+class TenantValueError(GuitarsError):
+    """Raised when a tenant dimension's value cannot be safely published.
+
+    Not a scope failure -- a data-modeling bug: the value itself (its primary key,
+    typically) contains :data:`~guitars.gucs.VALUE_SEPARATOR`, the character the
+    row-level-security policy splits a published GUC on to read a multi-value scope. See
+    :func:`reject_separator`.
+    """
 
 
 BYPASS = '_bypass'
@@ -119,7 +159,7 @@ def reject_separator(value: object, *, dimension: str | None = None) -> None:
             # The eager call knows which dimension it was handed; the publish-time one does
             # not, and saying "tenant value" there beats inventing a name for it.
             subject = f'tenant({dimension}=...) value' if dimension else 'tenant value'
-            raise TenantScopeError(
+            raise TenantValueError(
                 f'{subject} {str(pk)!r} contains {VALUE_SEPARATOR!r}, which separates the '
                 f'values of one dimension when the scope is published to PostgreSQL -- a '
                 f'row-level-security policy would read it as several tenants and match all '
@@ -206,7 +246,7 @@ def tenanted(func: Callable | None = None, *, arg: str = 'tenant', dimension: st
         @tenanted(arg='target_shop', dimension='shop')  # they do not
         def migrate_to(target_shop: Shop) -> None: ...
 
-    Fail-closed: a tenant bound to ``None`` raises :class:`TenantScopeError` before the
+    Fail-closed: a tenant bound to ``None`` raises :class:`TenantScopeMissing` before the
     wrapped callable runs. A *missing* required argument is not re-labeled -- the call
     proceeds unscoped so Python raises its natural ``TypeError``. Sync and async
     callables are supported -- including an object whose ``__call__`` is async -- and the
@@ -232,7 +272,7 @@ def tenanted(func: Callable | None = None, *, arg: str = 'tenant', dimension: st
             bound.apply_defaults()
             value = bound.arguments.get(arg, _UNBOUND)
             if value is None:
-                raise TenantScopeError(
+                raise TenantScopeMissing(
                     f'{fn_name} needs a non-None {arg!r} to open its tenant scope.'
                 )
             return value

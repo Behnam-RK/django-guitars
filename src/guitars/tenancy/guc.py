@@ -39,7 +39,7 @@ from guitars.gucs import BYPASS_GUC, VALUE_SEPARATOR, guc_name
 from .scope import (
     BYPASS,
     MULTI_VALUE_TYPES,
-    TenantScopeError,
+    TenantScopeViolation,
     get_tenant,
     reject_separator,
 )
@@ -248,8 +248,8 @@ def _rls_violation(exc: BaseException) -> BaseException | None:
     The message test is what separates an RLS rejection from an ordinary
     ``permission denied``, which shares SQLSTATE 42501. It is English-only: on a server
     with a non-English ``lc_messages`` the rejection stays a raw ``ProgrammingError``
-    instead of a ``TenantScopeError``. That degrades the message, not the enforcement --
-    the write is refused either way -- and PostgreSQL offers no distinct SQLSTATE or
+    instead of a ``TenantScopeViolation``. That degrades the message, not the enforcement
+    -- the write is refused either way -- and PostgreSQL offers no distinct SQLSTATE or
     diagnostic field to key on instead.
     """
     # Tracked by identity -- a chain can cycle, and an exception free to define __eq__
@@ -277,8 +277,13 @@ def _wrapper(execute, sql, params, many, context):
             raise
         # Postgres names the table but not the tenant, and the traceback points at the
         # cursor rather than the caller. Re-raise as the error the rest of the codebase
-        # already catches and greps for.
-        raise TenantScopeError(
+        # already catches and greps for. TenantScopeViolation, not TenantScopeMissing:
+        # this is the layer of last resort -- joins, cascades, _base_manager, raw SQL --
+        # so a rejection here may mean no scope was ever opened in Python at all, not
+        # only a wrong one. It is filed as a violation anyway because both raise through
+        # the same TenantScopeError base a caller can catch either way, and "the database
+        # refused this write" reads as an alerting signal here regardless of which.
+        raise TenantScopeViolation(
             f'write rejected by a tenant policy -- the row does not belong to the '
             f'active tenant, or no tenant scope is active. Wrap the call in '
             f'tenant(...), or tenancy_bypassed() for a deliberate cross-tenant '

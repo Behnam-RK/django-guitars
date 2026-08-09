@@ -54,6 +54,56 @@ they had zero consumers in `makeguitarmigrations` or anywhere else in the kit.
   content-hash suffix when they would exceed PostgreSQL's 63-byte identifier
   limit, so two long names can no longer silently collide onto the same rule.
 
+M5: Tenancy & models API for 2.0 (#12).
+
+### ⚠️ BREAKING
+
+**The unscoped-queryset deny-list is now an allow-list.** `_ALLOWED_UNSCOPED`
+(`guitars/tenancy/manager.py`) names the queryset methods known safe to leave
+reachable without an active tenant scope; every other public method Django or
+guitars itself defines is denied by default rather than silently inherited. A
+Django release adding a queryset method, or a future guitars queryset method,
+is now denied until someone classifies it as safe — fail-closed instead of
+fail-open. `Manager.raw()` is part of this: it is now **denied** on an unscoped
+queryset (previously reachable), resolving the inconsistency with
+`hard_delete()` (already denied on the same "the database's job" reasoning) —
+a `RawQuerySet` is a distinct class that never passes back through the denying
+queryset, so leaving it allowed handed out an unscoped escape hatch.
+`tenancy_bypassed()` remains the explicit way to use it unscoped. A
+downstream consumer's own custom queryset method is unaffected: it can only
+reach the database through a primitive this module already denies, so the
+sweep deliberately leaves it reachable.
+
+**`TenantScopeError` is split into a hierarchy.** It carried five semantically
+unrelated failure modes in one class, so a caller could not `except` one
+without catching all five. `guitars.GuitarsError` is now the package-level
+base (`guitars/__init__.py`, previously exported nothing but `__version__`),
+and the tenancy failures are:
+
+```
+GuitarsError
+├── TenantScopeError            # base for every tenant-scope failure
+│   ├── TenantScopeMissing      # no scope satisfies the operation
+│   └── TenantScopeViolation    # an active scope's write disagrees with it
+└── TenantValueError            # a value cannot be safely published at all
+```
+
+| Old raise site | Condition | New class |
+| --- | --- | --- |
+| `scope.tenanted` | decorated arg bound to `None` | `TenantScopeMissing` |
+| `manager._violation` (`unscoped`) | write with no value and no active scope | `TenantScopeMissing` |
+| `manager._deny` | any read on the unscoped queryset | `TenantScopeMissing` |
+| `manager._deny_query_write` | set-wide write on the unscoped queryset | `TenantScopeMissing` |
+| `manager._violation` (`missing`/`ambiguous`/`mismatch`) | write does not satisfy the active scope | `TenantScopeViolation` |
+| `guc._wrapper` | PostgreSQL RLS rejection (SQLSTATE 42501) | `TenantScopeViolation` |
+| `scope.reject_separator` | value contains the GUC separator | `TenantValueError` |
+
+`TenantScopeError` itself is never raised directly and stays the shared base,
+so `except TenantScopeError` keeps working for every case except the
+separator one, which is now `TenantValueError` — not a scope failure at all,
+so it is deliberately **not** a `TenantScopeError` subclass. See
+[`docs/tenancy.md`](docs/tenancy.md#exceptions) for handling guidance.
+
 ## [1.3.0] - 2026-08-02
 
 M2: new behavioural test families (#9) -- dev/test-only, no production code path changes

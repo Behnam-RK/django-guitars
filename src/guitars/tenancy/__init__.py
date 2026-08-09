@@ -17,6 +17,14 @@ Neither is redundant. Without the database the coverage has holes; without Pytho
 missing scope is silent. ``tenancy_bypassed()`` is the one explicit, greppable
 cross-tenant path, and bypasses both layers at once.
 
+Every failure raises a :class:`TenantScopeError` subclass: :class:`TenantScopeMissing`
+when no scope satisfies the operation (ordinarily a 403 in application code, not a 500),
+:class:`TenantScopeViolation` when an active scope's write disagrees with it or
+PostgreSQL's own policy rejects the statement (ordinarily an alerting signal -- something
+computed the wrong tenant), and :class:`TenantValueError` when a value cannot be safely
+published at all. Catch ``TenantScopeError`` to handle any scope failure alike, or a
+specific subclass to handle just one.
+
 State lives in a ``ContextVar`` so a scope survives ``await`` / ``sync_to_async``.
 
 Portability: this package imports only the standard library and Django. Anything
@@ -43,6 +51,9 @@ from .manager import (
 from .reporting import Reporter, set_reporter
 from .scope import (
     TenantScopeError,
+    TenantScopeMissing,
+    TenantScopeViolation,
+    TenantValueError,
     get_tenant,
     is_bypassed,
     tenancy_bypassed,
@@ -58,6 +69,9 @@ __all__ = [
     'Reporter',
     'TenantEnforcement',
     'TenantScopeError',
+    'TenantScopeMissing',
+    'TenantScopeViolation',
+    'TenantValueError',
     'TenantedManager',
     'get_tenant',
     'guc_name',

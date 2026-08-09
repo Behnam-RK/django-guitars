@@ -27,6 +27,7 @@ from guitars.models import GuitarModel
 from guitars.sql import policy
 from guitars.tenancy import (
     TenantScopeError,
+    TenantValueError,
     get_tenant,
     guc,
     manager,
@@ -257,13 +258,13 @@ class TestTheEncodingRefusesWhatItCannotCarry:
     """
 
     def test_a_scalar_containing_the_separator_is_refused(self):
-        with pytest.raises(TenantScopeError, match='contains'):
+        with pytest.raises(TenantValueError, match='contains'):
             guc.encode_value('acme,globex')
 
     def test_a_collection_member_containing_the_separator_is_refused(self):
         """The collection path encodes each member through the same helper, so it cannot be
         the loophole -- ``['a', 'b,c']`` would otherwise publish as three values."""
-        with pytest.raises(TenantScopeError, match='contains'):
+        with pytest.raises(TenantValueError, match='contains'):
             guc.encode_value(['acme', 'globex,initech'])
 
     def test_the_scope_refuses_it_at_entry_and_names_the_dimension(self):
@@ -273,7 +274,7 @@ class TestTheEncodingRefusesWhatItCannotCarry:
         happened to publish the frame first -- a cursor several frames away from the mistake,
         which is the same complaint ``_reject_lazy`` exists to answer.
         """
-        with pytest.raises(TenantScopeError, match=r'tenant\(shop=\.\.\.\) value'):
+        with pytest.raises(TenantValueError, match=r'tenant\(shop=\.\.\.\) value'):
             with tenant(shop='acme,globex'):
                 pytest.fail('the scope should not have opened')
 
@@ -281,7 +282,7 @@ class TestTheEncodingRefusesWhatItCannotCarry:
         assert get_tenant() == {}
 
     def test_a_collection_is_checked_at_entry_too(self):
-        with pytest.raises(TenantScopeError, match='contains'):
+        with pytest.raises(TenantValueError, match='contains'):
             with tenant(shop=['acme', 'globex,initech']):
                 pytest.fail('the scope should not have opened')
 
@@ -300,7 +301,7 @@ class TestTheEncodingRefusesWhatItCannotCarry:
         instance = _Unsaved()
         with tenant(shop=instance):  # passes: pk is None, which publishes as empty and denies
             instance.pk = 'acme,globex'
-            with pytest.raises(TenantScopeError, match='contains'):
+            with pytest.raises(TenantValueError, match='contains'):
                 guc.desired_state()
 
     def test_an_ordinary_value_still_encodes(self):

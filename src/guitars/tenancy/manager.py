@@ -270,6 +270,146 @@ def _self_install() -> None:
 
 # ─────────────────────────────── read guards ────────────────────────────── #
 
+_ALLOWED_UNSCOPED: dict[str, str] = {
+    # Django's own QuerySet surface: chain-building or metadata, never a database hit by
+    # itself. Checked live against Django 5.0.14, 5.2.15 and 6.0.6 while writing this --
+    # tests/test_tenancy_denylist.py's dynamic drift test is what catches the next one,
+    # not this comment.
+    'alias': 'lazy: builds a new queryset, does not touch the database',
+    'all': 'lazy: builds a new queryset, does not touch the database',
+    'annotate': 'lazy: builds a new queryset, does not touch the database',
+    'as_manager': 'metadata: returns a Manager, never queries',
+    'complex_filter': 'lazy: builds a new queryset, does not touch the database',
+    'dates': 'lazy: builds a new queryset, does not touch the database',
+    'datetimes': 'lazy: builds a new queryset, does not touch the database',
+    'db': 'metadata: resolves the alias to use, does not query',
+    'defer': 'lazy: builds a new queryset, does not touch the database',
+    'difference': 'lazy: builds a new queryset, does not touch the database',
+    'distinct': 'lazy: builds a new queryset, does not touch the database',
+    'exclude': 'lazy: builds a new queryset, does not touch the database',
+    'extra': 'lazy: builds a new queryset, does not touch the database',
+    'filter': 'lazy: builds a new queryset, does not touch the database',
+    'intersection': 'lazy: builds a new queryset, does not touch the database',
+    'only': 'lazy: builds a new queryset, does not touch the database',
+    'order_by': 'lazy: builds a new queryset, does not touch the database',
+    'ordered': 'metadata: inspects the query, does not execute it',
+    'prefetch_related': 'lazy: builds a new queryset, does not touch the database',
+    'query': 'metadata: builds the Query object, does not execute it',
+    'resolve_expression': 'metadata: used when this queryset is nested in another query',
+    'reverse': 'lazy: builds a new queryset, does not touch the database',
+    'select_for_update': 'lazy: builds a new queryset, does not touch the database',
+    'select_related': 'lazy: builds a new queryset, does not touch the database',
+    'union': 'lazy: builds a new queryset, does not touch the database',
+    'using': 'lazy: builds a new queryset, does not touch the database',
+    'values': 'lazy: builds a new queryset, does not touch the database',
+    'values_list': 'lazy: builds a new queryset, does not touch the database',
+    # guitars' own additions.
+    'lives': 'property returning self.filter(...) -- lazy, chains into a denying clone',
+    'archives': 'property returning self.filter(...) -- lazy, chains into a denying clone',
+    # 'raw' is deliberately ABSENT: calling it doesn't touch the database, but the
+    # RawQuerySet it returns is a distinct class that never passes back through this
+    # denying queryset -- so allowing it here would be handing out an unscoped escape
+    # hatch, the exact inconsistency M5 (#12) resolved by denying it instead. It falls
+    # through to the default-deny sweep below like any other unclassified method.
+}
+"""Methods known safe to leave reachable on an unscoped queryset -- name -> why.
+
+This is the allow-list half of the inversion: everything **not** named here, on a class
+Django or guitars itself defines, is denied by ``_default_deny_sweep`` below rather than
+silently inherited. Adding a queryset method (guitars' own, or a future Django release)
+is now safe by construction -- it is denied until someone moves it here with a reason.
+"""
+
+
+def _closest_public_definitions(base: type[models.QuerySet]) -> dict[str, object]:
+    """``{name: attribute}`` for every public (non-underscore) name reachable on *base*.
+
+    Walks the MRO closest-first, so a subclass's own override wins -- matching what
+    ``getattr`` would actually resolve to. Private helpers (``_clone``, ``_chain``,
+    ``_filter_or_exclude``, ...) are deliberately excluded: they are plumbing invoked
+    *by* the public methods above, not separate entry points, and several of the public
+    methods classified here as lazy internally call them -- denying them by name would
+    break the very filtering ``_ALLOWED_UNSCOPED`` just declared safe.
+    """
+    found: dict[str, object] = {}
+    for klass in base.__mro__:
+        if klass is object:
+            continue
+        for name, value in vars(klass).items():
+            if name.startswith('_'):
+                continue
+            found.setdefault(name, value)
+    return found
+
+
+def _defining_module(attr: object) -> str | None:
+    """Where *attr* was actually defined, for the default-deny sweep below.
+
+    A ``property``'s module lives on its getter, not on the property object itself.
+    """
+    if isinstance(attr, property):
+        attr = attr.fget
+    return getattr(attr, '__module__', None)
+
+
+def _denies_by_default(module: str | None) -> bool:
+    """Whether an unclassified method should default-deny, based on where it lives.
+
+    Django's own QuerySet surface and every queryset method guitars itself adds are both
+    fail-closed: an addition to either -- a new Django release, or a future guitars
+    queryset method nobody classified yet -- is denied until someone decides it belongs in
+    :data:`_ALLOWED_UNSCOPED`. A downstream consumer's own custom queryset method is left
+    alone -- see :func:`_untenanted_queryset_class`'s docstring for why denying it eagerly
+    would be wrong.
+    """
+    return bool(module) and (
+        module.startswith('django.db.models') or module.startswith('guitars.')
+    )
+
+
+def _unclassified_denier(name: str):
+    """Build the method the default-deny sweep installs for one unclassified name.
+
+    Distinct wording from ``_deny``/``_deny_query_write`` above (which describe a
+    specific read or write): this one says *why* -- nothing classified it -- since the
+    caller does not yet know whether it is a read or a write.
+    """
+
+    def _denier(self, *args, **kwargs):
+        model_name = self.model.__name__ if self.model else 'Query'
+        raise TenantScopeError(
+            f'{model_name}.{name}() is not classified as safe to call without an active '
+            f'tenant scope, and guitars denies what it has not classified. If {name!r} '
+            f'is lazy or otherwise harmless, add it to _ALLOWED_UNSCOPED in '
+            f'guitars/tenancy/manager.py with a reason; otherwise deny it explicitly.'
+        )
+
+    _denier.__name__ = f'_deny_unclassified_{name}'
+    _denier.__qualname__ = _denier.__name__
+    return _denier
+
+
+def _apply_default_deny_sweep(denying: type[models.QuerySet], base: type[models.QuerySet]) -> None:
+    """Deny every public method of *base* the class body above left undecided.
+
+    This is what makes the deny-list an allow-list: anything already overridden in
+    *denying*'s own body stays as written, anything in ``_ALLOWED_UNSCOPED`` is left to
+    resolve normally through inheritance, and everything else -- on Django's own
+    ``QuerySet`` or on any class in the ``guitars`` package -- is denied by name. A
+    downstream consumer's own custom queryset method is the one thing this leaves
+    reachable: it can only reach the database through a primitive this module already
+    denies, so eagerly denying it too would gain nothing and would break audit mode's
+    report-and-proceed contract for that method.
+    """
+    handled = set(vars(denying))
+    for name, original in _closest_public_definitions(base).items():
+        if name in handled or name in _ALLOWED_UNSCOPED:
+            continue
+        if not _denies_by_default(_defining_module(original)):
+            continue
+        denier = _unclassified_denier(name)
+        setattr(denying, name, property(denier) if isinstance(original, property) else denier)
+
 
 @functools.cache
 def _guarded_queryset_class(base: type[models.QuerySet]) -> type[models.QuerySet]:
@@ -300,13 +440,25 @@ def _guarded_queryset_class(base: type[models.QuerySet]) -> type[models.QuerySet
 
 @functools.cache
 def _untenanted_queryset_class(base: type[models.QuerySet]) -> type[models.QuerySet]:
-    """Build the deny-everything queryset on top of the manager's own queryset.
+    """Build the deny-by-default queryset on top of the manager's own queryset.
 
     Subclassing ``base`` rather than plain ``QuerySet`` is what keeps a custom method
     reachable on the unscoped path. Without it ``Bundle.objects.lives()`` raises
     ``AttributeError`` when a scope is missing instead of the ``TenantScopeError`` that
     says what is actually wrong -- and in audit mode it breaks a path that is only
     supposed to report.
+
+    **Allow-list, not deny-list.** The class body below overrides the methods known to
+    need enforcement-mode-aware handling (``create``, ``bulk_create``, ...) or a tailored
+    read/write message (``count``, ``update``, ...); ``_apply_default_deny_sweep`` then
+    denies everything else Django or guitars defines that is not in
+    :data:`_ALLOWED_UNSCOPED`. A method neither this class nor ``_ALLOWED_UNSCOPED``
+    mentions -- a future Django release's addition, or a new guitars queryset method
+    nobody classified yet -- is denied by that sweep rather than silently inherited. The
+    one thing the sweep deliberately leaves alone is a *consumer's* own custom queryset
+    method: it was never going to reach the database except through a primitive this
+    module already denies, and denying it too would only break audit mode's
+    report-and-proceed contract for that method without closing any real gap.
 
     Cached per base class: the same manager class always yields the same denying class,
     so this builds one apiece rather than one per manager instance.
@@ -420,6 +572,7 @@ def _untenanted_queryset_class(base: type[models.QuerySet]) -> type[models.Query
         # they skip _fetch_all entirely -- deny them by name.
         iterator = aiterator = _deny
 
+    _apply_default_deny_sweep(_UntenantedQuerySet, base)
     return _UntenantedQuerySet
 
 

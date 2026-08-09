@@ -27,18 +27,16 @@ from django.db import connections
 from django.db.models import QuerySet as DjangoQuerySet
 
 from guitars.models import HardDeletableQuerySet, LiveQuerySet
-from guitars.tenancy import TenantScopeError
-from guitars.tenancy.manager import _untenanted_queryset_class
+from guitars.tenancy import TenantScopeError, tenancy_bypassed
+from guitars.tenancy.manager import _ALLOWED_UNSCOPED, _untenanted_queryset_class
 from tests.testapp.models import Release
 
 
-#: Methods guitars adds to its querysets that do NOT reach the database, with the reason.
-#: Lazy, queryset-returning members are safe because they chain into a denying clone --
-#: evaluating that clone is what raises, at the ``_fetch_all`` chokepoint.
-SAFE_BY_DESIGN = {
-    'lives': 'property returning self.filter(...) -- lazy, chains into a denying clone',
-    'archives': 'property returning self.filter(...) -- lazy, chains into a denying clone',
-}
+#: The runtime allow-list (guitars/tenancy/manager.py) is the source of truth the sweep
+#: actually reads; this module's classification below documents and cross-checks it, but
+#: does not duplicate it -- see test_allowed_unscoped_methods_still_exist_upstream and
+#: test_allowed_unscoped_methods_all_carry_a_reason.
+SAFE_BY_DESIGN = _ALLOWED_UNSCOPED
 
 #: Historical: the frozen subset of Django's database-touching API this module named
 #: before the dynamic check below existed. Kept, and still asserted against below by
@@ -161,15 +159,9 @@ DJANGO_DENIED_VIA_CHAIN = {
 DJANGO_INDIVIDUALLY_HANDLED = {'abulk_create', 'acreate', 'bulk_create', 'create', 'none'}
 
 #: Chain-building or metadata: return a new (lazy) queryset, or a value that never
-#: required a query, so they never touch the database by themselves.
-#:
-#: ``raw`` is here, not in a denied bucket, on a technicality worth naming: *calling*
-#: raw() doesn't touch the database -- it returns a RawQuerySet -- but that RawQuerySet
-#: is a distinct class that never passes through the denying queryset at all, so an
-#: unscoped `Model.objects.raw(...)` bypasses this Python-side deny-list entirely. Same
-#: shape of gap as the save()-path one ADR 0004 documents (the *complete* enforcement
-#: layer -- FORCE ROW LEVEL SECURITY -- still applies; this deny-list is the *loud* one).
-#: Out of scope to close here: harness-only milestone, no SQL/generator/model changes.
+#: required a query, so they never touch the database by themselves. Must match
+#: _ALLOWED_UNSCOPED's Django-side names exactly -- see
+#: test_django_lazy_safe_matches_allowed_unscoped.
 DJANGO_LAZY_SAFE = {
     'alias',
     'all',
@@ -191,7 +183,6 @@ DJANGO_LAZY_SAFE = {
     'ordered',
     'prefetch_related',
     'query',
-    'raw',
     'resolve_expression',
     'reverse',
     'select_for_update',
@@ -201,6 +192,16 @@ DJANGO_LAZY_SAFE = {
     'values',
     'values_list',
 }
+
+#: *Calling* raw() doesn't touch the database -- it returns a RawQuerySet -- but that
+#: RawQuerySet is a distinct class that never passes back through the denying queryset at
+#: all, so leaving it lazy would hand out an unscoped escape hatch. M5 (#12) resolved the
+#: inconsistency with hard_delete (denied on the same "the database's job" reasoning) by
+#: denying raw() too: it is simply absent from _ALLOWED_UNSCOPED, so
+#: _apply_default_deny_sweep denies it like any other unclassified Django method -- no
+#: explicit alias in guitars/tenancy/manager.py needed. See
+#: test_raw_is_denied_without_a_scope_and_permitted_under_bypass.
+DJANGO_DENIED_BY_SWEEP = {'raw'}
 
 
 def _django_queryset_public_members() -> set[str]:
@@ -228,6 +229,7 @@ def test_djangos_own_queryset_surface_is_fully_classified():
         | DJANGO_DENIED_VIA_CHAIN
         | DJANGO_INDIVIDUALLY_HANDLED
         | DJANGO_LAZY_SAFE
+        | DJANGO_DENIED_BY_SWEEP
     )
 
     unclassified = sorted(_django_queryset_public_members() - classified)
@@ -454,3 +456,107 @@ def test_row_creating_writes_are_intercepted_rather_than_plainly_denied():
         assert denying.__dict__[name] is not denying.__dict__.get('_deny_query_write'), (
             f'{name} is aliased to the bare denial, so audit mode could not report-and-proceed'
         )
+
+
+# ────────────────────────── the allow-list sweep itself ───────────────────────── #
+
+
+def test_allowed_unscoped_methods_still_exist_upstream():
+    """_ALLOWED_UNSCOPED is the sweep's actual source of truth (guitars/tenancy/manager.py);
+    a name it lists that exists nowhere -- Django renamed or removed it, or a guitars
+    queryset method was renamed -- is dead weight silently no longer meaning anything.
+    """
+    known = (
+        _django_queryset_public_members()
+        | _own_members(LiveQuerySet)
+        | _own_members(HardDeletableQuerySet)
+    )
+    stale = sorted(set(_ALLOWED_UNSCOPED) - known)
+    assert not stale, f'_ALLOWED_UNSCOPED names method(s) that exist nowhere: {stale}'
+
+
+def test_allowed_unscoped_methods_all_carry_a_reason():
+    empty = [name for name, reason in _ALLOWED_UNSCOPED.items() if not reason]
+    assert not empty, f'_ALLOWED_UNSCOPED entries with no reason: {empty}'
+
+
+def test_django_lazy_safe_matches_allowed_unscoped():
+    """DJANGO_LAZY_SAFE documents Django's own lazy/metadata surface for the drift test
+    above; _ALLOWED_UNSCOPED is what the sweep actually reads at runtime. They must name
+    the same Django methods (plus guitars' own lives/archives), or this module's
+    documentation and the runtime allow-list have drifted apart.
+    """
+    assert set(_ALLOWED_UNSCOPED) == DJANGO_LAZY_SAFE | {'lives', 'archives'}
+
+
+def test_raw_is_denied_without_a_scope_and_permitted_under_bypass():
+    """M5 (#12): raw() is now denied unscoped rather than left lazy -- see
+    DJANGO_DENIED_BY_SWEEP's comment for why leaving it allowed would be a real gap.
+    tenancy_bypassed() remains the explicit, greppable way to use it unscoped.
+    """
+    with pytest.raises(TenantScopeError, match='raw'):
+        Release.objects.raw('SELECT id FROM testapp_release')
+
+    with tenancy_bypassed():
+        # A RawQuerySet is lazy like any other -- calling raw() itself must not raise.
+        Release.objects.raw('SELECT id FROM testapp_release')
+
+
+def test_an_unclassified_guitars_namespaced_method_is_denied_by_the_sweep_alone():
+    """The whole point of the inversion: a brand-new method needs no entry added to
+    _ALLOWED_UNSCOPED, MUST_BE_DENIED, or any other bucket in this file to be denied.
+    Defined here with its module spoofed to look guitars-authored -- matching what a real
+    addition to guitars/models/soft_deletion.py would look like -- and denied purely by
+    _apply_default_deny_sweep noticing nothing classified it.
+    """
+
+    class _FutureQuerySet(LiveQuerySet):
+        def totally_unclassified(self):
+            return list(self)
+
+    _FutureQuerySet.totally_unclassified.__module__ = 'guitars.models.soft_deletion'
+    denying = _denying_class(_FutureQuerySet)
+    instance = denying(Release)
+
+    with pytest.raises(TenantScopeError, match='totally_unclassified'):
+        instance.totally_unclassified()
+
+
+def test_an_unclassified_guitars_namespaced_property_is_denied_as_a_property():
+    """Same as the method case above, but for a ``@property`` -- the sweep must replace it
+    with another data descriptor (so ``instance.name`` raises on *access*, not on a call)
+    rather than a plain denying function that would need to be invoked to fire.
+    """
+
+    class _FutureQuerySet(LiveQuerySet):
+        @property
+        def totally_unclassified_property(self):
+            return list(self)
+
+    _FutureQuerySet.totally_unclassified_property.fget.__module__ = 'guitars.models.soft_deletion'
+    denying = _denying_class(_FutureQuerySet)
+    instance = denying(Release)
+
+    assert inspect.isdatadescriptor(denying.__dict__['totally_unclassified_property'])
+    with pytest.raises(TenantScopeError, match='totally_unclassified_property'):
+        instance.totally_unclassified_property  # noqa: B018 - the access itself must raise
+
+
+def test_a_consumers_own_queryset_method_is_left_reachable():
+    """The sweep's one deliberate exception: a method whose defining module is neither
+    Django's nor guitars' own is a downstream consumer's, and stays lazy/reachable --
+    it can only reach the database through a primitive this module already denies.
+    """
+
+    class _ConsumerQuerySet(LiveQuerySet):
+        def custom_report(self):
+            return self.filter()
+
+    assert _ConsumerQuerySet.custom_report.__module__ == __name__
+    denying = _denying_class(_ConsumerQuerySet)
+    instance = denying(Release)
+
+    # Does not raise: chains into .filter(), itself in _ALLOWED_UNSCOPED, returning
+    # another instance of the same denying class -- consuming it is what would raise.
+    result = instance.custom_report()
+    assert isinstance(result, denying)

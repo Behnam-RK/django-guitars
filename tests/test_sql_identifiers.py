@@ -8,6 +8,8 @@ new M4 additions -- that don't yet have a single obvious call site to hang a tes
 
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 
 from guitars.sql import _identifiers, policy
@@ -307,7 +309,7 @@ class TestSafeIdentifier:
         candidate = 'soft_delete_related_' + 'x' * 60
         result = _identifiers._safe_identifier(candidate)
         assert len(result.encode('utf-8')) <= 63
-        assert result.endswith(_identifiers.hashlib.sha256(candidate.encode()).hexdigest()[:10])
+        assert result.endswith(hashlib.sha256(candidate.encode()).hexdigest()[:10])
 
     def test_two_long_names_sharing_a_prefix_produce_distinct_results(self):
         prefix = 'soft_delete_related_' + 'x' * 50

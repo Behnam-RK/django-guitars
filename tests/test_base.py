@@ -71,6 +71,36 @@ def test_update_ignores_unknown_field_when_not_raising():
     assert band.name == 'Yes'
 
 
+@pytest.mark.django_db
+def test_update_logs_the_dropped_field_when_not_raising(caplog):
+    """``_raise_for_excessive=False`` means the caller does not see a raise -- not that a
+    typo'd kwarg vanishes with zero trace. See models/base.py's M5 (#12) fix."""
+    band = Band.objects.create(name='Rush')
+
+    with caplog.at_level('DEBUG', logger='guitars.models'):
+        band.update(bogus='x', name='Yes', _raise_for_excessive=False)
+
+    assert 'bogus' in caplog.text
+    assert 'Band' in caplog.text
+
+
+@pytest.mark.django_db
+def test_update_raises_when_save_all_fields_is_meaningless_without_save():
+    """``_save_all_fields=True`` has nothing to act on when ``_save=False`` -- nothing is
+    saved this call at all. Previously silent: ``update_fields`` was computed as ``None``
+    and simply never used."""
+    band = Band.objects.create(name='Rush', nickname='original-nick')
+
+    with pytest.raises(ValueError, match='_save_all_fields'):
+        band.update(name='Yes', _save=False, _save_all_fields=True)
+
+    # Raises before mutating anything -- consistent with the excessive-fields guard.
+    assert band.name == 'Rush'
+    band.refresh_from_db()
+    assert band.name == 'Rush'
+    assert band.nickname == 'original-nick'
+
+
 @pytest.mark.django_db(transaction=True)
 def test_update_with_no_scalar_fields_writes_nothing():
     """A bare, argument-less update() must not become a full-row rewrite.

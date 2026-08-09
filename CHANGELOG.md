@@ -155,6 +155,12 @@ export list that served four different audiences.**
 +from guitars.tenancy.testing import uninstall
 ```
 
+**`update(_save=False, _save_all_fields=True)` now raises `ValueError`.** The
+combination was always meaningless — `_save_all_fields` has nothing to act on
+when nothing is saved that call — and silently computed `update_fields=None`,
+then never used it. Breaking only for a call site that happened to pass both
+together; every other combination of `update()`'s four flags is unaffected.
+
 ### Changed
 
 - The audit-mode `Reporter` now receives structured context alongside the
@@ -164,6 +170,9 @@ export list that served four different audiences.**
   Sentry or similar can now classify a finding programmatically. Not breaking
   for a reporter already accepting `**context` (the documented shape); one
   matching only specific keyword names needs to accept the new ones too.
+- `update(_raise_for_excessive=False)` now leaves a `DEBUG` log on the
+  `guitars.models` logger naming the field(s) it dropped, so a typo'd kwarg no
+  longer vanishes with zero trace.
 
 ## [1.3.0] - 2026-08-02
 

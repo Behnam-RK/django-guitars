@@ -14,6 +14,7 @@ standalone mixin (``UpdatableModel``, ``HasCachedPropertyModel``, ``DatedModel``
 ``SoftDeletableModel``) for models that need one without the ones below it.
 """
 
+import logging
 from contextlib import nullcontext
 
 from asgiref.sync import sync_to_async
@@ -28,6 +29,9 @@ from guitars.tenancy import tenanted_manager
 from guitars.tenancy.checks import register_checks
 
 from .soft_deletion import AllObjectsManager, ArchiveManager, LiveManager, SoftDeletableModel
+
+
+logger = logging.getLogger('guitars.models')
 
 
 class DatedModel(Model):
@@ -83,14 +87,38 @@ class UpdatableModel(Model):
         given_fields = set(attrs.keys())
         excessive_fields = given_fields - fields
         updating_fields = (fields & given_fields) - m2m_fields
-
-        if excessive_fields and _raise_for_excessive:
-            raise ValueError(f'Invalid arguments: {excessive_fields}. (valid choices: {fields})')
-
         m2m_attrs = {attr: value for attr, value in attrs.items() if attr in m2m_fields}
 
-        if not _save and m2m_attrs:
-            raise ValueError('Cannot update m2m fields without saving the instance!')
+        if excessive_fields:
+            if _raise_for_excessive:
+                raise ValueError(
+                    f'Invalid arguments: {excessive_fields}. (valid choices: {fields})'
+                )
+            # _raise_for_excessive=False means "ignore and proceed", not "ignore silently"
+            # -- a typo'd kwarg previously vanished with zero signal. DEBUG rather than
+            # WARNING: this is the documented, requested behaviour, not a surprise.
+            logger.debug(
+                '%s.update() ignored unknown field(s) %s (valid choices: %s)',
+                type(self).__name__,
+                sorted(excessive_fields),
+                sorted(fields),
+            )
+
+        if not _save:
+            if m2m_attrs:
+                raise ValueError('Cannot update m2m fields without saving the instance!')
+            if _save_all_fields:
+                # _save_all_fields says "write every field to the database" -- but
+                # _save=False means nothing is written at all this call, so the
+                # combination has no meaning. Previously this silently computed
+                # update_fields=None and then never used it (self.save() is never
+                # reached when _save is False), which is exactly the kind of
+                # meaningless-but-accepted combination the M5 (#12) review flagged.
+                raise ValueError(
+                    '_save_all_fields=True has no effect when _save=False -- nothing is '
+                    'saved this call. Drop _save_all_fields, or pass _save=True (the '
+                    'default) if you meant to write every field.'
+                )
 
         for attr, attr_value in attrs.items():
             if attr in updating_fields:
@@ -116,6 +144,11 @@ class UpdatableModel(Model):
         A subsequent call with ``_save=True`` will **not** include those
         earlier attributes unless ``_save_all_fields=True`` is also passed.
 
+        ``_save=False`` combined with ``_save_all_fields=True`` in the *same* call raises
+        ``ValueError``: nothing is saved this call, so "save every field" has nothing to
+        act on -- silently accepting it used to compute ``update_fields=None`` and never
+        use it.
+
         M2M fields are handled via ``.set(values, clear=True)`` and require
         ``_save=True``.
 
@@ -126,6 +159,11 @@ class UpdatableModel(Model):
         guard that fills in and validates the tenant field. The database-level RLS policy
         still applies if installed, but nothing on the Python side does; each such call is
         reported once per model class via ``guitars.tenancy.reporting``.
+
+        ``_raise_for_excessive=False`` silently ignores an unrecognised kwarg rather than
+        raising -- but "silently" only means the caller does not see it; a DEBUG log on
+        the ``guitars.models`` logger names what was dropped, so a typo does not vanish
+        with zero trace.
         """
         m2m_attrs, update_fields = self._prepare_update(
             _save, _save_all_fields, _raise_for_excessive, attrs

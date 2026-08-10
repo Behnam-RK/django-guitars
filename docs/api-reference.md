@@ -27,8 +27,8 @@ Each capability is also a standalone mixin: `UpdatableModel`,
 | `LiveManager` | Default manager on a `SoftDeletableModel` — live rows only. |
 | `ArchiveManager` | `_archives` — soft-deleted rows only. |
 | `AllObjectsManager` | `_all_objects` — every row regardless of `_deleted_at`. |
-| `LiveQuerySet` | Queryset backing `LiveManager` / `ArchiveManager`. |
-| `HardDeletableQuerySet` | Adds `.hard_delete()` in bulk. |
+| `LiveQuerySet` | Queryset backing `LiveManager`. |
+| `HardDeletableQuerySet` | `LiveQuerySet` subclass adding `.hard_delete()` in bulk; backs `ArchiveManager` / `AllObjectsManager`. |
 
 ## Tenancy public API (`guitars.tenancy`)
 
@@ -75,7 +75,7 @@ settings the enforcement generator reads:
 | `GUITARS_TENANT_AUTOFILL` | `False` | Fill a missing tenant from the active scope. `GuitarModel` passes `True` for its own FK regardless. |
 | `GUITARS_TENANT_POLICIES` | `True` | `False` keeps the Python layer and leaves the database alone. |
 | `GUITARS_RLS_FORCE` | `True` | `False` ships policies inert, for a staged retrofit; `makeguitarmigrations --force-rls` lands `FORCE` later. |
-| `GUITARS_RLS_EXEMPT_ROLES` | `[]` | Roles granted a `SELECT`-only exemption policy. |
+| `GUITARS_RLS_EXEMPT_ROLES` | `[]` | Roles granted a `SELECT`-only exemption policy, guarded on the role existing. |
 | `GUITARS_AUTO_MAKE_MIGRATIONS` | `True` | `False` disables the `makemigrations` override's enforcement step; use the standalone `makeguitarmigrations` instead. |
 | `LOCAL_APPS` | *(required)* | Not `GUITARS_`-prefixed. First-party app labels the generator scans for `_updated_at` / `_deleted_at`. |
 | `TRIGGER_FUNCTION_APP` | `LOCAL_APPS[0]` | Not `GUITARS_`-prefixed. Which app hosts the shared trigger-function migration. |

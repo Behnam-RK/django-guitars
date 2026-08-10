@@ -746,9 +746,11 @@ carry the old SQL — see *Fixed* below for why that matters and how to replace 
   `_deleted_at` partial index against the child's non-local column
   (`models.E016`).
 
-Not yet supported: cascading *into* an MTI child through a FK on the child's
-own table when its `_deleted_at` lives on a farther ancestor; the command skips
-it with a warning rather than emitting a broken rule.
+### Not yet supported
+
+- Cascading *into* an MTI child through a FK on the child's own table when its
+  `_deleted_at` lives on a farther ancestor; the command skips it with a
+  warning rather than emitting a broken rule.
 
 ## [0.6.0] - 2026-07-03
 
@@ -826,19 +828,16 @@ it with a warning rather than emitting a broken rule.
   in the wheel): `bump.sh` bumps `pyproject.toml` and seeds a changelog
   section; `release.sh` creates the git tag and GitHub release from the
   matching changelog notes. Documented in `scripts/README.md`.
+- `CLAUDE.md` repo guidance for contributors and AI assistants, plus a
+  "Releasing" section in the README.
+- Clarified the setar etymology (three strings by name) versus the model's
+  actual string-count ladder.
 
 ### Changed
 
 - `guitars.__version__` is now read from the installed package metadata
   (`importlib.metadata`) instead of a hardcoded string, making
   `pyproject.toml` the single source of truth for the version.
-
-### Added
-
-- `CLAUDE.md` repo guidance for contributors and AI assistants, plus a
-  "Releasing" section in the README.
-- Clarified the setar etymology (three strings by name) versus the model's
-  actual string-count ladder.
 
 ## [0.2.0] - 2026-06-06
 

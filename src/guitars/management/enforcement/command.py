@@ -22,15 +22,10 @@ All four ship from one command because they share every mechanic that is actuall
 difficult: model discovery, MTI column-ownership resolution, dedupe against operations
 already written, ``--empty`` scaffolding, digest stamping and app scoping.
 
-**Idempotency has three layers**, and all matter. A ``[DIGEST:...]`` marker on the first
-line identifies an unchanged operation set; per-operation comment headers
-(``# Updated at Trigger on "x" table!``) identify which tables are already covered; and a
-``[SQL:...]`` identity on each header identifies whether the covered table's operation is
-the SQL the kit emits *today* -- without it, a table whose header was recognised read as
-covered forever, so an edited SQL constant shipped no migration at all. A *partially*
-covered app gets only the genuinely new or outdated operations. Those header strings are
-therefore **frozen**: reword one and every existing migration stops being recognised, and
-the next run emits duplicates. See ``docs/migrations.md`` for the full account.
+Idempotency has three layers (digest, per-operation header, SQL identity); see
+``docs/migrations.md``'s "Idempotency has three layers" section for the full account.
+The header strings are **frozen**: reword one and every existing migration stops being
+recognised, and the next run emits duplicates.
 
 This package is organized by concern rather than as one flat module:
 

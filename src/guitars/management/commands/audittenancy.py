@@ -23,12 +23,10 @@ Five findings it exists to catch, in descending order of danger:
   tenant dimension, or its tenant column was renamed, and the replacement migration was
   generated but never applied (or was applied and then hand-edited). Existence checks pass
   and the table looks protected, while every statement is filtered by a strictly weaker
-  predicate than the Python layer believes. Compared by the facts a stored policy preserves:
-  the ``tenant.*`` settings its ``USING`` and ``WITH CHECK`` halves each read, and the
-  columns ``pg_depend`` records it referencing. Both halves, because they are independently
-  editable and only ``WITH CHECK`` governs writes -- ``USING (<tenant match>) WITH CHECK
-  (true)`` reads as fully scoped and accepts every cross-tenant write. See
-  ``TableCoverage.policy_gucs`` / ``policy_columns``.
+  predicate than the Python layer believes. Compared by the facts a stored policy preserves
+  (its ``USING``/``WITH CHECK`` GUCs and ``pg_depend`` columns) -- see ``docs/tenancy.md``'s
+  "Auditing" section for why both halves matter and ``TableCoverage.policy_gucs`` /
+  ``policy_columns`` for the mechanics.
 
   Reported but not fatal unless ``--require-match``, for the same reason ``--require-force``
   is opt-in: a run that happens before the deploy's ``migrate`` step is legitimately in this
@@ -78,14 +76,10 @@ class TableState(NamedTuple):
     policy_gucs: frozenset[str]
     policy_columns: frozenset[tuple[str, str]]
     #: The same settings, read off the policy's ``WITH CHECK`` half -- the one that governs
-    #: *writes*. Tracked separately rather than merged into ``policy_gucs`` because the two
-    #: halves are independently editable and a union would hide the dangerous direction: a
-    #: policy left with ``USING (<tenant match>) WITH CHECK (true)`` reads as perfectly
-    #: scoped while permitting every cross-tenant write, and the ``pg_depend`` column set
-    #: cannot give it away either (``true`` references no columns, so the USING half's
-    #: dependencies are all that remain). Falls back to the USING expression when
-    #: ``polwithcheck`` is NULL, which is PostgreSQL's own rule for a ``FOR ALL`` policy
-    #: written without an explicit ``WITH CHECK``.
+    #: *writes*. Tracked separately from ``policy_gucs`` for the reason ``docs/tenancy.md``
+    #: describes (the ``USING (<tenant match>) WITH CHECK (true)`` hazard). Falls back to the
+    #: USING expression when ``polwithcheck`` is NULL, which is PostgreSQL's own rule for a
+    #: ``FOR ALL`` policy written without an explicit ``WITH CHECK``.
     policy_check_gucs: frozenset[str]
 
 
@@ -270,12 +264,10 @@ class Command(BaseCommand):
         ``current_setting(...) AS current_setting`` -- so the text it hands back never equals
         the text ``sql.policy`` emitted, however correct the policy is.
 
-        The two halves of the policy are checked separately. ``USING`` governs reads,
-        ``WITH CHECK`` governs writes, and they are independently editable -- so a policy left
-        as ``USING (<tenant match>) WITH CHECK (true)`` scopes every read while accepting
-        every cross-tenant write. That state is invisible to the column comparison below
-        (``true`` records no ``pg_depend`` rows, leaving the USING half's dependencies as the
-        whole answer), which is exactly why the write half needs its own test.
+        The two halves are checked separately for the ``USING (<tenant match>) WITH CHECK
+        (true)`` reason ``docs/tenancy.md`` describes; that state is invisible to the column
+        comparison below (``true`` records no ``pg_depend`` rows), which is exactly why the
+        write half needs its own test.
         """
         expected_gucs = coverage.policy_gucs()
         expected_columns = coverage.policy_columns(table)

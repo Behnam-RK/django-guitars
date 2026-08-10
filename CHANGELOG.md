@@ -54,6 +54,178 @@ they had zero consumers in `makeguitarmigrations` or anywhere else in the kit.
   content-hash suffix when they would exceed PostgreSQL's 63-byte identifier
   limit, so two long names can no longer silently collide onto the same rule.
 
+M5: Tenancy & models API for 2.0 (#12).
+
+### ⚠️ BREAKING
+
+**The unscoped-queryset deny-list is now an allow-list.** `_ALLOWED_UNSCOPED`
+(`guitars/tenancy/manager.py`) names the queryset methods known safe to leave
+reachable without an active tenant scope; every other public method Django or
+guitars itself defines is denied by default rather than silently inherited. A
+Django release adding a queryset method, or a future guitars queryset method,
+is now denied until someone classifies it as safe — fail-closed instead of
+fail-open. `Manager.raw()` is part of this: it is now **denied** on an unscoped
+queryset (previously reachable), resolving the inconsistency with
+`hard_delete()` (already denied on the same "the database's job" reasoning) —
+a `RawQuerySet` is a distinct class that never passes back through the denying
+queryset, so leaving it allowed handed out an unscoped escape hatch.
+`tenancy_bypassed()` remains the explicit way to use it unscoped. A
+downstream consumer's own custom queryset method is unaffected: it can only
+reach the database through a primitive this module already denies, so the
+sweep deliberately leaves it reachable.
+
+**`TenantScopeError` is split into a hierarchy.** It carried five semantically
+unrelated failure modes in one class, so a caller could not `except` one
+without catching all five. `guitars.GuitarsError` is now the package-level
+base (`guitars/__init__.py`, previously exported nothing but `__version__`),
+and the tenancy failures are:
+
+```
+GuitarsError
+├── TenantScopeError            # base for every tenant-scope failure
+│   ├── TenantScopeMissing      # no scope satisfies the operation
+│   └── TenantScopeViolation    # an active scope's write disagrees with it
+└── TenantValueError            # a value cannot be safely published at all
+```
+
+| Old raise site | Condition | New class |
+| --- | --- | --- |
+| `scope.tenanted` | decorated arg bound to `None` | `TenantScopeMissing` |
+| `manager._violation` (`unscoped`) | write with no value and no active scope | `TenantScopeMissing` |
+| `manager._deny` | any read on the unscoped queryset | `TenantScopeMissing` |
+| `manager._deny_query_write` | set-wide write on the unscoped queryset | `TenantScopeMissing` |
+| `manager._violation` (`missing`/`ambiguous`/`mismatch`) | write does not satisfy the active scope | `TenantScopeViolation` |
+| `guc._wrapper` | PostgreSQL RLS rejection (SQLSTATE 42501) | `TenantScopeViolation` |
+| `scope.reject_separator` | value contains the GUC separator | `TenantValueError` |
+
+`TenantScopeError` itself is never raised directly and stays the shared base,
+so `except TenantScopeError` keeps working for every case except the
+separator one, which is now `TenantValueError` — not a scope failure at all,
+so it is deliberately **not** a `TenantScopeError` subclass. See
+[`docs/tenancy.md`](docs/tenancy.md#exceptions) for handling guidance.
+
+**`TenantedManager` is renamed to `tenanted_manager`.** It always returned a
+manager *instance*, not a type — the PascalCase name carried a `# noqa: N802`
+suppressing the naming-convention warning it was flagging on itself. The
+factory now has an honest lowercase name, and the manager class it builds
+additionally inherits a new `TenantedManagerBase` marker, so
+`isinstance(Model.objects, TenantedManagerBase)` recognises a tenant-scoped
+manager without relying on the private `_tenant_dimensions` attribute as the
+only signal. Every call site needs the mechanical rename:
+
+```diff
+-from guitars.tenancy import TenantedManager
++from guitars.tenancy import tenanted_manager
+
+-objects = TenantedManager(_manager_class=LiveManager, org="org")
++objects = tenanted_manager(_manager_class=LiveManager, org="org")
+```
+
+**`guitars.tenancy.__all__` is trimmed from 23 names to 16, splitting one
+export list that served four different audiences.**
+
+- `BYPASS_GUC`, `GUC_PREFIX`, `VALUE_SEPARATOR`, `guc_name` are no longer
+  re-exported from `guitars.tenancy` at all — `from guitars.tenancy import
+  BYPASS_GUC` now raises `ImportError`. Import them from `guitars.gucs`
+  directly, which is the whole reason that leaf module exists: a generated
+  migration's `from guitars import sql` can reach these four names without
+  pulling in the tenancy runtime (connection handling, a signal receiver, a
+  `ContextVar`), and re-exporting them from `guitars.tenancy` defeated that.
+- `tenant_spec` and `local_tenant_fields` move to `guitars.tenancy.spec` and
+  are no longer reachable from `guitars.tenancy` either. They answer a
+  generator-facing question ("what is this model tenanted on?"), read by the
+  RLS policy generator and by `discovery`/`checks` — not one guitars ever
+  documented as application-facing. Import them from `guitars.tenancy.spec`.
+- `uninstall`, `install_tenant_guc`, `uninstall_tenant_guc`,
+  `install_write_guards`, `uninstall_write_guards`, and `register_checks` move
+  to a new `guitars.tenancy.testing` submodule, documented in its own
+  docstring as existing for test setup/teardown and not part of the
+  application-facing surface. `install()` is the one entry point that stays
+  on `guitars.tenancy` itself — it is what a real project actually calls (or
+  `GuitarsConfig.ready()` calls for it).
+
+```diff
+-from guitars.gucs import BYPASS_GUC        # already worked; now the only way
++from guitars.gucs import BYPASS_GUC
+
+-from guitars.tenancy import tenant_spec
++from guitars.tenancy.spec import tenant_spec
+
+-from guitars.tenancy import uninstall
++from guitars.tenancy.testing import uninstall
+```
+
+**`update(_save=False, _save_all_fields=True)` now raises `ValueError`.** The
+combination was always meaningless — `_save_all_fields` has nothing to act on
+when nothing is saved that call — and silently computed `update_fields=None`,
+then never used it. Breaking only for a call site that happened to pass both
+together; every other combination of `update()`'s four flags is unaffected.
+
+**`SoftDeletableModel.cls` is removed.** An undocumented `self.__class__`
+alias with no test coverage of intent beyond confirming it returned
+`self.__class__`, and a plausible field-name collision risk on a concrete
+model. Use `self.__class__` or `type(self)` directly.
+
+### Added
+
+- **A system check for the connection-pooling GUC leak.**
+  `guitars.tenancy.W002` (`check_pooling_leaks_tenant_gucs`) warns when a
+  `DATABASES` alias sets `DISABLE_SERVER_SIDE_CURSORS` — Django's own
+  documented recommendation for a transaction-pooling connection pooler (e.g.
+  pgbouncer with `POOL_MODE: transaction`), and the one signal available from
+  `DATABASES` that correlates with an external pooler without also flagging
+  guitars' own already-safe mechanisms (`CONN_MAX_AGE`, `OPTIONS['pool']`,
+  both proven safe by `tests/test_concurrency.py`). Under transaction
+  pooling, a previous client's published `tenant.*` session setting can
+  still be resident on the physical backend handed to the next one — a
+  proven, fail-**open** leak
+  (`tests/test_concurrency.py::TestPgbouncerTransactionPooling`) that
+  `tenancy/guc.py`'s own cache has no visibility into, since it is correct
+  about *this* connection's identity and a pooled connection's identity is
+  exactly what changes underneath it. See `docs/tenancy.md`'s new
+  "Connection pooling" section for the mechanism and the mitigation (the
+  pooler's `server_reset_query = DISCARD ALL`, not anything Django or
+  guitars can do). A nudge, not a verdict: the risk applies to every
+  tenanted deployment behind such a pooler whether or not this setting is
+  configured.
+
+### Changed
+
+- The audit-mode `Reporter` now receives structured context alongside the
+  message instead of a string to regex: `kind` (a new `ViolationKind` enum —
+  `UNSCOPED`, `MISSING`, `AMBIGUOUS`, `MISMATCH`), `model`, and, where one
+  specific field is at fault, `dimension`. A custom reporter forwarding to
+  Sentry or similar can now classify a finding programmatically. Not breaking
+  for a reporter already accepting `**context` (the documented shape); one
+  matching only specific keyword names needs to accept the new ones too.
+- `update(_raise_for_excessive=False)` now leaves a `DEBUG` log on the
+  `guitars.models` logger naming the field(s) it dropped, so a typo'd kwarg no
+  longer vanishes with zero trace.
+- `aupdate()`'s `sync_to_async` wrapper is now built once, at module import,
+  instead of freshly per call. Its docstring now says what it actually is — a
+  thread hop via asgiref, not native async I/O — and documents
+  `thread_sensitive=True`'s implication for concurrent
+  `aupdate(_disable_signals=True)` calls: safe to overlap (`DisableSignals` is
+  reference-counted under a lock since M0), but the suppression itself is
+  still shared while any one call's block is open. No behavior change.
+- Four small duplications extracted to one place each, no behavior change:
+  the exception-chain-walking loop (`guc._walk_chain`, previously duplicated
+  verbatim in `_aborted_transaction` and `_rls_violation`); MTI-root-finding
+  (`guitars.introspection.mti_root`, previously duplicated in two sites in
+  `models/soft_deletion.py`); `is_local` (new leaf module
+  `guitars.local_apps`, following the `guitars.gucs` precedent, re-exported
+  from both `guitars.tenancy.discovery` and `guitars.management._generator`
+  so existing imports are unaffected); and the "wrap it in `tenant(...)`, or
+  `tenancy_bypassed()`..." remediation sentence (new
+  `guitars.tenancy.messages.remediation`, previously four independently-typed
+  copies that had already drifted into two different wordings — now one).
+- Type annotations added to `update()`/`aupdate()` (previously unannotated
+  while the private `_prepare_update` above them was fully annotated),
+  `signals.py` (previously zero annotations anywhere in the file), and the
+  `connection` parameter throughout `tenancy/guc.py` (now `BaseDatabaseWrapper`
+  rather than untyped, making downstream `connection.savepoint_ids`/
+  `run_on_commit`/`execute_wrappers` usages checkable). No behavior change.
+
 ## [1.3.0] - 2026-08-02
 
 M2: new behavioural test families (#9) -- dev/test-only, no production code path changes
@@ -674,6 +846,7 @@ carry the old SQL — see *Fixed* below for why that matters and how to replace 
 - `makeguitarmigrations` management command — generates the PostgreSQL
   trigger/rule migrations behind the timestamps and soft deletion.
 
+[2.0.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.0.0
 [Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v0.7.0...HEAD
 [0.7.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v0.7.0
 [0.6.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v0.6.0

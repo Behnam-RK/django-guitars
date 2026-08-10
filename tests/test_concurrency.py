@@ -16,11 +16,13 @@ import socket
 import threading
 
 import pytest
+from asgiref.sync import async_to_sync
 from django.db import close_old_connections, connection, connections
+from django.db.models.signals import pre_save
 
 from guitars.tenancy import tenant
 from tests.conftest import scalar as _scalar
-from tests.testapp.models import Release
+from tests.testapp.models import Band, Release
 
 
 PGBOUNCER_HOST, PGBOUNCER_PORT = 'localhost', 6432
@@ -147,6 +149,58 @@ class TestTwoThreadsInDifferentScopes:
 
         assert not errors, errors
         assert seen == {'a': ['release-a'], 'b': ['release-b']}
+
+
+@pytest.mark.django_db(transaction=True)
+class TestConcurrentAupdateDisableSignals:
+    """``aupdate()``'s docstring (``models/base.py``, M5 #12) documents that
+    ``thread_sensitive=True``'s shared worker thread means two concurrent
+    ``aupdate(_disable_signals=True)`` calls are not guaranteed to land on the same OS
+    thread, and that ``DisableSignals`` being process-global and reference-counted under
+    a lock (fixed in M0) is what makes overlapping blocks nest safely instead of one
+    clobbering the other's restore.
+
+    Real ``threading.Thread`` workers, each running its own event loop via
+    ``async_to_sync`` -- not ``asyncio.gather`` on one loop. Confirmed empirically while
+    writing this: outside an ASGI/request context, asgiref pins every
+    ``sync_to_async(thread_sensitive=True)`` call within *one* event loop run to a single
+    shared worker thread, so calls from ``asyncio.gather`` on one loop execute strictly
+    one at a time and could never actually overlap. Two OS threads is what makes the
+    overlap genuine.
+    """
+
+    def test_two_threads_both_persist_and_the_write_guard_is_restored(self):
+        before = len(pre_save.receivers)
+        band_a = Band.objects.create(name='A', nickname='a-nick')
+        band_b = Band.objects.create(name='B', nickname='b-nick')
+
+        barrier = threading.Barrier(2)
+        errors: list[BaseException] = []
+
+        def worker(band, new_name: str) -> None:
+            try:
+                barrier.wait(timeout=5)
+                async_to_sync(band.aupdate)(name=new_name, _disable_signals=True)
+            except BaseException as exc:  # noqa: BLE001 - re-raised on the main thread below
+                errors.append(exc)
+            finally:
+                connection.close()
+
+        threads = [
+            threading.Thread(target=worker, args=(band_a, 'A2')),
+            threading.Thread(target=worker, args=(band_b, 'B2')),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert not errors, errors
+        assert Band.objects.get(pk=band_a.pk).name == 'A2'
+        assert Band.objects.get(pk=band_b.pk).name == 'B2'
+        # Not under- or over-connected after both blocks close -- proof the reference
+        # count survived two overlapping entries/exits across real threads, not just one.
+        assert len(pre_save.receivers) == before
 
 
 # ──────────────────────────────────── asyncio ──────────────────────────────────── #

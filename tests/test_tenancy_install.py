@@ -1,6 +1,6 @@
 """Activation, and the GUC names that are baked into generated SQL.
 
-``install()`` is reached two ways -- ``GuitarsConfig.ready()`` and ``TenantedManager()`` --
+``install()`` is reached two ways -- ``GuitarsConfig.ready()`` and ``tenanted_manager()`` --
 so it has to be genuinely idempotent rather than merely usually-called-once. A
 double-connected ``pre_save`` receiver would run the write guard twice per save, which is
 harmless today but would double-report in audit mode.
@@ -23,7 +23,7 @@ from django.db.models.signals import pre_save
 import guitars
 from guitars import gucs as names
 from guitars import tenancy
-from guitars.tenancy.manager import _WRITE_GUARD_UID, _on_pre_save
+from guitars.tenancy.enforcement import _WRITE_GUARD_UID, _on_pre_save
 
 
 def _write_guard_receiver_count() -> int:
@@ -171,3 +171,72 @@ def test_gucs_lives_outside_the_tenancy_package():
         f'this import, so the tenancy runtime must not be reachable from it.'
     )
     assert 'guitars.gucs' in imported, 'expected guitars.sql to reach the GUC names'
+
+
+# ────────────────────────── trimmed public surface (M5, #12) ────────────────────────── #
+
+
+class TestTheGucNamesAreNotReExported:
+    """``guitars.gucs`` exists precisely so a generated migration can reach these four
+    names without pulling in the tenancy runtime -- re-exporting them from
+    ``guitars.tenancy`` too would defeat that, so M5 removed the re-export outright."""
+
+    def test_bypass_guc_is_not_on_the_tenancy_package(self):
+        assert not hasattr(tenancy, 'BYPASS_GUC')
+
+    def test_none_of_the_four_names_are_in_tenancys_all(self):
+        leaked = {'BYPASS_GUC', 'GUC_PREFIX', 'VALUE_SEPARATOR', 'guc_name'} & set(tenancy.__all__)
+        assert not leaked
+
+
+class TestTenantSpecIsGeneratorFacingNotApplicationFacing:
+    """Moved to ``guitars.tenancy.spec`` -- read by the RLS policy generator and by
+    ``discovery``/``checks``, not something application code is documented to import."""
+
+    def test_tenant_spec_is_not_on_the_tenancy_package(self):
+        assert not hasattr(tenancy, 'tenant_spec')
+
+    def test_local_tenant_fields_is_not_on_the_tenancy_package(self):
+        assert not hasattr(tenancy, 'local_tenant_fields')
+
+    def test_both_are_reachable_from_spec_directly(self):
+        from guitars.tenancy import spec
+
+        assert callable(spec.tenant_spec)
+        assert callable(spec.local_tenant_fields)
+
+
+class TestLifecycleHooksMovedToTesting:
+    """The seven test-only lifecycle hooks: ``install()`` stays the one application-facing
+    entry point on ``guitars.tenancy`` itself; everything that installs or uninstalls one
+    layer in isolation lives in ``guitars.tenancy.testing`` instead."""
+
+    def test_install_is_still_the_one_public_entry_point(self):
+        assert 'install' in tenancy.__all__
+        assert callable(tenancy.install)
+
+    def test_uninstall_is_not_in_tenancys_all(self):
+        assert 'uninstall' not in tenancy.__all__
+        # Still callable directly -- guitars' own suite uses it constantly -- just not
+        # advertised alongside tenant()/tenanted_manager() as application-facing.
+        assert callable(tenancy.uninstall)
+
+    def test_testing_module_exports_the_six_lifecycle_hooks(self):
+        from guitars.tenancy import testing
+
+        assert set(testing.__all__) == {
+            'install_tenant_guc',
+            'install_write_guards',
+            'register_checks',
+            'uninstall',
+            'uninstall_tenant_guc',
+            'uninstall_write_guards',
+        }
+        for name in testing.__all__:
+            assert callable(getattr(testing, name)), name
+
+    def test_testings_uninstall_is_the_same_object_as_tenancys(self):
+        """A re-export, not a reimplementation -- one behaviour, reachable two ways."""
+        from guitars.tenancy import testing
+
+        assert testing.uninstall is tenancy.uninstall

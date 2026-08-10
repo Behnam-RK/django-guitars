@@ -14,12 +14,14 @@ from django.apps import apps as django_apps
 from django.conf import settings
 from django.core.checks import Error, Warning, register
 
-from .manager import TenantEnforcement, tenant_spec
+from .enforcement import TenantEnforcement
+from .spec import tenant_spec
 
 
 __all__ = [
     'check_guitar_models_have_a_tenant',
     'check_migrate_bypasses_tenancy',
+    'check_pooling_leaks_tenant_gucs',
     'check_tenancy_settings',
     'register_checks',
 ]
@@ -29,6 +31,7 @@ ENFORCE_ID = 'guitars.tenancy.E001'
 AUTOFILL_ID = 'guitars.tenancy.E002'
 TENANT_MODEL_ID = 'guitars.tenancy.E003'
 MIGRATE_OVERRIDE_ID = 'guitars.tenancy.W001'
+POOLING_ID = 'guitars.tenancy.W002'
 
 
 def _candidate_models(app_configs) -> list:
@@ -173,8 +176,82 @@ def check_migrate_bypasses_tenancy(app_configs, **kwargs) -> list[Warning]:
     ]
 
 
+def check_pooling_leaks_tenant_gucs(app_configs, **kwargs) -> list[Warning]:
+    """Warn when a database is configured the way Django's docs tell you to for a
+    transaction-pooling connection pooler.
+
+    ``tenancy/guc.py`` publishes the active scope as PostgreSQL session settings
+    (``tenant.*``), and its cache is careful about *this* process's one connection -- but
+    it has no visibility past that connection. Under an external, transaction-pooling
+    connection pooler (pgbouncer with ``POOL_MODE: transaction``, say), a session-level
+    ``SET`` a previous logical client made can still be resident on the physical backend
+    handed to the *next* client -- proven directly by
+    ``tests/test_concurrency.py::TestPgbouncerTransactionPooling``. That failure mode
+    fails **open**: the leaked value is a real, previously-scoped tenant, not an absent
+    one, so a policy reading it does not deny -- it matches the wrong tenant.
+
+    This check has no certain way to detect an external pooler: a pooler is transparent
+    at the wire protocol, indistinguishable in ``DATABASES`` from a direct connection.
+    What it keys on instead is ``DATABASES[alias]['DISABLE_SERVER_SIDE_CURSORS']`` --
+    Django's own documented setting for exactly this situation (server-side cursors do
+    not survive a connection being handed to a different client mid-transaction, which is
+    what transaction pooling does), so a project that set it almost certainly has a
+    transaction-pooling pooler in front of that alias already.
+
+    Two signals that look related were deliberately **not** used, because both are
+    proven safe by this kit's own test suite and would only add noise: ``OPTIONS['pool']``
+    is Django's own psycopg connection pool (``connection_created`` fires per checkout,
+    so the GUC cache starts empty every time -- see
+    ``tests/test_concurrency.py::test_tenant_scope_is_correct_under_djangos_psycopg_pool``),
+    and a non-zero ``CONN_MAX_AGE`` is Django's own persistent-connection-across-requests
+    mechanism (the fingerprint/marker checks in ``guc._ensure`` handle it -- see
+    ``test_a_persistent_connection_tracks_a_new_tenant_across_logical_requests``). Neither
+    implies an *external* pooler; this project's own harness sets both on test-only
+    ``DATABASES`` aliases specifically to prove they are safe, which would make either one
+    a standing false positive here.
+
+    Still not a verdict, only a nudge -- the underlying risk applies to *every* tenanted
+    deployment behind an external transaction-pooling pooler, whether or not this setting
+    is present. See ``docs/tenancy.md``'s "Connection pooling" section either way.
+
+    Gated the same way :func:`check_migrate_bypasses_tenancy` is: only when some model is
+    actually tenanted, and only when ``GUITARS_TENANT_POLICIES`` leaves the database
+    layer switched on -- a leaked GUC nobody's policy reads is harmless.
+    """
+    if not getattr(settings, 'GUITARS_TENANT_POLICIES', True):
+        return []
+    if not any(tenant_spec(model) for model in _candidate_models(app_configs)):
+        return []
+
+    flagged = sorted(
+        alias
+        for alias, config in getattr(settings, 'DATABASES', {}).items()
+        if config.get('DISABLE_SERVER_SIDE_CURSORS')
+    )
+    if not flagged:
+        return []
+
+    return [
+        Warning(
+            f'{", ".join(flagged)} {"has" if len(flagged) == 1 else "have"} '
+            f"DISABLE_SERVER_SIDE_CURSORS set -- Django's own recommendation for a "
+            f'transaction-pooling connection pooler (e.g. pgbouncer with '
+            f"POOL_MODE=transaction). Under transaction pooling, a previous client's "
+            f'published tenant.* session setting can still be resident on the physical '
+            f'backend handed to the next one -- this fails open, not closed.',
+            hint=(
+                "Configure the pooler's reset query to clear session state between "
+                'clients (pgbouncer: server_reset_query = DISCARD ALL). See the '
+                '"Connection pooling" section of docs/tenancy.md.'
+            ),
+            id=POOLING_ID,
+        )
+    ]
+
+
 def register_checks() -> None:
     """Register the checks. Idempotent -- Django's registry is a set, keyed by function."""
     register(check_tenancy_settings)
     register(check_guitar_models_have_a_tenant)
     register(check_migrate_bypasses_tenancy)
+    register(check_pooling_leaks_tenant_gucs)

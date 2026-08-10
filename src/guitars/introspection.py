@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from django.db import models
 
 
-__all__ = ['column_owner', 'has_column', 'is_mti_child', 'owns_column']
+__all__ = ['column_owner', 'has_column', 'is_mti_child', 'mti_root', 'owns_column']
 
 
 def has_column(model: type[models.Model], colname: str) -> bool:
@@ -63,3 +63,18 @@ def is_mti_child(model: type[models.Model], colname: str) -> bool:
         and has_column(model, colname)
         and not owns_column(model, colname)
     )
+
+
+def mti_root(model: type[models.Model]) -> type[models.Model]:
+    """The top of *model*'s multi-table-inheritance chain -- *model* itself if it has none.
+
+    Walks ``_meta.parents`` up to the model with no MTI parent of its own. Every table in
+    an MTI chain shares the same primary-key value, so the root is where a walk over the
+    *whole* chain (ancestors and descendants alike, not just ancestors) has to start --
+    ``guitars.models.soft_deletion`` uses this to reach ancestor tables only otherwise
+    visible through the parent-link reverse relation.
+    """
+    root = model
+    while root._meta.parents:
+        root = next(iter(root._meta.parents))
+    return root

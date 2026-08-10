@@ -7,8 +7,8 @@ branch, it is used; where it genuinely cannot -- because an earlier guard fires 
 internal is called and the docstring says why.
 
 Async methods get their own tests rather than being assumed equivalent to the sync ones. They
-are separate code in ``manager.py``, and a guard added to one and not the other is exactly the
-kind of asymmetry that ships.
+are separate code in ``querysets.py``, and a guard added to one and not the other is exactly
+the kind of asymmetry that ships.
 """
 
 from __future__ import annotations
@@ -27,10 +27,11 @@ from guitars.models import GuitarModel
 from guitars.sql import policy
 from guitars.tenancy import (
     TenantScopeError,
+    TenantValueError,
     get_tenant,
     guc,
-    manager,
     reporting,
+    spec,
     tenancy_bypassed,
     tenant,
 )
@@ -94,9 +95,9 @@ class TestPartiallyCoveredModel:
 
     @pytest.fixture
     def mixed_spec(self, monkeypatch):
-        spec = {'label': 'label', 'via_release': 'release__label'}
-        for module in ('guitars.tenancy.discovery', 'guitars.tenancy.manager'):
-            monkeypatch.setattr(f'{module}.tenant_spec', lambda model, _spec=spec: _spec)
+        stub_spec = {'label': 'label', 'via_release': 'release__label'}
+        for module in ('guitars.tenancy.discovery', 'guitars.tenancy.spec'):
+            monkeypatch.setattr(f'{module}.tenant_spec', lambda model, _spec=stub_spec: _spec)
 
     def test_the_covered_dimension_still_gets_a_policy(self, mixed_spec):
         coverage, _ = _classify(Track)
@@ -125,10 +126,10 @@ class TestLocalTenantFields:
         ``Exception``, so a genuine bug in the surrounding code still surfaces.
         """
         monkeypatch.setattr(
-            'guitars.tenancy.manager.tenant_spec', lambda model: {'label': 'no_such_field'}
+            'guitars.tenancy.spec.tenant_spec', lambda model: {'label': 'no_such_field'}
         )
 
-        assert manager.local_tenant_fields(Release) == {}
+        assert spec.local_tenant_fields(Release) == {}
 
     def test_a_lookup_naming_a_non_concrete_field_is_not_local(self, monkeypatch):
         """A lookup with no ``__`` is not automatically a column.
@@ -139,14 +140,14 @@ class TestLocalTenantFields:
         typo cases above, not treated as local because it happened to resolve.
         """
         monkeypatch.setattr(
-            'guitars.tenancy.manager.tenant_spec', lambda model: {'label': 'albums'}
+            'guitars.tenancy.spec.tenant_spec', lambda model: {'label': 'albums'}
         )
 
-        assert manager.local_tenant_fields(Band) == {}
+        assert spec.local_tenant_fields(Band) == {}
 
     def test_an_untenanted_model_never_autofills(self):
         """``_autofills`` walks the managers looking for a tenanted one and finds none."""
-        assert manager._autofills(Label) is False
+        assert spec._autofills(Label) is False
 
 
 class TestAWriteWithNoTenantAndNoScope:
@@ -257,13 +258,13 @@ class TestTheEncodingRefusesWhatItCannotCarry:
     """
 
     def test_a_scalar_containing_the_separator_is_refused(self):
-        with pytest.raises(TenantScopeError, match='contains'):
+        with pytest.raises(TenantValueError, match='contains'):
             guc.encode_value('acme,globex')
 
     def test_a_collection_member_containing_the_separator_is_refused(self):
         """The collection path encodes each member through the same helper, so it cannot be
         the loophole -- ``['a', 'b,c']`` would otherwise publish as three values."""
-        with pytest.raises(TenantScopeError, match='contains'):
+        with pytest.raises(TenantValueError, match='contains'):
             guc.encode_value(['acme', 'globex,initech'])
 
     def test_the_scope_refuses_it_at_entry_and_names_the_dimension(self):
@@ -273,7 +274,7 @@ class TestTheEncodingRefusesWhatItCannotCarry:
         happened to publish the frame first -- a cursor several frames away from the mistake,
         which is the same complaint ``_reject_lazy`` exists to answer.
         """
-        with pytest.raises(TenantScopeError, match=r'tenant\(shop=\.\.\.\) value'):
+        with pytest.raises(TenantValueError, match=r'tenant\(shop=\.\.\.\) value'):
             with tenant(shop='acme,globex'):
                 pytest.fail('the scope should not have opened')
 
@@ -281,7 +282,7 @@ class TestTheEncodingRefusesWhatItCannotCarry:
         assert get_tenant() == {}
 
     def test_a_collection_is_checked_at_entry_too(self):
-        with pytest.raises(TenantScopeError, match='contains'):
+        with pytest.raises(TenantValueError, match='contains'):
             with tenant(shop=['acme', 'globex,initech']):
                 pytest.fail('the scope should not have opened')
 
@@ -300,7 +301,7 @@ class TestTheEncodingRefusesWhatItCannotCarry:
         instance = _Unsaved()
         with tenant(shop=instance):  # passes: pk is None, which publishes as empty and denies
             instance.pk = 'acme,globex'
-            with pytest.raises(TenantScopeError, match='contains'):
+            with pytest.raises(TenantValueError, match='contains'):
                 guc.desired_state()
 
     def test_an_ordinary_value_still_encodes(self):
@@ -311,6 +312,35 @@ class TestTheEncodingRefusesWhatItCannotCarry:
     def test_a_none_pk_still_encodes_as_empty(self):
         """Unchanged: an empty GUC yields an empty array, which denies."""
         assert guc.encode_value(None) == ''
+
+
+class TestWalkChain:
+    """M5 (#12): the exception-chain walk used to be duplicated verbatim in
+    ``_aborted_transaction`` and ``_rls_violation``; both now delegate to this."""
+
+    def test_yields_the_exception_itself_first(self):
+        exc = ValueError('leaf')
+
+        assert list(guc._walk_chain(exc)) == [exc]
+
+    def test_follows_cause_then_context(self):
+        root = ValueError('root')
+        middle = ValueError('middle')
+        middle.__cause__ = root
+        leaf = ValueError('leaf')
+        leaf.__context__ = middle  # not __cause__ -- proves __cause__ is preferred first
+
+        # leaf has no __cause__, so __context__ is followed; middle has __cause__, so
+        # that wins over any __context__ it might also carry.
+        assert list(guc._walk_chain(leaf)) == [leaf, middle, root]
+
+    def test_a_cycle_terminates_instead_of_looping_forever(self):
+        a = ValueError('a')
+        b = ValueError('b')
+        a.__cause__ = b
+        b.__cause__ = a  # cycle
+
+        assert list(guc._walk_chain(a)) == [a, b]
 
 
 class TestPublisherGuards:

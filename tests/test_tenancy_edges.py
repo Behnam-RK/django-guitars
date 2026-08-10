@@ -21,14 +21,15 @@ from guitars.management import _generator
 from guitars.management.enforcement.identity import _literal
 from guitars.models import GuitarModel, LiveManager
 from guitars.tenancy import (
-    TenantedManager,
     TenantScopeError,
     reporting,
     tenancy_bypassed,
     tenant,
+    tenanted_manager,
 )
 from guitars.tenancy.checks import TENANT_MODEL_ID, check_guitar_models_have_a_tenant
 from guitars.tenancy.discovery import _classify
+from guitars.tenancy.enforcement import ViolationKind
 from tests.conftest import execute as _execute
 from tests.testapp.models import Booking, Label, Release, Review, StadiumTour
 
@@ -108,7 +109,7 @@ class TestDimensionsOnTwoAncestors:
         spec = {'label': 'label', 'region': 'continents'}
         # Patched in both namespaces: discovery imported the function object, and
         # local_tenant_fields calls its own module-level reference.
-        for module in ('guitars.tenancy.discovery', 'guitars.tenancy.manager'):
+        for module in ('guitars.tenancy.discovery', 'guitars.tenancy.spec'):
             monkeypatch.setattr(f'{module}.tenant_spec', lambda model, _spec=spec: _spec)
         return spec
 
@@ -201,10 +202,32 @@ class TestAuditMode:
         with tenancy_bypassed():
             assert Release.objects.filter(title='crossing').exists()
 
+    def test_a_cross_tenant_write_reports_structured_context_not_just_a_message(
+        self, unpolicied, tenants, sink
+    ):
+        """A reporter that forwards to Sentry needs to classify programmatically, not
+        regex the message -- ``kind``/``model``/``dimension`` are what make that possible.
+        """
+        with tenant(label=tenants.a):
+            Release(title='crossing', label=tenants.b).save()
+
+        _, context = next(pair for pair in sink if 'may not cross tenants' in pair[0])
+        assert context['kind'] is ViolationKind.MISMATCH
+        assert context['dimension'] == 'label'
+        assert 'Release' in context['model']
+
     def test_an_unscoped_create_is_reported_and_proceeds(self, unpolicied, tenants, sink):
         Release.objects.create(title='unscoped', label=tenants.a)
 
         assert any('needs an active tenant scope' in message for message, _ in sink)
+
+    def test_an_unscoped_create_reports_its_kind_as_unscoped(self, unpolicied, tenants, sink):
+        Release.objects.create(title='unscoped', label=tenants.a)
+
+        _, context = next(pair for pair in sink if 'needs an active tenant scope' in pair[0])
+        assert context['kind'] is ViolationKind.UNSCOPED
+        assert context['action'] == 'create'
+        assert context['model'] == 'Release'
 
     def test_an_unscoped_bulk_create_is_reported_and_still_guarded(
         self, unpolicied, tenants, sink
@@ -355,7 +378,7 @@ class TestAutofillRefusals:
         """Not silently ignored. There is no column to fill, so asking for it is a mistake
         worth naming where it was made rather than where it fails to happen."""
         with pytest.raises(TypeError, match='needs a dimension stored on this table'):
-            TenantedManager(_manager_class=LiveManager, autofill=True, label='release__label')
+            tenanted_manager(_manager_class=LiveManager, autofill=True, label='release__label')
 
     def test_a_queryset_as_a_scope_value_is_rejected(self):
         """``str()`` on a QuerySet runs a query -- inside the publish, which re-enters the
@@ -367,7 +390,7 @@ class TestAutofillRefusals:
     def test_a_manager_instance_is_accepted_as_well_as_a_class(self):
         """``QuerySet.as_manager()`` hands back an instance, and subclassing one fails with a
         baffling ``BaseManager.__init__() takes 1 positional argument``."""
-        manager = TenantedManager(_manager_class=LiveManager(), label='label')
+        manager = tenanted_manager(_manager_class=LiveManager(), label='label')
 
         assert manager._tenant_dimensions == {'label': 'label'}
 
@@ -533,17 +556,17 @@ class TestScaffoldingFailsLoudly:
 class TestUncoverableModelsStillScope:
     def test_the_multi_hop_model_has_no_local_tenant_field(self):
         """What makes it uncoverable, asserted at the source rather than via the note."""
-        from guitars.tenancy import local_tenant_fields, tenant_spec
+        from guitars.tenancy.spec import local_tenant_fields, tenant_spec
 
         assert tenant_spec(Review) == {'label': 'release__label'}
         assert local_tenant_fields(Review) == {}
 
     def test_a_hand_declared_manager_reports_its_local_field(self):
-        from guitars.tenancy import local_tenant_fields
+        from guitars.tenancy.spec import local_tenant_fields
 
         assert local_tenant_fields(Booking) == {'label': 'label'}
 
     def test_an_untenanted_model_has_no_spec(self):
-        from guitars.tenancy import tenant_spec
+        from guitars.tenancy.spec import tenant_spec
 
         assert tenant_spec(Label) == {}

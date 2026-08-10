@@ -80,7 +80,7 @@ def tenants(db) -> Tenants:
 
 @pytest.fixture
 def bookings(tenants) -> tuple[Booking, Booking]:
-    """One ``Booking`` per tenant -- the hand-declared ``TenantedManager`` model.
+    """One ``Booking`` per tenant -- the hand-declared ``tenanted_manager()`` model.
 
     Created through the bypass on purpose: ``Booking`` leaves ``GUITARS_TENANT_AUTOFILL``
     at its default of ``False``, so an unscoped create is the honest way to seed it and the

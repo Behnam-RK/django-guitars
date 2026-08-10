@@ -61,7 +61,7 @@ Decisions that were hard to reverse and are surprising without context are ADRs:
 - [`0002`](docs/adr/0002-force-rls-by-default.md) — why `FORCE ROW LEVEL SECURITY` is the default.
 - [`0003`](docs/adr/0003-mti-owner-join-policy.md) — why MTI children get their own policy; includes the "RLS with no policy is default-DENY" finding.
 - [`0004`](docs/adr/0004-unscoped-base-manager.md) — why `base_manager_name` is left unset, with the evidence.
-- [`0005`](docs/adr/0005-trigger-based-tenant-autofill.md) — **proposed, not implemented.** Moving tenant autofill into a `BEFORE INSERT` trigger and demoting the `pre_save` guard to diagnostics. Describes planned work, *not* current behaviour — autofill today is the `pre_save` receiver in `tenancy/manager.py`.
+- [`0005`](docs/adr/0005-trigger-based-tenant-autofill.md) — **proposed, not implemented.** Moving tenant autofill into a `BEFORE INSERT` trigger and demoting the `pre_save` guard to diagnostics. Describes planned work, *not* current behaviour — autofill today is the `pre_save` receiver in `tenancy/enforcement.py`.
 
 **Load-bearing details that are easy to break, kept here as a checklist:**
 

@@ -25,24 +25,44 @@ Two things guard the cache:
   transaction-locally in the first would otherwise be assumed still live in the second --
   after the commit that discarded it. See ``_transaction_marker``.
 
-None of this is incidental complexity: every guard here corresponds to a way the cache
-can fail open. Do not simplify it without a test that fails first.
+None of this is incidental complexity: every guard here corresponds to a way *this
+connection's own cache* can fail open. Do not simplify it without a test that fails
+first.
+
+**What none of it guards against: an external, transaction-pooling connection pooler**
+(pgbouncer with ``POOL_MODE: transaction``, say) sitting in front of the connection. That
+handed this process a different logical client's session-level ``SET`` from one
+transaction to the next, which this module has no visibility into -- the cache is correct
+about a connection whose identity is stable; a pooled connection's identity is not.
+``guitars.tenancy.checks.check_pooling_leaks_tenant_gucs`` (``guitars.tenancy.W002``)
+warns on the one signal available from ``DATABASES``; see ``docs/tenancy.md``'s
+"Connection pooling" section for the mechanism and the mitigation (the pooler's own reset
+query, not anything Django or guitars can do).
 """
 
 from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 from django.db import connections, transaction
 from django.db.backends.signals import connection_created
 
 from guitars.gucs import BYPASS_GUC, VALUE_SEPARATOR, guc_name
 
+from .messages import remediation
 from .scope import (
     BYPASS,
     MULTI_VALUE_TYPES,
-    TenantScopeError,
+    TenantScopeViolation,
     get_tenant,
     reject_separator,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
+
+    from django.db.backends.base.base import BaseDatabaseWrapper
 
 
 __all__ = [
@@ -104,13 +124,15 @@ def desired_state() -> dict[str, str]:
     return state
 
 
-def _fingerprint(connection) -> tuple:
+def _fingerprint(connection: BaseDatabaseWrapper) -> tuple:
     # savepoint_ids shrinks on ROLLBACK TO SAVEPOINT, which also reverts any SET made
     # after that savepoint -- so its shape is part of the signal we need.
     return (connection.in_atomic_block, tuple(connection.savepoint_ids))
 
 
-def _transaction_marker(connection, superseded=None):
+def _transaction_marker(
+    connection: BaseDatabaseWrapper, superseded: Callable[[], None] | None = None
+) -> Callable[[], None]:
     """Register a no-op commit hook whose *presence* identifies this transaction.
 
     Django exposes no transaction counter, and the fingerprint above only describes the
@@ -147,19 +169,22 @@ def _transaction_marker(connection, superseded=None):
         entry = (set(connection.savepoint_ids), marker, False)
         for index, existing in enumerate(connection.run_on_commit):
             if existing[1] is superseded:
-                connection.run_on_commit[index] = entry
+                # django-stubs' run_on_commit entry is a 2-tuple; real Django (since the
+                # `robust` kwarg was added to on_commit) writes a 3-tuple, which this
+                # mirrors on purpose -- see the docstring above.
+                connection.run_on_commit[index] = entry  # ty: ignore[invalid-assignment]
                 return marker
     transaction.on_commit(marker, using=connection.alias)
     return marker
 
 
-def _marker_live(connection, marker) -> bool:
+def _marker_live(connection: BaseDatabaseWrapper, marker: Callable[[], None] | None) -> bool:
     if marker is None:  # published at session level; no transaction to outlive
         return True
     return any(hook is marker for _, hook, *_ in connection.run_on_commit)
 
 
-def _publish(connection, state: dict[str, str]) -> None:
+def _publish(connection: BaseDatabaseWrapper, state: dict[str, str]) -> None:
     cached = getattr(connection, _CACHE, None)
     previous = cached[0] if cached else {}
     updates = dict(state)
@@ -172,7 +197,7 @@ def _publish(connection, state: dict[str, str]) -> None:
     # rollback can't leave a value we'd wrongly believe is still set.
     is_local = connection.in_atomic_block
     fragments = ', '.join(['set_config(%s, %s, %s)'] * len(updates))
-    params: list[object] = []
+    params: list[str | bool] = []
     for name, value in updates.items():
         params += [name, value, is_local]
 
@@ -193,19 +218,28 @@ def _publish(connection, state: dict[str, str]) -> None:
     setattr(connection, _CACHE, (state, _fingerprint(connection), marker))
 
 
-def _aborted_transaction(exc: BaseException) -> bool:
-    """Whether *exc* is "the transaction is already aborted", anywhere in its chain."""
+def _walk_chain(exc: BaseException) -> Iterator[BaseException]:
+    """Walk *exc*'s cause/context chain, cycle-safe.
+
+    Both links are followed: ``__cause__`` for an explicit ``raise ... from``, which is
+    what Django uses, and ``__context__`` for an error re-raised inside another ``except``
+    block without one. Tracked by identity -- a chain can cycle, and an exception free to
+    define ``__eq__`` would otherwise let two distinct links look like the same one.
+    """
     seen: set[int] = set()
     current: BaseException | None = exc
     while current is not None and id(current) not in seen:
         seen.add(id(current))
-        if _sqlstate(current) == _ABORTED_SQLSTATE:
-            return True
+        yield current
         current = current.__cause__ or current.__context__
-    return False
 
 
-def _ensure(connection) -> None:
+def _aborted_transaction(exc: BaseException) -> bool:
+    """Whether *exc* is "the transaction is already aborted", anywhere in its chain."""
+    return any(_sqlstate(link) == _ABORTED_SQLSTATE for link in _walk_chain(exc))
+
+
+def _ensure(connection: BaseDatabaseWrapper) -> None:
     if connection.vendor != 'postgresql':
         return
     state = desired_state()
@@ -241,31 +275,25 @@ def _rls_violation(exc: BaseException) -> BaseException | None:
     """The RLS-violating error in ``exc``'s chain, if any.
 
     Django wraps backend errors, so the driver error carrying ``sqlstate`` is usually a
-    link down the chain rather than the exception we are handed. Both links are followed:
-    ``__cause__`` for an explicit ``raise ... from``, which is what Django uses, and
-    ``__context__`` for an error re-raised inside another ``except`` block without one.
+    link down the chain rather than the exception we are handed -- see :func:`_walk_chain`.
 
     The message test is what separates an RLS rejection from an ordinary
     ``permission denied``, which shares SQLSTATE 42501. It is English-only: on a server
     with a non-English ``lc_messages`` the rejection stays a raw ``ProgrammingError``
-    instead of a ``TenantScopeError``. That degrades the message, not the enforcement --
-    the write is refused either way -- and PostgreSQL offers no distinct SQLSTATE or
+    instead of a ``TenantScopeViolation``. That degrades the message, not the enforcement
+    -- the write is refused either way -- and PostgreSQL offers no distinct SQLSTATE or
     diagnostic field to key on instead.
     """
-    # Tracked by identity -- a chain can cycle, and an exception free to define __eq__
-    # would otherwise let two distinct links look like the same one.
-    seen: set[int] = set()
-    current: BaseException | None = exc
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        if _sqlstate(current) == _RLS_SQLSTATE and 'row-level security' in str(current).lower():
-            return current
-        current = current.__cause__ or current.__context__
+    for link in _walk_chain(exc):
+        if _sqlstate(link) == _RLS_SQLSTATE and 'row-level security' in str(link).lower():
+            return link
     return None
 
 
-def _wrapper(execute, sql, params, many, context):
-    connection = context['connection']
+def _wrapper(
+    execute: Callable, sql: str, params: object, many: bool, context: dict[str, object]
+) -> object:
+    connection: BaseDatabaseWrapper = context['connection']  # ty: ignore[invalid-assignment]
     # Re-entrancy guard: _publish issues SQL of its own through this same path.
     if not getattr(connection, _SYNCING, False):
         _ensure(connection)
@@ -277,16 +305,20 @@ def _wrapper(execute, sql, params, many, context):
             raise
         # Postgres names the table but not the tenant, and the traceback points at the
         # cursor rather than the caller. Re-raise as the error the rest of the codebase
-        # already catches and greps for.
-        raise TenantScopeError(
+        # already catches and greps for. TenantScopeViolation, not TenantScopeMissing:
+        # this is the layer of last resort -- joins, cascades, _base_manager, raw SQL --
+        # so a rejection here may mean no scope was ever opened in Python at all, not
+        # only a wrong one. It is filed as a violation anyway because both raise through
+        # the same TenantScopeError base a caller can catch either way, and "the database
+        # refused this write" reads as an alerting signal here regardless of which.
+        raise TenantScopeViolation(
             f'write rejected by a tenant policy -- the row does not belong to the '
-            f'active tenant, or no tenant scope is active. Wrap the call in '
-            f'tenant(...), or tenancy_bypassed() for a deliberate cross-tenant '
-            f'write. Database said: {violation}'
+            f'active tenant, or no tenant scope is active -- {remediation("write")} '
+            f'Database said: {violation}'
         ) from exc
 
 
-def install_on(connection) -> None:
+def install_on(connection: BaseDatabaseWrapper) -> None:
     """Attach the wrapper to one connection and forget its cached GUC state."""
     if hasattr(connection, _CACHE):
         delattr(connection, _CACHE)
@@ -294,7 +326,9 @@ def install_on(connection) -> None:
         connection.execute_wrappers.append(_wrapper)
 
 
-def _on_connection_created(sender, connection, **kwargs) -> None:
+def _on_connection_created(
+    sender: object, connection: BaseDatabaseWrapper, **kwargs: object
+) -> None:
     # A brand-new session has no GUCs set, so the cache must start empty -- install_on()
     # clears it. This is also what makes a reconnect safe.
     install_on(connection)

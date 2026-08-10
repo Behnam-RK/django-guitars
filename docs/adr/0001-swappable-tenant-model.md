@@ -16,7 +16,7 @@ impossible. Copying that pattern deserves an argument.
 
 The alternatives considered:
 
-1. **The consumer declares the FK themselves** and composes `TenantedManager` by
+1. **The consumer declares the FK themselves** and composes `tenanted_manager()` by
    hand on every model.
 2. **A checked requirement** — the kit asserts that any `GuitarModel` subclass has
    *some* field it can use, without contributing one.
@@ -77,7 +77,7 @@ without a payoff.
 **Accepted costs.**
 
 - **One dimension, one field.** `GuitarModel` scopes on exactly one axis. A model
-  needing two, or a multi-hop dimension, declares `TenantedManager` by hand — which
+  needing two, or a multi-hop dimension, declares `tenanted_manager()` by hand — which
   remains fully supported, and is the documented escape hatch rather than a
   fallback.
 - **A `CASCADE` FK per tenanted model** means one cascade soft-delete rule on the

@@ -514,7 +514,7 @@ class TestMultiHopDimension:
 
 
 class TestHandDeclaredManager:
-    """``Booking`` composes ``TenantedManager`` over ``LiveManager`` itself.
+    """``Booking`` composes ``tenanted_manager()`` over ``LiveManager`` itself.
 
     The path a project takes to scope a model without moving it to the ``GuitarModel`` rung.
     """

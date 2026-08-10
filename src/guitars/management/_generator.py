@@ -41,8 +41,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from django.apps import apps as django_apps
-from django.conf import settings
 from django.core.management import CommandError, call_command
+
+from guitars.local_apps import is_local
 
 
 if TYPE_CHECKING:
@@ -76,18 +77,6 @@ RE_DIGEST = re.compile(r'\[DIGEST:(?P<digest>\w+)\]')
 # ---------------------------------------------------------------------------
 # App selection
 # ---------------------------------------------------------------------------
-
-
-def is_local(app: AppConfig) -> bool:
-    """Whether *app* is one of the project's own, per ``settings.LOCAL_APPS``.
-
-    Keyed on ``app.name``, because ``LOCAL_APPS`` holds dotted module paths
-    (``tests.testapp``) rather than Django's short labels.
-
-    Duplicated as ``guitars.tenancy.discovery.is_local`` on purpose -- see that copy for why
-    neither module may import the other.
-    """
-    return app.name in settings.LOCAL_APPS
 
 
 def is_in_scope(app: AppConfig, requested: set[str]) -> bool:

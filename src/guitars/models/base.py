@@ -14,6 +14,7 @@ standalone mixin (``UpdatableModel``, ``HasCachedPropertyModel``, ``DatedModel``
 ``SoftDeletableModel``) for models that need one without the ones below it.
 """
 
+import logging
 from contextlib import nullcontext
 
 from asgiref.sync import sync_to_async
@@ -24,10 +25,13 @@ from django.db.models.base import Model
 from django.db.models.functions import Now
 from django.utils.functional import cached_property
 
-from guitars.tenancy import TenantedManager
+from guitars.tenancy import tenanted_manager
 from guitars.tenancy.checks import register_checks
 
 from .soft_deletion import AllObjectsManager, ArchiveManager, LiveManager, SoftDeletableModel
+
+
+logger = logging.getLogger('guitars.models')
 
 
 class DatedModel(Model):
@@ -83,14 +87,38 @@ class UpdatableModel(Model):
         given_fields = set(attrs.keys())
         excessive_fields = given_fields - fields
         updating_fields = (fields & given_fields) - m2m_fields
-
-        if excessive_fields and _raise_for_excessive:
-            raise ValueError(f'Invalid arguments: {excessive_fields}. (valid choices: {fields})')
-
         m2m_attrs = {attr: value for attr, value in attrs.items() if attr in m2m_fields}
 
-        if not _save and m2m_attrs:
-            raise ValueError('Cannot update m2m fields without saving the instance!')
+        if excessive_fields:
+            if _raise_for_excessive:
+                raise ValueError(
+                    f'Invalid arguments: {excessive_fields}. (valid choices: {fields})'
+                )
+            # _raise_for_excessive=False means "ignore and proceed", not "ignore silently"
+            # -- a typo'd kwarg previously vanished with zero signal. DEBUG rather than
+            # WARNING: this is the documented, requested behaviour, not a surprise.
+            logger.debug(
+                '%s.update() ignored unknown field(s) %s (valid choices: %s)',
+                type(self).__name__,
+                sorted(excessive_fields),
+                sorted(fields),
+            )
+
+        if not _save:
+            if m2m_attrs:
+                raise ValueError('Cannot update m2m fields without saving the instance!')
+            if _save_all_fields:
+                # _save_all_fields says "write every field to the database" -- but
+                # _save=False means nothing is written at all this call, so the
+                # combination has no meaning. Previously this silently computed
+                # update_fields=None and then never used it (self.save() is never
+                # reached when _save is False), which is exactly the kind of
+                # meaningless-but-accepted combination the M5 (#12) review flagged.
+                raise ValueError(
+                    '_save_all_fields=True has no effect when _save=False -- nothing is '
+                    'saved this call. Drop _save_all_fields, or pass _save=True (the '
+                    'default) if you meant to write every field.'
+                )
 
         for attr, attr_value in attrs.items():
             if attr in updating_fields:
@@ -101,12 +129,12 @@ class UpdatableModel(Model):
 
     def update(
         self,
-        _save=True,
-        _save_all_fields=False,
-        _raise_for_excessive=True,
-        _disable_signals=False,
-        **attrs,
-    ):
+        _save: bool = True,
+        _save_all_fields: bool = False,
+        _raise_for_excessive: bool = True,
+        _disable_signals: bool = False,
+        **attrs: object,
+    ) -> None:
         """Set attributes on the instance and optionally persist to the database.
 
         Only the fields passed as ``**attrs`` are written to the DB (via
@@ -115,6 +143,11 @@ class UpdatableModel(Model):
         When called with ``_save=False``, attributes are set in memory only.
         A subsequent call with ``_save=True`` will **not** include those
         earlier attributes unless ``_save_all_fields=True`` is also passed.
+
+        ``_save=False`` combined with ``_save_all_fields=True`` in the *same* call raises
+        ``ValueError``: nothing is saved this call, so "save every field" has nothing to
+        act on -- silently accepting it used to compute ``update_fields=None`` and never
+        use it.
 
         M2M fields are handled via ``.set(values, clear=True)`` and require
         ``_save=True``.
@@ -126,6 +159,11 @@ class UpdatableModel(Model):
         guard that fills in and validates the tenant field. The database-level RLS policy
         still applies if installed, but nothing on the Python side does; each such call is
         reported once per model class via ``guitars.tenancy.reporting``.
+
+        ``_raise_for_excessive=False`` silently ignores an unrecognised kwarg rather than
+        raising -- but "silently" only means the caller does not see it; a DEBUG log on
+        the ``guitars.models`` logger names what was dropped, so a typo does not vanish
+        with zero trace.
         """
         m2m_attrs, update_fields = self._prepare_update(
             _save, _save_all_fields, _raise_for_excessive, attrs
@@ -135,8 +173,8 @@ class UpdatableModel(Model):
             from django.db.models.signals import post_save, pre_save
 
             from guitars.signals import DisableSignals
-            from guitars.tenancy import tenant_spec
             from guitars.tenancy.reporting import report_once
+            from guitars.tenancy.spec import tenant_spec
 
             signals_context = (
                 DisableSignals(signals=[pre_save, post_save])
@@ -162,20 +200,51 @@ class UpdatableModel(Model):
 
     async def aupdate(
         self,
-        _save=True,
-        _save_all_fields=False,
-        _raise_for_excessive=True,
-        _disable_signals=False,
-        **attrs,
-    ):
-        """Async version of ``.update()``. See ``.update()`` for full documentation."""
-        await sync_to_async(self.update)(
+        _save: bool = True,
+        _save_all_fields: bool = False,
+        _raise_for_excessive: bool = True,
+        _disable_signals: bool = False,
+        **attrs: object,
+    ) -> None:
+        """A thread hop onto ``.update()`` -- not native async I/O.
+
+        ``asgiref.sync.sync_to_async`` runs ``.update()`` on a worker thread and awaits
+        the result; the database write still blocks a thread for its duration, the same
+        as ``.update()`` itself, just not necessarily *this* one. "Async version" was an
+        overclaim -- this does not make the write concurrent, it moves which thread waits
+        for it.
+
+        The wrapper (``_update_async``, module level, below) is built once at import, not
+        reconstructed on every call: ``sync_to_async`` is not free to construct, and
+        nothing about it is per-instance -- only the arguments passed through it are.
+
+        ``thread_sensitive=True`` (``sync_to_async``'s default, used here) means this and
+        every other ``a*`` ORM call in the process share one small worker-thread pool --
+        one thread outside an ASGI request, the request's own thread inside one -- so two
+        concurrent ``aupdate(_disable_signals=True)`` calls are not guaranteed to land on
+        the same thread. That is safe rather than merely quiet because ``DisableSignals``
+        (``guitars.signals``) is process-global and reference-counted under a lock, fixed
+        in M0 specifically for concurrent use: overlapping blocks nest instead of one
+        clobbering the other's restore. What does *not* change is the scope of the
+        suppression itself -- while any one call's ``_disable_signals=True`` block is
+        open, ``pre_save``/``post_save`` are suppressed for every concurrent caller's save
+        too, not just this one's. Reference-counting makes the shared suppression safe to
+        leave and re-enter correctly; it does not make it per-caller.
+        """
+        await _update_async(
+            self,
             _save=_save,
             _save_all_fields=_save_all_fields,
             _raise_for_excessive=_raise_for_excessive,
             _disable_signals=_disable_signals,
             **attrs,
         )
+
+
+#: Built once, not reconstructed on every ``aupdate()`` call -- see that method's
+#: docstring. ``UpdatableModel.update`` is the unbound function (its own first
+#: parameter is ``self``), so this is called as ``await _update_async(instance, ...)``.
+_update_async = sync_to_async(UpdatableModel.update)
 
 
 class HasCachedPropertyModel(Model):
@@ -315,7 +384,7 @@ class GuitarModel(SetarModel):
     * a non-null ``ForeignKey`` to ``settings.GUITARS_TENANT_MODEL``, named
       ``settings.GUITARS_TENANT_FIELD`` (default ``'tenant'``), ``on_delete=CASCADE`` and
       ``editable=False``;
-    * all three managers wrapped in :func:`~guitars.tenancy.TenantedManager`, so a read
+    * all three managers wrapped in :func:`~guitars.tenancy.tenanted_manager`, so a read
       without an active scope raises ``TenantScopeError`` instead of returning every
       tenant's rows;
     * a ``tenant_scope`` row-level-security policy, generated by
@@ -405,7 +474,7 @@ def _install_tenancy(tenant_model: str, field_name: str) -> None:
         # rows ``objects`` hides, and an unscoped one would see every tenant's.
         GuitarModel.add_to_class(
             name,
-            TenantedManager(
+            tenanted_manager(
                 _manager_class=manager_class,
                 autofill=True,
                 **{field_name: field_name},
@@ -417,7 +486,7 @@ def _install_tenancy(tenant_model: str, field_name: str) -> None:
 # Registered unconditionally, and deliberately *not* behind ``tenancy.install()``.
 #
 # ``install()`` reaches this module two ways -- ``GuitarsConfig.ready()`` and
-# ``TenantedManager()`` -- and with GUITARS_TENANT_MODEL unset neither fires: the manager is
+# ``tenanted_manager()`` -- and with GUITARS_TENANT_MODEL unset neither fires: the manager is
 # never constructed, and a project using guitars as a pure library has no INSTALLED_APPS
 # entry for the AppConfig hook. That combination is exactly the one E003 exists to catch, so
 # leaving the checks to ``install()`` meant they were absent from the only case that needed

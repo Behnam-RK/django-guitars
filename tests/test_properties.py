@@ -200,6 +200,17 @@ class TestUpdateFlagCombinatorics:
             assert band.name == 'Original'
             return
 
+        if not save and save_all_fields:
+            # M5 (#12): the one combination that is meaningless rather than merely
+            # unusual -- _save_all_fields has nothing to act on when nothing is saved
+            # this call. Checked ahead of the excessive-fields case above: that one
+            # raises regardless of this combination, so it must win when both apply --
+            # which the `if raise_for_excessive: return` above already guarantees.
+            with pytest.raises(ValueError, match='_save_all_fields'):
+                band.update(**call_kwargs)
+            assert band.name == 'Original'
+            return
+
         band.update(**call_kwargs)
         # The valid attr is set in memory regardless of every other flag.
         assert band.name == 'Updated'

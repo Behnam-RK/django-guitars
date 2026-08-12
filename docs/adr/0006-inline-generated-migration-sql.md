@@ -20,7 +20,7 @@ This was not theoretical. The 1.0.0 soft-delete-guard rewrite (fixing a
 rolled-back `hard_delete()` that permanently disabled soft deletion for the rest
 of a connection) needed every existing database to pick up the new guard SQL. It
 didn't: the digest-based idempotency check covered only the migration file's
-*source*, which still just said `sql.CREATE_SOFT_DELETE_RULE(...)`, and the
+*source*, which still just said `sql.CREATE_SOFT_DELETE_RULE.format(...)`, and the
 per-table header-recognition scan short-circuited before a content digest was
 ever reached. Every already-migrated database kept running the old, buggy guard
 forever, silently.
@@ -63,7 +63,7 @@ delta without also tracking content, which is what option 3 does directly.
 Inlining does cost something: it's what put the SQL "out of reach" of any future
 digest scheme for the pre-1.1.0 tail, which is why `guitars.sql`'s names must
 stay frozen forever rather than for a deprecation window. That tradeoff was made
-deliberately — an unbounded but fixed-size, non-growing obligation on old names,
+deliberately — a permanent but fixed-size, non-growing obligation on old names,
 in exchange for every migration generated from 1.1.0 on being self-contained and
 correct by construction.
 
@@ -79,9 +79,11 @@ correct by construction.
 - The generator is slightly more complex: each operation renders its own literal
   SQL and content digest rather than a short `.format()`/name reference.
 
-**Reversibility.** Low. Reverting to name-references would silently break every
-consuming project's migrations generated since 1.1.0 the same way the pre-1.1.0
-form broke — the exact failure mode this decision exists to close.
+**Reversibility.** Low. Migrations already written inline are self-contained and
+would survive a revert untouched, but every migration generated *after* one would
+reopen the pre-1.1.0 failure mode — a file whose meaning depends on the installed
+guitars version — which is the exact thing this decision exists to close. The
+frozen-name obligation would also become open-ended again rather than fixed-size.
 
 ## Related
 - [`docs/migrations.md`](../migrations.md) — "Idempotency has three layers" and

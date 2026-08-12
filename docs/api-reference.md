@@ -41,7 +41,7 @@ GUC constants live in `guitars.gucs`, generator-facing spec helpers in
 | --- | --- | --- |
 | `tenant(**dimensions)` | context manager | Open a tenant scope for the block. |
 | `tenancy_bypassed()` | context manager | The one explicit cross-tenant escape hatch. |
-| `tenanted` | decorator | Require an active scope on a function argument. |
+| `tenanted` | decorator | Run the wrapped callable inside a scope opened from one of its own arguments (`@tenanted(arg=…, dimension=…)`). Raises `TenantScopeMissing` if that argument is `None`. |
 | `tenanted_manager(...)` | factory | Build a tenant-scoped manager (renamed from `TenantedManager` in 2.0 — see `CHANGELOG.md`'s `[2.0.0]` entry). |
 | `TenantedManagerBase` | class | Marker base; `isinstance(Model.objects, TenantedManagerBase)` recognises a tenant-scoped manager. |
 | `install()` | function | Activate enforcement. Idempotent; called by `GuitarsConfig.ready()` and by `tenanted_manager()`. |
@@ -77,7 +77,7 @@ settings the enforcement generator reads:
 | `GUITARS_RLS_FORCE` | `True` | `False` ships policies inert, for a staged retrofit; `makeguitarmigrations --force-rls` lands `FORCE` later. |
 | `GUITARS_RLS_EXEMPT_ROLES` | `[]` | Roles granted a `SELECT`-only exemption policy, guarded on the role existing. |
 | `GUITARS_AUTO_MAKE_MIGRATIONS` | `True` | `False` disables the `makemigrations` override's enforcement step; use the standalone `makeguitarmigrations` instead. |
-| `LOCAL_APPS` | *(required)* | Not `GUITARS_`-prefixed. First-party app labels the generator scans for `_updated_at` / `_deleted_at`. |
+| `LOCAL_APPS` | *(required)* | Not `GUITARS_`-prefixed. First-party apps the generator scans for `_updated_at` / `_deleted_at`, matched against each `AppConfig.name` — so entries are **dotted module paths** (`"myproject.blog"`), not short labels. A short label for an app whose `name` is dotted matches nothing, and the scan is then silently empty. |
 | `TRIGGER_FUNCTION_APP` | `LOCAL_APPS[0]` | Not `GUITARS_`-prefixed. Which app hosts the shared trigger-function migration. |
 
 ## Management commands

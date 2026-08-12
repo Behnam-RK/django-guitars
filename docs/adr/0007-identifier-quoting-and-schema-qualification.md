@@ -34,10 +34,8 @@ Alternatives considered:
 Option 3. Every generated trigger, rule, and policy statement now quotes and
 validates its SQL identifiers through one shared module. `db_table` may be
 schema-qualified (a bare `'schema.table'`, or Django's own pre-quoted
-`'"schema"."table"'`), resolved end-to-end through name derivation, generated
-DDL, and existence-check queries (fixing `CHECK_RULE_EXISTS_ON_TABLE`, which
-previously matched only the bare `pg_rules.tablename` column and so reported
-"no rule" forever for a correctly-configured schema-qualified table). Rule
+`'"schema"."table"'`), resolved end-to-end through name derivation and
+generated DDL. Rule
 names derived from long table names are truncated with a content-hash suffix
 once they'd exceed Postgres's 63-byte identifier limit, so two long names can
 no longer silently collide onto the same rule.
@@ -75,9 +73,18 @@ already-migrated table.
   existing MTI/cascade logic needs to resolve.
 - Four dead `CHECK_*` constants (`CHECK_TRIGGER_FUNCTION_EXISTS`,
   `CHECK_PARENT_TRIGGER_FUNCTION_EXISTS`, `CHECK_TRIGGER_EXISTS_ON_TABLE`,
-  `CHECK_RULE_EXISTS_ON_TABLE`) were removed as part of this milestone, having
-  had zero consumers — a 2.0 major-version-only removal, since `guitars.sql`
-  names are otherwise frozen (see ADR-0006).
+  `CHECK_RULE_EXISTS_ON_TABLE`) were removed rather than made schema-aware as
+  part of this milestone. What made that safe is not the major version — a
+  pre-1.1.0 migration resolves `guitars.sql` names at `migrate` time whatever
+  version is installed, so no bump ever licenses removing a *referenced* name
+  (see ADR-0006). It is that these four had zero consumers: nothing in
+  `guitars.management.enforcement` ever called `.format()` on them, and no
+  checked-in migration references them. Doing it in a major release was
+  caution, not permission; the paper trail is in
+  `tests/test_sql_interface.py`. `CHECK_RULE_EXISTS_ON_TABLE` in particular
+  matched only the bare `pg_rules.tablename` column and so would have reported "no rule"
+  forever for a correctly-configured schema-qualified table; deleting it was
+  cheaper than fixing an introspection helper nothing called.
 
 **Reversibility.** Low for the quoting itself (reverting reopens the mixed-case/
 reserved-word bugs). The schema-qualification support is additive and could be

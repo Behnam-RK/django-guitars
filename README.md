@@ -19,8 +19,9 @@ database keeps score; you just write models. Use only the pieces you need.
 ## Requirements
 
 - **Python** ≥ 3.10
-- **Django** 5.0–6.0 — uses `db_default`; this is the range CI's matrix actually
-  tests, not just a claim
+- **Django** 5.0–6.0 — uses `db_default`. CI's matrix samples the ends and the
+  middle of that range (5.0, 5.2, 6.0) against Python 3.10/3.12/3.14, rather
+  than every advertised combination
 - **PostgreSQL** ≥ 14 — currently the only supported backend; the soft-delete rule
   and `_updated_at` trigger live in the database itself. CI verifies 14 and 18.
   Other backends are on the roadmap.

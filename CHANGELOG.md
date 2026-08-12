@@ -61,7 +61,7 @@ M5: Tenancy & models API for 2.0 (#12).
 ### ⚠️ BREAKING
 
 **The unscoped-queryset deny-list is now an allow-list.** `_ALLOWED_UNSCOPED`
-(`guitars/tenancy/manager.py`) names the queryset methods known safe to leave
+(`guitars/tenancy/querysets.py`) names the queryset methods known safe to leave
 reachable without an active tenant scope; every other public method Django or
 guitars itself defines is denied by default rather than silently inherited. A
 Django release adding a queryset method, or a future guitars queryset method,
@@ -767,27 +767,8 @@ carry the old SQL — see *Fixed* below for why that matters and how to replace 
 
 ## [0.5.1] - 2026-07-03
 
-### Added
-
-- `makemigrations` now also generates the advanced trigger/rule migrations that
-  `makeguitarmigrations` produces, so the soft-delete rules and `updated_at`
-  triggers can no longer be silently forgotten. `makemigrations --check`
-  validates both layers. Opt out with `GUITARS_AUTO_MAKE_MIGRATIONS = False` to
-  keep the explicit two-command workflow; the standalone `makeguitarmigrations`
-  command is unchanged.
-
 ### Changed
 
-- `makeguitarmigrations` now accepts optional app labels to scope generation
-  (e.g. `makeguitarmigrations blog`), and `makemigrations` forwards any app
-  labels it receives, so a scoped `makemigrations blog` only generates guitar
-  migrations for `blog`. With no labels, all `LOCAL_APPS` are scanned as before.
-  An unknown app label is now rejected the same way Django's own
-  `makemigrations` rejects one, so a typo can no longer turn `--check` into a
-  silent no-op. Cross-app CASCADE soft-delete rules are attributed to the
-  *parent* model's app, so scoping to a child app alone skips the rule; the
-  command now prints a warning naming the skipped rule and the app to include
-  to close the gap.
 - (dev only) `publish.yml` is now `workflow_dispatch`-only instead of firing on
   every `vX.Y.Z` tag push, so shipping to PyPI is a deliberate manual step.
   `release.yml` now only creates a GitHub Release for tags reachable from
@@ -803,9 +784,18 @@ carry the old SQL — see *Fixed* below for why that matters and how to replace 
 
 ### Added
 
+- `makemigrations` now also generates the advanced trigger/rule migrations that
+  `makeguitarmigrations` produces, so the soft-delete rules and `updated_at`
+  triggers can no longer be silently forgotten. `makemigrations --check`
+  validates both layers. Opt out with `GUITARS_AUTO_MAKE_MIGRATIONS = False` to
+  keep the explicit two-command workflow; the standalone `makeguitarmigrations`
+  command is unchanged.
 - `makeguitarmigrations` (and, by extension, `makemigrations`) accepts
   optional app labels to scope generation, e.g. `makeguitarmigrations blog`,
-  mirroring Django's own `makemigrations` app-label argument.
+  mirroring Django's own `makemigrations` app-label argument. `makemigrations`
+  forwards any it receives, so a scoped `makemigrations blog` only generates
+  guitar migrations for `blog`. With no labels, all `LOCAL_APPS` are scanned as
+  before.
 - CI: a GitHub Actions workflow running pre-commit and pytest, and a
   workflow that auto-tags `main` with the version read from
   `pyproject.toml` on push.

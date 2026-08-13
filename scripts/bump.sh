@@ -89,13 +89,20 @@ if [[ -f "$CHANGELOG" ]]; then
     warn "CHANGELOG already has a [${NEW}] section; leaving it untouched."
   else
     NEW_SECTION="## [${NEW}] - ${TODAY}\n\n### Added\n\n- \n\n### Changed\n\n- \n\n### Fixed\n\n- \n"
-    # Insert the new section directly above the first existing release section.
+    # Insert the new section directly above the first existing *versioned* section.
+    # The `[0-9]` is load-bearing: CHANGELOG.md keeps a `## [Unreleased]` heading at
+    # the top, and matching a bare `^## \[` wedges the new release *above* it, so the
+    # file ends up claiming the just-cut version predates "Unreleased".
     perl -0pi -e 'BEGIN{$s="'"$NEW_SECTION"'\n"; $done=0}
-                  s/(^## \[)/$done++ ? "$1" : "$s$1"/me' "$CHANGELOG"
-    # Add the tag link reference above the first existing reference line.
+                  s/(^## \[[0-9])/$done++ ? "$1" : "$s$1"/me' "$CHANGELOG"
+    # Add the tag link reference above the first existing reference line. `^\[[0-9]`
+    # already skips `[Unreleased]:`, keeping it first.
     LINK="[${NEW}]: ${REPO_PATH}/releases/tag/${TAG}"
     perl -0pi -e 'BEGIN{$l="'"$LINK"'\n"; $done=0}
                   s/(^\[[0-9])/$done++ ? "$1" : "$l$1"/me' "$CHANGELOG"
+    # Re-point the [Unreleased] compare link at the tag being cut. Without this it
+    # keeps naming whichever release it was first written against, and silently rots.
+    perl -pi -e 's{^(\[Unreleased\]:\s*\S+/compare/)\S+(\.\.\.HEAD)$}{$1'"${TAG}"'$2}' "$CHANGELOG"
     ok "CHANGELOG.md seeded [${NEW}] - ${TODAY}"
     warn "Fill in the new CHANGELOG section before releasing."
   fi

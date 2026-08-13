@@ -741,10 +741,11 @@ carry the old SQL — see *Fixed* below for why that matters and how to replace 
   cascade rules attached to the owning table. `hard_delete()` (instance and
   queryset) now clears the whole MTI table chain with no orphaned parent row.
   Works at any inheritance depth via the shared-PK invariant.
-- MTI children of a soft-deletable base must declare their own `Meta` (an empty
-  `class Meta: pass` suffices) so Django doesn't re-declare the parent's
-  `_deleted_at` partial index against the child's non-local column
-  (`models.E016`).
+
+  Requires one thing of you: an MTI child of a soft-deletable base must declare
+  its own `Meta` (an empty `class Meta: pass` suffices) so Django doesn't
+  re-declare the parent's `_deleted_at` partial index against the child's
+  non-local column (`models.E016`).
 
 ### Not yet supported
 
@@ -820,14 +821,14 @@ carry the old SQL — see *Fixed* below for why that matters and how to replace 
   matching changelog notes. Documented in `scripts/README.md`.
 - `CLAUDE.md` repo guidance for contributors and AI assistants, plus a
   "Releasing" section in the README.
-- Clarified the setar etymology (three strings by name) versus the model's
-  actual string-count ladder.
 
 ### Changed
 
 - `guitars.__version__` is now read from the installed package metadata
   (`importlib.metadata`) instead of a hardcoded string, making
   `pyproject.toml` the single source of truth for the version.
+- Docs: clarified the setar etymology (three strings by name) versus the
+  model's actual string-count ladder.
 
 ## [0.2.0] - 2026-06-06
 

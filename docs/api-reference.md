@@ -111,6 +111,13 @@ reference nothing (see [ADR 0006](adr/0006-inline-generated-migration-sql.md)).
 Either way, these names must never be renamed — `tests/test_sql_interface.py`
 guards this list.
 
+Two different obligations share one list. A name that could appear in a
+pre-1.1.0 migration is load-bearing for `migrate` on a fresh database in a
+consuming project. A name added *after* inlining — the `REPLACE_*` / `ADOPT_*`
+forms and everything row-level-security — is referenced by no migration
+anywhere; it is recorded here so that a later rename is still caught rather
+than shipped silently. Neither may be renamed; only the blast radius differs.
+
 **Constants:**
 `CREATE_UPDATED_AT_TRIGGER_FUNCTION`, `DROP_UPDATED_AT_TRIGGER_FUNCTION`,
 `CREATE_UPDATED_AT_TRIGGER`, `DROP_UPDATED_AT_TRIGGER`,

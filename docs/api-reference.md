@@ -77,7 +77,7 @@ settings the enforcement generator reads:
 | `GUITARS_RLS_FORCE` | `True` | `False` ships policies inert, for a staged retrofit; `makeguitarmigrations --force-rls` lands `FORCE` later. |
 | `GUITARS_RLS_EXEMPT_ROLES` | `[]` | Roles granted a `SELECT`-only exemption policy, guarded on the role existing. |
 | `GUITARS_AUTO_MAKE_MIGRATIONS` | `True` | `False` disables the `makemigrations` override's enforcement step; use the standalone `makeguitarmigrations` instead. |
-| `LOCAL_APPS` | *(required)* | Not `GUITARS_`-prefixed. First-party apps the generator scans for `_updated_at` / `_deleted_at`, matched against each `AppConfig.name` — so entries are **dotted module paths** (`"myproject.blog"`), not short labels. A short label for an app whose `name` is dotted matches nothing, and the scan is then silently empty. |
+| `LOCAL_APPS` | *(required)* | Not `GUITARS_`-prefixed. First-party apps the generator scans for `_updated_at` / `_deleted_at`, matched against each `AppConfig.name` — so entries are the same strings `INSTALLED_APPS` holds (`"blog"` for a top-level app, `"myproject.blog"` for a nested one), not app *labels*. A short label for an app whose `name` is dotted matches nothing, and the scan is then silently empty. |
 | `TRIGGER_FUNCTION_APP` | `LOCAL_APPS[0]` | Not `GUITARS_`-prefixed. Which app hosts the shared trigger-function migration. |
 
 ## Management commands
@@ -86,8 +86,8 @@ settings the enforcement generator reads:
 | Flag | Effect |
 | --- | --- |
 | `--check` | Exit non-zero if enforcement migrations are missing; writes nothing. |
-| `--adopt` | Re-emit every operation in a form correct whether or not the database object already exists (for a database whose objects weren't created by this command). |
-| `--force-rls` | Generate `FORCE ROW LEVEL SECURITY` migrations for tables whose policies already exist. Only needed when `GUITARS_RLS_FORCE = False`. |
+| `--adopt` | Re-emit every operation in a form correct whether or not the database object already exists (for a database whose objects weren't created by this command). Cannot be combined with `--force-rls`. |
+| `--force-rls` | Generate `FORCE ROW LEVEL SECURITY` migrations for tables whose policies already exist. Only needed when `GUITARS_RLS_FORCE = False`. Cannot be combined with `--adopt` — it acts only on policies this command already recorded, which is the very thing `--adopt` exists because you lack; run `--adopt` first. |
 
 **`audittenancy [app_label ...]`**
 | Flag | Effect |

@@ -412,7 +412,7 @@ Node.js 20" deprecation warning the old pins were emitting on every run.
 
 ## [1.1.0] - 2026-07-31
 
-### ⚠️ BREAKING
+### ⚠️ Action required
 
 **`makemigrations --check` will fail on your first run, and that is the fix, not a
 regression.** Every enforcement migration written before this release carries a

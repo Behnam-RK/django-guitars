@@ -33,7 +33,9 @@ __all__ = ['is_local']
 def is_local(app: AppConfig) -> bool:
     """Whether *app* is one of the project's own, per ``settings.LOCAL_APPS``.
 
-    Keyed on ``app.name``, because ``LOCAL_APPS`` holds dotted module paths
-    (``tests.testapp``) rather than Django's short labels.
+    Keyed on ``app.name`` -- the same string ``INSTALLED_APPS`` holds -- rather than
+    Django's short ``app.label``. The two coincide for a top-level app (``blog``) but
+    diverge for a nested one (``tests.testapp``, label ``testapp``), so matching on the
+    label would silently miss every app whose module path is dotted.
     """
     return app.name in settings.LOCAL_APPS

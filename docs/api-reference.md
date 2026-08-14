@@ -1,5 +1,7 @@
 # API reference
 
+<!-- doc-budget: exempt — enumeration; length tracks the API surface, not verbosity -->
+
 A flat enumeration of the public surface: base models, managers, settings,
 commands, and the frozen `guitars.sql` names. For the *why* behind any of
 this, see [`docs/adr/`](adr/README.md); for task-oriented guides, see

@@ -424,7 +424,7 @@ It catches, in descending order of danger:
 - **Unexpected coverage** — a policy on a table the models no longer consider
   tenanted. Harmless to reads, but the database and the models disagree.
 
-The third is compared by the facts a *stored* policy preserves, not by its text:
+The fourth is compared by the facts a *stored* policy preserves, not by its text:
 PostgreSQL rewrites a policy expression when it saves it (casts made explicit,
 columns parenthesised), so the text it hands back never equals what was emitted,
 however correct the policy is. What survives intact is the set of `tenant.*`

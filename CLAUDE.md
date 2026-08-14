@@ -54,14 +54,9 @@ contributors and consumers alike. Read the relevant one before changing behaviou
 | Enforcement-migration vocabulary, idempotency, frozen names, scaffolding, staged RLS | [`docs/migrations.md`](docs/migrations.md) |
 | Owner resolution, redirect rule, parent trigger, owner-join policy, hard-delete chain | [`docs/mti.md`](docs/mti.md) |
 | Both enforcement layers, settings, rollout order, auditing | [`docs/tenancy.md`](docs/tenancy.md) |
+| Flat enumeration of the public surface: models, managers, tenancy API, settings, command flags, frozen `guitars.sql` names | [`docs/api-reference.md`](docs/api-reference.md) |
 
-Decisions that were hard to reverse and are surprising without context are ADRs:
-
-- [`0001`](docs/adr/0001-swappable-tenant-model.md) — why `GuitarModel` owns a swappable tenant FK, and what that costs.
-- [`0002`](docs/adr/0002-force-rls-by-default.md) — why `FORCE ROW LEVEL SECURITY` is the default.
-- [`0003`](docs/adr/0003-mti-owner-join-policy.md) — why MTI children get their own policy; includes the "RLS with no policy is default-DENY" finding.
-- [`0004`](docs/adr/0004-unscoped-base-manager.md) — why `base_manager_name` is left unset, with the evidence.
-- [`0005`](docs/adr/0005-trigger-based-tenant-autofill.md) — **proposed, not implemented.** Moving tenant autofill into a `BEFORE INSERT` trigger and demoting the `pre_save` guard to diagnostics. Describes planned work, *not* current behaviour — autofill today is the `pre_save` receiver in `tenancy/enforcement.py`.
+Decisions that were hard to reverse and are surprising without context are ADRs — see the index at [`docs/adr/`](docs/adr/README.md). Note ADR-0005 describes planned work, *not* current behaviour: autofill today is the `pre_save` receiver in `tenancy/enforcement.py`.
 
 **Load-bearing details that are easy to break, kept here as a checklist:**
 

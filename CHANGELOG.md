@@ -5,6 +5,8 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
 ## [2.0.0] - 2026-08-06
 
 M4: SQL identifier quoting + schema-qualified support (#11).
@@ -59,7 +61,7 @@ M5: Tenancy & models API for 2.0 (#12).
 ### ⚠️ BREAKING
 
 **The unscoped-queryset deny-list is now an allow-list.** `_ALLOWED_UNSCOPED`
-(`guitars/tenancy/manager.py`) names the queryset methods known safe to leave
+(`guitars/tenancy/querysets.py`) names the queryset methods known safe to leave
 reachable without an active tenant scope; every other public method Django or
 guitars itself defines is denied by default rather than silently inherited. A
 Django release adding a queryset method, or a future guitars queryset method,
@@ -410,7 +412,7 @@ Node.js 20" deprecation warning the old pins were emitting on every run.
 
 ## [1.1.0] - 2026-07-31
 
-### Upgrading
+### ⚠️ Action required
 
 **`makemigrations --check` will fail on your first run, and that is the fix, not a
 regression.** Every enforcement migration written before this release carries a
@@ -740,15 +742,16 @@ carry the old SQL — see *Fixed* below for why that matters and how to replace 
   queryset) now clears the whole MTI table chain with no orphaned parent row.
   Works at any inheritance depth via the shared-PK invariant.
 
-### Notes
+  Requires one thing of you: an MTI child of a soft-deletable base must declare
+  its own `Meta` (an empty `class Meta: pass` suffices) so Django doesn't
+  re-declare the parent's `_deleted_at` partial index against the child's
+  non-local column (`models.E016`).
 
-- MTI children of a soft-deletable base must declare their own `Meta` (an empty
-  `class Meta: pass` suffices) so Django doesn't re-declare the parent's
-  `_deleted_at` partial index against the child's non-local column
-  (`models.E016`).
-- Not yet supported: cascading *into* an MTI child through a FK on the child's
-  own table when its `_deleted_at` lives on a farther ancestor; the command skips
-  it with a warning rather than emitting a broken rule.
+### Not yet supported
+
+- Cascading *into* an MTI child through a FK on the child's own table when its
+  `_deleted_at` lives on a farther ancestor; the command skips it with a
+  warning rather than emitting a broken rule.
 
 ## [0.6.0] - 2026-07-03
 
@@ -763,9 +766,22 @@ carry the old SQL — see *Fixed* below for why that matters and how to replace 
 - Restricted CI to the `main` branch and removed the `develop` branch from the
   development flow.
 
-## [Unreleased]
-
 ## [0.5.1] - 2026-07-03
+
+### Changed
+
+- (dev only) `publish.yml` is now `workflow_dispatch`-only instead of firing on
+  every `vX.Y.Z` tag push, so shipping to PyPI is a deliberate manual step.
+  `release.yml` now only creates a GitHub Release for tags reachable from
+  `main`, and its "update an existing release" path no longer breaks (it
+  previously passed `gh release edit` a `--generate-notes` flag that command
+  doesn't support).
+
+## [0.5.0] - 2026-07-03
+
+> **Note:** `v0.4.0` was bumped internally but never tagged or released —
+> superseded by `v0.5.0` the same day before shipping. No section exists for
+> it here because nothing was ever published under that version.
 
 ### Added
 
@@ -775,25 +791,25 @@ carry the old SQL — see *Fixed* below for why that matters and how to replace 
   validates both layers. Opt out with `GUITARS_AUTO_MAKE_MIGRATIONS = False` to
   keep the explicit two-command workflow; the standalone `makeguitarmigrations`
   command is unchanged.
+- `makeguitarmigrations` (and, by extension, `makemigrations`) accepts
+  optional app labels to scope generation, e.g. `makeguitarmigrations blog`,
+  mirroring Django's own `makemigrations` app-label argument. `makemigrations`
+  forwards any it receives, so a scoped `makemigrations blog` only generates
+  guitar migrations for `blog`. With no labels, all `LOCAL_APPS` are scanned as
+  before.
+- CI: a GitHub Actions workflow running pre-commit and pytest, and a
+  workflow that auto-tags `main` with the version read from
+  `pyproject.toml` on push.
 
-### Changed
+### Fixed
 
-- `makeguitarmigrations` now accepts optional app labels to scope generation
-  (e.g. `makeguitarmigrations blog`), and `makemigrations` forwards any app
-  labels it receives, so a scoped `makemigrations blog` only generates guitar
-  migrations for `blog`. With no labels, all `LOCAL_APPS` are scanned as before.
-  An unknown app label is now rejected the same way Django's own
-  `makemigrations` rejects one, so a typo can no longer turn `--check` into a
-  silent no-op. Cross-app CASCADE soft-delete rules are attributed to the
-  *parent* model's app, so scoping to a child app alone skips the rule; the
-  command now prints a warning naming the skipped rule and the app to include
-  to close the gap.
-- (dev only) `publish.yml` is now `workflow_dispatch`-only instead of firing on
-  every `vX.Y.Z` tag push, so shipping to PyPI is a deliberate manual step.
-  `release.yml` now only creates a GitHub Release for tags reachable from
-  `main`, and its "update an existing release" path no longer breaks (it
-  previously passed `gh release edit` a `--generate-notes` flag that command
-  doesn't support).
+- App labels are now validated the same way Django's own `makemigrations`
+  validates them, so a typo is rejected rather than silently scanning
+  nothing.
+- A cross-app CASCADE soft-delete rule (attributed to the parent model's
+  app) skipped by a scoped run now surfaces a warning naming the skipped
+  rule and the app to include, instead of silently dropping it — including
+  when the child's own app is also out of scope.
 
 ## [0.3.0] - 2026-06-11
 
@@ -803,19 +819,16 @@ carry the old SQL — see *Fixed* below for why that matters and how to replace 
   in the wheel): `bump.sh` bumps `pyproject.toml` and seeds a changelog
   section; `release.sh` creates the git tag and GitHub release from the
   matching changelog notes. Documented in `scripts/README.md`.
+- `CLAUDE.md` repo guidance for contributors and AI assistants, plus a
+  "Releasing" section in the README.
 
 ### Changed
 
 - `guitars.__version__` is now read from the installed package metadata
   (`importlib.metadata`) instead of a hardcoded string, making
   `pyproject.toml` the single source of truth for the version.
-
-### Documentation
-
-- `CLAUDE.md` repo guidance for contributors and AI assistants, plus a
-  "Releasing" section in the README.
-- Clarified the setar etymology (three strings by name) versus the model's
-  actual string-count ladder.
+- Docs: clarified the setar etymology (three strings by name) versus the
+  model's actual string-count ladder.
 
 ## [0.2.0] - 2026-06-06
 
@@ -846,11 +859,21 @@ carry the old SQL — see *Fixed* below for why that matters and how to replace 
 - `makeguitarmigrations` management command — generates the PostgreSQL
   trigger/rule migrations behind the timestamps and soft deletion.
 
+[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.0.0...HEAD
 [2.0.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.0.0
-[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v0.7.0...HEAD
+[1.3.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v1.3.0
+[1.2.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v1.2.0
+[1.1.3]: https://github.com/Behnam-RK/django-guitars/releases/tag/v1.1.3
+[1.1.2]: https://github.com/Behnam-RK/django-guitars/releases/tag/v1.1.2
+[1.1.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v1.1.1
+[1.1.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v1.1.0
+[1.0.2]: https://github.com/Behnam-RK/django-guitars/releases/tag/v1.0.2
+[1.0.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v1.0.1
+[1.0.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v1.0.0
 [0.7.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v0.7.0
 [0.6.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v0.6.0
 [0.5.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v0.5.1
+[0.5.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v0.5.0
 [0.3.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v0.3.0
 [0.2.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v0.1.0

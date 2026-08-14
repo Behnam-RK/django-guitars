@@ -39,6 +39,12 @@ LOCAL_APPS = ["blog", "shop"]      # apps the generator scans
 # TRIGGER_FUNCTION_APP = "blog"    # optional; hosts the shared function migration
 ```
 
+Entries are matched against each app's `AppConfig.name`, so they must be the same
+dotted module paths `INSTALLED_APPS` uses — `"myproject.blog"`, not `"blog"`, if
+that is how the app is installed. A short label that matches no `AppConfig.name`
+is not an error: the generator simply scans nothing, and `--check` exits 0 having
+validated nothing.
+
 Prefer the explicit two-command workflow?
 
 ```python

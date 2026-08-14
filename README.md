@@ -19,14 +19,18 @@ database keeps score; you just write models. Use only the pieces you need.
 ## Requirements
 
 - **Python** ≥ 3.10
-- **Django** ≥ 5.0 — uses `db_default`
-- **PostgreSQL** — currently the only supported backend; the soft-delete rule and
-  `_updated_at` trigger live in the database itself. Other backends are on the
-  roadmap.
+- **Django** 5.0–6.0 — uses `db_default`. CI's matrix samples the ends and the
+  middle of that range (5.0, 5.2, 6.0) against Python 3.10/3.12/3.14, rather
+  than every advertised combination
+- **PostgreSQL** ≥ 14 — currently the only supported backend; the soft-delete rule
+  and `_updated_at` trigger live in the database itself. CI verifies 14 and 18.
+  Other backends are on the roadmap.
 
-> **Status:** 1.0.0. The public API — the base models, the managers, the
-> `guitars.sql` names generated migrations depend on, and the `GUITARS_*`
-> settings — is stable, and breaking changes now require a major version.
+> **Status:** [![PyPI version](https://img.shields.io/pypi/v/django-guitars.svg)](https://pypi.org/project/django-guitars/).
+> The public API — the base models, the managers, the `guitars.sql` names
+> generated migrations depend on, and the `GUITARS_*` settings — is stable
+> since 1.0.0, and breaking changes now require a major version. See
+> [`CHANGELOG.md`](CHANGELOG.md) for what's in the current release.
 
 ## Installation
 
@@ -64,7 +68,8 @@ INSTALLED_APPS = [
 | scope rows to a tenant | [`docs/tenancy.md`](docs/tenancy.md) |
 | use multi-table inheritance | [`docs/mti.md`](docs/mti.md) |
 | know how the triggers, rules and policies get into your database | [`docs/migrations.md`](docs/migrations.md) |
-| know *why* something was built this way | [`docs/adr/`](docs/adr/) |
+| look up a setting, command flag, or the frozen `guitars.sql` names | [`docs/api-reference.md`](docs/api-reference.md) |
+| know *why* something was built this way | [`docs/adr/`](docs/adr/README.md) |
 | upgrade from 0.7 | [`CHANGELOG.md`](CHANGELOG.md) |
 
 ## Pick your instrument

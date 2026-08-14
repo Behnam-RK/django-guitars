@@ -89,15 +89,39 @@ if [[ -f "$CHANGELOG" ]]; then
     warn "CHANGELOG already has a [${NEW}] section; leaving it untouched."
   else
     NEW_SECTION="## [${NEW}] - ${TODAY}\n\n### Added\n\n- \n\n### Changed\n\n- \n\n### Fixed\n\n- \n"
-    # Insert the new section directly above the first existing release section.
+    # Insert the new section directly above the first existing *versioned* section.
+    # The `[0-9]` is load-bearing: CHANGELOG.md keeps a `## [Unreleased]` heading at
+    # the top, and matching a bare `^## \[` wedges the new release *above* it, so the
+    # file ends up claiming the just-cut version predates "Unreleased".
     perl -0pi -e 'BEGIN{$s="'"$NEW_SECTION"'\n"; $done=0}
-                  s/(^## \[)/$done++ ? "$1" : "$s$1"/me' "$CHANGELOG"
-    # Add the tag link reference above the first existing reference line.
+                  s/(^## \[[0-9])/$done++ ? "$1" : "$s$1"/me' "$CHANGELOG"
+    # Fallback for a changelog with no released section yet (only `## [Unreleased]`):
+    # the `[0-9]` above matches nothing there, and without this the seed is silently
+    # dropped while the success line below still claims it landed.
+    if ! grep -qE "^## \[${NEW//./\\.}\]" "$CHANGELOG"; then
+      perl -0pi -e 'BEGIN{$s="'"$NEW_SECTION"'"; $done=0}
+                    s/(^## \[Unreleased\]\n)/$done++ ? "$1" : "$1\n$s"/me' "$CHANGELOG"
+    fi
+    # Add the tag link reference above the first existing reference line. `^\[[0-9]`
+    # already skips `[Unreleased]:`, keeping it first.
     LINK="[${NEW}]: ${REPO_PATH}/releases/tag/${TAG}"
     perl -0pi -e 'BEGIN{$l="'"$LINK"'\n"; $done=0}
                   s/(^\[[0-9])/$done++ ? "$1" : "$l$1"/me' "$CHANGELOG"
-    ok "CHANGELOG.md seeded [${NEW}] - ${TODAY}"
-    warn "Fill in the new CHANGELOG section before releasing."
+    # Same fallback: with no released link reference yet, land it under `[Unreleased]:`
+    # rather than leaving the section above pointing at a definition that never exists.
+    if ! grep -qF "$LINK" "$CHANGELOG"; then
+      perl -0pi -e 'BEGIN{$l="'"$LINK"'\n"; $done=0}
+                    s/(^\[Unreleased\]:.*\n)/$done++ ? "$1" : "$1$l"/me' "$CHANGELOG"
+    fi
+    # Re-point the [Unreleased] compare link at the tag being cut. Without this it
+    # keeps naming whichever release it was first written against, and silently rots.
+    perl -pi -e 's{^(\[Unreleased\]:\s*\S+/compare/)\S+(\.\.\.HEAD)$}{$1'"${TAG}"'$2}' "$CHANGELOG"
+    if grep -qE "^## \[${NEW//./\\.}\]" "$CHANGELOG"; then
+      ok "CHANGELOG.md seeded [${NEW}] - ${TODAY}"
+      warn "Fill in the new CHANGELOG section before releasing."
+    else
+      warn "could not place a [${NEW}] section in $CHANGELOG (no '## [' heading found); add it by hand."
+    fi
   fi
 else
   warn "no $CHANGELOG; skipped changelog update."

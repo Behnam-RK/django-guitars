@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-08-14
+
+No package changes — documentation and release tooling only. Every `src/` diff in
+this release is a docstring; nothing a consumer imports or calls behaves differently.
+
+### Added
+
+- An ADR index at [`docs/adr/README.md`](docs/adr/README.md), with a
+  [`template.md`](docs/adr/template.md) for new entries, and three ADRs recording
+  decisions that were previously only reconstructable from commit history:
+  [`0006`](docs/adr/0006-inline-generated-migration-sql.md) (why enforcement SQL is
+  inlined into generated migrations rather than referenced by name),
+  [`0007`](docs/adr/0007-identifier-quoting-and-schema-qualification.md), and
+  [`0008`](docs/adr/0008-unscoped-queryset-allow-list.md).
+- [`docs/api-reference.md`](docs/api-reference.md) — a flat enumeration of the public
+  surface in one place: models and mixins, managers and querysets, the tenancy API,
+  every `GUITARS_*` setting with its default, every management-command flag, and the
+  frozen `guitars.sql` names.
+
+### Changed
+
+- Inline docstrings in `management/_generator.py`, `management/commands/audittenancy.py`,
+  and `management/enforcement/command.py` are trimmed to point at the doc that now owns
+  the explanation, instead of restating it where it can drift.
+- `CHANGELOG.md` is restructured: `## [Unreleased]` moved to the top where it belongs,
+  the 0.5.0/0.5.1 entries re-attributed to match what each tag actually shipped,
+  duplicate headings deduped, and several bullets refiled under the section that
+  describes them. 1.1.0's `### ⚠️ BREAKING` is relabelled `### ⚠️ Action required` — it
+  was the only such marker on a non-major release, and the section's own text says the
+  behaviour change "is the fix, not a regression".
+
+### Fixed
+
+- `scripts/bump.sh` no longer wedges each new release section *above* `## [Unreleased]`.
+  It anchored on the first `^## \[` heading, which became `[Unreleased]` once that moved
+  to the top, so every release cut from here on would have claimed to predate it. It also
+  now re-points the `[Unreleased]` compare link at the tag being cut, rather than leaving
+  it naming whichever release it was first written against.
+- `scripts/bump.sh` no longer reports a changelog seed it never wrote. On a changelog
+  holding only `## [Unreleased]` and no released section, the narrowed anchor matched
+  nothing and the section was silently dropped while the success line still printed.
+- [`docs/api-reference.md`](docs/api-reference.md) documents that `--adopt` and
+  `--force-rls` cannot be combined — `--force-rls` acts only on policies already
+  recorded, which is the very thing `--adopt` exists because you lack.
+- The `LOCAL_APPS` entry format is corrected in both `docs/api-reference.md` and
+  `is_local`'s docstring. Both said it holds dotted module paths "rather than short
+  labels", which reads as a rule that short entries are invalid. It holds `AppConfig.name`
+  — the same string `INSTALLED_APPS` holds — which for a top-level app *is* short.
+
 ## [2.0.0] - 2026-08-06
 
 M4: SQL identifier quoting + schema-qualified support (#11).
@@ -859,7 +908,8 @@ carry the old SQL — see *Fixed* below for why that matters and how to replace 
 - `makeguitarmigrations` management command — generates the PostgreSQL
   trigger/rule migrations behind the timestamps and soft deletion.
 
-[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.0.1...HEAD
+[2.0.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.0.1
 [2.0.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.0.0
 [1.3.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v1.3.0
 [1.2.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v1.2.0

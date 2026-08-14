@@ -56,7 +56,7 @@ contributors and consumers alike. Read the relevant one before changing behaviou
 | Both enforcement layers, settings, rollout order, auditing | [`docs/tenancy.md`](docs/tenancy.md) |
 | Flat enumeration of the public surface: models, managers, tenancy API, settings, command flags, frozen `guitars.sql` names | [`docs/api-reference.md`](docs/api-reference.md) |
 
-Decisions that were hard to reverse and are surprising without context are ADRs — see the index at [`docs/adr/`](docs/adr/README.md). Note ADR-0005 describes planned work, *not* current behaviour: autofill today is the `pre_save` receiver in `tenancy/enforcement.py`.
+Decisions that were hard to reverse and are surprising without context are ADRs — see the index at [`docs/adr/`](docs/adr/README.md). ADR-0005 is **accepted but not yet implemented** (targeted at 2.1.0), so it describes planned behaviour, *not* current: autofill today is still the `pre_save` receiver in `tenancy/enforcement.py`.
 
 **Load-bearing details that are easy to break, kept here as a checklist:**
 

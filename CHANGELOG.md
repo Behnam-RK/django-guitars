@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.2] - 2026-08-14
+
+Documentation only — no `src/` diff at all. Nothing a consumer imports, calls or
+migrates behaves differently.
+
+### Changed
+
+- [ADR-0005](docs/adr/0005-trigger-based-tenant-autofill.md) (moving tenant autofill
+  into a `BEFORE INSERT` trigger and demoting the `pre_save` guard to diagnostics)
+  moves from `proposed` to **accepted**, explicitly marked *not yet implemented* and
+  targeted at 2.1.0. It had sat at `proposed` since 1.0.0 while its evidence was
+  already gathered and measured, which understated how settled the decision is —
+  but accepting it without the caveat would have implied code that does not exist.
+  The ADR now opens with a note saying so, and
+  [`docs/adr/README.md`](docs/adr/README.md) and `CLAUDE.md` say the same rather than
+  "proposed". Autofill today is still the `pre_save` receiver in
+  `guitars/tenancy/enforcement.py`; implementation is tracked in
+  [#24](https://github.com/Behnam-RK/django-guitars/issues/24).
+
 ## [2.0.1] - 2026-08-14
 
 No package changes — documentation and release tooling only. Every `src/` diff in
@@ -908,7 +927,8 @@ carry the old SQL — see *Fixed* below for why that matters and how to replace 
 - `makeguitarmigrations` management command — generates the PostgreSQL
   trigger/rule migrations behind the timestamps and soft deletion.
 
-[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.0.1...HEAD
+[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.0.2...HEAD
+[2.0.2]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.0.2
 [2.0.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.0.1
 [2.0.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.0.0
 [1.3.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v1.3.0

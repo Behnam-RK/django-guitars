@@ -1,9 +1,15 @@
 # 0005 — Tenant autofill belongs in a trigger; the signal stays for diagnostics
 
-- **Status:** proposed
-- **Date:** 2026-07-30
+- **Status:** accepted — **not yet implemented**, targeted at 2.1.0
+- **Date:** 2026-07-30 (accepted 2026-08-14)
 - **Affects:** `guitars.sql.triggers`, `makeguitarmigrations`, `guitars.tenancy.enforcement`,
   `GUITARS_TENANT_AUTOFILL`
+
+> **Read this before trusting the present tense below.** The decision is settled; the
+> code is not written. Autofill today is still the `pre_save` receiver installed by
+> `install_write_guards()` in `guitars/tenancy/enforcement.py`, and `DisableSignals`
+> still switches it off — the finding that motivated this ADR is live behaviour, not
+> history. Everything in **Decision** describes what 2.1.0 will do.
 
 ## Context
 
@@ -167,6 +173,8 @@ being the thing correctness depends on — which is the whole point.
 
 ## Related
 
+- [Issue #24](https://github.com/Behnam-RK/django-guitars/issues/24) — the implementation
+  this ADR is waiting on. Flip the status note above to plain `accepted` when it lands.
 - [ADR 0002 — FORCE ROW LEVEL SECURITY by default](0002-force-rls-by-default.md)
 - [ADR 0004 — `base_manager_name` is deliberately left unset](0004-unscoped-base-manager.md)
   — the same "which layer should own this?" question, answered the other way

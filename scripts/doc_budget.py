@@ -81,7 +81,7 @@ def _docstring_violations(path: Path, tree: ast.Module) -> list[str]:
         if doc is None:
             continue
         body = node.body[0]
-        span = body.end_lineno - body.lineno + 1
+        span = (body.end_lineno or body.lineno) - body.lineno + 1
         if span > DOCSTRING_CAP:
             name = getattr(node, 'name', '<module>')
             violations.append(

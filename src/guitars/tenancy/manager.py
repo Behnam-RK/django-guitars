@@ -1,11 +1,6 @@
-"""The manager that scopes reads.
-
-``tenanted_manager()`` filters ``get_queryset()`` by the active frame, and returns a
-queryset (``guitars.tenancy.querysets``) that refuses to run at all when the frame is
-missing. Write guarding lives in ``guitars.tenancy.enforcement``; what a model is tenanted
-*on* lives in ``guitars.tenancy.spec``. This module is the thin factory that ties the three
-together into one manager class.
-"""
+"""The manager that scopes reads. ``tenanted_manager()`` filters ``get_queryset()`` by the
+active frame, returning a queryset (``guitars.tenancy.querysets``) that refuses to run at
+all when it's missing. Write guarding lives in ``enforcement``; scope lives in ``spec``."""
 
 from __future__ import annotations
 
@@ -19,31 +14,15 @@ __all__ = ['TenantedManagerBase', 'tenanted_manager']
 
 
 class TenantedManagerBase:
-    """Marker mixed into every manager ``tenanted_manager()`` builds.
-
-    Contributes no behaviour of its own -- the base queryset, dimensions, and autofill
-    setting all still come from ``_manager_class`` and the dynamic class body below, which
-    ``tenanted_manager()`` has to build fresh per call regardless. What this buys is a real
-    type: ``isinstance(Model.objects, TenantedManagerBase)`` recognises a tenant-scoped
-    manager without relying on ``_tenant_dimensions`` -- a private attribute -- as the only
-    signal, and subclassing it is a documented way to build a custom tenant-aware manager
-    by hand rather than through the factory.
-    """
+    """Marker mixed into every manager ``tenanted_manager()`` builds -- contributes no
+    behaviour, but gives ``isinstance(Model.objects, TenantedManagerBase)`` a real type to
+    recognise instead of relying on the private ``_tenant_dimensions`` attribute."""
 
 
 def _self_install() -> None:
-    """Activate enforcement because a tenanted model was just declared.
-
-    Declaring a tenant-scoped manager *is* the opt-in, so nothing needs remembering and
-    guitars needs no ``INSTALLED_APPS`` entry. ``GuitarsConfig.ready()`` calls the same
-    idempotent ``install()`` when the app *is* installed; whichever fires first wins and
-    the second is a no-op.
-
-    Imported inside the function, not at module scope, to break a genuine cycle:
-    ``tenancy/__init__`` imports this module, and ``checks`` (which ``install()`` needs)
-    imports ``TenantEnforcement`` from ``enforcement``. By the time any model is defined,
-    the package is fully imported and this resolves straight out of ``sys.modules``.
-    """
+    """Activate enforcement because a tenanted model was just declared -- the opt-in
+    itself, so guitars needs no ``INSTALLED_APPS`` entry. Imported inside the function to
+    break a cycle: ``tenancy/__init__`` imports this module, and ``checks`` imports it back."""
     from guitars import tenancy  # noqa: PLC0415 - deferred to break the import cycle
 
     tenancy.install()
@@ -54,28 +33,9 @@ def tenanted_manager(
     autofill: bool | None = None,
     **dimensions: str,
 ):
-    """Build a manager enforcing ``dimensions`` (``name='orm__lookup'``).
-
-    Returns an instance subclassing ``_manager_class`` and :class:`TenantedManagerBase` so
-    the underlying queryset (soft-delete filtering, custom methods) is preserved and
-    ``isinstance()``/``issubclass()`` recognise the result; the tenant filter layers on top
-    of ``super().get_queryset()``. Multi-hop lookups and several dimensions are allowed::
-
-        tenanted_manager(shop='shop')
-        tenanted_manager(_manager_class=LiveManager, shop='shop')
-        tenanted_manager(shop='post__shop')
-        tenanted_manager(shop='shop', user='author')
-
-    ``autofill`` overrides ``GUITARS_TENANT_AUTOFILL`` for this model -- pass ``False``
-    where taking the tenant implicitly would be wrong (an append-only archive, say).
-    Only a dimension that is a local column can be autofilled, so requesting it for a
-    multi-hop dimension is rejected here rather than silently doing nothing.
-
-    ``QuerySet.as_manager()`` is accepted as well as a manager class: it hands back an
-    *instance*, and subclassing one fails with a baffling
-    ``BaseManager.__init__() takes 1 positional argument``. A manager holds no state
-    until ``contribute_to_class``, so its class is all we need.
-    """
+    """Build a manager enforcing ``dimensions`` (``name='orm__lookup'``) -- usage in
+    ``docs/tenancy.md``. Subclasses ``_manager_class`` and :class:`TenantedManagerBase`.
+    A manager *instance* (``QuerySet.as_manager()``) is accepted too, not just a class."""
     _self_install()
     if isinstance(_manager_class, models.Manager):
         _manager_class = type(_manager_class)

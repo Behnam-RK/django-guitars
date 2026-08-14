@@ -17,16 +17,9 @@ def _is_mti_model(model: type[Model]) -> bool:
 
 
 def _mti_table_chain(model: type[Model]) -> list[tuple[str, str]]:
-    """Return ``(db_table, pk_column)`` for every table in *model*'s MTI tree, leaf-first.
-
-    Walks up to the inheritance **root** (via ``_meta.parents``) then DFS-descends through every
-    MTI child (the ``parent_link`` reverse relations), emitting each table child-before-parent.
-    Every table in an MTI chain shares the same primary-key value, so the same ``pk`` list filters
-    every level. Leaf-first ordering is FK-safe: a child table's parent-link references its parent's
-    row. Covering the whole tree (not just ancestors) means ``hard_delete`` on *any* level -- root,
-    middle, or leaf -- clears the entire chain with no orphaned row left in either direction. A
-    single-table model yields ``[(own_table, own_pk)]``.
-    """
+    """``(db_table, pk_column)`` for every table in *model*'s MTI tree, leaf-first (FK-safe:
+    a child's parent-link references its parent's row). Covers the whole tree, not just
+    ancestors, so ``hard_delete`` from any level clears the chain with no orphan either way."""
 
     def _pk_column(m: type[Model]) -> str:
         column = m._meta.pk.column
@@ -61,53 +54,30 @@ class LiveQuerySet(QuerySet):
 
 
 class LiveManager(Manager):
-    """Default manager — returns only live records (``_deleted_at IS NULL``).
-
-    These three managers override ``get_queryset()`` for one reason only: to append the
-    ``.lives`` / ``.archives`` filter. Everything else is Django's, and that includes
-    **instantiating ``self._queryset_class`` rather than a hard-coded class name**.
-
-    That is load-bearing, not style. ``_queryset_class`` is Django's documented seam for
-    swapping the queryset a manager hands out, and a subclass that sets it expects to be
-    obeyed — ``guitars.tenancy.tenanted_manager()`` sets it to a subclass whose
-    ``bulk_create`` carries the tenant write guard, then calls ``super().get_queryset()``.
-    Naming ``LiveQuerySet`` here directly would hand back an unguarded queryset while the
-    manager still advertised the guarded one: a security guard that reads as installed and
-    silently does nothing. Covered by
-    ``tests/test_soft_deletion.py::TestManagerQuerySetClass``.
-    """
+    """Default manager — only live records, via ``self._queryset_class`` (never a
+    hard-coded name) -- load-bearing: ``tenanted_manager()`` swaps it for a guarded
+    subclass, and naming ``LiveQuerySet`` directly would silently hand back an unguarded one."""
 
     _queryset_class = LiveQuerySet
 
     def get_queryset(self) -> LiveQuerySet:
-        # ``self._queryset_class``, never the class named above -- see the note on
-        # ``_queryset_class`` below. ``_hints`` is a real runtime attribute (set in
-        # Manager.__init__) that django-stubs doesn't declare.
+        # ``self._queryset_class``, never the class named above -- see the class docstring.
+        # ``_hints`` is a real runtime attribute django-stubs doesn't declare.
         return self._queryset_class(model=self.model, using=self._db, hints=self._hints).lives  # ty: ignore[unresolved-attribute]
 
 
 class HardDeletableQuerySet(LiveQuerySet):
-    """QuerySet that can access archived records and perform hard deletes.
-
-    ``.hard_delete()`` temporarily sets the PostgreSQL session variable
-    ``rules.hard_deletion = 'on'`` so the soft-delete rule is bypassed,
-    then executes a real ``DELETE`` statement inside a transaction.
-    """
+    """QuerySet that can access archived records and perform hard deletes -- see
+    ``docs/soft-deletion.md``'s "Hard deletion" for the session-switch mechanism."""
 
     @property
     def archives(self):
         return self.filter(_deleted_at__isnull=False)
 
     def hard_delete(self):
-        """Permanently remove matching rows from the database.
-
-        For a multi-table-inheritance model this also removes the corresponding rows from every
-        other table in the inheritance chain (descendants and ancestors, leaf-to-root by shared PK)
-        so no orphaned row is left behind, regardless of which level the queryset is on. Like the
-        single-table path, this is a blunt instrument: it does not walk reverse-FK cascade children
-        (other than the MTI chain itself) -- callers needing that should use instance
-        ``hard_delete()``.
-        """
+        """Permanently remove matching rows. For an MTI model, also removes every other
+        table in the chain by shared PK, regardless of level. Blunt: unlike instance
+        ``hard_delete()``, this does not walk reverse-FK cascade children."""
         model = self.model
         if not _is_mti_model(model):
             return self._hard_delete_own_table()
@@ -128,20 +98,15 @@ class HardDeletableQuerySet(LiveQuerySet):
                     )
                     cursor.execute(sql_stmt, pks)
             except Exception:
-                # See _hard_delete_own_table for why this attempt's own failure is
-                # suppressed here but not below: a DELETE failure means the transaction
-                # is likely already aborted, so a failing switch-off here would only
-                # replace the real error with its own. Re-raise the real one either way.
+                # Suppressed here (unlike the success path below): the transaction is
+                # likely already aborted, so a failing switch-off would only replace the
+                # real error. See docs/soft-deletion.md on the leaked-switch danger.
                 with contextlib.suppress(Exception):
                     cursor.execute(SWITCH_OFF_HARD_DELETION)
                 raise
             else:
-                # No suppression here: if the DELETEs succeeded but turning the switch
-                # back off fails, that failure must abort the enclosing transaction (via
-                # this atomic() block) rather than be swallowed -- swallowing it would
-                # leave 'rules.hard_deletion' leaked 'on' for the rest of any transaction
-                # this call is nested in, silently turning later plain .delete() calls
-                # into hard deletes.
+                # Not suppressed: a failed switch-off here must abort the transaction, or
+                # 'rules.hard_deletion' leaks 'on' for the rest of any enclosing transaction.
                 cursor.execute(SWITCH_OFF_HARD_DELETION)
             return None
 
@@ -150,28 +115,9 @@ class HardDeletableQuerySet(LiveQuerySet):
     hard_delete.queryset_only = True  # ty: ignore[unresolved-attribute]
 
     def _hard_delete_own_table(self):
-        """Delete only this queryset's own-table rows (the single-table primitive).
-
-        Used both for non-MTI models and, per model, by instance-level ``hard_delete`` -- which
-        collects the whole MTI chain into its own child-first ``model_order`` and deletes each
-        table separately, so this must never reach into ancestor tables.
-
-        Three statements, three ``execute`` calls -- like the MTI path above, and not
-        splice-able back into one string: a parameterised multi-statement ``execute`` only
-        works under client-side binding, so one call would break the moment a consumer sets
-        psycopg's ``server_side_binding`` option. ``atomic()`` is what keeps the split safe
-        even without the switch-off attempt below: the switch is transaction-local, and in
-        autocommit each statement would otherwise be its own transaction -- the switch
-        expiring before the DELETE it exists to unlock, which then archives instead of
-        deleting. Turning the switch back off is still attempted as a guarantee of this
-        function rather than a side effect of whatever ``atomic()`` block happens to be
-        enclosing it -- on the failure path the DELETE has already aborted the transaction,
-        so a failing switch-off attempt there is suppressed (it would only replace the real
-        error with its own); on the success path a failing switch-off attempt is left to
-        raise, so this ``atomic()`` block rolls the DELETE back too rather than silently
-        leaving ``rules.hard_deletion`` leaked 'on' for the rest of any transaction this
-        call is nested in.
-        """
+        """Delete only this queryset's own-table rows -- used per table by instance
+        ``hard_delete``, so this must never reach into ancestor tables. Its own
+        ``atomic()``, or autocommit lets the switch expire before the DELETE it unlocks."""
         with connections[self.db].cursor() as cursor:
             query = self.query.clone()
             query.__class__ = sql.DeleteQuery
@@ -203,12 +149,8 @@ class ArchiveManager(Manager):
 
 
 class AllObjectsManager(Manager):
-    """Manager that returns every record, live and soft-deleted alike.
-
-    The unfiltered view, exposed as ``_all_objects``. ``.lives`` and ``.archives`` are
-    mirrored onto the manager so either half is reachable without going through
-    ``get_queryset()`` first.
-    """
+    """Manager returning every record, exposed as ``_all_objects``. ``.lives``/``.archives``
+    are mirrored onto it so either half is reachable without ``get_queryset()`` first."""
 
     _queryset_class = HardDeletableQuerySet
 
@@ -229,19 +171,9 @@ class AllObjectsManager(Manager):
 
 
 class SoftDeletableModel(Model):
-    """Abstract model that enables PostgreSQL-level soft deletion.
-
-    Deletion logic lives entirely in the database via PostgreSQL rules
-    generated by ``makeguitarmigrations``. Calling Django's ``.delete()``
-    is intercepted by a rule that sets ``_deleted_at = NOW()`` instead of
-    removing the row.
-
-    Three managers control record visibility:
-
-    - ``objects`` (``LiveManager``) — only live records (default).
-    - ``_archives`` (``ArchiveManager``) — only soft-deleted records.
-    - ``_all_objects`` (``AllObjectsManager``) — everything.
-    """
+    """Abstract model enabling PostgreSQL-level soft deletion. ``.delete()`` is intercepted
+    by a generated rule that sets ``_deleted_at = NOW()`` instead of removing the row.
+    Three managers: ``objects`` (live), ``_archives`` (deleted), ``_all_objects`` (both)."""
 
     _deleted_at = DateTimeField(
         verbose_name='Deleted at',
@@ -274,28 +206,9 @@ class SoftDeletableModel(Model):
         return not self.is_deleted
 
     def hard_delete(self):
-        """Soft-delete first, then permanently remove this instance and all CASCADE-related rows.
-
-        Two-phase approach:
-        1. ``self.delete()`` — triggers the PG soft-delete rule, which also fires the PG
-           cascade-soft-delete rules for every related ``SoftDeletableModel``.  The call is
-           idempotent: the rule's ``WHERE _deleted_at IS NULL`` guard makes it a no-op when
-           the row is already soft-deleted.
-        2. DFS collection + hard-delete — walks ``on_delete=CASCADE`` FK relations via
-           ``_all_objects`` (so already-soft-deleted rows are included), builds a child-first
-           deletion order, and bulk-hard-deletes each model's rows inside one transaction.
-
-        For a multi-table-inheritance instance the DFS starts from the MTI **root** (with the
-        shared PK): the parent-link reverse relation is itself an ``on_delete=CASCADE`` relation,
-        so every table in the chain (and any CASCADE child of any ancestor) is collected into
-        the same child-first order and each table is hard-deleted separately -- no orphaned
-        parent row, no FK violation.
-
-        Note: Django's ``on_delete=CASCADE`` is Python-level (``Collector``-based).  Django
-        does **not** create ``ON DELETE CASCADE`` constraints in PostgreSQL, so a raw DELETE
-        on the parent would be rejected by the DB's FK check.  That is why we must collect
-        and delete children before parents ourselves.
-        """
+        """Soft-delete first, then permanently remove this instance and CASCADE-related
+        rows -- see ``docs/soft-deletion.md``'s "Hard deletion". Django's CASCADE is
+        Python-level, not a DB constraint, so children are deleted before parents."""
         using = self._state.db
         pk = self.pk  # save before Phase 1 resets self.pk to None
         to_delete: dict[type[Model], set] = defaultdict(set)
@@ -334,10 +247,8 @@ class SoftDeletableModel(Model):
             # Phase 1 — soft-delete first (idempotent; PG rules cascade to related objects).
             self.delete()
 
-            # Phase 2 — collect all related rows (now all soft-deleted) and hard-delete
-            # in child-first order so no FK constraint is violated.
-            # NOTE: self.pk is None after Phase 1 (Django clears it post-delete), use saved pk;
-            # the PK is shared across the whole MTI chain, so it filters every level.
+            # Phase 2 — collect related rows and hard-delete child-first. self.pk is None
+            # after Phase 1 (Django clears it post-delete), so use the saved pk.
             _collect(root, {pk})
 
             for model in model_order:
@@ -351,12 +262,8 @@ class SoftDeletableModel(Model):
                     model._all_objects.using(using).filter(  # ty: ignore[unresolved-attribute]
                         pk__in=pks
                     )._hard_delete_own_table()
-                else:  # pragma: no cover - unreachable: see note below
-                    # A CASCADE-related model with no soft-delete rule of its own is always
-                    # already gone by this point -- Django's Collector (triggered by Phase 1's
-                    # plain ``self.delete()``) walks the *entire* CASCADE graph reachable from
-                    # any level of the MTI chain (ancestors' own dependents included, since it
-                    # also recurses into ``_meta.parents``) and issues a real, unintercepted
-                    # DELETE for any table without a rule. Kept for symmetry with the
-                    # ``_all_objects`` branch above and as a defensive fallback.
+                else:  # pragma: no cover - unreachable
+                    # A model with no soft-delete rule is always already gone by this point:
+                    # Django's Collector (Phase 1's plain delete()) already issued a real
+                    # DELETE for it. Kept as a defensive fallback, not a live path.
                     model._default_manager.using(using).filter(pk__in=pks).delete()

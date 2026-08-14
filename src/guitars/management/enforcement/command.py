@@ -1,43 +1,6 @@
-"""The ``makeguitarmigrations`` command: wires headers, identity, scanning and operations
-together into the CLI entry point.
-
-Vocabulary, used consistently here and in the docs:
-
-* An **enforcement migration** is a generated migration of ``RunSQL`` operations. Django's
-  own migrations describe *schema* -- which tables and columns exist. These describe what
-  the database *guarantees about the rows*, for every code path including the ones that
-  never call ``save()``.
-* An **enforcement operation** is one ``RunSQL`` entry inside such a migration.
-
-There are four kinds, and each already has a precise name of its own:
-
-============================  ===============================================
-timestamp trigger             keeps ``_updated_at`` current on any ``UPDATE``
-soft-delete rule              rewrites ``DELETE`` into a ``_deleted_at`` stamp
-MTI redirect rule / trigger   applies both to a multi-table-inheritance child
-tenant policy                 row-level security scoping rows to a tenant
-============================  ===============================================
-
-All four ship from one command because they share every mechanic that is actually
-difficult: model discovery, MTI column-ownership resolution, dedupe against operations
-already written, ``--empty`` scaffolding, digest stamping and app scoping.
-
-Idempotency has three layers (digest, per-operation header, SQL identity); see
-``docs/migrations.md``'s "Idempotency has three layers" section for the full account.
-The header strings are **frozen**: reword one and every existing migration stops being
-recognised, and the next run emits duplicates.
-
-This package is organized by concern rather than as one flat module:
-
-* ``headers.py`` -- the frozen ``HEADER_*`` templates and the ``_RE_*`` scanners derived
-  from (most of) them.
-* ``identity.py`` -- rendering a ``RunSQL`` operation and reading the ``[SQL:...]``/
-  ``[POLICY:...]`` identity tokens back off an already-written header line.
-* ``scanning.py`` -- ``ExistingOperations`` and the one-pass scan of every local app's
-  migration files that builds it.
-* ``operations.py`` -- ``OperationsMixin``, building the operations an app's models need.
-* ``command.py`` (this module) -- the thin ``Command`` wiring the above into a CLI.
-"""
+"""The ``makeguitarmigrations`` command: wires ``headers``/``identity``/``scanning``/
+``operations`` into the CLI entry point (vocabulary in ``CONTEXT.md``). Header strings are
+**frozen** -- reword one and every existing migration stops being recognised."""
 
 from __future__ import annotations
 
@@ -69,25 +32,9 @@ if TYPE_CHECKING:
 
 
 class Command(OperationsMixin, BaseCommand):
-    """Generates the enforcement migrations: triggers, rules and tenant policies.
-
-    Each kind is driven by the shape of the model, so declaring the thing *is* the opt-in
-    and there is no registry to keep in step:
-
-    * ``_updated_at`` -> a statement-level timestamp trigger.
-    * ``_deleted_at`` -> a soft-delete rule, plus cascade rules for related
-      soft-deletable models whose FK is ``on_delete=CASCADE``.
-    * a ``tenanted_manager()`` -> a row-level-security tenant policy.
-
-    Multi-table inheritance is handled throughout: because the relevant columns physically
-    live on an ancestor's table, each column's owner is resolved via
-    ``guitars.introspection`` rather than ``hasattr``, and an MTI child gets the
-    parent-propagating trigger, the redirect rule, and the owner-join policy instead of the
-    own-table forms. See ``docs/mti.md``.
-
-    Run after ``makemigrations`` when models change -- or let ``makemigrations`` run it for
-    you, which is the default.
-    """
+    """Generates enforcement migrations, driven by the shape of the model
+    (``_updated_at`` -> trigger, ``_deleted_at`` -> soft-delete rule, ``tenanted_manager()``
+    -> RLS policy). MTI columns resolve via ``guitars.introspection``, never ``hasattr``."""
 
     help = (
         'Creates enforcement migrations (timestamp triggers, soft-delete rules, tenant policies).'
@@ -102,9 +49,7 @@ class Command(OperationsMixin, BaseCommand):
 
         # (app_label, migration_stem) tuples or None, pointing at the singleton function
         # migrations. Populated from self.existing on first access, not here -- see that
-        # property -- and mutable alongside it for the same reason: a singleton function
-        # migration is only "already done" when it both exists and defines the SQL the kit
-        # emits today.
+        # property.
         self.trigger_function_dependency: tuple[str, str] | None = None
         self.parent_trigger_function_dependency: tuple[str, str] | None = None
         self.trigger_function_sql: str | None = None
@@ -119,14 +64,9 @@ class Command(OperationsMixin, BaseCommand):
 
     @property
     def existing(self) -> ExistingOperations:
-        """Every enforcement operation already on disk, scanned once and cached.
-
-        Not scanned eagerly in ``__init__``: Django constructs a ``Command()`` for
-        ``--help`` and the command registry, and neither needs a filesystem scan of every
-        local app's migrations. The first real access -- by ``handle()``, or directly by a
-        test exercising internals below the CLI entry point -- triggers the scan and copies
-        the singleton-function state onto ``self`` exactly once.
-        """
+        """Every enforcement operation already on disk, scanned once and cached. Not eager
+        in ``__init__``: Django constructs a ``Command()`` for ``--help`` and the registry,
+        neither needing a filesystem scan of every local app's migrations."""
         if self._existing is None:
             self._existing = scan_existing_operations()
             self.trigger_function_dependency = self._existing.trigger_function_dependency
@@ -183,12 +123,9 @@ class Command(OperationsMixin, BaseCommand):
 
     @staticmethod
     def _tenant_policies_enabled() -> bool:
-        """Whether to emit tenant policies at all.
-
-        ``False`` keeps the Python enforcement layer while leaving the database alone --
-        for adopting the loud layer first, or for a database where the application role
-        cannot own its tables and so could never be constrained by RLS anyway.
-        """
+        """Whether to emit tenant policies at all. ``False`` keeps the Python layer while
+        leaving the database alone -- adopting the loud layer first, or a role that could
+        never own its tables and so could never be RLS-constrained anyway."""
         return bool(getattr(settings, 'GUITARS_TENANT_POLICIES', True))
 
     @staticmethod
@@ -233,11 +170,8 @@ class Command(OperationsMixin, BaseCommand):
         operations_digest: str,
         dependencies: list[tuple[str, str]] | None = None,
     ) -> None:
-        """Rewrite a migration file to include the given custom *operations*.
-
-        Thin wrapper naming this command's marker text; the mechanics live in
-        ``_generator``, shared with every command that generates migrations.
-        """
+        """Rewrite a migration file to include the given custom *operations* -- thin
+        wrapper naming this command's marker text; mechanics live in ``_generator``."""
         _generator.write_migration_file(
             app=app,
             migration_file=migration_file,
@@ -268,35 +202,17 @@ class Command(OperationsMixin, BaseCommand):
         dependencies: list[tuple[str, str]] | None = None,
     ) -> tuple[tuple[str, str], str] | None:
         """Ensure the host app has a current migration for one singleton trigger function.
-
-        Returns ``((app_label, stem), digest)`` for a migration it wrote, or ``None`` if the
-        recorded one is already current.
-
-        These two functions are singletons by *existence*, and that is precisely why a change
-        to either body used to ship nothing: the first thing this did was return early on
-        "a migration mentioning the function exists somewhere". It now also compares the
-        recorded ``[SQL:...]`` digest, so an edited body produces a second migration carrying
-        the ``OR REPLACE`` form. ``OR REPLACE`` rather than DROP + CREATE is forced, not
-        defensive -- ``DROP FUNCTION`` refuses while any trigger depends on it, and CASCADE
-        would take every table's trigger with it.
-
-        Under ``--adopt`` the ``OR REPLACE`` form is used even when nothing is recorded at
-        all: the whole premise of the flag is a database the generator has no record of, and
-        a plain ``CREATE FUNCTION`` there fails migrate with "function already exists" on
-        exactly the database ``--adopt`` exists to bring in. There is no separate adopt form
-        for a function the way there is for a trigger, because ``OR REPLACE`` is already the
-        one form that is correct whether or not the function exists.
-        """
+        Compares the recorded ``[SQL:...]`` digest, not mere existence, so an edited body
+        reships via ``OR REPLACE`` (``DROP FUNCTION`` refuses while a trigger depends on it)."""
         current_source, current_digest = _operation(header, create, drop)
         if recorded is not None and (recorded_digest == current_digest and not adopt):
             return None
 
         stale = recorded is not None
         if check_only:
-            # Bare message, not self.style.ERROR(...): Django's own top-level handler
-            # applies style.ERROR() again when it prints an uncaught CommandError, and
-            # double-wrapping garbled the ANSI codes. Compare _report_missing's raise below,
-            # which never wrapped its message and was always correct.
+            # Bare message, not self.style.ERROR(...): Django's own handler applies
+            # style.ERROR() again on an uncaught CommandError, and double-wrapping garbled
+            # the ANSI codes.
             raise CommandError(stale_message if stale else missing_message)
 
         if stale or adopt:
@@ -321,11 +237,8 @@ class Command(OperationsMixin, BaseCommand):
     def _ensure_trigger_function_migration(
         self, *, check_only: bool = False, adopt: bool = False
     ) -> bool:
-        """
-        Ensure a current standalone migration for the trigger function exists in the host app.
-        Sets ``self.trigger_function_dependency`` when done.
-        Returns True if a new migration was created, False if the recorded one is current.
-        """
+        """Ensure a current standalone migration for the trigger function exists in the
+        host app. Sets ``self.trigger_function_dependency``; returns whether it wrote one."""
         written = self._ensure_function_migration(
             recorded=self.trigger_function_dependency,
             recorded_digest=self.trigger_function_sql,
@@ -354,13 +267,9 @@ class Command(OperationsMixin, BaseCommand):
     def _ensure_parent_trigger_function_migration(
         self, *, check_only: bool = False, adopt: bool = False
     ) -> bool:
-        """
-        Ensure a current standalone migration for the MTI parent updated-at function exists.
-        Sets ``self.parent_trigger_function_dependency`` when done. Kept separate from the
-        base trigger-function migration so that adding MTI support never re-digests (and thus
-        regenerates) the existing single-table function migration.
-        Returns True if a new migration was created, False if the recorded one is current.
-        """
+        """Ensure a current migration for the MTI parent updated-at function. Kept separate
+        from the base trigger-function migration so adding MTI support never re-digests
+        (and regenerates) the existing single-table one."""
         written = self._ensure_function_migration(
             recorded=self.parent_trigger_function_dependency,
             recorded_digest=self.parent_trigger_function_sql,
@@ -418,11 +327,9 @@ class Command(OperationsMixin, BaseCommand):
         # writing a migration -- so they must already carry the scanned values by then.
         _ = self.existing
 
-        # Step 1: Ensure the singleton function migration(s) exist, so all subsequent app
-        # migrations can safely depend on them. Scoped to the requested apps, but still hosted
-        # in TRIGGER_FUNCTION_APP (a hard prerequisite) even if that host app wasn't named.
-        # The base ``set_updated_at`` function is needed by own-table triggers; the MTI
-        # ``set_parent_updated_at`` function only by MTI children that inherit ``_updated_at``.
+        # Step 1: ensure the singleton function migration(s) exist so later app migrations
+        # can depend on them -- scoped to requested apps, but always hosted in
+        # TRIGGER_FUNCTION_APP even if that host app wasn't named.
         in_scope_models = [
             model
             for app in django_apps.get_app_configs()
@@ -432,12 +339,9 @@ class Command(OperationsMixin, BaseCommand):
         needs_trigger_function = any(owns_column(m, '_updated_at') for m in in_scope_models)
         needs_parent_function = any(is_mti_child(m, '_updated_at') for m in in_scope_models)
 
-        # Under --check, a stale/missing function migration raises immediately from inside
-        # _ensure_function_migration -- caught here rather than left to propagate, so it can
-        # join the per-app report below instead of hiding it: function-migration staleness
-        # used to fail fast while app-operation staleness aggregated into one report, so a
-        # project with both problems only ever heard about whichever this method reached
-        # first.
+        # Under --check, a stale/missing function migration raises from inside
+        # _ensure_function_migration -- caught here so it joins the per-app report below
+        # instead of a project with both problems only hearing about whichever came first.
         function_check_messages: list[str] = []
         changes_made = False
         if needs_trigger_function:
@@ -493,16 +397,9 @@ class Command(OperationsMixin, BaseCommand):
         check_missing: list[tuple[str, list[str]]],
         function_check_messages: list[str] | None = None,
     ) -> None:
-        """Print what ``--check`` found and exit non-zero.
-
-        "or outdated" is not padding: an operation here may be a *replacement* for a policy
-        whose shape no longer matches the models, which is a migration the app needs despite
-        already having one for that table.
-
-        *function_check_messages* prints first: a missing/stale singleton function migration
-        is a hard prerequisite every per-app migration depends on, so it reads as the more
-        fundamental problem even though both are reported together.
-        """
+        """Print what ``--check`` found and exit non-zero. "or outdated" is not padding --
+        an operation may be a *replacement* for a policy whose shape no longer matches.
+        *function_check_messages* prints first: it's the more fundamental prerequisite."""
         for message in function_check_messages or []:
             self.stderr.write(self.style.ERROR(message))
         for app_label, operations in check_missing:
@@ -514,19 +411,13 @@ class Command(OperationsMixin, BaseCommand):
         raise CommandError('Run `manage.py makeguitarmigrations` to create missing migrations.')
 
     def _handle_force_rls_stage(self, requested: set[str], *, check_only: bool) -> None:
-        """Emit only ``FORCE ROW LEVEL SECURITY`` migrations, for tables already policied.
-
-        A separate stage rather than part of the main run, because it exists for exactly one
-        situation: a retrofit onto a populated database that set ``GUITARS_RLS_FORCE = False``
-        so policies could be shipped inert, soaked, and only then made binding. Mixing it
-        into the normal run would defeat the staging it exists to provide.
-        """
+        """Emit only ``FORCE ROW LEVEL SECURITY`` migrations, for tables already policied --
+        a separate stage for exactly one case: a retrofit that shipped policies inert
+        (``GUITARS_RLS_FORCE = False``) to soak before making them binding."""
         if self._rls_force_enabled():
-            # Not an error, and not redundant either: this is the shape of a *finished*
-            # retrofit. Policies shipped inert under GUITARS_RLS_FORCE = False, the setting
-            # was then flipped to True, and those already-policied tables still need their
-            # FORCE. New policies get it inline, so the run below finds only the backlog --
-            # commonly nothing, which is why it says so rather than failing.
+            # Not an error: this is a *finished* retrofit. Policies shipped inert, the
+            # setting was flipped to True, and those tables still need their FORCE --
+            # new policies get it inline, so the run below finds only the backlog.
             self.stdout.write(
                 self.style.WARNING(
                     'GUITARS_RLS_FORCE is True, so new tenant policies already emit FORCE. '

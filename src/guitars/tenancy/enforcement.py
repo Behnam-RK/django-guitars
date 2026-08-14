@@ -1,20 +1,6 @@
-"""The write guards: fill in a missing tenant, or refuse a write that contradicts one.
-
-A ``pre_save`` receiver plus a ``bulk_create`` override fill in the tenant when it is
-absent and reject it when it contradicts the active frame. Because the receiver is on the
-*signal*, it covers every ``save()`` -- including ``instance.save()`` and writes routed
-through ``_base_manager``, neither of which consults a manager. The ``bulk_create`` guard
-itself lives on the queryset (``guitars.tenancy.querysets``), which is what actually calls
-:func:`apply_write_guard` per object -- chaining leaves the manager behind
-(``Model.objects.filter(...)`` hands back a queryset), so a guard the manager owned alone
-would not be on it.
-
-What this deliberately does not cover: ``queryset.update()``, ``bulk_create`` on a
-non-tenanted manager (no signal, no override), cascade deletes, and raw SQL. Those are
-the database's job -- its ``WITH CHECK`` sees every statement, which is the whole reason
-enforcement lives there too. What Python adds is a diagnosable error and an autofill the
-database cannot perform.
-"""
+"""The write guards: fill in a missing tenant, or refuse a write that contradicts one. A
+``pre_save`` receiver covers every ``save()``; ``bulk_create`` is guarded separately since
+it sends no signal. Doesn't cover ``update()``/cascades/raw SQL -- see ``docs/tenancy.md``."""
 
 from __future__ import annotations
 
@@ -55,27 +41,18 @@ class TenantEnforcement(str, Enum):
     """Raise. The resting state."""
 
     AUDIT = 'audit'
-    """Report and proceed.
+    """Report and proceed -- for rolling enforcement out over a populated deployment
+    without 500-ing the offending paths."""
 
-    For rolling enforcement out over a populated deployment: it names the offending
-    paths without 500-ing them.
-    """
-
-    # StrEnum parity on Python 3.10, which guitars still supports (ganje required 3.12).
-    # Without this, ``str(TenantEnforcement.STRICT)`` yields 'TenantEnforcement.STRICT'
-    # rather than 'strict' -- and checks.py compares ``str(configured)`` against the
-    # allowed values, so a project passing the enum itself would fail its own check.
+    # StrEnum parity on Python 3.10: without this, str(TenantEnforcement.STRICT) yields
+    # 'TenantEnforcement.STRICT', and checks.py's str(configured) comparison would fail.
     __str__ = str.__str__
 
 
 class ViolationKind(str, Enum):
-    """What kind of write-guard violation this is.
-
-    Previously computed by :func:`apply_write_guard` for internal dedup only, and thrown
-    away before reaching the ``Reporter`` -- a custom reporter (one forwarding to Sentry,
-    say) had nothing to classify on but regexing the message string. Now passed straight
-    through as structured ``kind=`` context; see :func:`_violation`.
-    """
+    """What kind of write-guard violation this is -- passed to the ``Reporter`` as
+    structured ``kind=`` context (see :func:`_violation`) rather than left for a custom
+    reporter to regex out of the message string."""
 
     UNSCOPED = 'unscoped'
     """No active tenant scope at all -- nothing to take a value from."""
@@ -106,16 +83,9 @@ def _violation(
     kind: ViolationKind,
     **context: object,
 ) -> None:
-    """Raise ``exception``, or merely report ``kind``/``context``, depending on the mode.
-
-    ``exception`` is the caller's choice between :class:`TenantScopeMissing` (no scope
-    satisfies this) and :class:`TenantScopeViolation` (a scope is active but this write
-    contradicts it) -- audit mode reports the same finding regardless of which, since
-    nothing here raises in that mode at all. ``kind`` and any extra ``context`` (typically
-    ``model=`` and ``dimension=``) reach the ``Reporter`` as structured keyword arguments
-    rather than being folded into the message string alone, so a reporter that forwards
-    to Sentry or similar can classify programmatically instead of regexing it.
-    """
+    """Raise ``exception``, or merely report ``kind``/``context``, depending on the mode --
+    audit mode reports the same finding regardless of which exception was chosen.
+    ``context`` reaches the ``Reporter`` as structured kwargs, not just message text."""
     if _enforcement() is TenantEnforcement.AUDIT:
         report_once(key, message, mode=TenantEnforcement.AUDIT.value, kind=kind, **context)
         return
@@ -175,10 +145,8 @@ def apply_write_guard(instance: models.Model) -> None:
                     dimension=dimension,
                 )
             elif isinstance(expected, MULTI_VALUE_TYPES):
-                # A collection scope reads as "either of these", which a column holding one
-                # value cannot express. Refused whatever the length: unwrapping a
-                # one-element collection would make the write depend on how many tenants
-                # the caller's list happened to contain.
+                # A collection scope reads as "either of these"; refused whatever the
+                # length, or the write would depend on how many tenants the list contained.
                 _violation(
                     f'{label} write has no {dimension!r} and the active scope names '
                     f'several ({[_pk(item) for item in expected]!r}), so there is no '
@@ -205,12 +173,8 @@ def apply_write_guard(instance: models.Model) -> None:
 
 
 def _guarded(objs) -> list:
-    """Materialise ``objs`` and guard each one.
-
-    Shared by every ``bulk_create`` override (``guitars.tenancy.querysets``): the batched
-    path sends no ``pre_save``, so the guard has to be invoked by hand or that path would
-    skip autofill and validation both.
-    """
+    """Materialise ``objs`` and guard each one -- shared by every ``bulk_create``
+    override, since the batched path sends no ``pre_save`` to trigger it automatically."""
     objs = list(objs)
     for obj in objs:
         apply_write_guard(obj)

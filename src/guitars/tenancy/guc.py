@@ -1,44 +1,6 @@
-"""Mirror the active tenant frame into PostgreSQL session settings (GUCs).
-
-Row-level-security policies cannot read a Python ``ContextVar``, so the frame is
-published as ``tenant.<dimension>`` plus ``tenant.bypass``. Policies read them with
-``current_setting(..., true)``; an unset GUC yields ``NULL`` and therefore denies, which
-is what makes the database half fail closed.
-
-**Lazy, not eager.** Publishing happens in a ``connection.execute_wrappers`` entry,
-immediately before a statement runs, and only when the desired state differs from what
-this connection was last told. A ``tenant()`` block that never queries costs nothing,
-nested blocks cost nothing (only the effective value matters), and a tenant switch costs
-one extra round trip.
-
-**Why the cache key is more than the values.** PostgreSQL reverts a session-level ``SET``
-when a transaction aborts, and reverts a transaction-local one when it ends at all. Either
-way the connection silently stops matching what we cached -- and a stale cache means we
-skip a needed update and the *previous* tenant's value stays live, which fails OPEN.
-
-Two things guard the cache:
-
-* ``in_atomic_block`` and the savepoint stack, which catch entering or leaving a
-  transaction and a rollback to a savepoint.
-* A per-transaction marker, because the two above are *shapes*, not identities: two
-  sibling ``atomic()`` blocks at the same depth look identical, so a value published
-  transaction-locally in the first would otherwise be assumed still live in the second --
-  after the commit that discarded it. See ``_transaction_marker``.
-
-None of this is incidental complexity: every guard here corresponds to a way *this
-connection's own cache* can fail open. Do not simplify it without a test that fails
-first.
-
-**What none of it guards against: an external, transaction-pooling connection pooler**
-(pgbouncer with ``POOL_MODE: transaction``, say) sitting in front of the connection. That
-handed this process a different logical client's session-level ``SET`` from one
-transaction to the next, which this module has no visibility into -- the cache is correct
-about a connection whose identity is stable; a pooled connection's identity is not.
-``guitars.tenancy.checks.check_pooling_leaks_tenant_gucs`` (``guitars.tenancy.W002``)
-warns on the one signal available from ``DATABASES``; see ``docs/tenancy.md``'s
-"Connection pooling" section for the mechanism and the mitigation (the pooler's own reset
-query, not anything Django or guitars can do).
-"""
+"""Mirror the active tenant frame into PostgreSQL session settings, published lazily
+before each statement. **The cache key is deliberately more than the values** -- see
+CLAUDE.md's checklist and :func:`_transaction_marker`."""
 
 from __future__ import annotations
 
@@ -82,26 +44,15 @@ _ABORTED_SQLSTATE = '25P02'
 
 
 def _sqlstate(exc: BaseException) -> str | None:
-    """The driver's SQLSTATE for *exc*, whichever driver it came from.
-
-    psycopg names it ``sqlstate``, psycopg2 ``pgcode``. guitars pins neither, so a consumer
-    picks one and Django supports both.
-    """
+    """The driver's SQLSTATE for *exc*, whichever driver it came from -- psycopg names it
+    ``sqlstate``, psycopg2 ``pgcode``, and guitars pins neither."""
     return getattr(exc, 'sqlstate', None) or getattr(exc, 'pgcode', None)
 
 
 def _scalar(value: object) -> str:
-    """One dimension value as its GUC text, refusing anything the encoding cannot carry.
-
-    Accepts a model instance, a pk, or anything ``str()``-able -- mirroring what ``tenant()``
-    already accepts and what the manager filters on.
-
-    The refusal itself lives in :func:`~guitars.tenancy.scope.reject_separator`, which
-    ``tenant()`` also calls at scope entry. See it for why a separator is refused rather than
-    escaped, and why this later call is not redundant with the earlier one -- in short, a pk
-    that was ``None`` when the scope opened can still acquire one before it is published, and
-    this is the boundary the policy actually reads.
-    """
+    """One dimension value as its GUC text, refusing via
+    :func:`~guitars.tenancy.scope.reject_separator` -- called here too, not just at scope
+    entry, since a pk that was ``None`` at scope open can acquire one before publish."""
     reject_separator(value)
     pk = getattr(value, 'pk', value)
     return '' if pk is None else str(pk)
@@ -133,45 +84,19 @@ def _fingerprint(connection: BaseDatabaseWrapper) -> tuple:
 def _transaction_marker(
     connection: BaseDatabaseWrapper, superseded: Callable[[], None] | None = None
 ) -> Callable[[], None]:
-    """Register a no-op commit hook whose *presence* identifies this transaction.
-
-    Django exposes no transaction counter, and the fingerprint above only describes the
-    current transaction's shape -- sibling ``atomic()`` blocks at the same depth are
-    indistinguishable by it. ``run_on_commit`` is the one piece of per-transaction state
-    Django reliably discards for us: it is emptied on commit and on rollback, and entries
-    registered inside a savepoint are dropped when that savepoint rolls back. So "our
-    marker is still registered" means exactly "the transaction that published is the one
-    we are still in".
-
-    A ``superseded`` marker is replaced *in place*, never filtered out: removing an entry
-    renumbers everything after it, and Django's ``TestCase.captureOnCommitCallbacks``
-    slices ``run_on_commit`` from a start index saved when the capture opened -- so
-    dropping a pre-capture entry mid-window silently disowns a consumer callback
-    registered inside the window. In-place replacement also keeps the list at one marker
-    per transaction, so a capture window is never padded with stale no-ops (a loop
-    switching tenants inside one ``atomic()`` would otherwise leave one per switch).
-
-    ``using`` is mandatory here, not cosmetic: ``on_commit`` defaults to the *default*
-    alias, so on any other connection the marker would land on the wrong list -- or run
-    immediately, if the default alias happens to be in autocommit -- and this connection's
-    cache would then never look live.
-    """
+    """Register a no-op commit hook whose *presence* identifies this transaction --
+    :func:`_fingerprint` alone can't distinguish two sibling ``atomic()`` blocks. A
+    ``superseded`` marker is replaced *in place*, never filtered out."""
 
     def marker() -> None:
         """Never does anything -- only its presence carries information."""
 
     if superseded is not None:
-        # Mirror ``on_commit``'s entry shape: (active savepoint ids, func, robust).
-        # Fresh savepoint ids, not the superseded entry's: this marker vouches for the
-        # ``SET LOCAL`` just issued, which a rollback of a savepoint active *now* would
-        # revert. A dead ``superseded`` (transaction already ended, or its savepoint
-        # rolled back) simply isn't found, and we fall through to a plain registration.
+        # Fresh savepoint ids: this marker vouches for the SET LOCAL just issued. A dead
+        # superseded isn't found, and we fall through to a plain registration below.
         entry = (set(connection.savepoint_ids), marker, False)
         for index, existing in enumerate(connection.run_on_commit):
             if existing[1] is superseded:
-                # django-stubs' run_on_commit entry is a 2-tuple; real Django (since the
-                # `robust` kwarg was added to on_commit) writes a 3-tuple, which this
-                # mirrors on purpose -- see the docstring above.
                 connection.run_on_commit[index] = entry  # ty: ignore[invalid-assignment]
                 return marker
     transaction.on_commit(marker, using=connection.alias)
@@ -219,13 +144,9 @@ def _publish(connection: BaseDatabaseWrapper, state: dict[str, str]) -> None:
 
 
 def _walk_chain(exc: BaseException) -> Iterator[BaseException]:
-    """Walk *exc*'s cause/context chain, cycle-safe.
-
-    Both links are followed: ``__cause__`` for an explicit ``raise ... from``, which is
-    what Django uses, and ``__context__`` for an error re-raised inside another ``except``
-    block without one. Tracked by identity -- a chain can cycle, and an exception free to
-    define ``__eq__`` would otherwise let two distinct links look like the same one.
-    """
+    """Walk *exc*'s cause/context chain, cycle-safe. Both links: ``__cause__`` (Django's
+    ``raise ... from``) and ``__context__`` (a bare re-raise). Tracked by identity, since
+    an exception free to define ``__eq__`` could make two distinct links look the same."""
     seen: set[int] = set()
     current: BaseException | None = exc
     while current is not None and id(current) not in seen:
@@ -257,33 +178,16 @@ def _ensure(connection: BaseDatabaseWrapper) -> None:
     except Exception as exc:  # noqa: BLE001 - narrowed immediately below
         if not _aborted_transaction(exc):
             raise
-        # PostgreSQL has already failed this transaction and refuses every statement until
-        # it is rolled back -- including, crucially, the ROLLBACK TO SAVEPOINT that Django
-        # issues to recover. That rollback goes through connection.cursor(), so it reaches
-        # this wrapper first; raising here would block the only statement that can clear the
-        # error, wedging the connection permanently and masking the original failure.
-        #
-        # Skipping cannot fail open. The cache is left untouched, so the next statement
-        # republishes; and while the transaction is aborted no statement can execute at all,
-        # so there is no window in which a query runs against stale settings. Once the
-        # rollback lands, transaction-local settings are reverted anyway and the fingerprint
-        # and marker checks above force a fresh publish.
+        # Postgres refuses every statement until rollback, including the recovery ROLLBACK
+        # TO SAVEPOINT itself; raising here would wedge the connection permanently. Cannot
+        # fail open: the cache is untouched and no statement can run while aborted.
         return
 
 
 def _rls_violation(exc: BaseException) -> BaseException | None:
-    """The RLS-violating error in ``exc``'s chain, if any.
-
-    Django wraps backend errors, so the driver error carrying ``sqlstate`` is usually a
-    link down the chain rather than the exception we are handed -- see :func:`_walk_chain`.
-
-    The message test is what separates an RLS rejection from an ordinary
-    ``permission denied``, which shares SQLSTATE 42501. It is English-only: on a server
-    with a non-English ``lc_messages`` the rejection stays a raw ``ProgrammingError``
-    instead of a ``TenantScopeViolation``. That degrades the message, not the enforcement
-    -- the write is refused either way -- and PostgreSQL offers no distinct SQLSTATE or
-    diagnostic field to key on instead.
-    """
+    """The RLS-violating error in ``exc``'s chain, if any -- the SQLSTATE-carrying error is
+    usually a link down, not what we're handed. English-only message test separates it
+    from an ordinary ``permission denied`` sharing the same SQLSTATE 42501."""
     for link in _walk_chain(exc):
         if _sqlstate(link) == _RLS_SQLSTATE and 'row-level security' in str(link).lower():
             return link
@@ -303,14 +207,9 @@ def _wrapper(
         violation = _rls_violation(exc)
         if violation is None:
             raise
-        # Postgres names the table but not the tenant, and the traceback points at the
-        # cursor rather than the caller. Re-raise as the error the rest of the codebase
-        # already catches and greps for. TenantScopeViolation, not TenantScopeMissing:
-        # this is the layer of last resort -- joins, cascades, _base_manager, raw SQL --
-        # so a rejection here may mean no scope was ever opened in Python at all, not
-        # only a wrong one. It is filed as a violation anyway because both raise through
-        # the same TenantScopeError base a caller can catch either way, and "the database
-        # refused this write" reads as an alerting signal here regardless of which.
+        # TenantScopeViolation, not Missing: last-resort layer (joins, cascades, raw SQL),
+        # so a rejection may mean no scope was ever opened -- filed as a violation anyway
+        # since both share the TenantScopeError base a caller can catch either way.
         raise TenantScopeViolation(
             f'write rejected by a tenant policy -- the row does not belong to the '
             f'active tenant, or no tenant scope is active -- {remediation("write")} '

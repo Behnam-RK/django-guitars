@@ -1,39 +1,6 @@
-"""Which tables are supposed to carry a ``tenant_scope`` policy, and how.
-
-One answer, two consumers: ``makeguitarmigrations`` turns it into migrations at build
-time, ``audittenancy`` compares it against a live database. Keeping the rule here means the
-audit can never quietly disagree with the generator about what coverage *should* look like
--- a drift that would make a green audit meaningless.
-
-A model is covered when its tenant dimensions can be predicated on from its own table. Two
-shapes satisfy that:
-
-* **Own-table columns** -- the ordinary case, including fields copied down from an abstract
-  base.
-* **Columns on a multi-table-inheritance ancestor** -- covered through a correlated
-  subquery on the shared primary key. guitars does *not* treat MTI children as protected
-  transitively, which is the tempting shortcut: a child-only statement
-  (``queryset.update()`` on child-local fields, a ``DELETE`` on the child table,
-  ``.values()`` of child-only columns) never touches the ancestor, so an ancestor-only
-  policy never applies to it. The kit already knows this -- it is why
-  ``set_parent_updated_at`` exists.
-
-What is still reported rather than covered:
-
-* **Multi-hop dimensions** (``shop='post__shop'``) -- no column here at all to predicate
-  on. The Python manager still scopes reads; RLS coverage arrives via the table the hop
-  lands on.
-* **Dimensions spread across two different ancestors** -- one correlated subquery reaches
-  one ancestor, and which one it reached would come down to field declaration order. All
-  of them are dropped rather than one picked arbitrarily.
-
-A model can therefore end up *partially* covered: its own-table dimensions get a policy
-while the ones above are left to Python scoping. That is reported as what it is. Every note
-names the dimensions it dropped and the ones the policy still enforces, because "skipped"
-alone would read as "no protection here" on a table that has some.
-
-Skips are design, not gaps -- but never silent.
-"""
+"""Which tables carry a ``tenant_scope`` policy, and how -- one answer, two consumers:
+``makeguitarmigrations`` builds migrations from it, ``audittenancy`` compares it against a
+live database. See ADR-0003 and ``docs/tenancy.md`` for MTI and reported-not-covered cases."""
 
 from __future__ import annotations
 
@@ -64,15 +31,9 @@ __all__ = [
 
 
 class PolicyKwargs(TypedDict, total=False):
-    """The shape :meth:`TableCoverage.as_kwargs` produces.
-
-    Spelled out rather than left as ``dict[str, object]`` because the generator now *calls*
-    ``sql.create_table_rls(**kwargs)`` instead of rendering the call as text into a
-    migration. Text was never type-checked; a real call is, and an untyped mapping makes
-    every parameter read as ``object``.
-
-    ``total=False``: the owner keys are absent, not ``None``, when there is no owner join.
-    """
+    """The shape :meth:`TableCoverage.as_kwargs` produces -- spelled out, not
+    ``dict[str, object]``, since the generator *calls* ``sql.create_table_rls(**kwargs)``.
+    ``total=False``: owner keys are absent, not ``None``, when there's no owner join."""
 
     columns: dict[str, str]
     owner_table: str | None
@@ -82,12 +43,9 @@ class PolicyKwargs(TypedDict, total=False):
 
 
 class TableCoverage(NamedTuple):
-    """How one table's policy should be predicated.
-
-    ``columns`` maps dimension -> column on this table. When the tenant column lives on an
-    MTI ancestor instead, ``owner_*`` describes the join and ``owner_columns`` maps
-    dimension -> column over there. A model may legitimately have both.
-    """
+    """How one table's policy should be predicated. ``columns`` maps dimension -> column on
+    this table; when the tenant column lives on an MTI ancestor, ``owner_*`` describes the
+    join and ``owner_columns`` maps dimension -> column there. A model may have both."""
 
     columns: dict[str, str]
     owner_table: str | None = None
@@ -96,11 +54,8 @@ class TableCoverage(NamedTuple):
     owner_columns: dict[str, str] | None = None
 
     def as_kwargs(self) -> PolicyKwargs:
-        """The keyword arguments ``guitars.sql.create_table_rls`` expects.
-
-        Owner keys are omitted entirely when there is no owner join, so a non-MTI table's
-        generated migration stays as simple as it reads.
-        """
+        """The keyword arguments ``guitars.sql.create_table_rls`` expects -- owner keys
+        omitted entirely when there's no owner join, so a non-MTI migration stays simple."""
         kwargs: PolicyKwargs = {'columns': dict(self.columns)}
         if self.owner_columns:
             kwargs['owner_table'] = self.owner_table
@@ -109,41 +64,25 @@ class TableCoverage(NamedTuple):
             kwargs['owner_columns'] = dict(self.owner_columns)
         return kwargs
 
-    # ``audittenancy`` compares a *live* policy against the two facts below rather than
-    # against the SQL text: PostgreSQL rewrites a policy expression when it stores it
-    # (``current_setting('tenant.x'::text, true) AS current_setting``, columns parenthesised
-    # and casts made explicit), so string equality against what ``sql.policy`` emitted can
-    # never hold. These two sets survive that rewrite intact -- and they live here, beside
-    # ``as_kwargs`` which the generator uses, so the audit and the generator read one
-    # description of the same policy. That is the whole reason this module exists.
+    # ``audittenancy`` compares a *live* policy against the two facts below, not SQL text:
+    # Postgres rewrites a stored policy expression, so string equality can never hold.
+    # These two survive that rewrite, living beside ``as_kwargs`` for one shared description.
 
     def policy_gucs(self) -> frozenset[str]:
-        """Session-setting names the emitted predicate reads.
-
-        Recoverable from a stored policy because ``current_setting('tenant.x', true)`` keeps
-        its literal argument verbatim through PostgreSQL's rewrite. A dimension added to or
-        removed from a model changes this set, which is what makes the drift visible.
-        """
+        """Session-setting names the emitted predicate reads -- recoverable from a stored
+        policy because ``current_setting('tenant.x', true)`` survives Postgres's rewrite
+        verbatim. A dimension added or removed changes this set, making drift visible."""
         dimensions = set(self.columns) | set(self.owner_columns or {})
         return frozenset({BYPASS_GUC, *(guc_name(dimension) for dimension in dimensions)})
 
     def policy_columns(self, table: str) -> frozenset[tuple[str, str]]:
-        """``(table, column)`` pairs the emitted predicate references.
-
-        Read back from ``pg_depend`` rather than parsed: creating a policy records a real
-        dependency on every column its expression touches, so this is the catalog's own
-        answer and needs no regex. A renamed tenant column changes this set even when the
-        dimension names are untouched.
-
-        *table* is a parameter rather than a field because it is this coverage's key in
-        ``Coverage.tables``, and duplicating it here would let the two drift apart.
-        """
+        """``(table, column)`` pairs the emitted predicate references -- read from
+        ``pg_depend``, not parsed. *table* is a param, not a field, to avoid drifting from
+        ``Coverage.tables``'s own key."""
         pairs = {(table, column) for column in self.columns.values()}
         owner_table, owner_pk, child_pk = self.owner_table, self.owner_pk, self.child_pk
-        # The three-way check is the same invariant ``sql.policy._predicate`` enforces (it
-        # raises when ``owner_columns`` arrives without them), so a coverage that failed it
-        # could never have produced a policy for this table to be compared against. Spelling
-        # it out here rather than asserting keeps the optional fields narrowed for the checker.
+        # Same invariant ``sql.policy._predicate`` enforces (raises without them), so a
+        # coverage that failed it could never have produced a policy to compare against.
         if self.owner_columns and owner_table and owner_pk and child_pk:
             # The correlated subquery joins on both keys and reads the ancestor's columns.
             pairs.add((table, child_pk))
@@ -153,11 +92,8 @@ class TableCoverage(NamedTuple):
 
 
 class Coverage(NamedTuple):
-    """What the models say the database should look like.
-
-    ``notes`` carries the human-readable reason for every model that was considered and
-    left out, or only partially covered.
-    """
+    """What the models say the database should look like. ``notes`` carries the
+    human-readable reason for every model left out, or only partially covered."""
 
     tables: dict[str, TableCoverage]
     notes: list[str]
@@ -177,10 +113,8 @@ def _classify(model: type[models.Model]) -> tuple[TableCoverage | None, list[str
         if owns_column(model, field_name):
             own[dimension] = column
         else:
-            # MTI: the field resolves, but the column physically lives on an ancestor.
-            # Resolve the OWNER, not the immediate parent -- in a chain three deep the
-            # column may live two tables up, and predicating against the parent would
-            # reference a table that has no such column either.
+            # MTI: resolve the OWNER, not the immediate parent -- in a chain three deep
+            # the column may live two tables up.
             by_owner.setdefault(column_owner(model, field_name), {})[dimension] = column
 
     # Only when something *is* covered. A model whose every dimension is multi-hop gets the
@@ -199,11 +133,8 @@ def _classify(model: type[models.Model]) -> tuple[TableCoverage | None, list[str
     if len(by_owner) > 1:
         owners = sorted(_meta(owner).db_table for owner in by_owner)
         dropped = sorted(dim for columns in by_owner.values() for dim in columns)
-        # Dropping ALL of them rather than picking one ancestor arbitrarily: one correlated
-        # subquery reaches one ancestor, and which one it happened to be would depend on
-        # field declaration order -- a policy whose strength varied with that is worse than
-        # a named gap. Any own-table dimensions still get their policy, so the note has to
-        # say what is and is not enforced, not just that something was skipped.
+        # Dropping ALL rather than picking one ancestor arbitrarily -- which one it reached
+        # would depend on field declaration order, worse than a named gap. See ADR-0003.
         remaining = (
             f'its policy still enforces {sorted(own)}'
             if own
@@ -216,11 +147,8 @@ def _classify(model: type[models.Model]) -> tuple[TableCoverage | None, list[str
         )
         by_owner = {}
         if not own:
-            # Return here rather than falling through to the skip note, which would add a
-            # second note for the same fact -- and a wrong one: it says these dimensions
-            # "have no column on this table or a shared-key ancestor", when what actually
-            # happened is that they have columns on *two* of them. The note above already
-            # says no policy is emitted, and says why.
+            # Return here, not fall through to the skip note: that note would wrongly say
+            # "no column on any ancestor" when these actually have columns on *two*.
             return None, notes
 
     if not own and not by_owner:
@@ -261,10 +189,8 @@ def _skip_note(model: type[models.Model], spec: dict[str, str]) -> str:
 
 
 def app_coverage(app: AppConfig) -> Coverage:
-    """Policy-eligible tables for one app.
-
-    Proxies share their concrete model's table, so tables dedupe naturally via the dict key.
-    """
+    """Policy-eligible tables for one app -- proxies share their concrete model's table,
+    so tables dedupe naturally via the dict key."""
     tables: dict[str, TableCoverage] = {}
     notes: list[str] = []
     for model in app.get_models():
@@ -278,10 +204,8 @@ def app_coverage(app: AppConfig) -> Coverage:
 
 
 def expected_coverage(requested: set[str] | None = None) -> Coverage:
-    """Policy-eligible tables across every local app, optionally scoped.
-
-    *requested* holds app labels; empty or ``None`` means all local apps.
-    """
+    """Policy-eligible tables across every local app, optionally scoped. *requested* holds
+    app labels; empty or ``None`` means all."""
     tables: dict[str, TableCoverage] = {}
     notes: list[str] = []
     for app in django_apps.get_app_configs():

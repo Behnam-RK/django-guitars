@@ -1,37 +1,6 @@
-"""Row-level-security policy SQL for tenanted tables.
-
-The database half of the fail-closed guarantee: a ``tenant_scope`` policy on a table
-enforces the active frame on every statement -- joins, cascades, ``_base_manager``,
-``instance.save()`` and raw SQL included -- none of which ever consult a Django manager.
-Policies read the ``tenant.*`` session settings published by
-:mod:`guitars.tenancy.guc`.
-
-These are functions rather than format-string constants because the predicate is composed
-from a variable-length ``{dimension: column}`` mapping. ``makeguitarmigrations`` writes
-migrations that call them at *migrate* time.
-
-**Nothing here reads Django settings, and that is deliberate.** Whether to emit ``FORCE``,
-and which roles are exempt, are decided by the generator and written into the migration as
-literal arguments. A migration whose SQL depended on the settings in force when it ran
-would produce different databases from the same migration history -- and would silently
-change an already-reviewed migration's meaning when someone edited a setting.
-
-The tenant predicate is deliberately the **list-tolerant** form::
-
-    <column>::text = ANY(string_to_array(
-        (SELECT current_setting('tenant.<dim>', true)), ','))
-
-because ``guc.encode_value`` always encodes a dimension as a separated list -- one policy
-form handles a scalar scope and a collection scope alike, with no cast to trip over. Every
-NULL path denies: an unset GUC yields NULL (-> ``ANY(NULL)`` -> NULL -> deny) and an empty
-string yields an empty array.
-
-Each ``current_setting`` sits inside a **scalar subquery** on purpose. A bare call in a
-qual is re-evaluated for every candidate row; wrapping it lets the planner hoist it to an
-InitPlan evaluated once per statement (the documented PostgreSQL RLS pattern).
-Predicate-equivalent -- a scalar subquery over a zero-table SELECT returns exactly the
-same value, NULL included -- so the fail-closed reasoning above is untouched.
-"""
+"""Row-level-security policy SQL for tenanted tables -- the database half of the
+fail-closed guarantee, predicate shape and all, documented in ``docs/tenancy.md``.
+Functions, not constants, for the variable-length ``{dimension: column}`` mapping."""
 
 from __future__ import annotations
 
@@ -77,40 +46,9 @@ _OWNER_ALIAS = '_guitars_owner'
 
 
 def _qualified_table(table: str) -> str:
-    """A possibly schema-qualified table name.
-
-    Checked first, ahead of either shape :func:`_bare_or_qualified` distinguishes: *table*
-    is one well-formed, self-quoted segment (:data:`~guitars.sql._identifiers._QUOTED_UNQUALIFIED`)
-    -- an unqualified table pre-wrapped by the caller, e.g. ``'"my.table"'`` with a literal
-    ``.`` embedded in its own name. Returned unchanged for the same reason
-    :func:`guitars.sql._identifiers._quote_table` checks this first: a dot inside an
-    already-self-quoted, schema-less table must not be mistaken for a schema separator and
-    split on, which is what happens if this table is instead routed into
-    :func:`_bare_or_qualified` below. Deliberately the stricter ``_QUOTED_UNQUALIFIED``, not
-    the looser :func:`~guitars.sql._identifiers._is_self_quoted` -- a malformed or
-    three-or-more-part string like ``'"a"."b"."c"'`` also starts and ends with ``"`` without
-    being one legitimate quoted identifier, and must still reach ``_bare_or_qualified`` below
-    to be rejected there.
-
-    Otherwise, two input shapes, two different outputs, because :func:`_bare_or_qualified`
-    treats them differently (see its docstring):
-
-    * A bare ``'schema.table'`` (or unqualified ``'table'``) comes back with each part
-      already proved bare via :func:`_bare`, so it is joined -- or returned -- unquoted, the
-      same as this module has always interpolated a table/column position. Quoting an
-      already-lowercase, already-validated identifier would change the SQL text every
-      already-generated migration contains for no behavioural gain.
-    * Django's own pre-quoted ``'"schema"."table"'`` convention is explicitly *not*
-      re-validated as bare by :func:`_bare_or_qualified` -- quoting is what already made a
-      hostile part safe, so re-checking it against ``_BARE_IDENTIFIER`` would reject
-      legitimate mixed-case/reserved-word content this form exists to carry. That trust has
-      to be repaid by re-quoting here: joining the raw, unescaped parts with a bare ``.``
-      would render exactly the unquoted, case-folding bug this milestone exists to fix,
-      just relocated from the trigger/rule path to the tenant-policy one. A model meant to
-      be read and written through the Django ORM *must* use this form for its ``db_table``
-      (see :func:`guitars.sql._identifiers._quote_table`'s docstring for why), so this is
-      not a corner this module could decline to cover.
-    """
+    """A possibly schema-qualified table name. Self-quoted passes through unchanged (a dot
+    inside it must not be mistaken for a schema separator). Otherwise
+    :func:`_bare_or_qualified`: Django's pre-quoted form is trusted, not re-validated."""
     if _QUOTED_UNQUALIFIED.match(table) is not None:
         return table
     pre_quoted = _QUOTED_QUALIFIED.match(table) is not None
@@ -121,11 +59,8 @@ def _qualified_table(table: str) -> str:
 
 
 def _setting(name: str) -> str:
-    """``current_setting`` as a scalar subquery, so the planner caches it.
-
-    See the module docstring: bare in a qual it runs per row; hoisted to an InitPlan it
-    runs once per statement.
-    """
+    """``current_setting`` as a scalar subquery so the planner hoists it to an InitPlan,
+    evaluated once per statement rather than once per row -- see ``docs/tenancy.md``."""
     return f"(SELECT current_setting('{name}', true))"
 
 
@@ -144,30 +79,9 @@ def _owner_exists(
     child_pk: str,
     owner_columns: dict[str, str],
 ) -> str:
-    """The MTI form: reach the ancestor that physically holds the tenant column.
-
-    A multi-table-inheritance child has its own table, but the tenant column lives on the
-    ancestor that declared it. An ancestor-only policy is *not* sufficient: a child-only
-    statement -- ``queryset.update()`` on child-local fields, a ``DELETE`` against the
-    child table, ``.values()`` of child-only columns -- never touches the ancestor, so the
-    ancestor's policy never applies. This is the same problem ``set_parent_updated_at``
-    exists to solve for timestamps, reached from the other direction.
-
-    Correlated by the shared-PK invariant every MTI chain satisfies (see the package
-    docstring): ``owner_pk = child_pk``.
-
-    Two naming hazards, both handled. The ancestor is aliased, so an unqualified column
-    inside the subquery cannot silently resolve to it. And the child's key is written
-    table-qualified, so it cannot be shadowed by a same-named column on the ancestor --
-    PostgreSQL resolves that name once, at ``CREATE POLICY`` time, into an attribute
-    reference on the policy's own relation, so the stored policy still works when a query
-    aliases the table.
-
-    Note that the ancestor's *own* RLS policy also applies to this subquery. That is
-    correct rather than merely tolerable: it compares the same GUC, so it is satisfied for
-    the same tenant and denies for any other -- the two layers agree instead of one
-    quietly widening the other.
-    """
+    """The MTI owner-join form: reach the ancestor holding the tenant column -- an
+    ancestor-only policy misses a child-only statement. See ADR-0003. Correlated on
+    ``owner_pk = child_pk``; the ancestor is aliased, the child key table-qualified."""
     owner_table = _qualified_table(owner_table)
     owner_pk = _bare('owner primary key', owner_pk)
     child_pk = _bare('child primary key', child_pk)
@@ -175,14 +89,9 @@ def _owner_exists(
         _match(f'{_OWNER_ALIAS}.{_bare("owner tenant column", column)}', dimension)
         for dimension, column in sorted(owner_columns.items())
     )
-    # Suppressed below as DDL, not a query: every identifier here is resolved from Django's
-    # model _meta by the generator, and the result is written into a migration file for
-    # review. There are no runtime values and nothing to parameterise -- PostgreSQL does
-    # not accept bind parameters in a policy definition.
-    #
-    # The marker sits on the first fragment because that is the line the finding is
-    # reported on, and it carries no trailing prose: bandit parses whatever follows the
-    # test id as further test ids and warns once per word.
+    # Suppressed below as DDL, not a query: every identifier is resolved from Django's model
+    # _meta and written into a migration file for review; Postgres accepts no bind
+    # parameters in a policy definition. Marker on the first fragment: bandit reports there.
     return (  # noqa: S608
         f'EXISTS (\n'  # nosec B608
         f'        SELECT 1 FROM {owner_table} AS {_OWNER_ALIAS}\n'
@@ -200,12 +109,9 @@ def _predicate(
     child_pk: str | None = None,
     owner_columns: dict[str, str] | None = None,
 ) -> str:
-    """The tenant-match predicate.
-
-    Bypass short-circuits everything; otherwise every dimension must match its published
-    value -- those held on this table directly, and those held on an MTI ancestor through
-    the correlated subquery. A model may legitimately have both.
-    """
+    """The tenant-match predicate. Bypass short-circuits everything; otherwise every
+    dimension must match -- those held on this table directly, and those held on an MTI
+    ancestor through the correlated subquery. A model may legitimately have both."""
     table = _qualified_table(table)
     terms = [
         _match(f'{table}.{_bare("tenant column", column)}', dimension)
@@ -250,29 +156,19 @@ def drop_tenant_policy(table: str) -> str:
 
 
 def create_exempt_policy(table: str, role: str) -> str:
-    """``CREATE POLICY`` granting *role* unfiltered reads -- guarded on the role existing.
-
-    For a reporting or BI account that must see across tenants. One policy per role rather
-    than one naming several, so a cluster where only some of them exist still gets the
-    rest.
-
-    Roles are cluster-level, and a role provisioned only in staging or production would
-    make ``CREATE POLICY ... TO <missing role>`` fail migrate everywhere else -- so local
-    and CI databases skip the exemption instead of erroring.
-    """
+    """``CREATE POLICY`` granting *role* unfiltered reads, guarded on the role existing --
+    roles are cluster-level, and one provisioned only in prod would fail ``migrate``
+    everywhere else. One policy per role, so a cluster missing some still gets the rest."""
     table = _qualified_table(table)
-    # Every role-derived name is quoted rather than trusted to be bare, and the inner
-    # statement is escaped as a whole because EXECUTE takes a string literal -- so the two
-    # nesting levels are each escaped once, by the same rules PostgreSQL's own
-    # quote_ident/quote_literal use.
+    # Role-derived name quoted rather than trusted bare; the inner statement escaped as a
+    # whole since EXECUTE takes a string literal -- two nesting levels, each escaped once.
     statement = (
         f'CREATE POLICY {_exempt_policy_name(role)} ON {table} '
         f'FOR SELECT TO {_quote_ident(role)} USING (true)'
     )
-    # Suppressed below as DDL, not a query, and not an injection boundary: the role name
-    # comes from GUITARS_RLS_EXEMPT_ROLES, a settings value the project author controls, and
-    # the result lands in a migration file for review. PostgreSQL accepts no bind parameters
-    # in a policy definition, so quoting above is the available defence and it is applied.
+    # Suppressed below as DDL: the role name comes from GUITARS_RLS_EXEMPT_ROLES (author-
+    # controlled) and lands in a migration file for review; Postgres accepts no bind
+    # parameters here, so quoting above is the available defence.
     return (  # noqa: S608
         'DO $$\n'  # nosec B608
         'BEGIN\n'
@@ -284,20 +180,9 @@ def create_exempt_policy(table: str, role: str) -> str:
 
 
 def _exempt_policy_name(role: str) -> str:
-    """The exemption policy's identifier, quoted.
-
-    One function so the ``CREATE`` and the ``DROP`` can never disagree about how a role
-    name was spelled -- a mismatch would leave an exemption policy behind that nothing
-    knows how to remove.
-
-    Truncated through :func:`_safe_ident` before quoting: ``role`` is free-form ``settings``
-    text with no length limit of its own, and a name over PostgreSQL's 63-byte NAMEDATALEN
-    would otherwise be silently truncated by PostgreSQL itself -- two distinct long role
-    names could collide onto the same truncated policy name with no error either at
-    generation or at ``migrate`` time. Shared with
-    :func:`guitars.management.enforcement.operations._related_rule_name`, which needs the
-    identical truncate-then-quote discipline for a different derived name.
-    """
+    """The exemption policy's identifier, quoted -- one function so CREATE and DROP can
+    never disagree about the spelling. Truncated via :func:`_safe_ident` before quoting:
+    two long role names could otherwise collide onto the same truncated policy name."""
     return _safe_ident(f'{EXEMPT_POLICY_PREFIX}{role}')
 
 
@@ -306,29 +191,13 @@ def drop_exempt_policy(table: str, role: str) -> str:
 
 
 def drop_all_exempt_policies(table: str) -> str:
-    """Drop every exemption policy on *table*, whatever roles it was created for.
-
-    :func:`drop_exempt_policy` can only drop a role it is told about, and the caller
-    replacing a policy knows the roles configured *now* -- not the ones configured when the
-    policy was written. A role removed from ``GUITARS_RLS_EXEMPT_ROLES`` would therefore
-    keep its ``USING (true)`` exemption forever, which is a cross-tenant read the settings
-    say was revoked.
-
-    Discovering them from ``pg_policy`` instead of a list is what makes
-    :func:`replace_table_rls` converge on the configured set rather than accumulate.
-    ``starts_with`` rather than ``LIKE``: the prefix ends in ``_``, which ``LIKE`` would
-    read as a single-character wildcard.
-    """
+    """Drop every exemption policy on *table*, whatever roles it was created for --
+    discovered from ``pg_policy``, not a list, so a role removed from
+    ``GUITARS_RLS_EXEMPT_ROLES`` doesn't keep a stale cross-tenant exemption forever."""
     table = _qualified_table(table)
-    # Suppressed below as DDL, not a query: *table* is proved bare per part above (the
-    # unqualified/bare-qualified shapes) or quoted by _qualified_table itself (Django's
-    # pre-quoted shape) -- either way it is not interpolated unescaped. It is spliced as a
-    # %s *argument* to format(), not into the format string itself, and quoted as a literal
-    # via _quote_literal for the regclass cast -- so neither an embedded single quote (which
-    # would otherwise terminate the surrounding SQL string literal early) nor an embedded
-    # '%' (which format() would otherwise try to read as its own directive) can corrupt the
-    # statement it builds. The policy names are read from the catalog and quoted by
-    # format(%I).
+    # Suppressed below as DDL: *table* is proved bare or quoted by _qualified_table above,
+    # spliced as a %s *argument* to format() and quoted via _quote_literal for the regclass
+    # cast -- so neither an embedded quote nor a literal '%' can corrupt the statement.
     return (  # noqa: S608
         'DO $$\n'  # nosec B608
         'DECLARE\n'
@@ -353,16 +222,9 @@ def disable_rls(table: str) -> str:
 
 
 def force_rls(table: str) -> str:
-    """Make the policy bind the table's owner too.
-
-    Not folded into :func:`enable_rls`, because the two are separable on purpose: the
-    application role owns its tables (it runs migrations), and **an owner bypasses
-    non-FORCE RLS silently** -- no error, no log, rows simply come back unfiltered. So
-    ``ENABLE`` alone is inert against the application, which is useful exactly once: as
-    the first stage of retrofitting policies onto a populated database.
-
-    Emitted by default. Rollback is ``NO FORCE`` -- seconds, not a migration rewrite.
-    """
+    """Make the policy bind the table's owner too -- separate from :func:`enable_rls` on
+    purpose, since an owner bypasses non-FORCE RLS silently (no error, no log). See
+    ADR-0002. Emitted by default; rollback is ``NO FORCE``, seconds not a migration rewrite."""
     return f'ALTER TABLE {_qualified_table(table)} FORCE ROW LEVEL SECURITY'
 
 
@@ -380,11 +242,8 @@ def create_table_rls(
     force: bool = True,
     exempt_roles: list[str] | None = None,
 ) -> list[str]:
-    """Everything one table needs: the policy, any exemptions, ENABLE, and FORCE.
-
-    *force* and *exempt_roles* arrive as literals written into the migration by the
-    generator, never read from settings here -- see the module docstring.
-    """
+    """Everything one table needs: the policy, any exemptions, ENABLE, and FORCE. *force*
+    and *exempt_roles* arrive as literals the generator resolved, never settings read here."""
     statements = [
         create_tenant_policy(table, columns, owner_table, owner_pk, child_pk, owner_columns)
     ]
@@ -405,20 +264,9 @@ def replace_table_rls(
     force: bool = True,
     exempt_roles: list[str] | None = None,
 ) -> list[str]:
-    """Redefine an existing table's policies in place, for a coverage shape that changed.
-
-    PostgreSQL has no ``CREATE OR REPLACE POLICY`` and no ``CREATE POLICY IF NOT EXISTS``, so
-    a table whose tenant dimensions, tenant column or exempt roles changed cannot simply be
-    re-``create_table_rls``'d -- that fails with "policy tenant_scope already exists". The
-    generator emits this instead once it sees a policy whose recorded shape no longer matches
-    the models.
-
-    ``ENABLE`` and ``FORCE`` are deliberately left alone rather than cycled: both are
-    idempotent ``ALTER TABLE``s that :func:`create_table_rls` re-issues below, and dropping
-    them would leave the table briefly unprotected for no gain. Only the policies are
-    replaced, so at no point in the transaction is the table enabled-but-unpolicied (which is
-    default-DENY) or policied-but-disabled (which is no protection at all).
-    """
+    """Redefine an existing table's policies in place: Postgres has no ``CREATE OR REPLACE
+    POLICY``, so a changed coverage shape can't simply re-``create_table_rls``. ``ENABLE``/
+    ``FORCE`` are left alone rather than cycled -- only the policies are ever unprotected."""
     return [
         drop_tenant_policy(table),
         drop_all_exempt_policies(table),
@@ -436,11 +284,8 @@ def replace_table_rls(
 
 
 def drop_table_rls(table: str, exempt_roles: list[str] | None = None) -> list[str]:
-    """Reverse of :func:`create_table_rls`, in teardown order.
-
-    ``NO FORCE`` before ``DISABLE`` so the table is never left forced-but-disabled, and the
-    policies are dropped last, once nothing is enforcing them.
-    """
+    """Reverse of :func:`create_table_rls`, in teardown order: ``NO FORCE`` before
+    ``DISABLE`` so the table is never forced-but-disabled; policies dropped last."""
     return [
         no_force_rls(table),
         disable_rls(table),

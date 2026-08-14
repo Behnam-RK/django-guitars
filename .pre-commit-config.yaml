@@ -69,3 +69,8 @@ repos:
         language: system
         types: [python]
         pass_filenames: false
+      - id: doc-budget
+        name: doc budget
+        entry: uv run python scripts/doc_budget.py
+        language: system
+        pass_filenames: false

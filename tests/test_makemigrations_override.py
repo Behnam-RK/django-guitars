@@ -1,26 +1,6 @@
-"""Tests for the ``makemigrations`` override that also runs guitar generation.
-
-All six tests here used to mock both the real ``makemigrations`` ``handle`` and the
-module's own ``call_command``, asserting only on call arguments -- every one of them would
-still pass if ``makeguitarmigrations`` became a same-named no-op, since nothing checked
-that a migration file actually appeared. These run the real command against a real
-throwaway app instead (``tests/makemigrations_override/``, no migrations checked in at
-all), and assert on what actually landed on disk.
-
-The app is added to ``INSTALLED_APPS`` here, inside the ``_scoped_app`` fixture, rather
-than in ``tests/settings.py`` -- it has no migrations checked in at all, and an app
-installed that way trips the *unscoped* ``makemigrations --check`` CI runs regardless of
-``LOCAL_APPS`` (Django's own schema check, not guitars' scoping, examines every installed
-app). Scoping the installation to these tests keeps it invisible to everything else.
-
-Every test here writes real files into ``tests/makemigrations_override/migrations/`` and
-diffs the directory listing against a "before" snapshot -- so two of these tests dispatched
-to different xdist workers at the same moment could see each other's files. ``pytestmark``
-pins the whole module to one worker (the same fix ``TestPgbouncerTransactionPooling`` in
-``test_concurrency.py`` uses for a differently-shaped shared resource); the scaffolding test
-in ``test_tenancy_internals.py::TestScaffolding`` shares this app and carries the same
-group name for the same reason.
-"""
+"""Tests for the ``makemigrations`` override that also runs guitar generation -- against a
+real throwaway app, asserting on disk output, not mocked ``call_command``. ``pytestmark``
+pins the module to one xdist worker since tests diff a real migrations-dir snapshot."""
 
 from __future__ import annotations
 
@@ -47,12 +27,8 @@ def _generated_files(migrations_dir: Path) -> set[Path]:
 @pytest.fixture
 def _scoped_app():
     """Installs the throwaway app for one test's duration and cleans up what it wrote.
-
-    ``override_settings`` runs as a context manager here, not a decorator, so its effect
-    (and the app becoming resolvable via ``apps.get_app_config``) is active before this
-    fixture -- and therefore the test body -- ever runs, and stays active through the
-    generated-files cleanup below it.
-    """
+    ``override_settings`` runs as a context manager, not a decorator, so it's active
+    before this fixture (and the test body) runs, and through cleanup below it."""
     with override_settings(
         INSTALLED_APPS=[*django_settings.INSTALLED_APPS, 'tests.makemigrations_override'],
         LOCAL_APPS=['tests.testapp', 'tests.makemigrations_override'],
@@ -99,15 +75,9 @@ def test_check_reports_needed_changes_for_both_layers_and_writes_nothing(_scoped
 
 @pytest.mark.django_db
 def test_check_reports_missing_enforcement_when_schema_is_already_current(_scoped_app):
-    """The schema and enforcement layers are checked independently: the schema layer can
-    already be up to date (nothing for Django's own --check to exit non-zero over) while
-    the enforcement layer is still missing, and --check must still fail in that case.
-
-    Regression test: step 2 used to gate on ``self.dry_run``, which Django's own handle()
-    forces to ``True`` whenever --check is passed (check implies dry-run for the schema
-    half) -- so this exact case exited 0 silently, printing "not checked because of
-    --dry-run" without ever running the enforcement check.
-    """
+    """Schema and enforcement check independently: schema can be current while enforcement
+    is missing, and --check must still fail. Regression: step 2 used to gate on
+    ``self.dry_run``, forced True by Django's handle() under --check, so this silently exited 0."""
     with override_settings(GUITARS_AUTO_MAKE_MIGRATIONS=False):
         call_command('makemigrations', APP_LABEL, stdout=StringIO())
 

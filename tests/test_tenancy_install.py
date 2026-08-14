@@ -1,16 +1,6 @@
-"""Activation, and the GUC names that are baked into generated SQL.
-
-``install()`` is reached two ways -- ``GuitarsConfig.ready()`` and ``tenanted_manager()`` --
-so it has to be genuinely idempotent rather than merely usually-called-once. A
-double-connected ``pre_save`` receiver would run the write guard twice per save, which is
-harmless today but would double-report in audit mode.
-
-The names are pinned because they are not just runtime strings: ``guitars.sql.policy``
-embeds them in ``CREATE POLICY`` statements that get written into migration files. Once a
-project has applied such a migration, changing a name here means the policies in its
-database read a session setting nothing publishes any more -- and a policy comparing
-against an unset GUC matches no rows, so the failure is a silent, total denial.
-"""
+"""Activation, and the GUC names baked into generated SQL. ``install()`` is reached two
+ways so must be genuinely idempotent. Names are pinned: ``guitars.sql.policy`` embeds them
+in ``CREATE POLICY`` migrations -- a rename means a deployed policy silently denies all."""
 
 import ast
 import subprocess
@@ -27,13 +17,9 @@ from guitars.tenancy.enforcement import _WRITE_GUARD_UID, _on_pre_save
 
 
 def _write_guard_receiver_count() -> int:
-    """How many times our ``pre_save`` receiver is connected.
-
-    Indexed rather than unpacked, because Django's receiver entries are
-    ``(lookup_key, receiver)`` on older versions and ``(lookup_key, receiver, is_async)``
-    on 5.0+ -- unpacking would pin this test to one Django. Receivers may be stored either
-    as a weakref or directly, so both are resolved.
-    """
+    """How many times our ``pre_save`` receiver is connected. Indexed, not unpacked --
+    Django's receiver entries gained a third element (``is_async``) on 5.0+, and receivers
+    may be stored as a weakref or directly, so both are resolved."""
     count = 0
     for entry in pre_save.receivers:
         receiver = entry[1]
@@ -107,12 +93,9 @@ class TestGucNames:
         assert names.VALUE_SEPARATOR == ','
 
     def test_the_bypass_key_cannot_collide_with_a_dimension_named_bypass(self):
-        """``tenant(bypass=...)`` must not be able to forge a bypass.
-
-        The in-Python reserved key is ``_bypass`` while the published GUC is
-        ``tenant.bypass``, so a dimension literally named ``bypass`` publishes to the same
-        GUC. Worth knowing about explicitly rather than discovering it as a leak.
-        """
+        """``tenant(bypass=...)`` must not be able to forge a bypass. The in-Python reserved
+        key is ``_bypass`` while the published GUC is ``tenant.bypass``, so a dimension
+        literally named ``bypass`` would otherwise publish to the same GUC."""
         from guitars.tenancy.scope import BYPASS
 
         assert BYPASS == '_bypass'
@@ -140,19 +123,11 @@ def test_gucs_module_imports_nothing_at_all():
 
 
 def test_gucs_lives_outside_the_tenancy_package():
-    """The other half, and the one that is easy to get wrong.
-
-    Being import-free is not sufficient. Importing a submodule executes its package's
-    ``__init__`` first, so while these names lived at ``guitars.tenancy.names`` every
-    generated migration's ``from guitars import sql`` pulled in the entire tenancy
-    runtime -- connection handling, a signal receiver and a ContextVar -- in order to read
-    four strings. Moving the module to the top level is what actually delivers the
-    property; this test is what stops it drifting back.
-    """
-    # A subprocess, not a sys.modules purge. Purging would make every later test file
-    # re-import guitars and get *different* class objects -- a second TenantScopeError,
-    # a re-registered signal receiver -- so the test would corrupt the session it runs in.
-    # A clean interpreter is the only honest way to observe a first import.
+    """Easy to get wrong: being import-free is not sufficient -- while these names lived
+    under ``guitars.tenancy``, importing a submodule ran its package ``__init__`` first,
+    pulling in the entire tenancy runtime to read four strings."""
+    # A subprocess, not a sys.modules purge: purging would make later tests re-import
+    # guitars and get *different* class objects, corrupting the session they run in.
     probe = (
         'import sys; from guitars import sql; '
         "print(','.join(sorted(m for m in sys.modules if m.startswith('guitars'))))"

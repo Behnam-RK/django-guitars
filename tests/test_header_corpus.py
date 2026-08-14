@@ -1,19 +1,6 @@
-"""Frozen-corpus guard for deriving ``_RE_*`` scanners from their ``HEADER_*`` templates.
-
-``HEADER_SCANNERS`` in ``test_enforcement_identity.py`` already proves each scanner reads
-back what its own template just emitted -- but that fixture is synthetic, one hand-typed
-example per kind. It cannot catch a derivation bug that only shows up against the messier,
-real header text a project actually accumulates over many releases (varying table names,
-multiple FKs between the same two tables, a policy that has been replaced, and so on).
-
-This test sources its fixture from ``tests/testapp/migrations/*.py`` instead: the project's
-own committed migration history. For every scanner, it pins the exact regex source that
-existed before any of them were mechanically derived from their ``HEADER_*`` template, and
-asserts the current (partly derived) scanner still matches that real corpus identically --
-same spans, same captured groups. A derivation that silently narrows or widens what a
-scanner recognises would otherwise only surface as a stale or duplicated migration in
-someone else's project.
-"""
+"""Frozen-corpus guard for deriving ``_RE_*`` scanners from their ``HEADER_*`` templates,
+sourcing real header text from ``tests/testapp/migrations/*.py`` and pinning the
+pre-derivation regex each scanner must still match identically."""
 
 import re
 from pathlib import Path
@@ -52,14 +39,9 @@ _BASELINE = {
 #: agreeing on zero matches is the whole assertion for it, not a weaker check.
 _EXPECTED_EMPTY = {'_RE_TENANT_FORCE'}
 
-#: ``_RE_TENANT_POLICY``'s own baseline still captures ``[POLICY:...]`` inline as a named
-#: group (that was the *other* half of commit 4's "3 need explicit handling" list); commit 5
-#: moved reading it out to a separate tail search (``_recorded_policy_identity``), the same
-#: mechanism ``[SQL:...]`` already used, so the two tokens are read the same way even though
-#: they mean different things. Comparing raw ``groupdict()`` here would fail for exactly the
-#: reason that move is safe: the *shape* of the match changed on purpose, the *identity
-#: value it recovers* did not -- so this scanner is checked by round-tripping the identity
-#: each mechanism recovers, not by diffing capture groups.
+#: ``_RE_TENANT_POLICY``'s baseline captures ``[POLICY:...]`` inline; current reads it via
+#: a tail search instead -- shape changed on purpose, so this is checked by round-tripping
+#: the recovered identity, not diffing capture groups.
 _IDENTITY_VIA_TAIL_SEARCH = {'_RE_TENANT_POLICY': identity_module._recorded_policy_identity}
 
 

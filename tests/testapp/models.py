@@ -13,12 +13,8 @@ from guitars.tenancy import tenanted_manager
 
 
 class Riff(TarModel):
-    """Basic helpers only (TarModel) — no timestamps, no soft deletion.
-
-    ``band`` is a CASCADE FK to a soft-deletable model from a model that is
-    itself NOT soft-deletable — exercises the plain (non-``_all_objects``)
-    hard-delete path for cascade children.
-    """
+    """Basic helpers only (TarModel), no timestamps or soft deletion -- ``band`` is a
+    CASCADE FK to a soft-deletable model, exercising the plain hard-delete path."""
 
     name = CharField(max_length=50)
     band = ForeignKey('Band', on_delete=CASCADE, null=True, blank=True, related_name='riffs')
@@ -42,13 +38,8 @@ class Genre(DutarModel):
 
 
 class WhisperMixin:
-    """A plain (non-model) mixin contributing a ``cached_property``.
-
-    Exists to prove refresh-driven invalidation reaches properties inherited from any
-    class in the MRO -- Python copies nothing down, so this property lives in the mixin's
-    ``__dict__`` while its cached value lands on the instance. Invisible to migrations:
-    ``ModelState`` records only model bases.
-    """
+    """A plain mixin contributing a ``cached_property`` -- proves refresh-driven
+    invalidation reaches properties inherited from anywhere in the MRO, not just the class."""
 
     @cached_property
     def whisper(self) -> str:
@@ -92,12 +83,8 @@ class Ensemble(SetarModel):
 
 
 class Orchestra(Ensemble):
-    """Single-level MTI child — its metadata columns live on the Ensemble table.
-
-    MTI children of a soft-deletable base must declare their own ``Meta`` so the parent's
-    partial ``_deleted_at`` index isn't re-declared against this table's non-local column
-    (Django ``models.E016``). An empty ``Meta`` is enough; the managers are still inherited.
-    """
+    """Single-level MTI child -- its own ``Meta`` (even empty) stops the parent's partial
+    ``_deleted_at`` index from re-declaring against this table's non-local column (E016)."""
 
     conductor = CharField(max_length=100)
 
@@ -118,19 +105,9 @@ class ChamberOrchestra(Orchestra):
 
 
 class Merch(SetarModel):
-    """Reachable from ``Album`` by two independent CASCADE relations -- ``album`` and
-    ``bonus_album`` -- so hard-deleting the shared root (``Band``) makes the
-    instance-level hard_delete's DFS (``_collect`` in ``soft_deletion.py``) visit this
-    model twice, each time with a different new pk. That is the only way to exercise
-    its "already queued, don't re-append" branch: every other relation in this app
-    converges on a model at most once.
-
-    Both FKs deliberately target ``Album`` (soft-deletable), not ``Riff``: ``Riff`` has
-    no soft-delete rule, so Phase 1's cascade (Django's own Collector, which walks the
-    *entire* graph and does not know about rules) would physically remove the ``Riff``
-    row while a live ``Merch`` row still pointed at it -- a real FK violation, not the
-    branch this model exists to exercise.
-    """
+    """Two independent CASCADE FKs to ``Album``, so hard-deleting the shared root makes
+    the DFS in ``soft_deletion._collect`` visit this model twice -- the "already queued"
+    branch. Not ``Riff``: its rule-less Collector cascade would orphan a live row."""
 
     description = CharField(max_length=100)
     album = ForeignKey(Album, on_delete=CASCADE, null=True, blank=True, related_name='merch')
@@ -143,10 +120,8 @@ class Merch(SetarModel):
 
 
 class Section(SetarModel):
-    """Soft-deletable model with a CASCADE FK to an MTI child (the FK target).
-
-    Exercises that the cascade soft-delete rule lands on the owner (Ensemble) table.
-    """
+    """Soft-deletable, CASCADE FK to an MTI child -- exercises the cascade rule landing
+    on the owner (Ensemble) table, not the child."""
 
     name = CharField(max_length=100)
     orchestra = ForeignKey(Orchestra, on_delete=CASCADE, related_name='sections')
@@ -155,28 +130,13 @@ class Section(SetarModel):
         return self.name
 
 
-# ─────────────────────────────── tenancy ─────────────────────────────── #
-#
-# `tests/settings.py` sets GUITARS_TENANT_MODEL = 'testapp.Label' and
-# GUITARS_TENANT_FIELD = 'label'. The field name is deliberately NOT the default
-# 'tenant': it has to name the column, the reverse accessor, the `tenant.label` session
-# setting, the policy predicate and the scope dimension, and only a non-default value
-# proves all five moved together. The default name is covered by the subprocess probes in
-# `tests/test_ladder.py`.
-#
-# The models above stay untenanted on purpose. A project adopting tenancy does so model by
-# model, and the two kinds have to coexist -- an untenanted model must not start demanding
-# a scope, and a tenanted one must not stop.
+# ─── tenancy: GUITARS_TENANT_FIELD = 'label', not the default 'tenant' -- only a
+# non-default value proves the column, GUC, predicate, and dimension moved together. ───
 
 
 class Label(SetarModel):
-    """The tenant. Soft-deletable on purpose, which is the more demanding shape.
-
-    A CASCADE tenant FK means `makeguitarmigrations` writes one cascade soft-delete rule
-    onto *this* table per tenanted model, so soft-deleting a label archives its rows. That
-    interacts with row-level security in a way worth having under test rather than in a
-    docstring: see `tests/test_tenancy_models.py`.
-    """
+    """The tenant, soft-deletable on purpose (the more demanding shape) -- a CASCADE
+    tenant FK means soft-deleting a label archives its rows. See test_tenancy_models.py."""
 
     name = CharField(max_length=100)
 
@@ -194,11 +154,8 @@ class Release(GuitarModel):
 
 
 class Track(GuitarModel):
-    """Tenanted, with a CASCADE FK to another tenanted model.
-
-    Two rules meet on this table -- the cascade soft-delete from `Release` and its own
-    tenant policy -- so it covers a `DO ALSO` rule firing under `FORCE ROW LEVEL SECURITY`.
-    """
+    """Tenanted, CASCADE FK to another tenanted model -- two rules meet here: the cascade
+    soft-delete from Release and its own tenant policy, under FORCE ROW LEVEL SECURITY."""
 
     title = CharField(max_length=100)
     release = ForeignKey(Release, on_delete=CASCADE, related_name='tracks')
@@ -226,11 +183,8 @@ class WorldTour(Tour):
 
 
 class StadiumTour(WorldTour):
-    """Second MTI level: the tenant column is *two* tables up.
-
-    The case `column_owner` exists for -- predicating the owner-join against the immediate
-    parent would reference a table that has no tenant column either.
-    """
+    """Second MTI level: the tenant column is *two* tables up -- the case ``column_owner``
+    exists for, since the immediate parent has no tenant column either."""
 
     capacity = IntegerField(default=0)
 
@@ -239,15 +193,9 @@ class StadiumTour(WorldTour):
 
 
 class Booking(SetarModel):
-    """Hand-declared `tenanted_manager()` over `LiveManager`, tenant FK declared by hand.
-
-    The composition path a project takes when it wants scoping without the `GuitarModel`
-    rung -- a tenant FK it declares itself (so `editable=False` and the templated
-    `related_name` are its own choice, not the rung's) and `GUITARS_TENANT_AUTOFILL`
-    honoured rather than overridden. Only `objects` is scoped, so `_archives` and
-    `_all_objects` stay unscoped here: that asymmetry is the point, and it is what
-    `GuitarModel` exists to stop you having to get right.
-    """
+    """Hand-declared ``tenanted_manager()`` over ``LiveManager``, tenant FK declared by
+    hand -- only ``objects`` is scoped; ``GuitarModel`` exists so nobody has to get
+    that asymmetry right themselves."""
 
     venue = CharField(max_length=100)
     label = ForeignKey(Label, on_delete=CASCADE, related_name='bookings')
@@ -259,12 +207,8 @@ class Booking(SetarModel):
 
 
 class Review(SetarModel):
-    """A multi-hop dimension: scoped through a relation, with no local tenant column.
-
-    Python scoping applies; a row-level-security policy cannot, because there is nothing on
-    this table to predicate on. `makeguitarmigrations` and `audittenancy` must both say so
-    out loud instead of skipping it silently.
-    """
+    """A multi-hop dimension: scoped through a relation, no local tenant column -- Python
+    scoping applies, RLS cannot, and both generators must say so out loud."""
 
     body = CharField(max_length=200)
     release = ForeignKey(Release, on_delete=CASCADE, related_name='reviews')
@@ -276,12 +220,8 @@ class Review(SetarModel):
 
 
 # ─────────────────────── a dimension on every rung ─────────────────────── #
-#
-# Three-level MTI chain built solely to give `discovery._classify` a model whose tenant
-# dimensions are split across *two different* ancestors while it also has one on its own
-# table -- the only combination that exercises the "an own-table dimension survives a
-# multi-ancestor conflict" branch. Every other tenanted model here has all its dimensions
-# on one table (or none).
+# Three-level MTI chain giving `_classify` a model with dimensions split across two
+# ancestors *and* one on its own table -- the only combination exercising that branch.
 
 
 class Festival(SetarModel):
@@ -295,8 +235,7 @@ class Festival(SetarModel):
 
 
 class TouringFestival(Festival):
-    """First MTI level: the `promoter` dimension's column lives here, one table up
-    from the eventual leaf."""
+    """First MTI level: ``promoter``'s column lives here, one table up from the leaf."""
 
     promoter = ForeignKey(Label, on_delete=CASCADE, related_name='touring_festivals')
 
@@ -305,10 +244,8 @@ class TouringFestival(Festival):
 
 
 class HeadlineFestival(TouringFestival):
-    """Leaf: `sponsor` is own-table, `market` and `promoter` are each owned by a
-    *different* ancestor (`Festival` and `TouringFestival`) -- the diamond `_classify`
-    has nothing else to trigger it with.
-    """
+    """Leaf: ``sponsor`` is own-table, ``market``/``promoter`` are each owned by a
+    *different* ancestor -- the only shape that triggers ``_classify``'s diamond case."""
 
     sponsor = ForeignKey(Label, on_delete=CASCADE, related_name='headline_festivals')
 

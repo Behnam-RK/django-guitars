@@ -103,14 +103,9 @@ def test_update_raises_when_save_all_fields_is_meaningless_without_save():
 
 @pytest.mark.django_db(transaction=True)
 def test_update_with_no_scalar_fields_writes_nothing():
-    """A bare, argument-less update() must not become a full-row rewrite.
-
-    ``_prepare_update`` used to collapse an empty ``updating_fields`` set to
-    ``update_fields=None`` (truthiness), which Django reads as "save every field" --
-    the opposite of the docstring's promise that only the passed attrs are written.
-    ``_updated_at``'s trigger is the observable proof: a real UPDATE bumps it, an
-    empty one (Django short-circuits before issuing any SQL) must not.
-    """
+    """A bare, argument-less update() must not become a full-row rewrite --
+    ``_prepare_update`` used to collapse empty ``updating_fields`` to ``update_fields=None``,
+    which Django reads as "save every field". ``_updated_at`` is the observable proof."""
     band = Band.objects.create(name='Rush')
     band.refresh_from_db()
     before = band._updated_at
@@ -138,14 +133,9 @@ def test_update_m2m_only_writes_no_scalar_column():
 
 @pytest.mark.django_db
 def test_updatable_fields_skips_columnless_relations(monkeypatch):
-    """``_updatable_fields`` must record a columnless relation's *name* without also
-    adding a phantom column for it.
-
-    The guard's own comment says it exists for relations with no column, but nothing in
-    the test app actually produces one: even the M2M ``genres`` reports a truthy
-    ``column`` (Django falls back to the field's ``attname``). Rather than reshape the
-    schema chasing a case real relations don't produce here, this synthesizes one.
-    """
+    """``_updatable_fields`` must record a columnless relation's *name* without adding a
+    phantom column. Nothing in the test app produces one naturally (even M2M ``genres``
+    reports a truthy ``column``), so this synthesizes one instead of reshaping the schema."""
     band = Band.objects.create(name='Rush')
     real_get_fields = type(band)._meta._get_fields
     phantom = types.SimpleNamespace(name='phantom_relation')  # deliberately no `.column`
@@ -194,16 +184,8 @@ def test_update_m2m_without_save_raises_before_mutating_scalar_fields():
 @pytest.mark.django_db
 def test_update_disable_signals_only_narrows_to_save_signals(monkeypatch):
     """``_disable_signals=True`` must disable exactly pre_save/post_save, not the other
-    six DEFAULT_SIGNALS -- a bare ``DisableSignals()`` would also suppress
-    pre_migrate/post_migrate/pre_init/post_init/pre_delete/post_delete for the
-    duration of the call, which is scope creep for a save path.
-
-    ``DisableSignals.__exit__`` always restores fully before ``update()`` returns in
-    the single-threaded case, so a black-box check of ``pre_migrate.receivers`` before
-    and after the call cannot tell the eight-signal default apart from the narrowed
-    pair -- both leave it intact by the time control returns. What actually differs is
-    the ``signals=`` argument passed for the call's duration, so that is what this pins.
-    """
+    six DEFAULT_SIGNALS. ``__exit__`` always restores fully by return, so a black-box
+    before/after check can't tell them apart; this pins the ``signals=`` argument instead."""
     import guitars.signals as signals_module
 
     captured = {}

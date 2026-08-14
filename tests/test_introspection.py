@@ -1,13 +1,6 @@
-"""Direct tests for guitars.introspection's extracted, standalone helpers.
-
-Most of introspection.py's coverage comes from the consumers that actually depend on
-getting it right -- test_schema_qualified.py (column_owner/owns_column, via the
-enforcement generator) and test_mti.py/test_tenancy_edges.py (is_mti_child, via
-makeguitarmigrations and the RLS policy generator). ``mti_root`` is different: it was
-extracted from two duplicated inline walks in guitars/models/soft_deletion.py (M5, #12)
-with no consumer-level test of its own, so it gets one directly here -- none of these
-touch the database, since walking ``_meta.parents`` needs no connection.
-"""
+"""Direct tests for guitars.introspection's extracted, standalone helpers. Most coverage
+comes from consumers that depend on getting it right; ``mti_root`` has none, since it was
+extracted from two duplicated inline walks (M5, #12), so it gets one directly here."""
 
 from guitars.introspection import mti_root
 from tests.testapp.models import Festival, HeadlineFestival, Riff, TouringFestival

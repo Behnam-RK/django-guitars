@@ -1,14 +1,6 @@
-"""The incremental-upgrade case: an MTI child added to an already-migrated, already-current app.
-
-``tests/mti_incremental/``'s ``Ancestor`` is fully migrated and enforced from the start
-(``0002_auto_enforcement.py`` is real, current-generator output). ``Descendant``
-(``0003_descendant.py``, checked in) is what a real project's history looks like one commit
-after adding an MTI child and running plain ``makemigrations`` -- schema only, before anyone
-runs ``makeguitarmigrations`` again. This is the test that would catch a regression where
-the generator's per-table scan mistakes "this app has an enforcement migration" for "this
-app is fully covered": only the new child should be reported missing and generated, and
-nothing about ``Ancestor``'s already-current coverage should be touched or re-emitted.
-"""
+"""The incremental-upgrade case: an MTI child added to an already-current app. ``Ancestor``
+is fully enforced; ``Descendant`` is schema-only, before ``makeguitarmigrations`` re-runs.
+Catches a scan mistaking "has an enforcement migration" for "fully covered"."""
 
 from __future__ import annotations
 

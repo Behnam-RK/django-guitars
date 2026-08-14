@@ -1,9 +1,5 @@
-"""Shared fixtures for the tenancy tests.
-
-Two tenants, always. A single-tenant fixture cannot tell "the scope works" from "there was
-only ever one tenant's data", which is the failure mode that matters: every assertion here
-is really about the rows the caller must *not* see.
-"""
+"""Shared fixtures for the tenancy tests. Two tenants, always -- a single-tenant fixture
+can't tell "the scope works" from "there was only ever one tenant's data"."""
 
 from __future__ import annotations
 
@@ -19,19 +15,9 @@ from tests.testapp.models import Booking, Label, Release, StadiumTour, Track
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """test_ladder.py runs some probes in a subprocess (see its module docstring for why).
-
-    Setting COVERAGE_PROCESS_START before those subprocesses spawn makes coverage.py's own
-    site-packages shim (installed by the `coverage` package itself, not something added
-    here) start tracking inside each one; [tool.coverage.run] parallel=true is what then
-    lets pytest-cov combine that data with the main process's at session end. Gated on
-    ``--cov`` actually being passed (pytest-cov's own ``cov_source`` option) -- otherwise a
-    plain ``pytest`` invocation still spawns coverage.py inside every subprocess and leaves
-    a stray ``.coverage.<host>.pid<N>...`` file per probe, despite nothing on the command
-    line asking for coverage at all. ``pytest_configure`` runs once per process (main and
-    each xdist worker alike) and well before collection reaches any subprocess-spawning
-    test, so the timing guarantee the env var needs still holds.
-    """
+    """Sets COVERAGE_PROCESS_START before test_ladder.py's subprocess probes spawn, so
+    coverage.py's own site-packages shim tracks inside them too -- gated on ``--cov``
+    actually being passed, or a plain run leaves stray ``.coverage.<host>.pid<N>`` files."""
     if config.getoption('cov_source', default=None):
         os.environ.setdefault(
             'COVERAGE_PROCESS_START', str(Path(__file__).resolve().parent.parent / 'pyproject.toml')
@@ -53,14 +39,9 @@ class Tenants(NamedTuple):
 
 @pytest.fixture
 def tenants(db) -> Tenants:
-    """Seed two tenants' worth of rows.
-
-    The labels are created under ``tenancy_bypassed()`` because ``Label`` is the tenant
-    model itself and is not tenanted -- but the rows *below* it are created inside a real
-    ``tenant(...)`` scope, so the fixture also exercises autofill on the way in. Seeding
-    through the bypass instead would leave every test resting on data that never passed the
-    write guard.
-    """
+    """Seed two tenants' worth of rows. Labels are created under ``tenancy_bypassed()`` since
+    ``Label`` is the tenant model itself, but rows below it go through a real ``tenant(...)``
+    scope, so the fixture also exercises autofill on the way in."""
     with tenancy_bypassed():
         a = Label.objects.create(name='Aardvark Records')
         b = Label.objects.create(name='Basilisk Sound')
@@ -80,12 +61,9 @@ def tenants(db) -> Tenants:
 
 @pytest.fixture
 def bookings(tenants) -> tuple[Booking, Booking]:
-    """One ``Booking`` per tenant -- the hand-declared ``tenanted_manager()`` model.
-
-    Created through the bypass on purpose: ``Booking`` leaves ``GUITARS_TENANT_AUTOFILL``
-    at its default of ``False``, so an unscoped create is the honest way to seed it and the
-    tests that care about the guard say so themselves.
-    """
+    """One ``Booking`` per tenant, the hand-declared ``tenanted_manager()`` model. Created
+    through the bypass since ``Booking`` leaves ``GUITARS_TENANT_AUTOFILL`` at its default
+    ``False``, so an unscoped create is the honest way to seed it."""
     with tenancy_bypassed():
         return (
             Booking.objects.create(venue='Aardvark Arena', label=tenants.a),
@@ -94,21 +72,14 @@ def bookings(tenants) -> tuple[Booking, Booking]:
 
 
 # ─────────────────────────────── raw-cursor helpers ─────────────────────────────── #
-#
-# Several modules assert against the database directly rather than through the ORM --
-# the whole point of a raw DDL probe or a `pg_policies` check is that no Django manager
-# sits between the assertion and the row. That need was previously met by copy-pasted
-# `with connection.cursor() as cursor: ...` blocks in seven files (independently
-# redefined in two of them). One definition here, imported everywhere.
+# Several modules assert against the database directly (no Django manager between the
+# assertion and the row). One definition here instead of copy-pasted cursor blocks.
 
 
 def execute(*statements: str, params: list | None = None) -> None:
-    """Run one or more raw SQL statements against the default connection, ignoring results.
-
-    ``params`` binds placeholders and is only valid together with a single statement --
-    it exists for the rare write (e.g. a parametrized ``INSERT`` with no ``RETURNING``)
-    that would otherwise need its own ad hoc cursor block.
-    """
+    """Run one or more raw SQL statements, ignoring results. ``params`` binds placeholders
+    and is only valid with a single statement -- for the rare parametrized write that would
+    otherwise need its own ad hoc cursor block."""
     with connection.cursor() as cursor:
         if params is not None:
             if len(statements) != 1:
@@ -136,9 +107,6 @@ def rows(query: str, params: list | None = None) -> list:
 
 @pytest.fixture
 def _execute(db):
-    """Fixture form of :func:`execute`, for call sites written as ``_execute(stmt)``.
-
-    Depends on ``db`` explicitly so a module that only ever injects this fixture (and
-    never ``db`` itself) still gets a migrated test database before its first statement.
-    """
+    """Fixture form of :func:`execute`. Depends on ``db`` explicitly so a module that only
+    injects this fixture still gets a migrated test database first."""
     return execute

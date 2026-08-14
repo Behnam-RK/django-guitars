@@ -1,24 +1,6 @@
-"""The operation identity layer: inlined SQL, ``[SQL:...]`` headers, and ``--adopt``.
-
-Three things are tested here that the rest of the suite cannot see, because each of them is
-about a *silent* failure -- a generator that emits nothing while reporting success:
-
-* A change to a SQL constant must produce a migration. Before the header carried a content
-  digest it could not: the per-table ``_RE_*`` scan reported the table covered, so no
-  operation was built and the file-level ``[DIGEST:...]`` was never reached. That is how the
-  1.0.0 soft-delete guard rewrite reached every existing database as a no-op.
-* The comment headers the scan keys on must agree with the templates that emit them. Most
-  scanners are now mechanically derived from their template (see ``_derive_scanner``); the
-  handful that resist derivation -- because they fuse two header forms, or must not capture
-  one of their own placeholders -- are still hand-written, each with its own reason
-  commented at the definition. ``CLAUDE.md`` and ``docs/migrations.md`` both once claimed
-  ``tests/test_sql_interface.py`` guarded this, and it never did; ``test_header_corpus.py``
-  now does, against the project's own committed migration history.
-* ``IF EXISTS`` and ``OR REPLACE`` must appear only where the generator genuinely does not
-  know what the database holds, which is under ``--adopt`` and nowhere else. Used on a path
-  where the answer is known they turn "your database has diverged from its migration
-  history" into silence.
-"""
+"""The operation identity layer: inlined SQL, ``[SQL:...]`` headers, and ``--adopt`` --
+silent-failure modes the rest of the suite can't see: a SQL edit shipping no migration, a
+header/scanner drift, and ``IF EXISTS``/``OR REPLACE`` where knowledge isn't uncertain."""
 
 from io import StringIO
 from pathlib import Path
@@ -41,10 +23,8 @@ from .test_command import _command_with_scaffold, _unforced_policy_tables
 # ---------------------------------------------------------------------------
 
 #: ``(header template, scanner, placeholder values)`` for every kind of enforcement
-#: operation. Most scanners are derived from their template and cannot drift from it by
-#: construction; this table is what proves the round trip for all nine anyway, including
-#: the hand-written ones, where nothing else stops emitter and scanner drifting apart -- a
-#: drift invisible until a consuming project's next run silently duplicates an operation.
+#: operation -- proves the round trip for all nine, including the hand-written scanners
+#: where nothing else stops emitter and scanner drifting apart.
 HEADER_SCANNERS = [
     (headers_module.HEADER_TRIGGER_FUNCTION, headers_module._RE_TRIGGER_FUNCTION, {}),
     (headers_module.HEADER_PARENT_TRIGGER_FUNCTION, headers_module._RE_PARENT_TRIGGER_FUNCTION, {}),
@@ -90,13 +70,9 @@ HEADER_SCANNERS = [
     ids=lambda v: v if isinstance(v, str) else '',
 )
 def test_every_emitted_header_is_matched_by_its_scanner(template, scanner, values):
-    """The round trip the docs have always promised and no test performed.
-
-    Reword a header without rewording its regex and every already-committed migration stops
-    being recognised: the next run emits a duplicate of every operation the project already
-    has. The failure is at ``migrate`` time in someone else's repository, which is why it
-    has to be caught here.
-    """
+    """Reword a header without rewording its regex and every already-committed migration
+    stops being recognised, duplicating on the next run -- caught here, not at someone
+    else's ``migrate``."""
     source, digest = identity_module._operation(template.format(**values), 'SELECT 1', 'SELECT 2')
     header = source.splitlines()[0]
 
@@ -117,12 +93,8 @@ def test_the_header_table_lists_every_header_the_module_defines():
 
 
 def test_the_force_header_cannot_be_read_as_a_policy_header():
-    """A documented invariant of the header vocabulary, not an accident of the strings.
-
-    The FORCE header carries an extra token before "RLS". If it ever matched the policy
-    scanner, a table would read as policied on the strength of a migration that only forces
-    row-level security -- an ``ALTER TABLE`` with no predicate behind it.
-    """
+    """If the FORCE header ever matched the policy scanner, a table would read as
+    policied on the strength of an ``ALTER TABLE`` with no predicate behind it."""
     force = headers_module.HEADER_TENANT_FORCE.format(table='shop_order')
     assert headers_module._RE_TENANT_POLICY.search(force) is None
     assert headers_module._RE_TENANT_FORCE.search(force) is not None
@@ -137,13 +109,8 @@ def test_the_two_function_headers_cannot_be_read_as_each_other():
 
 
 def test_a_header_without_the_sql_token_reads_as_stale_not_covered():
-    """The upgrade path, in one assertion.
-
-    Every migration written before the SQL was inlined carries a recognised header and no
-    ``[SQL:...]``. Reading that as covered is exactly the bug: it is how the 1.0.0
-    soft-delete guard rewrite -- which turned a rolled-back ``hard_delete()`` into permanent
-    deletes -- reached every existing database as nothing at all.
-    """
+    """The upgrade path, in one assertion: reading a recognised-but-tokenless header as
+    covered is exactly the bug the 1.0.0 soft-delete guard rewrite shipped as a no-op."""
     legacy = '# Soft Delete Rule on "shop_order" table!'
     match = headers_module._RE_SOFT_DELETE.search(legacy)
 
@@ -157,13 +124,8 @@ def test_a_header_without_the_sql_token_reads_as_stale_not_covered():
 
 
 def test_generated_operations_carry_sql_rather_than_naming_it():
-    """The whole reason a SQL change used to ship nothing.
-
-    ``from guitars import sql`` in a migration makes the file's meaning a function of the
-    installed version: a fresh ``migrate`` and an incrementally-migrated database end up
-    differing while sharing an identical history. It also put the SQL out of reach of every
-    digest, since the source named the constant instead of containing it.
-    """
+    """``from guitars import sql`` makes a migration's meaning a function of the installed
+    version, and put the SQL out of reach of every digest -- see ADR-0006."""
     source, _ = identity_module._operation(
         '# Soft Delete Rule on "shop_order" table!',
         sql.CREATE_SOFT_DELETE_RULE.format(table='shop_order', primary_key='id'),
@@ -186,12 +148,8 @@ def test_a_changed_sql_constant_changes_the_operation_digest():
 
 
 def test_the_digest_ignores_which_form_is_emitted():
-    """A create and its replacement describe the same definition, so they digest the same.
-
-    Keying the digest to the emitted form instead makes successive runs disagree forever: a
-    fresh database records the create form's digest, the next run builds the replace form to
-    compare against it, the two differ, and a replacement migration is written every run.
-    """
+    """A create and its replacement describe the same definition, so they digest the
+    same -- keying to the emitted form instead would make every run disagree forever."""
     _, created = identity_module._operation('# h!', 'CREATE TRIGGER t ...', 'DROP TRIGGER t')
     replaced_source, replaced = identity_module._operation(
         '# h!', 'CREATE TRIGGER t ...', 'DROP TRIGGER t', emit='DROP TRIGGER t; CREATE TRIGGER t'
@@ -202,12 +160,8 @@ def test_the_digest_ignores_which_form_is_emitted():
 
 
 def test_sql_that_cannot_be_triple_quoted_falls_back_to_repr():
-    """Readability is the default, validity is not negotiable.
-
-    A trailing double quote would run into the closing delimiter and an embedded triple
-    quote would close it early -- either way the generated migration is a syntax error that
-    only shows up in someone else's repository.
-    """
+    """Readability is the default, validity is not negotiable -- a trailing double quote
+    or embedded triple quote would otherwise close the delimiter early."""
     assert identity_module._sql_string_literal('SELECT 1') == '"""SELECT 1"""'
     for hostile in ('SELECT """x"""', 'SELECT "col"', "SELECT E'\\n'"):
         rendered = identity_module._sql_string_literal(hostile)
@@ -236,12 +190,8 @@ def _emit(command, recorded, key='shop_order', *, is_adopt=False):
 
 
 def test_nothing_recorded_emits_the_plain_create_form():
-    """A first definition must collide loudly.
-
-    ``set_updated_at()`` is an unqualified name in the public schema. If the create form
-    carried ``OR REPLACE``, guitars would silently clobber another extension's function of
-    the same name and the breakage would surface at runtime, somewhere else, much later.
-    """
+    """A first definition must collide loudly -- if the create form carried OR REPLACE,
+    guitars would silently clobber another extension's function of the same name."""
     (operation,) = _emit(Command(), {})
 
     assert 'IF EXISTS' not in operation
@@ -262,11 +212,8 @@ def test_a_current_recorded_digest_emits_nothing():
 
 @pytest.mark.parametrize('recorded', [None, 'stale0000'], ids=['legacy-header', 'changed-sql'])
 def test_a_stale_record_emits_the_replace_form_without_if_exists(recorded):
-    """The object is known to be ours, so the drop is unguarded.
-
-    ``IF EXISTS`` here would swallow the one thing worth hearing about: a database that no
-    longer matches the migration history that supposedly built it.
-    """
+    """The object is known to be ours, so the drop is unguarded -- IF EXISTS here would
+    swallow the one thing worth hearing about: a diverged database."""
     (operation,) = _emit(Command(), {'shop_order': recorded})
 
     assert 'DROP TRIGGER updated_at_trigger ON shop_order; CREATE' in operation
@@ -300,14 +247,8 @@ def test_adopt_re_emits_even_a_record_that_is_already_current():
 
 
 def test_adopt_emits_the_replacement_policy_form():
-    """The gap this flag was added to close.
-
-    ``create_tenant_policy`` is a bare ``CREATE POLICY`` -- PostgreSQL has no
-    ``CREATE POLICY IF NOT EXISTS`` -- so a database whose policy exists but was never
-    recorded here had no supported route in at all: the generator saw no ``[POLICY:...]``
-    header, emitted the CREATE form, and ``migrate`` failed with "policy tenant_scope
-    already exists".
-    """
+    """A database whose policy exists but was never recorded had no route in: Postgres
+    has no CREATE POLICY IF NOT EXISTS, so migrate failed with "already exists"."""
     command = Command()
     command.stdout = StringIO()
 
@@ -322,12 +263,8 @@ def test_adopt_emits_the_replacement_policy_form():
 
 
 def test_a_changed_policy_sql_emits_a_replacement_even_when_the_identity_is_unchanged():
-    """Two independent reasons to replace, and the identity cannot see the second.
-
-    ``[POLICY:...]`` covers what the policy *says*, with ``force`` deliberately excluded so
-    that flipping ``GUITARS_RLS_FORCE`` cannot defeat the staged ``--force-rls`` retrofit.
-    That leaves a change to the policy SQL itself invisible to it.
-    """
+    """Two independent reasons to replace: ``[POLICY:...]`` covers what the policy
+    *says* (``force`` excluded), leaving a change to the SQL itself invisible to it."""
     app = django_apps.get_app_config('testapp')
     table = 'testapp_release'
     command = Command()
@@ -355,12 +292,8 @@ def test_a_changed_policy_sql_emits_a_replacement_even_when_the_identity_is_unch
 
 
 def test_a_changed_function_body_emits_a_replacement_migration(monkeypatch, tmp_path):
-    """These are singletons by *existence*, which is why an edited body shipped nothing.
-
-    The first thing the ensure methods did was return early on "a migration mentioning this
-    function exists somewhere". Comparing the recorded digest as well is what turns an edit
-    into a migration.
-    """
+    """Singletons by *existence*, which is why an edited body once shipped nothing --
+    comparing the recorded digest too is what turns an edit into a migration."""
     command, _, filename = _command_with_scaffold(monkeypatch, tmp_path)
     command.trigger_function_dependency = ('testapp', '0001_pretend')
     command.trigger_function_sql = 'stale0000'
@@ -385,15 +318,8 @@ def test_check_reports_a_changed_function_body_rather_than_passing(monkeypatch, 
 
 
 def test_adopt_emits_or_replace_for_a_function_with_nothing_recorded(monkeypatch, tmp_path):
-    """The gap ``--adopt`` exists to close, for a function rather than a trigger or policy.
-
-    A function with no recorded migration at all -- not even a stale one -- is exactly the
-    database ``--adopt`` is for: created by hand, or by a generator whose headers this one
-    cannot read. A plain ``CREATE FUNCTION`` there fails migrate with "function already
-    exists". There is no separate adopt form for a function, because ``OR REPLACE`` is
-    already correct whether or not it exists -- so ``--adopt`` must select it even though
-    nothing is recorded, which is the one case the create/replace choice used to get wrong.
-    """
+    """A function with nothing recorded at all is exactly what ``--adopt`` is for -- a
+    plain CREATE FUNCTION there fails migrate, so OR REPLACE must be selected regardless."""
     command, _, filename = _command_with_scaffold(monkeypatch, tmp_path)
     command.trigger_function_dependency = None
     command.trigger_function_sql = None
@@ -410,22 +336,15 @@ def test_adopt_emits_or_replace_for_a_function_with_nothing_recorded(monkeypatch
 
 
 def test_adopt_and_force_rls_cannot_be_combined():
-    """They contradict each other, and the failure would otherwise be a quiet no-op.
-
-    ``--force-rls`` acts only on tables whose policies this command already recorded;
-    ``--adopt`` exists precisely because that record is missing.
-    """
+    """They contradict: ``--force-rls`` acts only on already-recorded policies;
+    ``--adopt`` exists precisely because that record is missing."""
     with pytest.raises(CommandError, match='cannot be combined'):
         call_command('makeguitarmigrations', '--adopt', '--force-rls', stdout=StringIO())
 
 
 def test_the_generated_migrations_import_nothing_from_the_kit():
-    """Every enforcement migration written since inlining must stand on its own.
-
-    A migration that does ``from guitars import sql`` is a migration whose meaning changes
-    when the package is upgraded -- and the ones already committed here, from before the
-    change, are what the upgrade path has to keep recognising.
-    """
+    """Every migration written since inlining must stand on its own -- one doing ``from
+    guitars import sql`` changes meaning when the package is upgraded."""
     migrations = sorted((Path(__file__).parent / 'testapp' / 'migrations').glob('0*.py'))
     inlined = [path for path in migrations if headers_module._RE_SQL_IDENTITY.search(path.read_text())]
 
@@ -451,12 +370,8 @@ def test_the_scan_recovers_the_most_recent_digest_across_files():
 
 
 def test_unforced_policy_tables_reads_the_inlined_form():
-    """``force`` is no longer a keyword in the migration, so it is read off the SQL.
-
-    The lookbehind is not optional: every policy operation's ``reverse_sql`` carries
-    ``NO FORCE ROW LEVEL SECURITY`` in the same slice of text, and without it every table
-    reads as forced and ``--force-rls`` has nothing left to do.
-    """
+    """``force`` isn't a keyword anymore, so it's read off the SQL -- the lookbehind isn't
+    optional, or every ``reverse_sql``'s NO FORCE text would read every table as forced."""
     forced = (
         '# Tenant RLS on "a" table! [POLICY:aaaaaaaaaaaa] [SQL:1111]\n'
         'migrations.RunSQL(sql=["""ALTER TABLE a ENABLE ROW LEVEL SECURITY""",'
@@ -471,11 +386,8 @@ def test_unforced_policy_tables_reads_the_inlined_form():
 
 
 def test_unforced_policy_tables_still_reads_the_legacy_keyword_form():
-    """Migrations written before inlining record the decision as a keyword argument.
-
-    Reading only the SQL form would make every one of them look unforced and put
-    already-forced tables back on the FORCE backlog.
-    """
+    """Pre-inlining migrations record the decision as a keyword argument -- reading only
+    the SQL form would put already-forced tables back on the backlog."""
     legacy = (
         '# Tenant RLS on "a" table! [POLICY:aaaaaaaaaaaa]\n'
         'migrations.RunSQL(sql=sql.create_table_rls(table=\'a\', force=True)),\n'

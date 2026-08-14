@@ -1,15 +1,6 @@
-"""The last uncovered branches: defensive guards, async twins, and vendor checks.
-
-Most of these are reached only by calling an internal directly. That is deliberate and
-narrow: each one is a guard whose *absence* would be silent, and a guard nothing exercises is
-indistinguishable from a guard that has stopped working. Where a public path can reach the
-branch, it is used; where it genuinely cannot -- because an earlier guard fires first -- the
-internal is called and the docstring says why.
-
-Async methods get their own tests rather than being assumed equivalent to the sync ones. They
-are separate code in ``querysets.py``, and a guard added to one and not the other is exactly
-the kind of asymmetry that ships.
-"""
+"""The last uncovered branches: defensive guards, async twins, vendor checks -- most
+reached only by calling an internal directly. Async methods are separate code, so they
+get their own tests rather than assumed sync-equivalent."""
 
 from __future__ import annotations
 
@@ -45,11 +36,8 @@ from tests.testapp.models import Band, Booking, Label, Release, Track
 
 
 def test_quote_literal_rejects_a_nul_byte():
-    """Unreachable through the public API -- ``create_exempt_policy`` quotes the role as an
-    *identifier* first, so that guard fires before this one can. Called directly because a
-    guard on a quoting helper is worth keeping honest even when the current callers cannot
-    trip it: the next caller might pass a value that never went through ``_quote_ident``.
-    """
+    """Unreachable through the public API -- ``create_exempt_policy`` quotes the role as
+    an identifier first. Called directly to keep the guard honest for a future caller."""
     with pytest.raises(ValueError, match='string literals cannot contain a NUL byte'):
         policy._quote_literal('bad\x00value')
 
@@ -59,7 +47,7 @@ def test_quote_literal_rejects_a_nul_byte():
 
 class TestTheTenantModelCheckShortCircuits:
     def test_it_is_silent_when_tenancy_is_wired(self):
-        """This suite's own configuration. The cheap path, taken on every ``manage.py check``."""
+        """This suite's own config -- the cheap path, taken on every ``manage.py check``."""
         assert check_guitar_models_have_a_tenant(None) == []
 
     def test_it_is_silent_for_apps_with_no_guitar_models(self, monkeypatch):
@@ -86,12 +74,8 @@ class TestTheTenantModelCheckShortCircuits:
 
 
 class TestPartiallyCoveredModel:
-    """One dimension on this table, one through a relation.
-
-    The policy enforces what it can and the note says what it cannot. Only the *spec* is
-    stubbed -- see ``TestDimensionsOnTwoAncestors`` in ``test_tenancy_edges.py`` for why
-    declaring a throwaway concrete model is not an option.
-    """
+    """One dimension on this table, one through a relation -- the policy enforces what it
+    can, the note says what it can't. Only the *spec* is stubbed, not a throwaway model."""
 
     @pytest.fixture
     def mixed_spec(self, monkeypatch):
@@ -119,12 +103,8 @@ class TestPartiallyCoveredModel:
 
 class TestLocalTenantFields:
     def test_a_lookup_naming_no_field_is_not_local(self, monkeypatch):
-        """A typo'd lookup is not a crash and not a silent policy either.
-
-        It simply is not a local column, so there is nothing to autofill and nothing to
-        predicate on -- and ``FieldDoesNotExist`` is caught by type rather than as a bare
-        ``Exception``, so a genuine bug in the surrounding code still surfaces.
-        """
+        """A typo'd lookup is simply not a local column -- ``FieldDoesNotExist`` is caught
+        by type, not a bare ``Exception``, so a genuine bug still surfaces."""
         monkeypatch.setattr(
             'guitars.tenancy.spec.tenant_spec', lambda model: {'label': 'no_such_field'}
         )
@@ -132,13 +112,8 @@ class TestLocalTenantFields:
         assert spec.local_tenant_fields(Release) == {}
 
     def test_a_lookup_naming_a_non_concrete_field_is_not_local(self, monkeypatch):
-        """A lookup with no ``__`` is not automatically a column.
-
-        ``Band._meta.get_field('albums')`` resolves -- it is the reverse relation
-        ``Album.band`` creates -- but a reverse relation has no column of its own to
-        predicate on or autofill, so it must be dropped exactly like the multi-hop and
-        typo cases above, not treated as local because it happened to resolve.
-        """
+        """A lookup with no ``__`` is not automatically a column -- ``albums`` resolves as
+        a reverse relation, which has no column of its own, and must be dropped too."""
         monkeypatch.setattr(
             'guitars.tenancy.spec.tenant_spec', lambda model: {'label': 'albums'}
         )
@@ -152,11 +127,8 @@ class TestLocalTenantFields:
 
 class TestAWriteWithNoTenantAndNoScope:
     def test_it_names_both_problems(self, db):
-        """Neither an explicit tenant nor a scope to take one from.
-
-        Distinct from "missing, but there is a scope" (autofill's case) and from "explicit, but
-        no scope" (allowed, the database still checks it) -- so it gets its own message.
-        """
+        """Neither an explicit tenant nor a scope to take one from -- distinct from
+        autofill's case and from "explicit, no scope" (allowed), so its own message."""
         with pytest.raises(TenantScopeError, match='no active tenant scope to take one from'):
             Booking(venue='Nowhere').save()
 
@@ -166,16 +138,9 @@ class TestAsyncTwins:
 
     @pytest.fixture(autouse=True)
     async def _close_executor_connections(self):
-        """Close the connection Django's async ORM opened in its executor thread.
-
-        ``sync_to_async(thread_sensitive=True)`` -- which every ``a*`` ORM method uses -- runs
-        the query in a dedicated thread, and ``connections`` is thread-local, so that thread's
-        connection is invisible to the main thread's teardown. Left open it holds the test
-        database and pytest-django cannot drop it, which surfaces as a teardown warning
-        attributed to whichever test happened to run last.
-
-        Closed *through* ``sync_to_async`` so the call lands in the same thread that opened it.
-        """
+        """Close the connection Django's async ORM opened in its executor thread --
+        ``connections`` is thread-local, invisible to the main thread's teardown. Closed
+        *through* sync_to_async so the call lands in the same thread that opened it."""
         yield
         from asgiref.sync import sync_to_async
 
@@ -218,12 +183,8 @@ class TestAsyncTwins:
 
     @pytest.mark.django_db(transaction=True)
     async def test_acreate_reports_before_the_database_refuses(self, _audit_mode, caplog):
-        """Audit mode softens the Python guard on the async path exactly as on the sync one --
-        and the policy refuses anyway, because no setting makes a policy lenient.
-
-        So the value of audit mode here is the *log line*: it names the call site, which the
-        database error cannot. Asserted in that order.
-        """
+        """Audit softens the Python guard, but the policy refuses anyway -- so its value
+        here is the *log line*, naming the call site the database error cannot."""
         with caplog.at_level('WARNING', logger='guitars.tenancy'):
             with pytest.raises(TenantScopeError, match='rejected by a tenant policy'):
                 await Release.objects.acreate(title='async-audit')
@@ -243,19 +204,9 @@ class TestAsyncTwins:
 
 
 class TestTheEncodingRefusesWhatItCannotCarry:
-    """A tenant value containing the separator would make the *database* layer wider.
-
-    The policy predicate splits the published GUC on ``,`` and tests membership, so one pk
-    of ``'acme,globex'`` is indistinguishable from the two-tenant scope ``['acme', 'globex']``
-    -- PostgreSQL reads it as "tenant acme OR tenant globex" and returns both tenants' rows.
-    The Python manager filters on the exact string and matches neither, so RLS would be
-    strictly *wider* than the managers, on exactly the paths (raw SQL, ``_base_manager``,
-    cascades) where RLS is the only guard.
-
-    That is the one direction this kit must never fail in, so the value is refused twice: at
-    ``tenant()`` entry, where the dimension can be named, and again at publish time, which is
-    the boundary the policy actually reads.
-    """
+    """A tenant value containing the separator would make the *database* layer wider: a pk
+    of ``'acme,globex'`` reads as the two-tenant scope ``['acme', 'globex']``. Refused
+    twice: at ``tenant()`` entry and at publish, the boundary the policy actually reads."""
 
     def test_a_scalar_containing_the_separator_is_refused(self):
         with pytest.raises(TenantValueError, match='contains'):
@@ -268,12 +219,8 @@ class TestTheEncodingRefusesWhatItCannotCarry:
             guc.encode_value(['acme', 'globex,initech'])
 
     def test_the_scope_refuses_it_at_entry_and_names_the_dimension(self):
-        """The eager half. The traceback points at the ``with`` the caller wrote.
-
-        Left to the publish-time guard alone, the error surfaced from inside whichever query
-        happened to publish the frame first -- a cursor several frames away from the mistake,
-        which is the same complaint ``_reject_lazy`` exists to answer.
-        """
+        """The eager half: the traceback points at the ``with`` the caller wrote, not a
+        cursor several frames away inside whichever query happened to publish first."""
         with pytest.raises(TenantValueError, match=r'tenant\(shop=\.\.\.\) value'):
             with tenant(shop='acme,globex'):
                 pytest.fail('the scope should not have opened')
@@ -287,13 +234,8 @@ class TestTheEncodingRefusesWhatItCannotCarry:
                 pytest.fail('the scope should not have opened')
 
     def test_a_pk_acquired_after_entry_is_still_refused(self):
-        """Why the publish-time guard stays, rather than being replaced by the eager one.
-
-        A value whose ``pk`` is ``None`` when the scope opens -- an unsaved instance -- has
-        nothing to refuse yet, so it passes the eager check honestly. It can still acquire a
-        separator before anything publishes the frame, and ``guc._scalar`` is the boundary that
-        has to catch it.
-        """
+        """Why the publish-time guard stays: an unsaved instance's ``pk=None`` passes the
+        eager check honestly, but can acquire a separator before the frame publishes."""
 
         class _Unsaved:
             pk = None
@@ -358,11 +300,8 @@ class TestPublisherGuards:
         assert not hasattr(_Sqlite(), guc._CACHE)
 
     def test_an_unrelated_error_is_not_swallowed(self):
-        """Only "the transaction is already aborted" is skipped.
-
-        Swallowing anything else would mean a failed publish looked like a successful one, and
-        the *previous* tenant's value would stay live -- which fails open.
-        """
+        """Only "the transaction is already aborted" is skipped -- swallowing anything
+        else would leave the *previous* tenant's value looking live, failing open."""
         assert guc._aborted_transaction(ValueError('nothing to do with SQL')) is False
 
     def test_a_failed_publish_for_another_reason_propagates(self, db):
@@ -382,17 +321,9 @@ class TestPublisherGuards:
 
     @pytest.mark.django_db(transaction=True)
     def test_a_transaction_marker_is_found_past_an_unrelated_commit_hook(self):
-        """The replace-in-place loop in ``_transaction_marker`` must not assume the
-        marker it is looking for is the *first* entry in ``run_on_commit`` -- anything
-        else on the connection could have registered a hook earlier in the same
-        transaction, and the search has to keep going past it.
-
-        ``transaction=True`` (real commits, no wrapping test-transaction) is load-bearing
-        here: under the plain ``db`` fixture the whole test already runs inside one atomic
-        block, so the fixture setup below would itself publish a *local* marker before this
-        test's own ``transaction.atomic()`` even starts -- landing at index 0 and leaving
-        nothing for the search to skip past.
-        """
+        """The replace-in-place loop must not assume the marker is the *first* entry --
+        something could register a hook earlier. ``transaction=True`` is load-bearing:
+        under plain ``db`` the fixture's own publish would land at index 0."""
         with tenancy_bypassed():
             # Outside any atomic() block: in_atomic_block is False, so this publish is
             # session-level (no run_on_commit entry at all) -- run_on_commit starts empty.
@@ -440,23 +371,9 @@ class TestPublisherGuards:
 class TestScaffolding:
     @pytest.mark.xdist_group(name='makemigrations_override_dir')
     def test_it_returns_the_filename_django_printed(self, db):
-        """Django prints the path it wrote rather than returning it, so it is parsed back out.
-
-        Exercised for real -- including the ``makemigrations --empty`` round trip and the
-        re-entry into guitars' own ``makemigrations`` override -- then cleaned up. A test that
-        mocked ``call_command`` would only prove the regex, not that the output still looks the
-        way the regex expects.
-
-        Scaffolds into ``tests.makemigrations_override``, not ``tests.testapp``:
-        ``tests/testapp/migrations`` is scanned (``iter_migration_files``) by
-        ``makeguitarmigrations``/drift tests that run concurrently under xdist, and this
-        test's file briefly existing and then vanishing there raced a ``FileNotFoundError``
-        out of an unrelated worker's scan. ``tests/test_makemigrations_override.py`` installs
-        the same throwaway app the same way and shares its ``migrations/`` directory, hence
-        the same ``xdist_group``: those tests diff the directory listing too, so this test
-        running on a different worker at the same moment could still leave a file for one of
-        them to trip over.
-        """
+        """Django prints the path rather than returning it, parsed back out -- exercised
+        for real, not mocked. Scaffolds into ``tests.makemigrations_override``, not
+        ``tests.testapp``, whose migrations dir is scanned concurrently under xdist."""
         with override_settings(
             INSTALLED_APPS=[*django_settings.INSTALLED_APPS, 'tests.makemigrations_override']
         ):
@@ -485,11 +402,8 @@ class TestScaffolding:
 
 class TestEnforcementModeNote:
     def test_it_says_nothing_when_no_policy_binds(self):
-        """Audit mode is exactly right at this stage of a rollout, so the command stays quiet.
-
-        Called directly with an empty live state, because a database with the policies applied
-        is what every other test in the suite has.
-        """
+        """Audit mode is right at this rollout stage. Called with an empty live state,
+        since a database with policies applied is what every other test has."""
         from guitars.management.commands.audittenancy import Command
 
         with override_settings(GUITARS_TENANT_ENFORCE='audit'):

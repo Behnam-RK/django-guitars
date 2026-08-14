@@ -1,10 +1,6 @@
-"""The tenant frame: nesting, bypass, and the ``@tenanted`` decorator.
-
-Nothing here touches the database -- ``scope.py`` is pure ``ContextVar`` bookkeeping. What
-it must get right is *fail-closed* behaviour: an absent dimension, and a dimension
-explicitly bound to ``None``, both have to read as "no scope", because the alternative
-(treating ``None`` as "match everything") fails OPEN.
-"""
+"""The tenant frame: nesting, bypass, and the ``@tenanted`` decorator. Nothing here touches
+the database -- ``scope.py`` is pure ``ContextVar`` bookkeeping, which must get
+*fail-closed* right: an absent dimension and one bound to ``None`` both read as "no scope"."""
 
 import asyncio
 
@@ -90,12 +86,8 @@ def test_bypass_sets_the_reserved_key_and_is_reported():
 
 
 def test_an_explicit_scope_inside_a_bypass_re_enforces():
-    """The documented rule: entering a tenant always enforces.
-
-    Without this, a bypassed maintenance job that opens a scope for one tenant would keep
-    reading every tenant's rows -- failing open in exactly the place the author was trying
-    to be careful.
-    """
+    """The documented rule: entering a tenant always enforces. Without it, a bypassed
+    maintenance job scoping to one tenant would keep reading every tenant's rows."""
     with tenancy_bypassed():
         assert is_bypassed() is True
         with tenant(shop=1):
@@ -116,11 +108,8 @@ def test_bypass_nested_inside_a_scope_restores_the_scope_afterwards():
 
 
 def test_a_queryset_is_refused_as_a_dimension_value():
-    """A QuerySet would be evaluated *during* the publish, recursing back into it.
-
-    The naive symptom is a RecursionError raised from somewhere unrelated, so the mistake
-    is named at the point it is made.
-    """
+    """A QuerySet would be evaluated *during* the publish, recursing back into it --
+    the naive symptom is a RecursionError raised from somewhere unrelated."""
     from tests.testapp.models import Band
 
     with pytest.raises(TypeError, match='got a QuerySet'):
@@ -167,11 +156,8 @@ def test_tenanted_reads_a_custom_parameter_name():
 
 
 def test_tenanted_separates_the_parameter_name_from_the_dimension():
-    """The parameter belongs to the signature; the dimension must match the manager.
-
-    Collapsing the two would open a dimension no manager scopes on -- which then fails
-    closed on the next scoped read, far from the decorator that got it wrong.
-    """
+    """The parameter belongs to the signature; the dimension must match the manager --
+    collapsing the two would open a dimension no manager scopes on."""
 
     @tenanted(arg='target_shop', dimension='shop')
     def handler(target_shop):
@@ -205,10 +191,8 @@ def test_tenanted_fails_closed_on_a_none_tenant():
 
 
 def test_tenanted_lets_python_raise_its_own_missing_argument_error():
-    """A missing required argument is a programming error in the caller, not a scope error.
-
-    Re-labelling it would hide a plain TypeError behind a tenancy message.
-    """
+    """A missing required argument is a caller programming error, not a scope error --
+    re-labelling it would hide a plain TypeError behind a tenancy message."""
 
     @tenanted(arg='shop')
     def handler(shop):
@@ -265,11 +249,8 @@ async def test_tenanted_scope_survives_await():
 
 
 async def test_tenanted_supports_an_object_whose_call_is_async():
-    """Such an object is not itself a coroutine function.
-
-    Taking the sync branch would close the scope before the caller ever awaited, so the
-    check reads ``__call__`` off the type.
-    """
+    """Such an object is not itself a coroutine function -- the sync branch would close
+    the scope before the caller awaited, so the check reads ``__call__`` off the type."""
 
     class Handler:
         async def __call__(self, shop):

@@ -80,13 +80,9 @@ def test_hard_delete_removes_instance_and_cascade_children():
 
 @pytest.mark.django_db(transaction=True)
 def test_hard_delete_collects_a_diamond_convergence_once():
-    """``Merch`` is reachable from ``Album`` by two independent CASCADE relations --
-    ``album`` and ``bonus_album`` -- so the DFS in instance-level ``hard_delete()``
-    visits it twice: once per relation, each time with a *different* new pk. The
-    second visit must not re-append it to the deletion order (it is already queued
-    from the first), only fold its new pk into the row already scheduled for that
-    table.
-    """
+    """``Merch`` has two independent CASCADE relations to ``Album``, so the DFS in
+    ``hard_delete()`` visits it twice -- the second visit must fold its new pk in,
+    not re-append it to the deletion order."""
     band = Band.objects.create(name='Rush')
     album = Album.objects.create(title='Hemispheres', band=band)
     # Two distinct Merch rows so the two relations bring different, non-overlapping pks.
@@ -145,14 +141,9 @@ def test_hard_delete_hard_deletes_non_soft_deletable_cascade_children():
 
 @pytest.mark.django_db(transaction=True, databases=['default', 'secondary'])
 def test_instance_hard_delete_operates_on_the_bound_alias():
-    """``hard_delete()`` must delete from the alias the instance is bound to.
-
-    Both the MTI path and ``_hard_delete_own_table`` used to open a cursor on the
-    module-global default ``connection`` regardless of ``self.db`` -- on a multi-DB
-    project this either errors (no matching row on 'default') or, worse, silently
-    deletes the wrong row if one happens to share a pk. A same-named row on 'default'
-    surviving is the proof the delete actually went to 'secondary'.
-    """
+    """``hard_delete()`` must delete from the alias the instance is bound to, not a
+    hardcoded default ``connection`` -- a same-named row surviving on 'default' is
+    the proof the delete actually went to 'secondary'."""
     default_band = Band.objects.create(name='Default')
     secondary_band = Band.objects.using('secondary').create(name='Secondary')
 
@@ -174,15 +165,9 @@ def test_mti_queryset_hard_delete_operates_on_the_bound_alias():
 
 @pytest.mark.django_db(transaction=True)
 def test_switch_off_is_attempted_even_when_the_delete_itself_raises(monkeypatch):
-    """The switch-off must be this function's own guarantee, not merely an effect of
-    the enclosing ``atomic()`` eventually rolling back.
-
-    Proven by making the DELETE raise a plain Python exception that never reaches
-    Postgres -- so the transaction is never server-side aborted, and only the
-    ``except`` branch in ``_hard_delete_own_table`` decides whether
-    ``SWITCH_OFF_HARD_DELETION`` is still attempted afterwards. Before the fix, that line
-    was simply never reached.
-    """
+    """The switch-off must be ``_hard_delete_own_table``'s own guarantee, not merely an
+    effect of the enclosing ``atomic()`` rolling back -- proven via a Python-raised
+    exception that never reaches Postgres, so only the ``except`` branch decides."""
     band = Band.objects.create(name='Doomed')
     calls = []
     real_execute = CursorWrapper.execute
@@ -228,23 +213,9 @@ def test_mti_switch_off_is_attempted_even_when_a_delete_raises(monkeypatch):
 
 @pytest.mark.django_db(transaction=True)
 def test_switch_off_failure_after_a_successful_delete_is_not_swallowed(monkeypatch):
-    """A switch-off failure that follows a *successful* DELETE must propagate, not be
-    suppressed.
-
-    ``_hard_delete_own_table`` (and the MTI path above it) suppress a failing switch-off
-    attempt only when it follows a failed DELETE -- suppressing it there just avoids
-    replacing the real error with a second one, since the transaction is typically already
-    aborted at that point. Suppressing it unconditionally, including here on the success
-    path, would be worse: nothing would tell the caller that ``rules.hard_deletion`` never
-    got turned back off, and it would stay 'on' for the rest of any transaction this call
-    is nested in -- silently turning later plain ``.delete()`` calls in that same
-    transaction into hard deletes instead of archiving them.
-
-    Proven by making only the switch-off statement raise (the DELETE itself succeeds
-    normally) inside a caller-owned ``transaction.atomic()`` block, and asserting both that
-    the exception surfaces and that it aborts the whole block -- the row must not end up
-    hard-deleted behind a swallowed error.
-    """
+    """A switch-off failure after a *successful* DELETE must propagate, not be
+    suppressed, or ``rules.hard_deletion`` stays stuck 'on' for the rest of the
+    transaction, silently turning later plain ``.delete()`` calls into hard deletes."""
     band = Band.objects.create(name='Doomed')
     real_execute = CursorWrapper.execute
 
@@ -267,18 +238,9 @@ def test_switch_off_failure_after_a_successful_delete_is_not_swallowed(monkeypat
 
 
 class TestManagerQuerySetClass:
-    """Every soft-delete manager must instantiate ``self._queryset_class``.
-
-    Not a style preference. ``_queryset_class`` is Django's seam for swapping the queryset
-    a manager hands out, and ``guitars.tenancy.tenanted_manager()`` uses it to install the
-    tenant write guard on ``bulk_create``. A manager that names its queryset class
-    literally in ``get_queryset()`` ignores the swap and returns an *unguarded* queryset
-    while still advertising the guarded one on the class -- so the guard reads as installed
-    and does nothing.
-
-    These assert the seam directly, with no database and no tenancy, so a regression is
-    attributed to the manager rather than to whatever downstream feature noticed.
-    """
+    """Every soft-delete manager must instantiate ``self._queryset_class``, the seam
+    ``tenanted_manager()`` swaps to install the write guard -- naming the queryset
+    class literally would return an unguarded queryset while the guard reads installed."""
 
     @staticmethod
     def _bind(manager_class, queryset_class):
@@ -306,13 +268,9 @@ class TestManagerQuerySetClass:
         assert type(manager.get_queryset()) is swapped
 
     def test_a_swapped_override_actually_runs(self):
-        """The swap must survive the ``.lives`` clone and win method dispatch.
-
-        ``bulk_create`` on purpose: it is the method tenancy overrides to guard. An empty
-        list returns early in Django's implementation, so the un-swapped path is reached
-        without touching the database and the mutation shows up as this assertion rather
-        than as a connection error.
-        """
+        """The swap must survive the ``.lives`` clone and win method dispatch, tested via
+        ``bulk_create`` -- the method tenancy overrides to guard. An empty list returns
+        early in Django's implementation, so no database is touched."""
         calls = []
 
         class _Recording(LiveQuerySet):
@@ -326,19 +284,9 @@ class TestManagerQuerySetClass:
 
 
 class TestTheHardDeletionSwitchCannotLeak:
-    """A rolled-back ``hard_delete()`` must not turn later deletes into real ones.
-
-    ``hard_delete()`` opts out of the soft-delete rule by setting ``rules.hard_deletion``
-    transaction-locally. PostgreSQL reverts that on rollback -- but not to *unset*: a custom
-    GUC that was set and rolled back reads back as the **empty string**, while one that was
-    never set reads as NULL. A guard written ``= 'off'`` matches neither, so the rule stops
-    firing and ``DELETE`` means what it says.
-
-    The blast radius is the connection, not the transaction: with ``CONN_MAX_AGE`` or any
-    pool, one rolled-back transaction containing a ``hard_delete()`` would silently turn
-    every subsequent ``.delete()`` into permanent data loss for as long as that connection
-    lived. Hence ``<> 'on'`` everywhere -- anything but an explicit opt-in preserves the row.
-    """
+    """A rolled-back ``hard_delete()`` must not leak: a rolled-back GUC reads back as
+    the empty string, not NULL, so the guard must be ``<> 'on'`` everywhere (see
+    CLAUDE.md), or later pooled-connection deletes silently become permanent."""
 
     @staticmethod
     def _switch() -> str | None:
@@ -346,12 +294,9 @@ class TestTheHardDeletionSwitchCannotLeak:
 
     @pytest.mark.django_db(transaction=True)
     def test_a_rolled_back_hard_delete_leaves_soft_deletion_working(self):
-        """``transaction=True`` on purpose: the rollback has to be a real one.
-
-        Under the default fixture every test already runs inside a transaction that is
-        rolled back at the end, which is precisely how this bug reaches the *next* test --
-        but reproducing it inside one test needs a transaction this test controls.
-        """
+        """``transaction=True`` needed because the rollback must be a real one, not the
+        default fixture's own -- that outer rollback is precisely how this bug used to
+        reach the *next* test."""
         keeper = Band.objects.create(name='Keeper')
 
         with contextlib.suppress(RuntimeError), transaction.atomic():

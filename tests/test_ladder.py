@@ -1,19 +1,6 @@
-"""Tests for the instrument ladder, and for what ``GuitarModel`` contributes.
-
-``GuitarModel``'s tenancy wiring runs at **import time**, under ``GUITARS_TENANT_MODEL``
-and ``GUITARS_TENANT_FIELD``: the foreign key's name comes from a setting, so it cannot be
-declared in a class body and is contributed with ``add_to_class`` after it. That puts the
-behaviour out of reach of ``override_settings``, which changes a setting long after the
-module has been imported and the field named.
-
-So these run real Django setups in subprocesses, one per configuration. Not a workaround
--- the thing under test *is* import-time, setting-dependent module state, and a subprocess
-is the only instrument that can vary it. Each probe declares its models into the
-``guitars`` app label so no throwaway package is needed on ``sys.path``.
-
-The rung shift itself (``TarModel`` / ``DutarModel`` / ``SetarModel``) needs none of this:
-those are plain classes, asserted directly.
-"""
+"""Tests for the instrument ladder and what ``GuitarModel`` contributes. Its tenancy wiring
+runs at **import time**, out of reach of ``override_settings``, so most of these run real
+Django setups in subprocesses, one per configuration."""
 
 from __future__ import annotations
 
@@ -149,11 +136,8 @@ print(json.dumps(result))
 
 def _probe(body: str, installed_apps: list[str] | None = None, **settings_extra: object) -> dict:
     """Run *body* inside a fresh Django process configured with *settings_extra*.
-
-    ``installed_apps`` is separate from ``settings_extra`` because the template needs it
-    before the keyword expansion, and passing it twice is a TypeError rather than an
-    override.
-    """
+    ``installed_apps`` is separate because the template needs it before the keyword
+    expansion, and passing it twice is a TypeError rather than an override."""
     # Token substitution rather than str.format: the template is Python source full of
     # literal braces, and escaping every one of them is a trap the next edit falls into.
     script = (
@@ -175,10 +159,9 @@ def _probe(body: str, installed_apps: list[str] | None = None, **settings_extra:
     return json.loads(completed.stdout.split('---RESULT---', 1)[1])
 
 
-#: The default field name, and a renamed one. Both are exercised everywhere below, because
-#: GUITARS_TENANT_FIELD is not cosmetic: it names the column, the reverse accessor *and*
-#: the scope dimension, and a rename that only reached two of the three would leave
-#: `tenant(shop=s)` scoping a dimension no manager filters on.
+#: Default and renamed field name, both exercised below -- GUITARS_TENANT_FIELD names the
+#: column, the reverse accessor, and the scope dimension, and a rename reaching only two
+#: of three would leave `tenant(shop=s)` scoping a dimension no manager filters on.
 FIELD_NAMES = [
     pytest.param({}, 'tenant', id='default-name'),
     pytest.param({'GUITARS_TENANT_FIELD': 'shop'}, 'shop', id='renamed'),
@@ -256,12 +239,8 @@ class TestWhatGuitarModelContributes:
         assert 'AllObjectsManager' in result['bases']['_all_objects']
 
     def test_the_base_manager_stays_unscoped(self, extra, field_name):
-        """Deliberate, and the reasoning is in ``GuitarModel.Meta``.
-
-        ``_base_manager`` is on the ``save()`` path and Django's rule is that it must not
-        filter; scoping it would enforce partially (writes through, reads denied) and the
-        row-level-security policy already covers it completely.
-        """
+        """Deliberate (see ``GuitarModel.Meta``): ``_base_manager`` is on the ``save()``
+        path and must not filter, and RLS already covers it completely."""
         result = _probe(
             """
             result['name'] = Thing._meta.base_manager.name
@@ -278,11 +257,8 @@ class TestWhatGuitarModelContributes:
         assert result['dimensions'] is None
 
     def test_discovery_will_ask_for_a_policy_on_that_column(self, extra, field_name):
-        """The end of the chain: setting -> field -> dimension -> policy predicate.
-
-        Without this the three links above could each be right while the generator still
-        emitted no policy, or one predicating on the wrong column.
-        """
+        """The end of the chain: setting -> field -> dimension -> policy predicate --
+        without it the three links above could be right while no policy is emitted."""
         result = _probe(
             """
             from django.apps import apps
@@ -338,18 +314,9 @@ class TestTheSystemCheck:
         assert result['ids'] == []
 
     def test_it_fires_even_when_guitars_is_not_in_installed_apps(self):
-        """The case that needs it most, and the one it used to miss.
-
-        The checks used to be registered only by ``tenancy.install()``, which reaches this
-        module two ways -- ``GuitarsConfig.ready()`` and ``tenanted_manager()``. With
-        GUITARS_TENANT_MODEL unset the manager is never constructed, and a project using
-        guitars as a pure library has no INSTALLED_APPS entry for the AppConfig hook. So the
-        one configuration where a model is silently untenanted was the one configuration
-        where nothing said so. Registration now happens at import of ``guitars.models``.
-
-        ``contenttypes`` is borrowed purely as an installed app label to hang a concrete
-        model on; guitars itself is deliberately absent from INSTALLED_APPS.
-        """
+        """Regression: checks used to register only via ``tenancy.install()``, reached by
+        ``GuitarsConfig.ready()`` or ``tenanted_manager()`` -- with the tenant model unset
+        and guitars absent from INSTALLED_APPS, neither ran, so nothing said so."""
         completed = subprocess.run(
             [
                 sys.executable,
@@ -413,11 +380,9 @@ class TestTheSystemCheck:
         assert result['unscoped'] == ['guitars.tenancy.E003']
 
     def test_it_is_silent_for_a_project_that_never_used_the_rung(self):
-        """A project on the lower rungs must be able to run ``manage.py check`` clean.
-
-        Keyed on concrete subclasses, not on the setting alone -- otherwise every
-        untenanted project using guitars would be nagged about a feature it declined.
-        """
+        """A project on the lower rungs must run ``manage.py check`` clean -- keyed on
+        concrete subclasses, not the setting alone, or every untenanted project would
+        be nagged about a feature it declined."""
         completed = subprocess.run(
             [
                 sys.executable,

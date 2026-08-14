@@ -1,11 +1,6 @@
-"""Model for tests/test_makemigrations_override.py only.
-
-Starts with no migrations checked in at all (just an empty ``migrations`` package) --
-the whole point is to watch ``makemigrations`` generate both layers from a clean slate.
-
-Never touched by the rest of the suite -- not in ``LOCAL_APPS``, so
-``makeguitarmigrations``/``audittenancy`` ignore it unless a test names it explicitly.
-"""
+"""Model for tests/test_makemigrations_override.py only. Starts with no migrations
+checked in -- the point is watching ``makemigrations`` generate both layers from a
+clean slate. Not in ``LOCAL_APPS``, so ignored unless a test names it explicitly."""
 
 from django.db.models import CharField
 

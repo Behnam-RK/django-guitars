@@ -1,25 +1,6 @@
-"""Hostile / drifted-database tests.
-
-The rest of the suite proves the enforcement layers correct on a database this project's
-own tooling built. This file asks a different question: what happens once an operator
-touches the database directly -- the exact thing the whole design exists to survive, since
-that is precisely the class of write (raw SQL, someone else's migration, a manual "fix")
-none of the Python-side guarantees can see coming.
-
-Two audit layers exist, and each has a scope this file makes concrete by finding its edge:
-
-* ``makemigrations``/``makeguitarmigrations --check`` is a *build-time* gate. It compares
-  the SQL constants in ``guitars.sql`` against the digests recorded in migration *files* on
-  disk -- it never queries the database at all. A live object that diverges from what those
-  files describe, without the files themselves changing, is invisible to it by construction.
-* ``audittenancy`` is a *runtime* gate, but only for tenant RLS. It has no soft-delete or
-  ``_updated_at`` equivalent -- there is no live checker for a hand-dropped rule or trigger
-  anywhere in this package.
-
-So a hand-dropped soft-delete rule or ``_updated_at`` trigger is invisible to *both* layers;
-only a hand-altered or hand-dropped tenant *policy* is caught, and only by the second one.
-That asymmetry, demonstrated rather than asserted, is the point of this module.
-"""
+"""Hostile / drifted-database tests. Two audit layers: ``--check`` is *build-time*
+(migration-file digests, never the database); ``audittenancy`` is *runtime* but RLS-only.
+A hand-dropped rule/trigger is invisible to *both*; only a policy is caught."""
 
 from __future__ import annotations
 
@@ -36,11 +17,8 @@ from tests.testapp.models import Band, Release
 
 
 def _check(*app_labels) -> str:
-    """Run ``makeguitarmigrations --check``, returning its output.
-
-    Raises ``CommandError`` itself if the command disagrees that the database is
-    covered -- callers that expect it to pass just call this and move on.
-    """
+    """Run ``makeguitarmigrations --check``, returning its output. Raises ``CommandError``
+    itself if the database isn't covered -- callers that expect it to pass just call this."""
     out, err = StringIO(), StringIO()
     call_command('makeguitarmigrations', *app_labels, '--check', stdout=out, stderr=err)
     return out.getvalue() + err.getvalue()
@@ -67,18 +45,9 @@ class TestCheckIsBlindToADroppedSoftDeleteRule:
 
 
 class TestCheckIsBlindToADroppedUpdatedAtTrigger:
-    """Same blind spot for the other DB-enforced column: a trigger dropped by hand leaves
-    ``_updated_at`` frozen on every future write, with nothing here to notice before an
-    operator finds a suspiciously stale timestamp.
-
-    ``transaction=True`` and the trigger is restored in ``finally``: proving "the timestamp
-    did not move" needs two *separate* transactions (``NOW()`` is fixed for the life of one
-    transaction regardless of the trigger, so a single rollback-wrapped test would pass
-    vacuously here -- see ``test_base.py::test_updated_at_trigger_advances_on_update`` for
-    the positive control that needs the same setting). Because this is a real commit, not a
-    fixture rollback, the dropped trigger has to be put back explicitly or every later test
-    in the session would run against a table that no longer bumps its own timestamp.
-    """
+    """Same blind spot for ``_updated_at``. ``transaction=True``, trigger restored in
+    ``finally``: proving "did not move" needs two *separate* transactions, and since this
+    is a real commit, the trigger must be put back or later tests inherit a frozen table."""
 
     @pytest.mark.django_db(transaction=True)
     def test_check_passes_while_updated_at_stops_moving(self):
@@ -126,17 +95,9 @@ class TestAuditTenancyCatchesWhatCheckCannot:
 
 
 class TestAdoptAgainstAPartiallyDivergedDatabase:
-    """``--adopt`` exists for exactly one situation: an enforcement object that is really
-    there, but whose migration history has no record of it -- a hand-migrated legacy
-    project, or a database an earlier, interrupted run left half-covered. Proven directly
-    against the SQL forms themselves, since ``guitars.sql``'s names are a frozen interface
-    and this is the first place any test actually executes the adopt/plain pair against
-    real PostgreSQL rather than only asserting their text (see tests/test_sql_interface.py).
-
-    Both statements run inside the same test's rollback-wrapped transaction, so the plain
-    form's failure and the adopt form's success are shown back to back without either one
-    leaving the shared test database in a different state than it found it.
-    """
+    """``--adopt``: an enforcement object that's really there but unrecorded. First place
+    any test executes the adopt/plain SQL pair against real PostgreSQL, not just their
+    text (see test_sql_interface.py) -- both run in the same rollback-wrapped transaction."""
 
     def test_plain_create_fails_but_adopt_succeeds_against_an_already_present_trigger(self, db):
         table = Band._meta.db_table

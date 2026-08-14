@@ -1,17 +1,6 @@
-"""Tests for guitars.tenancy.manager -- that the guards it installs are reachable.
-
-A guard that is present on the class but absent from what the manager actually hands out
-is worse than no guard: it reads as installed everywhere it is documented, and enforces
-nothing. That failure mode is not hypothetical -- ``LiveManager`` and friends used to name
-their queryset class literally in ``get_queryset()``, which silently discarded the
-tenant-guarded subclass ``tenanted_manager()`` installs (see
-``tests/test_soft_deletion.py::TestManagerQuerySetClass`` for the seam itself).
-
-These assert reachability, without models or a database, so a regression is caught here
-rather than in whichever tenancy test happened to notice. The *behaviour* of the guard --
-autofill, cross-tenant rejection -- needs a model carrying a declared ``tenanted_manager()``
-and is covered by the tenanted-model tests.
-"""
+"""Tests for guitars.tenancy.manager -- that the guards it installs are reachable (see
+``test_soft_deletion.py::TestManagerQuerySetClass`` for the seam). No models or database --
+guard *behaviour* is covered by the tenanted-model tests."""
 
 from __future__ import annotations
 
@@ -34,12 +23,8 @@ MANAGER_CLASSES = [models.Manager, LiveManager, ArchiveManager, AllObjectsManage
 
 
 def _bind(manager, model=Band):
-    """Attach *manager* to a model outside ``contribute_to_class``.
-
-    A manager holds no state until then, so this is enough to exercise
-    ``get_queryset()`` -- and it keeps these tests independent of whether a tenanted
-    concrete model happens to exist yet.
-    """
+    """Attach *manager* to a model outside ``contribute_to_class`` -- enough to exercise
+    ``get_queryset()`` without a concrete tenanted model existing yet."""
     manager.model = model
     manager._db = None
     manager._hints = {}
@@ -68,14 +53,8 @@ class TestTheGuardIsOnWhatTheManagerHandsOut:
         assert type(queryset).bulk_create is manager._queryset_class.bulk_create
 
     def test_the_bypassed_queryset_carries_the_guard_too(self, manager_class):
-        """Bypass turns the tenant *filter* off; it does not uninstall the write guard.
-
-        The guard is what rejects a row contradicting an explicitly-passed tenant, and
-        ``tenancy_bypassed()`` is documented as the cross-tenant path -- so the guard here
-        is a no-op by its own logic (``apply_write_guard`` returns early when bypassed),
-        not because the method went missing. Losing the method would mean a later change to
-        that early return had nothing to take effect on.
-        """
+        """Bypass turns the tenant *filter* off, not the write guard -- it's a no-op by its
+        own logic (``apply_write_guard`` returns early), not because the method is missing."""
         manager = _bind(tenanted_manager(_manager_class=manager_class, tenant='name'))
 
         with tenancy_bypassed():
@@ -95,12 +74,8 @@ class TestTheGuardIsOnWhatTheManagerHandsOut:
 
 
 class TestCustomQuerySetMethodsSurvive:
-    """Wrapping must not cost the underlying queryset's own API.
-
-    ``LiveQuerySet.lives`` is the case that matters in this kit: it is what
-    ``LiveManager.get_queryset`` applies, so losing it would break soft deletion rather
-    than merely a convenience.
-    """
+    """Wrapping must not cost the underlying queryset's own API. ``LiveQuerySet.lives`` is
+    what ``LiveManager.get_queryset`` applies, so losing it would break soft deletion."""
 
     def test_on_the_scoped_path(self):
         manager = _bind(tenanted_manager(_manager_class=LiveManager, tenant='name'))
@@ -109,12 +84,8 @@ class TestCustomQuerySetMethodsSurvive:
             assert hasattr(manager.get_queryset(), 'lives')
 
     def test_on_the_denying_path(self):
-        """Present, so a missing scope raises TenantScopeError rather than AttributeError.
-
-        The denying queryset subclasses the manager's own queryset for exactly this: an
-        ``AttributeError`` would name the wrong problem, and in audit mode it would break a
-        path that is only meant to report.
-        """
+        """Present, so a missing scope raises TenantScopeError rather than AttributeError --
+        the denying queryset subclasses the manager's own for exactly this."""
         manager = _bind(tenanted_manager(_manager_class=LiveManager, tenant='name'))
 
         queryset = manager.get_queryset()
@@ -126,11 +97,9 @@ class TestCustomQuerySetMethodsSurvive:
 
 @pytest.mark.parametrize('manager_class', MANAGER_CLASSES, ids=lambda c: c.__name__)
 class TestTenantedManagerBase:
-    """The marker M5 (#12) added when the factory was renamed off ``TenantedManager``.
-
-    ``_tenant_dimensions`` (a private attribute) was previously the only way to recognise
-    a tenant-scoped manager from outside; this gives external code an actual type.
-    """
+    """The marker M5 (#12) added when the factory was renamed off ``TenantedManager`` --
+    ``_tenant_dimensions`` was previously the only way to recognise a tenant-scoped
+    manager from outside; this gives external code an actual type."""
 
     def test_every_manager_the_factory_builds_is_an_instance(self, manager_class):
         manager = tenanted_manager(_manager_class=manager_class, tenant='name')

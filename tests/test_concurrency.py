@@ -1,14 +1,6 @@
-"""Concurrency and connection-lifecycle tests.
-
-The rest of the suite proves the enforcement layers correct for one request on one
-connection. This file proves the parts of the design that only matter once more than one
-of those exists at a time: two threads, an already-running event loop, a connection
-Django keeps alive across requests, and -- where the local Postgres offers a pooler -- a
-connection pool operating underneath both Django and PostgreSQL.
-
-Negative control first, matching ``test_tenancy_rls.py``'s discipline: if the connecting
-role could bypass RLS, none of what follows would prove anything.
-"""
+"""Concurrency and connection-lifecycle tests -- the parts of the design that only matter
+once more than one connection exists at a time: two threads, an already-running event
+loop, a connection Django keeps alive, and a pooler underneath both Django and Postgres."""
 
 from __future__ import annotations
 
@@ -29,12 +21,8 @@ PGBOUNCER_HOST, PGBOUNCER_PORT = 'localhost', 6432
 
 
 def _pgbouncer_is_up() -> bool:
-    """Whether the opt-in ``pgbouncer`` compose profile is running.
-
-    ``docker compose --profile pooling up -d --wait`` starts it; plain ``docker compose up
-    -d`` does not, so most local runs and CI cells skip these rather than fail on a
-    service nobody asked for.
-    """
+    """Whether the opt-in ``pgbouncer`` compose profile is running -- plain ``docker
+    compose up -d`` doesn't start it, so most runs skip these rather than fail."""
     try:
         with socket.create_connection((PGBOUNCER_HOST, PGBOUNCER_PORT), timeout=0.5):
             return True
@@ -50,27 +38,9 @@ requires_pgbouncer = pytest.mark.skipif(
 
 @pytest.fixture(scope='module', autouse=True)
 def _reap_worker_thread_connections():
-    """Close whatever this module's threading/asyncio tests left open, once, at the end.
-
-    The threading test closes its own worker connections explicitly. The asyncio test
-    cannot: ``aupdate()``'s write runs via ``sync_to_async`` on a worker thread whose
-    Django connection wrapper refuses to be closed from any other thread (by design --
-    see ``validate_thread_sharing``), and which independent ``sync_to_async`` call lands
-    on which OS thread is not something this suite controls or can predict.
-
-    Doing this per-test instead would be actively wrong: a raw ``pg_terminate_backend``
-    sweep run *between* tests can just as easily kill the main test connection another
-    test's own teardown still needs, which is worse than the leak it was meant to fix.
-    Run once, after every test in this module is done and nothing needs a connection
-    anymore, there is nothing left to protect against.
-
-    The main thread's own Django connection is exactly such a survivor: pytest-django
-    keeps it open and idle across test *modules* within one process, so later files
-    (``test_management_audittenancy.py`` et al.) reuse it rather than reconnecting. A
-    sweep that excludes only its own pid -- not that one -- terminates it too, and the
-    next query any later test runs on it fails with ``OperationalError: terminating
-    connection due to administrator command``. Its pid must be excluded explicitly.
-    """
+    """Close whatever this module's tests left open, once, at the end -- a per-test sweep
+    could kill another test's still-needed connection. The main thread's own connection
+    (kept alive across modules by pytest-django) must be excluded by pid."""
     yield
     main = connections['default'].settings_dict
     exclude_pids = []
@@ -111,14 +81,9 @@ def test_the_connecting_role_cannot_bypass_rls(db):
 
 @pytest.mark.django_db(transaction=True)
 class TestTwoThreadsInDifferentScopes:
-    """The tenant frame is a ``ContextVar`` (see tenancy/scope.py), one per OS thread by
-    default. This is the test that would fail if that were ever a shared/global instead.
-
-    ``transaction=True``, not the plain ``db`` fixture: the default fixture wraps the
-    whole test in one rollback-only transaction on the *main* thread's connection, so a
-    worker thread's separate connection would not see ``tenants``' rows at all -- every
-    query below would truthfully return nothing, for a reason unrelated to tenancy.
-    """
+    """The tenant frame is a per-OS-thread ``ContextVar`` -- this fails if that were ever
+    shared/global. ``transaction=True``: plain ``db`` wraps the test in a rollback-only
+    transaction on the *main* thread, so a worker thread's connection would see nothing."""
 
     def test_no_cross_tenant_leakage_under_concurrent_scopes(self, tenants):
         barrier = threading.Barrier(2)
@@ -153,21 +118,9 @@ class TestTwoThreadsInDifferentScopes:
 
 @pytest.mark.django_db(transaction=True)
 class TestConcurrentAupdateDisableSignals:
-    """``aupdate()``'s docstring (``models/base.py``, M5 #12) documents that
-    ``thread_sensitive=True``'s shared worker thread means two concurrent
-    ``aupdate(_disable_signals=True)`` calls are not guaranteed to land on the same OS
-    thread, and that ``DisableSignals`` being process-global and reference-counted under
-    a lock (fixed in M0) is what makes overlapping blocks nest safely instead of one
-    clobbering the other's restore.
-
-    Real ``threading.Thread`` workers, each running its own event loop via
-    ``async_to_sync`` -- not ``asyncio.gather`` on one loop. Confirmed empirically while
-    writing this: outside an ASGI/request context, asgiref pins every
-    ``sync_to_async(thread_sensitive=True)`` call within *one* event loop run to a single
-    shared worker thread, so calls from ``asyncio.gather`` on one loop execute strictly
-    one at a time and could never actually overlap. Two OS threads is what makes the
-    overlap genuine.
-    """
+    """Proves ``aupdate()``'s claim: overlapping ``_disable_signals=True`` blocks nest
+    safely. Real threads, not ``asyncio.gather`` -- asgiref pins one loop's calls to a
+    single thread, so gather could never actually overlap."""
 
     def test_two_threads_both_persist_and_the_write_guard_is_restored(self):
         before = len(pre_save.receivers)
@@ -208,18 +161,9 @@ class TestConcurrentAupdateDisableSignals:
 
 @pytest.mark.django_db(transaction=True)
 async def test_aupdate_inside_an_already_running_event_loop(tenants):
-    """``test_base.py::test_aupdate_persists_changes`` only ever calls ``aupdate`` via
-    ``async_to_sync``, which builds and tears down a fresh event loop for the one call --
-    it never runs with a loop that was already running before the scope opened, which is
-    the shape every real caller (an async view, a Channels consumer) actually has.
-
-    ``asyncio_mode = "auto"`` (pyproject.toml) makes this an ``async def`` test running on
-    a real, already-running loop with no ``async_to_sync`` involved.
-
-    ``transaction=True``: ``aupdate`` runs the actual write via ``sync_to_async``, which
-    executes on a worker thread and therefore a separate connection -- the same reason
-    the threading test above needs it.
-    """
+    """``test_base.py``'s version only calls ``aupdate`` via ``async_to_sync``, which
+    builds a fresh loop per call -- never the already-running loop every real caller (an
+    async view) has. ``transaction=True``: the write runs on a worker thread's own connection."""
     with tenant(label=tenants.a):
         await tenants.release_a.aupdate(title='renamed-inside-a-running-loop')
 
@@ -227,13 +171,9 @@ async def test_aupdate_inside_an_already_running_event_loop(tenants):
         refreshed = await Release.objects.aget(pk=tenants.release_a.pk)
 
     assert refreshed.title == 'renamed-inside-a-running-loop'
-    # aupdate()'s write runs via sync_to_async, on a worker thread whose own (separate,
-    # thread-local) Django connection nothing in this test closes -- and, confirmed
-    # empirically rather than assumed, successive independent sync_to_async calls in this
-    # pytest-asyncio environment do not reliably land on the same OS thread, so there is
-    # no single thread to reach back into and close it from here. See
-    # ``_reap_worker_thread_connections`` below, which sweeps it up once for the whole
-    # module instead of trying to identify and close it mid-test.
+    # The worker thread's own connection is left open: successive sync_to_async calls
+    # don't reliably land on the same OS thread, so nothing here can close it. Swept by
+    # ``_reap_worker_thread_connections`` once for the whole module instead.
 
 
 # ─────────────────────────── connection reuse (CONN_MAX_AGE) ─────────────────────────── #
@@ -241,23 +181,9 @@ async def test_aupdate_inside_an_already_running_event_loop(tenants):
 
 @pytest.mark.django_db(transaction=True)
 def test_a_persistent_connection_tracks_a_new_tenant_across_logical_requests(tenants):
-    """``CONN_MAX_AGE`` is confirmed unset everywhere in this harness (see CLAUDE.md), so
-    nothing before this test ever proved the GUC cache survives the one thing
-    ``CONN_MAX_AGE`` exists to cause: the *same* physical connection serving a second,
-    unrelated logical request.
-
-    ``connection.settings_dict`` is mutated directly rather than through
-    ``override_settings(DATABASES=...)``: a wrapper object is cached the first time
-    ``connections[alias]`` is accessed (``django.utils.connection.BaseConnectionHandler``),
-    and nothing rebuilds that cache when the ``DATABASES`` setting changes later --
-    ``connect()`` reads ``max_age`` from *this* wrapper's own ``self.settings_dict``, so
-    only mutating that dict in place actually reaches it.
-
-    ``close_old_connections()`` is Django's own hook, normally wired to the
-    request-started/request-finished signals -- nothing calls it under pytest, so without
-    calling it explicitly here ``CONN_MAX_AGE`` would be decorative and this test would
-    pass whether or not connection reuse actually works.
-    """
+    """``CONN_MAX_AGE`` is unset elsewhere, so nothing else proves the GUC cache survives
+    one connection serving a second logical request. ``settings_dict`` mutated directly,
+    not via ``override_settings``: the wrapper caches it once and never rebuilds."""
     original_max_age = connection.settings_dict['CONN_MAX_AGE']
     connection.close()  # so the next connect() picks up CONN_MAX_AGE=60 from the start
     connection.settings_dict['CONN_MAX_AGE'] = 60
@@ -277,20 +203,16 @@ def test_a_persistent_connection_tracks_a_new_tenant_across_logical_requests(ten
             assert list(Release.objects.values_list('title', flat=True)) == ['release-b']
         assert connection.connection is reused, 'still the same connection as the first request'
     finally:
-        # Not just close_old_connections(): a connection that is not yet "old" by
-        # CONN_MAX_AGE's clock would survive past this test and block the session-end
-        # DROP DATABASE with "database is being accessed by other users".
+        # Not just close_old_connections(): a not-yet-"old" connection would survive
+        # past this test and block the session-end DROP DATABASE.
         connection.close()
         connection.settings_dict['CONN_MAX_AGE'] = original_max_age
 
 
 @pytest.mark.django_db(transaction=True)
 def test_conn_max_age_zero_is_the_control_that_makes_the_above_meaningful(tenants):
-    """Without this, the previous test's ``assert connection.connection is reused`` could
-    pass merely because pytest never closes anything -- not because ``CONN_MAX_AGE``
-    caused reuse. ``CONN_MAX_AGE`` defaults to 0 (unset, see core/settings.py), under
-    which ``close_old_connections()`` must actually close an idle connection.
-    """
+    """Without this, the previous test's reuse assertion could pass merely because
+    pytest never closes anything, not because CONN_MAX_AGE caused it."""
     with tenant(label=tenants.a):
         list(Release.objects.values_list('title', flat=True))
     live = connection.connection
@@ -323,17 +245,9 @@ requires_connection_pool = pytest.mark.skipif(
 @requires_connection_pool
 @pytest.mark.django_db(transaction=True, databases=['default', 'pooled'])
 def test_tenant_scope_is_correct_under_djangos_psycopg_pool(tenants):
-    """Django 5.1+'s ``OPTIONS: {"pool": True}`` hands out a *different* psycopg connection
-    object per checkout from the same underlying pool -- closer to what a pgbouncer-style
-    pooler does than a single long-lived connection is. Each checkout is a fresh
-    ``connection_created`` signal, so guitars re-installs its wrapper and starts the GUC
-    cache empty every time, which is exactly what should make this safe.
-
-    The 'pooled' alias lives in tests/settings.py (``TEST: {"MIRROR": "default"}``, so it
-    shares the migrated test database rather than getting its own) -- it has to be a real
-    settings.DATABASES entry because Django validates ``django_db(databases=[...])``
-    against settings at test-class setup, before this test body ever runs.
-    """
+    """Django 5.1+'s pool hands out a different connection per checkout, firing a fresh
+    ``connection_created`` signal each time, so guitars' GUC cache starts empty. The
+    'pooled' alias must be a real settings.DATABASES entry -- Django validates it early."""
     pooled = connections['pooled']
     try:
         for key, label, expected in (
@@ -353,26 +267,9 @@ def test_tenant_scope_is_correct_under_djangos_psycopg_pool(tenants):
 @requires_pgbouncer
 @pytest.mark.xdist_group(name='pgbouncer')
 class TestPgbouncerTransactionPooling:
-    """``compose.yaml``'s opt-in ``pooling`` profile runs pgbouncer with ``POOL_MODE:
-    transaction`` and ``DEFAULT_POOL_SIZE: 1`` -- one PostgreSQL backend total, shared by
-    every client. That size is deliberate, not incidental: with exactly one backend, two
-    *different* client connections are guaranteed to share it, which is what turns "a
-    session GUC can leak between logically unrelated clients under transaction pooling"
-    from a probabilistic race into a two-line reproduction.
-
-    Neither test below goes through Django or ``guitars.tenancy`` -- see the module
-    docstring on ``tenancy/guc.py``: the whole reason its cache is keyed on more than the
-    GUC values is that PostgreSQL, not guitars, is what silently reverts a ``SET``. This
-    demonstrates the PostgreSQL-and-pooler-level mechanism that guards against; there is
-    no Python-level cache to fool because nothing here asks Python to cache anything.
-
-    ``xdist_group`` pins both tests below to the same worker process: under
-    ``DEFAULT_POOL_SIZE: 1`` every client anywhere shares the one PostgreSQL backend behind
-    pgbouncer, so two *different* xdist workers each opening their own client at the same
-    moment could interleave with each other and read back the wrong leaked value -- these
-    two tests would only be racing against each other, not against the rest of the suite,
-    since nothing else in the suite talks to port 6432 at all.
-    """
+    """pgbouncer runs one shared backend (``DEFAULT_POOL_SIZE: 1``), deliberately, turning
+    the GUC-leak race into a two-line reproduction -- neither test goes through Django.
+    ``xdist_group`` pins both to one worker, or a second worker could read the wrong leak."""
 
     @staticmethod
     def _connect():
@@ -384,15 +281,9 @@ class TestPgbouncerTransactionPooling:
         )
 
     def test_session_set_is_not_naturally_isolated_between_clients(self):
-        """The risk ``docs/tenancy.md`` and ``tenancy/guc.py`` warn about, shown directly.
-
-        Client A sets a session GUC and disconnects (releasing pgbouncer's one backend).
-        Client B then connects and, without ever setting it, reads client A's value back --
-        because with ``DEFAULT_POOL_SIZE: 1`` and transaction pooling, B's transaction was
-        handed the exact same PostgreSQL session A just left it in. A direct ``SET`` (what
-        a plain, unpooled connection would use) does not survive a client disconnecting in
-        session-pooling mode, but it does here.
-        """
+        """The risk ``docs/tenancy.md`` warns about, shown directly: client A sets a
+        session GUC and disconnects; client B connects and reads A's value back, since
+        both share the one pgbouncer backend under transaction pooling."""
         with self._connect() as client_a, client_a.cursor() as cursor:
             cursor.execute("SET tenant.label = 'leaked-from-client-a'")
 
@@ -408,13 +299,9 @@ class TestPgbouncerTransactionPooling:
         )
 
     def test_reset_all_is_what_a_pooler_should_be_configured_to_run_between_clients(self):
-        """The mitigation, proven rather than assumed: ``DISCARD ALL`` (what a properly
-        configured transaction-mode pgbouncer runs as its ``server_reset_query``) clears
-        exactly the state the previous test showed leaking. This does not assert anything
-        about this repo's pgbouncer configuration -- see the docstring above, and the M5
-        follow-up this test family exists to inform -- it proves the fix these tests
-        recommend actually closes the gap, on the same one-backend setup.
-        """
+        """The mitigation, proven not assumed: ``DISCARD ALL`` (a properly configured
+        pgbouncer's ``server_reset_query``) clears exactly the state the previous test
+        showed leaking, on the same one-backend setup."""
         with self._connect() as client_a, client_a.cursor() as cursor:
             cursor.execute("SET tenant.label = 'should-not-survive-a-reset'")
             cursor.execute('DISCARD ALL')

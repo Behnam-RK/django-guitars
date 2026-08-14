@@ -1,50 +1,27 @@
-"""Test settings: the dev harness (core.settings) plus the concrete test app.
-
-The kit ships only abstract models, so the suite defines real models in
-``tests.testapp`` and points the enforcement-migrations command at it via
-``LOCAL_APPS`` / ``TRIGGER_FUNCTION_APP`` (so generated migrations land under
-``tests/``, never inside the shipped ``guitars`` package).
-"""
+"""Test settings: the dev harness (core.settings) plus the concrete test app. The kit
+ships only abstract models, so the suite defines real ones in ``tests.testapp`` and
+points the enforcement-migrations command at it via ``LOCAL_APPS``/``TRIGGER_FUNCTION_APP``."""
 
 from core.settings import *  # noqa: F401, F403
 
 
 # A second alias, same server, different database -- so `connections[self.db]` in
-# `hard_delete()` (guitars/models/soft_deletion.py) has a real second connection to
-# thread through instead of silently resolving to `connections['default']` regardless
-# of what `self.db` names. Same connection params as 'default'; pytest-django creates
-# and migrates 'test_guitars_secondary' the same way it does the default test database.
+# `hard_delete()` has a real second connection to thread through instead of silently
+# resolving to `connections['default']` regardless of what `self.db` names.
 DATABASES['secondary'] = {**DATABASES['default'], 'NAME': 'guitars_secondary'}  # noqa: F405
 
-# A third alias, same test database as 'default' (TEST.MIRROR skips creating a separate
-# one) but with the psycopg connection-pool option on -- tests/test_concurrency.py uses
-# this to exercise guitars' tenant-scope/GUC-cache correctness under Django 5.1+'s
-# `OPTIONS: {"pool": True}`, where each checkout is a distinct psycopg connection object
-# rather than one long-lived connection. Defined statically (not built at test runtime)
-# because Django validates `django_db(databases=[...])` against settings.DATABASES at
-# class setup, before any test body runs.
+# A third alias mirroring 'default' (TEST.MIRROR) but with the psycopg connection-pool
+# option on -- test_concurrency.py exercises the GUC cache under Django 5.1+'s pooled
+# checkouts. Defined statically since Django validates `databases=[...]` at class setup.
 DATABASES['pooled'] = {  # noqa: F405
     **DATABASES['default'],  # noqa: F405
     'OPTIONS': {**DATABASES['default'].get('OPTIONS', {}), 'pool': True},  # noqa: F405
     'TEST': {'MIRROR': 'default'},
 }
 
-# 'tests.legacy_migrations' and 'tests.mti_incremental' are installed (so pytest-django
-# migrates them like any other app, giving their tests an already-migrated database for
-# free at session setup) but deliberately left out of LOCAL_APPS -- makeguitarmigrations/
-# audittenancy ignore them by default, and each test scopes to its app explicitly.
-#
-# 'tests.makemigrations_override' and 'tests.schema_qualified' are deliberately NOT listed
-# here: both have no migrations checked in at all, and an app installed that way fails the
-# *unscoped* `makemigrations --check` CI runs (see .github/workflows/ci.yml) regardless of
-# LOCAL_APPS -- that check isn't guitars' own scoping, it's Django's, over every installed
-# app. tests/test_makemigrations_override.py and tests/test_schema_qualified.py each add
-# their app to INSTALLED_APPS themselves, only for the duration of each test, via
-# override_settings -- schema_qualified's table is additionally created and dropped inside
-# the test's own (rolled-back) transaction rather than through a real migration, so it
-# never persists in the shared session database at all; see test_schema_qualified.py for
-# why a persisted schema-qualified table breaks Django's own flush() for every other
-# transaction=True test in the suite, not just this one.
+# 'legacy_migrations'/'mti_incremental' are installed but left out of LOCAL_APPS -- each
+# test scopes explicitly. 'makemigrations_override'/'schema_qualified' aren't listed at all
+# (no checked-in migrations fails unscoped CI `--check`); their tests self-install instead.
 INSTALLED_APPS = [  # noqa: F405
     *INSTALLED_APPS,  # noqa: F405
     'tests.testapp',

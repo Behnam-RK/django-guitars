@@ -52,18 +52,9 @@ def test_disable_signals_only_disconnects_listed_signal():
 
 
 def test_disable_signals_concurrent_use_does_not_lose_receivers():
-    """Two overlapping ``DisableSignals()`` blocks must not permanently wipe receivers.
-
-    ``signal.receivers`` is process-global mutable state with no lock. This forces the
-    exact interleaving that loses it: A enters (stashes the real receivers, empties the
-    list), B enters (stashes A's now-empty list), A exits (correctly restores), then B
-    exits -- overwriting A's restore with B's stale, empty stash. The net effect is every
-    receiver in the process permanently disconnected, including guitars' own tenant write
-    guard, with no exception raised anywhere to say so.
-
-    The interleaving is forced with events rather than left to scheduler luck, so the test
-    reproduces deterministically instead of being flaky.
-    """
+    """Two overlapping ``DisableSignals()`` blocks must not permanently wipe receivers:
+    ``signal.receivers`` is process-global with no lock, so B stashing A's now-emptied
+    list then restoring it on exit wipes every receiver. Forced via events, not luck."""
 
     def on_save(sender, **kwargs):
         pass

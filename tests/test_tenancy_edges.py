@@ -1,11 +1,5 @@
-"""The refusals, the audit mode, and the branches a happy path never reaches.
-
-Every test here is about a path that only runs when something is wrong -- a mis-set setting,
-an uncoverable model shape, a value that cannot be turned into SQL. Those are exactly the
-paths that rot unnoticed, because nothing in normal use touches them, so they are the ones
-worth pinning hardest: a guard that has silently stopped guarding looks identical to one that
-never had to.
-"""
+"""The refusals, audit mode, and branches a happy path never reaches -- paths that only
+run when something is wrong rot unnoticed, so they're worth pinning hardest."""
 
 from __future__ import annotations
 
@@ -49,11 +43,8 @@ class TestPolicySqlRefusals:
             sql.drop_exempt_policy(table='t', role='bad\x00role')
 
     def test_a_policy_with_nothing_to_predicate_on_is_refused(self):
-        """Emitting one would be worse than emitting none.
-
-        ``USING (bypass)`` denies every scoped read on the table, which reads as a broken
-        deployment rather than as the configuration mistake it is.
-        """
+        """Emitting one would be worse than none -- ``USING (bypass)`` denies every
+        scoped read, reading as a broken deployment rather than the mistake it is."""
         with pytest.raises(ValueError, match='refusing to emit a policy'):
             sql.create_tenant_policy(table='t', columns={})
 
@@ -63,13 +54,8 @@ class TestPolicySqlRefusals:
 
 
 class TestForceIsSeparableFromTheRest:
-    """``force=False`` is the whole staged-retrofit workflow, so the shape it emits is pinned.
-
-    ``GUITARS_RLS_FORCE = False`` exists to ship policies *inert* onto a populated database:
-    the app role owns its tables and an owner bypasses non-``FORCE`` RLS silently, so the
-    policy can be soaked before it binds. Nothing asserted that the flag actually removes the
-    statement, and statement coverage could not notice -- ``if force:`` runs either way.
-    """
+    """``force=False`` is the whole staged-retrofit workflow -- statement coverage alone
+    can't notice, since ``if force:`` runs either way."""
 
     def test_force_false_omits_the_alter_and_changes_nothing_else(self):
         forced = sql.create_table_rls(table='t', columns={'label': 'label_id'}, force=True)
@@ -91,18 +77,9 @@ class TestForceIsSeparableFromTheRest:
 
 
 class TestDimensionsOnTwoAncestors:
-    """One correlated subquery reaches one ancestor, so all such dimensions are dropped.
-
-    Picking one would make the policy's strength depend on field declaration order -- a policy
-    whose strength varies with that is worse than a named gap.
-
-    Only the *spec* is stubbed. Declaring throwaway concrete models for this would register
-    them in the test app and make every migration command in the suite report them as missing,
-    so instead the real three-level MTI chain is reused and told it is scoped on two columns
-    that genuinely live on two different ancestors: ``label`` on ``Tour`` and ``continents`` on
-    ``WorldTour``. The ownership resolution under test is therefore real; only the declaration
-    that reaches it is faked.
-    """
+    """One correlated subquery reaches one ancestor, so dimensions on two are dropped --
+    picking one would depend on field declaration order. Only the *spec* is stubbed, on
+    the real MTI chain; a throwaway model would break every migration command."""
 
     @pytest.fixture
     def spread_spec(self, monkeypatch):
@@ -137,13 +114,8 @@ class TestDimensionsOnTwoAncestors:
         assert "'region'" in note
 
     def test_it_is_reported_once_and_not_also_as_uncoverable(self, spread_spec):
-        """One fact, one note.
-
-        The uncoverable-model note says the dimensions "have no column on this table or a
-        shared-key ancestor", which is the opposite of what happened here -- they have
-        columns on *two* ancestors. Emitting both read as two separate problems, and sent
-        the reader looking for a missing column that is not missing.
-        """
+        """One fact, one note -- the uncoverable-model note says "no column anywhere",
+        the opposite of what happened: these have columns on *two* ancestors."""
         _, notes = _classify(StadiumTour)
 
         assert len(notes) == 1
@@ -154,23 +126,14 @@ class TestDimensionsOnTwoAncestors:
 
 
 class TestAuditMode:
-    """Report and proceed, for rolling enforcement onto a populated deployment.
-
-    **Audit mode softens the Python layer only.** Once a ``tenant_scope`` policy binds, the
-    database refuses a cross-tenant write regardless of the setting -- there is no session
-    variable that says "enforce, but leniently". So audit mode is a tool for the *first* stage
-    of a rollout: adopt the managers with ``GUITARS_TENANT_POLICIES = False`` (or before
-    migrating the policies), let it name every offending call site, fix them, then turn on
-    strict and the policies together.
-
-    These tests run with the policy dropped for the duration, which is that configuration.
-    ``TestAuditModeDoesNotSoftenTheDatabase`` covers what happens if you skip the ordering.
-    """
+    """Report and proceed, for rolling enforcement onto a populated deployment. **Audit
+    softens the Python layer only.** These tests drop the policy, matching the first
+    rollout stage; see ``TestAuditModeDoesNotSoftenTheDatabase`` for skipping the order."""
 
     @pytest.fixture(autouse=True)
     def _audit_mode(self):
-        """``override_settings`` as a fixture, not a class decorator: Django's decorator only
-        supports ``SimpleTestCase`` subclasses, and these are plain pytest classes."""
+        """Fixture, not class decorator: Django's decorator only supports
+        ``SimpleTestCase`` subclasses, and these are plain pytest classes."""
         reporting.reset_reported()
         with override_settings(GUITARS_TENANT_ENFORCE='audit'):
             yield
@@ -178,12 +141,8 @@ class TestAuditMode:
 
     @pytest.fixture
     def unpolicied(self, db):
-        """Drop the ``testapp_release`` policy for this test.
-
-        DDL is transactional in PostgreSQL and the test runs inside a transaction, so this is
-        undone with everything else. It models the stage of a rollout where the Python layer
-        is in place and the database layer is not yet.
-        """
+        """Drop the ``testapp_release`` policy for this test -- DDL is transactional, so
+        this undoes with everything else. Models the Python-only rollout stage."""
         _execute(*sql.drop_table_rls(table=Release._meta.db_table))
         return None
 
@@ -232,11 +191,8 @@ class TestAuditMode:
     def test_an_unscoped_bulk_create_is_reported_and_still_guarded(
         self, unpolicied, tenants, sink
     ):
-        """The batched path fires no ``pre_save``, so the guard is invoked by hand.
-
-        Without that, ``bulk_create`` would validate strictly less than ``create`` in the one
-        mode whose entire purpose is finding out what is wrong.
-        """
+        """The batched path fires no ``pre_save``, so the guard is invoked by hand --
+        else ``bulk_create`` would validate strictly less in the mode meant to catch it."""
         Release.objects.bulk_create([Release(title='batched', label=tenants.a)])
 
         assert any('bulk_create' in message for message, _ in sink)
@@ -250,11 +206,8 @@ class TestAuditMode:
         assert len(sink) == 1
 
     def test_reads_still_deny_in_audit_mode(self, unpolicied, tenants):
-        """Audit mode softens *writes*.
-
-        A read has a value to return, and returning every tenant's rows would be the leak
-        itself -- there is no "report and proceed" that is not also a disclosure.
-        """
+        """Audit mode softens *writes* -- a read returning every tenant's rows would be
+        the leak itself; there's no "report and proceed" that isn't also a disclosure."""
         with pytest.raises(TenantScopeError):
             Release.objects.count()
 
@@ -282,12 +235,8 @@ class TestAuditMode:
 
 
 class TestAuditModeDoesNotSoftenTheDatabase:
-    """The ordering constraint, pinned rather than left as advice.
-
-    Someone who sets ``audit`` expecting no 500s, on a database whose policies already bind,
-    gets 500s -- from the database, after the Python layer has already waved the write
-    through. Better to have that as a test than as a surprise.
-    """
+    """The ordering constraint, pinned as a test: someone setting ``audit`` expecting no
+    500s, on a database whose policies already bind, gets 500s -- from the database."""
 
     @pytest.fixture(autouse=True)
     def _audit_mode(self):
@@ -356,11 +305,8 @@ class TestEnforcementSettingIsValidated:
 
 class TestTheTenantModelCheckInProcess:
     def test_it_names_every_offending_model(self, monkeypatch):
-        """The harness *does* configure tenancy, so the unwired state is simulated here.
-
-        ``tests/test_ladder.py`` proves the real import-time behaviour in subprocesses; this
-        covers the check's own logic, which is what decides the message a developer reads.
-        """
+        """The harness *does* configure tenancy, so the unwired state is simulated here;
+        ``test_ladder.py`` proves the real import-time behaviour in subprocesses."""
         monkeypatch.setattr(GuitarModel, '_guitars_tenancy_installed', False)
 
         errors = check_guitar_models_have_a_tenant(None)
@@ -444,13 +390,9 @@ class TestLiteralRendering:
         assert _literal({'label': 'label_id'}) == "{'label': 'label_id'}"
 
     def test_awkward_strings_stay_valid_python(self):
-        """A hand-built f"'{value}'" would emit a syntax error here, or eat the backslash.
-
-        Unreachable through ``sql.policy._bare``, which refuses anything but a plain
-        lower-case identifier -- but the refusal happens at *migrate* time, in the consuming
-        project, and a migration file that cannot even be imported is a worse way to find
-        out than the ValueError that was supposed to say so.
-        """
+        """A hand-built f"'{value}'" would emit a syntax error or eat a backslash --
+        unreachable through ``_bare``, but a migration that can't import is worse than
+        the ValueError that was supposed to say so."""
         for value in ("o'brien", 'back\\slash', 'new\nline'):
             assert ast.literal_eval(_literal(value)) == value
 
@@ -471,13 +413,9 @@ class TestGeneratorSettings:
         assert 'Missing' not in out.getvalue()
 
     def test_force_rls_writes_nothing_when_force_shipped_inline(self, db):
-        """The default is ``GUITARS_RLS_FORCE = True``, so every policy already carries FORCE.
-
-        It used to emit a redundant FORCE migration per tenanted table here, because it keyed
-        only on "a policy exists and has no separate FORCE operation" -- which is true of every
-        policy generated with FORCE inline. It now reads the ``force=`` literal the operation
-        was written with, so a second stage only acts on policies that really shipped inert.
-        """
+        """Default GUITARS_RLS_FORCE=True means every policy carries FORCE already -- used
+        to emit a redundant migration per table by keying on mere policy existence; now
+        reads the ``force=`` literal, so it only acts on policies that really shipped inert."""
         from io import StringIO
 
         out = StringIO()
@@ -488,15 +426,9 @@ class TestGeneratorSettings:
         assert 'No changes detected' in output
 
     def test_force_rls_is_quiet_in_the_configuration_it_exists_for(self, db):
-        """``GUITARS_RLS_FORCE = False`` is the retrofit the flag was built for.
-
-        Its sibling above covers the *finished* retrofit, where the setting is back on and the
-        warning is the point. Here the setting is still off, so there is nothing to warn about
-        -- and a stage that lectured the operator every time they ran it in the intended
-        configuration is a stage they learn to ignore. This repo's own policies all shipped
-        forced, so there is still no backlog to act on; what is asserted is the absence of the
-        notice, not the absence of work.
-        """
+        """``GUITARS_RLS_FORCE = False`` is the retrofit this flag was built for -- the
+        setting is still off here, so nothing to warn about; a stage lecturing the operator
+        every routine run is one they learn to ignore. Asserts the notice's absence, not work's."""
         from io import StringIO
 
         out = StringIO()
@@ -541,11 +473,8 @@ class TestGeneratorSettings:
 
 class TestScaffoldingFailsLoudly:
     def test_an_unparseable_makemigrations_output_is_an_error(self, monkeypatch):
-        """Django prints the path it wrote rather than returning it.
-
-        Guessing -- rewriting whichever file a glob found first -- would corrupt an unrelated
-        migration, so a failure to match the filename is raised instead.
-        """
+        """Django prints the path rather than returning it -- guessing (rewriting
+        whichever glob result) would corrupt an unrelated migration, so this raises."""
         monkeypatch.setattr(_generator, 'call_command', lambda *a, **k: None)
         app = __import__('django.apps', fromlist=['apps']).apps.get_app_config('testapp')
 

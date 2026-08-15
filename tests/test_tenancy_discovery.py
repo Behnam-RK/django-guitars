@@ -1,13 +1,6 @@
 """Tests for guitars.tenancy.discovery -- what the models say the database should look like.
-
-One answer, two consumers: ``makeguitarmigrations`` turns it into migrations at build time
-and ``audittenancy`` compares it against a live database. If they could disagree, a green
-audit would mean nothing -- so this is tested as the shared answer, not once per caller.
-
-The coverage shapes here are the real test-app models, so a shape that stops being
-reachable stops being asserted, rather than passing against a hand-built fixture that no
-longer resembles anything.
-"""
+One answer, two consumers (``makeguitarmigrations``, ``audittenancy``): if they could
+disagree, a green audit would mean nothing. Coverage shapes are real test-app models."""
 
 from __future__ import annotations
 
@@ -62,22 +55,15 @@ class TestWhichTablesAreCovered:
         assert 'Python scoping still applies' in note
 
     def test_that_is_the_only_note_about_it(self, coverage):
-        """One fact, one note.
-
-        A model whose every dimension is multi-hop used to collect two -- a "traverses a
-        relation" note naming the dimension and a "skipped" note naming the lookup -- which
-        read as two separate problems with one model.
-        """
+        """One fact, one note -- used to collect two ("traverses a relation" plus
+        "skipped"), reading as two separate problems with one model."""
         review_notes = [note for note in coverage.notes if 'testapp_review' in note]
         assert len(review_notes) == 1
 
     def test_an_own_dimension_survives_a_multi_ancestor_conflict(self, coverage):
-        """``HeadlineFestival`` has ``sponsor`` on its own table, while ``market`` and
-        ``promoter`` live on two *different* ancestors (``Festival`` and
-        ``TouringFestival``) -- one correlated subquery can only reach one of them, so
-        both are dropped. The own-table dimension must still get a policy: dropping
-        those two must not also drop the one this table can actually enforce itself.
-        """
+        """``sponsor`` is on its own table, while ``market``/``promoter`` live on two
+        *different* ancestors -- one correlated subquery can reach only one, so both are
+        dropped, but the own-table dimension must still get a policy."""
         assert coverage.tables[HeadlineFestival._meta.db_table] == TableCoverage(
             columns={'sponsor': 'sponsor_id'}
         )
@@ -99,11 +85,8 @@ class TestHowEachTableIsPredicated:
 
     @pytest.mark.parametrize('model', [WorldTour, StadiumTour], ids=lambda m: m.__name__)
     def test_an_mti_child_joins_the_column_owner(self, coverage, model):
-        """Both levels join ``testapp_tour``, not their immediate parent.
-
-        The leaf's parent is ``testapp_worldtour``, which has no tenant column either -- so
-        predicating against the immediate parent would reference a table that cannot answer.
-        """
+        """Both levels join ``testapp_tour``, not their immediate parent -- the leaf's parent
+        ``testapp_worldtour`` has no tenant column either, so it couldn't answer."""
         table = coverage.tables[model._meta.db_table]
 
         assert table.columns == {}
@@ -143,11 +126,8 @@ class TestAsKwargs:
         }
 
     def test_the_kwargs_build_valid_policy_sql(self, coverage):
-        """The point of the mapping: it is what ``sql.create_table_rls`` is called with.
-
-        Asserted here rather than only in the generator, so a rename on either side of that
-        call is caught by the side that changed.
-        """
+        """The point of the mapping: what ``sql.create_table_rls`` is called with. Asserted
+        here too, not only in the generator, so a rename is caught by whichever side changed."""
         from guitars import sql
 
         statements = sql.create_table_rls(

@@ -1,11 +1,6 @@
-"""The audit sink used by ``'audit'`` enforcement mode.
-
-Two properties matter. It must **deduplicate**, because the alternative is a hot query path
-emitting thousands of identical events. And it must **never raise**, because the entire
-point of audit mode is to observe a live path without breaking it -- a reporter that threw
-would convert "report and proceed" into a 500, which is the behaviour audit mode exists to
-avoid.
-"""
+"""The audit sink used by ``'audit'`` enforcement mode. Must **deduplicate** (a hot query
+path would otherwise emit thousands of identical events) and **never raise** (audit mode
+exists to observe without breaking the path, and a throwing reporter converts that to a 500)."""
 
 import logging
 

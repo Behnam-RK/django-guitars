@@ -1,5 +1,7 @@
 # API reference
 
+<!-- doc-budget: exempt — enumeration; length tracks the API surface, not verbosity -->
+
 A flat enumeration of the public surface: base models, managers, settings,
 commands, and the frozen `guitars.sql` names. For the *why* behind any of
 this, see [`docs/adr/`](adr/README.md); for task-oriented guides, see
@@ -19,6 +21,25 @@ The instrument ladder, each rung adding capability:
 
 Each capability is also a standalone mixin: `UpdatableModel`,
 `HasCachedPropertyModel`, `DatedModel`, `SoftDeletableModel`.
+
+### `.update()` / `.aupdate()` parameters (`UpdatableModel`)
+
+| Param | Effect |
+| --- | --- |
+| `_save` | `False` sets attributes in memory only; not saved, and not carried into a later `_save=True` call unless `_save_all_fields=True` too. |
+| `_save_all_fields` | Write every field, not just the passed ones. `_save=False` + `_save_all_fields=True` raises `ValueError` — nothing is saved that call, so "save every field" has nothing to act on. |
+| `_raise_for_excessive` | `False` ignores an unrecognised kwarg instead of raising; a DEBUG log on `guitars.models` still names it. |
+| `_disable_signals` | Suppresses `pre_save`/`post_save` for this call. On a `GuitarModel`, that disables the tenant write guard; each such call is reported once per model class via `guitars.tenancy.reporting`. |
+
+M2M fields go through `.set(values, clear=True)` and require `_save=True`. The
+save runs inside `transaction.atomic()`.
+
+`aupdate()` is a thread hop via `sync_to_async` (`thread_sensitive=True`), not
+native async I/O — the write still blocks a thread, just not necessarily the
+caller's. The shared worker pool gives concurrent calls no same-thread
+guarantee; safe because `DisableSignals` (`guitars.signals`) is process-global,
+lock-protected, and reference-counted, so overlapping `_disable_signals=True`
+blocks nest instead of clobbering each other's restore.
 
 ## Managers and querysets (`guitars.models`)
 

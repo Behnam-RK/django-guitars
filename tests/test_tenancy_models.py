@@ -1,17 +1,6 @@
-"""Tenancy against real models and a real PostgreSQL database.
-
-``tests/test_tenancy_rls.py`` proves the *SQL* with hand-written DDL; this file proves the
-whole stack the way a consumer meets it: a ``GuitarModel`` subclass, its three managers, the
-write guard, the soft-delete rules and the policy, all at once.
-
-The harness sets ``GUITARS_TENANT_FIELD = 'label'``, so every assertion here also exercises
-a non-default field name -- the column, the session setting ``tenant.label``, the policy
-predicate and the scope dimension all have to be the renamed one, and only a test that
-never mentions ``'tenant'`` can show they moved together.
-
-Two tenants throughout. The interesting assertion is never "I can see my rows" but "I
-cannot see theirs", and one tenant's data cannot demonstrate that.
-"""
+"""Tenancy against real models and a real PostgreSQL database -- the whole stack, unlike
+test_tenancy_rls.py's hand-written DDL. Harness sets ``GUITARS_TENANT_FIELD = 'label'``, so
+every assertion also exercises a non-default field name. Two tenants throughout."""
 
 from __future__ import annotations
 
@@ -25,11 +14,8 @@ from tests.testapp.models import Band, Booking, Label, Release, Review, StadiumT
 
 
 def _count(table: str) -> int:
-    """Row count straight from the database, with no ORM and therefore no manager.
-
-    What the policy alone decides. A manager could produce the right number for the wrong
-    reason; this cannot.
-    """
+    """Row count straight from the database, no ORM -- what the policy alone decides. A
+    manager could produce the right number for the wrong reason; this cannot."""
     return _scalar(f'SELECT count(*) FROM {table}')  # noqa: S608 - fixed literal names
 
 
@@ -51,11 +37,8 @@ class TestScopedReads:
 
     @pytest.mark.parametrize('manager', ['objects', '_archives', '_all_objects'])
     def test_every_manager_refuses_without_a_scope(self, tenants, manager):
-        """All three, not just the default.
-
-        ``_archives`` and ``_all_objects`` exist to see rows ``objects`` hides, so an
-        unscoped one would be the widest leak in the kit.
-        """
+        """All three, not just the default -- ``_archives``/``_all_objects`` exist to see
+        rows ``objects`` hides, so an unscoped one would be the widest leak."""
         with pytest.raises(TenantScopeError, match='active tenant scope on label'):
             getattr(Release, manager).count()
 
@@ -100,14 +83,8 @@ class TestTheDatabaseCoversWhatPythonCannot:
             assert _count('testapp_release') == 2
 
     def test_the_base_manager_is_scoped_by_the_policy(self, tenants):
-        """``_base_manager`` applies no tenant filter in Python -- deliberately, see
-        ``GuitarModel.Meta``. It is scoped anyway, because the policy does not care which
-        manager asked.
-
-        This is the assertion that makes the ``base_manager_name`` decision defensible
-        rather than merely argued: leaving it unscoped costs nothing, because the layer
-        below is not optional.
-        """
+        """``_base_manager`` applies no Python filter, by design (ADR-0004) -- it's scoped
+        anyway, since the policy doesn't care which manager asked."""
         with tenant(label=tenants.a):
             assert Release._base_manager.count() == 1
         with tenancy_bypassed():
@@ -160,12 +137,9 @@ class TestWrites:
             assert Release.objects.count() == 3
 
     def test_bulk_create_after_chaining_is_still_guarded(self, tenants):
-        """``filter()`` hands back a queryset and leaves the manager behind.
-
-        The guard therefore lives on the queryset class, not the manager. It used to be
-        installed via ``_queryset_class`` on a manager whose ``get_queryset()`` ignored it,
-        which made this exact call unguarded -- so autofill silently did nothing.
-        """
+        """``filter()`` hands back a queryset, leaving the manager behind -- the guard
+        lives on the queryset class. Used to live on a manager whose get_queryset()
+        ignored it, so this exact call was unguarded and autofill silently did nothing."""
         with tenant(label=tenants.a):
             Release.objects.filter(title='irrelevant').bulk_create([Release(title='z')])
 
@@ -176,11 +150,8 @@ class TestWrites:
             Release.objects.bulk_create([Release(title='x', label=tenants.b)])
 
     def test_a_collection_scope_refuses_to_autofill(self, tenants):
-        """ "Either of these" is not a value a column can hold.
-
-        Refused whatever the length -- unwrapping a one-element collection would make the
-        write depend on how many tenants the caller's list happened to contain.
-        """
+        """"Either of these" is not a value a column can hold -- refused whatever the
+        length, or unwrapping a one-element collection would make behavior depend on it."""
         with (
             tenant(label=[tenants.a, tenants.b]),
             pytest.raises(TenantScopeError, match='no one value to autofill'),
@@ -226,11 +197,8 @@ class TestWrites:
         ],
     )
     def test_set_wide_writes_are_denied_without_a_scope(self, tenants, call):
-        """Unscoped, each of these would reach every tenant's rows.
-
-        ``hard_delete`` matters most: it deletes permanently, and before
-        ``FORCE ROW LEVEL SECURITY`` was on, the database would not have stopped it either.
-        """
+        """Unscoped, each would reach every tenant's rows -- ``hard_delete`` matters most:
+        before FORCE ROW LEVEL SECURITY, the database wouldn't have stopped it either."""
         with pytest.raises(TenantScopeError):
             call()
 
@@ -239,12 +207,8 @@ class TestWrites:
             assert Release._all_objects.count() == 2
 
     def test_instance_hard_delete_is_denied_without_a_scope(self, tenants):
-        """Fail-closed: the row survives, live.
-
-        The in-memory instance is left with ``pk = None``, because phase one calls
-        ``self.delete()`` -- which Django always does, on success or failure. The instance
-        must not be reused after this; the *database* is what the guarantee is about.
-        """
+        """Fail-closed: the row survives, live. The instance is left with ``pk = None``
+        (phase one's ``self.delete()``) and must not be reused -- the database is the guarantee."""
         pk = tenants.release_a.pk
 
         with pytest.raises(TenantScopeError):
@@ -254,8 +218,8 @@ class TestWrites:
             assert Release.objects.filter(pk=pk).exists()
 
     def test_a_scoped_hard_delete_removes_only_its_own_rows(self, tenants):
-        """Instance-level, which walks CASCADE children -- the queryset form deliberately
-        does not, so calling it here would leave a track pointing at nothing."""
+        """Instance-level walks CASCADE children; the queryset form doesn't, or this
+        would leave a track pointing at nothing."""
         with tenant(label=tenants.a):
             tenants.release_a.hard_delete()
 
@@ -265,9 +229,9 @@ class TestWrites:
 
 
 class TestUpdateDisableSignalsReporting:
-    """``update(_disable_signals=True)`` suppresses ``pre_save`` -- which is also where
-    the tenant write guard lives. Nothing here can refuse the write without breaking the
-    flag's whole purpose, so it must at least say so."""
+    """``update(_disable_signals=True)`` suppresses ``pre_save``, where the write guard
+    lives too. Can't refuse the write without breaking the flag's purpose, so it must
+    at least say so."""
 
     @pytest.fixture(autouse=True)
     def _isolated_reporter(self):
@@ -320,10 +284,8 @@ class TestUpdateDisableSignalsReporting:
         assert seen == []
 
     def test_disabling_signals_when_the_save_is_a_no_op_is_not_reported(self, tenants):
-        """A no-op ``update(_disable_signals=True)`` -- nothing to write -- must not report
-        a guard bypass. ``update_fields`` collapses to an empty (non-None) set, so
-        ``self.save()`` short-circuits with no SQL and no signals at all; there is nothing
-        for ``_disable_signals`` to have bypassed."""
+        """A no-op update (nothing to write) must not report a bypass -- ``save()``
+        short-circuits with no SQL and no signals, so nothing was bypassed."""
         seen = []
         reporting.set_reporter(lambda message, /, **context: seen.append(message))
 
@@ -340,8 +302,8 @@ class TestSoftDeletionUnderPolicy:
     """The soft-delete rule rewrites ``DELETE`` into ``UPDATE``, which the policy also checks."""
 
     def test_a_scoped_delete_soft_deletes(self, tenants):
-        """The rewritten ``UPDATE`` has to pass ``WITH CHECK`` -- it leaves the tenant column
-        untouched, so it does, but only a real ``DELETE`` under ``FORCE`` proves it."""
+        """The rewritten UPDATE must pass WITH CHECK; only a real DELETE under FORCE
+        proves it does."""
         with tenant(label=tenants.a):
             tenants.release_a.delete()
 
@@ -362,16 +324,9 @@ class TestSoftDeletionUnderPolicy:
             assert Track.objects.filter(title='track-b').exists()
 
     def test_deleting_a_tenant_unscoped_does_not_archive_its_rows(self, tenants):
-        """A sharp edge, asserted so it is a known shape rather than a surprise.
-
-        ``Label`` is the tenant model and is *not* tenanted, so deleting one needs no scope.
-        Its cascade rule then tries to archive the tenanted rows -- and the policy filters
-        that ``UPDATE`` to nothing, because no scope is active. The tenant is archived and
-        its rows are not.
-
-        Fail-closed rather than wrong: nothing is destroyed and nothing leaks. But a caller
-        who wants the cascade has to say which tenant they mean, which is the next test.
-        """
+        """A sharp edge, pinned as known rather than surprise: ``Label`` isn't tenanted,
+        so deleting it needs no scope, and its cascade UPDATE is then filtered to nothing
+        with none active. Fail-closed, not wrong -- see the next test for the scoped case."""
         label_pk, release_pk = tenants.a.pk, tenants.release_a.pk
 
         tenants.a.delete()
@@ -397,12 +352,8 @@ class TestSoftDeletionUnderPolicy:
 
 
 class TestTenantedMti:
-    """The tenant column lives two tables up; the child carries an owner-join policy.
-
-    Without it, a child-only statement -- which never touches the ancestor -- would be
-    unfiltered. This is the gap the kit already knew about for timestamps
-    (``set_parent_updated_at``), reached from the other side.
-    """
+    """The tenant column lives two tables up; the child carries an owner-join policy --
+    without it, a child-only statement (never touching the ancestor) is unfiltered."""
 
     def test_a_scoped_read_of_the_leaf_sees_only_its_own_tenant(self, tenants):
         with tenant(label=tenants.a):
@@ -413,8 +364,8 @@ class TestTenantedMti:
             assert list(Tour.objects.values_list('name', flat=True)) == ['tour-a']
 
     def test_a_child_only_update_cannot_reach_another_tenant(self, tenants):
-        """``capacity`` lives on the leaf table alone, so this ``UPDATE`` never joins the
-        ancestor that holds the tenant column. Only the leaf's own policy can confine it."""
+        """``capacity`` lives on the leaf alone, so this UPDATE never joins the tenant
+        ancestor -- only the leaf's own policy can confine it."""
         with tenant(label=tenants.a):
             assert StadiumTour.objects.update(capacity=99) == 1
 
@@ -422,12 +373,8 @@ class TestTenantedMti:
             assert sorted(StadiumTour.objects.values_list('capacity', flat=True)) == [99, 1000]
 
     def test_a_child_only_raw_delete_cannot_reach_another_tenant(self, tenants):
-        """Raw SQL against the leaf table, with no ORM and no manager anywhere in the call.
-
-        The effect is asserted rather than ``cursor.rowcount``: the leaf carries the MTI
-        redirect rule, so a ``DELETE`` here is rewritten ``DO INSTEAD`` into an ``UPDATE`` on
-        the ancestor, and the reported row count describes the substituted statement.
-        """
+        """Raw SQL against the leaf, no ORM anywhere. Effect asserted, not
+        ``cursor.rowcount``: the MTI redirect rewrites DELETE into an UPDATE on the ancestor."""
         a_pk, b_pk = tenants.tour_a.pk, tenants.tour_b.pk
 
         with tenant(label=tenants.a):
@@ -473,11 +420,8 @@ class TestTenantedMti:
 
 
 class TestMultiHopDimension:
-    """``Review`` scopes through a relation, so it has no tenant column of its own.
-
-    Python still scopes it; the database cannot. Half-supporting that would be worse than
-    naming it, which is what the generator's skip note does.
-    """
+    """``Review`` scopes through a relation, no tenant column of its own -- Python still
+    scopes it, the database cannot. Half-supporting would be worse than naming the gap."""
 
     @pytest.fixture
     def reviews(self, tenants):
@@ -496,8 +440,8 @@ class TestMultiHopDimension:
             Review.objects.count()
 
     def test_the_table_carries_no_policy(self, reviews):
-        """Asserted against the database, because the alternative to a *named* gap is a
-        policy that looks like protection and predicates on nothing."""
+        """The alternative to a *named* gap is a policy that looks like protection and
+        predicates on nothing."""
         assert (
             _scalar(
                 'SELECT count(*) FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid '
@@ -508,16 +452,14 @@ class TestMultiHopDimension:
         )
 
     def test_raw_sql_is_therefore_not_scoped(self, reviews):
-        """The honest consequence, pinned. This is what the skip note is warning about."""
+        """The honest consequence -- what the skip note is warning about."""
         with tenancy_bypassed():
             assert _count('testapp_review') == 2
 
 
 class TestHandDeclaredManager:
-    """``Booking`` composes ``tenanted_manager()`` over ``LiveManager`` itself.
-
-    The path a project takes to scope a model without moving it to the ``GuitarModel`` rung.
-    """
+    """``Booking`` composes ``tenanted_manager()`` over ``LiveManager`` -- the path a
+    project takes to scope a model without moving it to the ``GuitarModel`` rung."""
 
     def test_the_scoped_manager_filters(self, bookings, tenants):
         with tenant(label=tenants.a):
@@ -528,25 +470,16 @@ class TestHandDeclaredManager:
             Booking.objects.count()
 
     def test_only_the_declared_manager_is_scoped(self, bookings):
-        """The asymmetry is real, and it is the argument for the ``GuitarModel`` rung.
-
-        Only ``objects`` was wrapped, so ``_archives`` and ``_all_objects`` still answer
-        unscoped -- in *Python*. The row-level-security policy does not care which manager
-        asked, so what comes back is still only what the caller may see; here, with no scope
-        active, that is nothing.
-        """
+        """The asymmetry is real, and the argument for ``GuitarModel``: only ``objects``
+        was wrapped, but the policy doesn't care which manager asked, so this still nets zero."""
         assert Booking._all_objects.count() == 0
 
         with tenancy_bypassed():
             assert Booking._all_objects.count() == 2
 
     def test_autofill_is_not_assumed_for_a_hand_declared_manager(self, tenants):
-        """``GUITARS_TENANT_AUTOFILL`` defaults to False, and this model leaves it there.
-
-        ``GuitarModel`` passes ``autofill=True`` for the field it owns, because that field is
-        framework-owned and ``editable=False``. A field the project declared itself is its
-        own business, so the default stands and the write is refused rather than guessed at.
-        """
+        """``GUITARS_TENANT_AUTOFILL`` defaults to False, and this model leaves it there --
+        ``GuitarModel`` overrides it only for the framework-owned field it declares itself."""
         with tenant(label=tenants.a), pytest.raises(TenantScopeError, match='is missing'):
             Booking.objects.create(venue='Nowhere')
 
@@ -557,17 +490,14 @@ class TestHandDeclaredManager:
         assert booking.label_id == tenants.a.pk
 
     def test_the_policy_still_covers_it(self, bookings, tenants):
-        """It has a local tenant column, so it is policy-eligible like any other."""
+        """Has a local tenant column, so it's policy-eligible like any other."""
         with tenant(label=tenants.a):
             assert _count('testapp_booking') == 1
 
 
 class TestNonNullTenantIsEnforcedByTheDatabase(object):
     def test_a_null_tenant_cannot_be_written(self, tenants):
-        """The FK is non-null, so even the bypass cannot create an orphan row.
-
-        Worth pinning: a nullable tenant column would produce rows no scope matches and no
-        policy hides -- invisible to every tenant and to the bypass alike.
-        """
+        """The FK is non-null, so even the bypass can't create an orphan -- a nullable
+        column would produce rows no scope matches and no policy hides."""
         with tenancy_bypassed(), pytest.raises(IntegrityError):
             Release.objects.create(title='orphan', label=None)

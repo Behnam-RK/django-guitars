@@ -1,11 +1,6 @@
-"""Startup validation of the tenancy settings.
-
-``GUITARS_TENANT_ENFORCE`` is read at *write* time, so without a system check a typo would
-surface as a ``ValueError`` from inside the first write that happened to trip a guard --
-on a request, long after deploy, nowhere near the setting. ``GUITARS_TENANT_AUTOFILL`` is
-worse: it is read through ``bool()``, so the string ``'False'`` would silently enable
-autofill and start assigning tenants to rows.
-"""
+"""Startup validation of the tenancy settings. ``GUITARS_TENANT_ENFORCE`` is read at
+*write* time, so a typo would surface as a deep ``ValueError`` long after deploy.
+``GUITARS_TENANT_AUTOFILL`` is read via ``bool()``, so ``'False'`` would silently enable it."""
 
 import pytest
 from django.apps import apps as django_apps
@@ -41,12 +36,9 @@ def test_every_valid_mode_string_passes(mode):
 
 @pytest.mark.parametrize('mode', list(TenantEnforcement))
 def test_passing_the_enum_itself_passes(mode):
-    """Relies on the StrEnum-parity ``__str__`` on Python 3.10.
-
-    The check compares ``str(configured)`` against the allowed values. On a plain
-    ``(str, Enum)`` without that override, ``str()`` yields 'TenantEnforcement.STRICT' and
-    a project handing over the enum would fail its own check.
-    """
+    """Relies on the StrEnum-parity ``__str__`` on Python 3.10 -- the check compares
+    ``str(configured)`` against allowed values, and a plain ``(str, Enum)`` without that
+    override would yield 'TenantEnforcement.STRICT', failing a project passing the enum."""
     with override_settings(GUITARS_TENANT_ENFORCE=mode):
         assert check_tenancy_settings(None) == []
 
@@ -116,10 +108,8 @@ def test_the_checks_are_registered_with_django(check):
 
 
 # ─────────────────── W001: the migrate override must win ────────────────── #
-#
-# Nothing but INSTALLED_APPS order decides which `migrate` runs, and losing it is silent:
-# a RunPython backfill is filtered by every tenant_scope policy, updates zero rows, and is
-# marked applied anyway.
+# Only INSTALLED_APPS order decides which `migrate` runs, and losing it is silent: a
+# RunPython backfill filtered by tenant_scope updates zero rows but is marked applied.
 
 
 class TestMigrateOverrideCheck:
@@ -173,19 +163,9 @@ class TestMigrateOverrideCheck:
 
 
 class TestPoolingCheck:
-    """The 'pooled' and 'secondary' aliases tests/settings.py adds specifically to prove
-    Django's own psycopg pool and CONN_MAX_AGE are safe (test_concurrency.py) are exactly
-    the configurations this check must stay silent about -- see
-    check_pooling_leaks_tenant_gucs's own docstring for why those two signals were
-    deliberately left out.
-
-    ``DATABASES`` is monkeypatched directly rather than through ``override_settings``:
-    Django's own ``complex_setting_changed`` receiver warns "Overriding setting DATABASES
-    can lead to unexpected behavior" for exactly this setting, and this suite's
-    ``filterwarnings = ["error"]`` turns that into a failure having nothing to do with
-    what these tests check. A plain attribute patch changes what the check function reads
-    without going through that signal at all.
-    """
+    """The 'pooled'/'secondary' aliases must stay silent -- see
+    ``check_pooling_leaks_tenant_gucs``. ``DATABASES`` is monkeypatched directly, not via
+    ``override_settings``, to avoid tripping ``filterwarnings = ["error"]``."""
 
     def test_the_harness_configuration_passes(self):
         """Confirms `manage.py check` is clean today, `pooled`/`secondary` aliases and all."""

@@ -1,10 +1,6 @@
-"""Tests for multi-table-inheritance (MTI) support in dated / soft-deletable models.
-
-These exercise the PG triggers and rules generated for MTI children, whose ``_updated_at`` /
-``_deleted_at`` columns physically live on an ancestor table. See ``tests/testapp/models.py``:
-``Ensemble`` (MTI parent) -> ``Orchestra`` (child) -> ``ChamberOrchestra`` (grandchild), plus
-``Section`` (a soft-deletable model with a CASCADE FK into the MTI child ``Orchestra``).
-"""
+"""Tests for multi-table-inheritance (MTI) support in dated / soft-deletable models --
+the PG triggers and rules for MTI children whose ``_updated_at``/``_deleted_at`` columns
+physically live on an ancestor table. See ``tests/testapp/models.py`` for the chain."""
 
 import types
 
@@ -16,11 +12,8 @@ from tests.testapp.models import ChamberOrchestra, Ensemble, Orchestra, Section
 
 
 def _row_exists(model: type, pk: int) -> bool:
-    """Whether a physical row exists in *model*'s own table (bypasses the ORM/joins).
-
-    Uses the model's own PK column, which for an MTI child is its parent-link column
-    (``ensemble_ptr_id`` / ``orchestra_ptr_id``), all sharing the same value down the chain.
-    """
+    """Whether a physical row exists in *model*'s own table (bypasses ORM joins). Uses the
+    model's own PK column -- for an MTI child, its parent-link column."""
     table = model._meta.db_table
     pk_column = model._meta.pk.column
     return _scalar(f'SELECT 1 FROM {table} WHERE {pk_column} = %s', [pk]) is not None
@@ -141,11 +134,9 @@ def test_queryset_hard_delete_removes_ancestor_rows():
 
 
 class _FakeMTIModel:
-    """Minimal stand-in for a Django model class, exposing only what
-    ``_mti_table_chain`` reads off ``_meta``. Plain identity hash/eq (unlike
-    ``types.SimpleNamespace``, which is unhashable) so it can go in the
-    traversal's ``seen`` set.
-    """
+    """Minimal stand-in for a Django model class, exposing only what ``_mti_table_chain``
+    reads off ``_meta``. Plain identity hash/eq, unlike unhashable ``SimpleNamespace``,
+    so it can go in the traversal's ``seen`` set."""
 
     def __init__(self, db_table, related_objects=()):
         self._meta = types.SimpleNamespace(

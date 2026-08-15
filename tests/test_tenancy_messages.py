@@ -1,7 +1,5 @@
 """Direct tests for guitars.tenancy.messages -- the remediation sentence extracted (M5,
-#12) from four independently-typed copies (guc.py and what are now
-enforcement.py/querysets.py) that had already drifted into two different wordings.
-"""
+#12) from four independently-typed copies that had already drifted into two wordings."""
 
 from guitars.tenancy.messages import remediation
 

@@ -1,22 +1,6 @@
-"""Row-level-security policies, exercised against real PostgreSQL.
-
-Deliberately model-free: the tables here are built with raw DDL, so this proves the *SQL*
-independently of the ORM layer that will generate it. The whole claim of the database half
-is that it covers statements no Django manager ever sees, and a test that went through a
-manager could not distinguish the policy working from the manager filtering.
-
-The MTI case is the one worth the trouble. It is tempting to believe an MTI child is
-protected transitively -- every ORM query joins the parent, so the parent's policy filters.
-That is false for a *child-only* statement, which is why these tests assert against the
-child table directly, and why each MTI assertion has a negative control: the leak is
-demonstrated with the child's policy dropped, then shown closed with it in place. Without
-the control, "no rows came back" cannot be distinguished from "the query happened not to
-match anything".
-
-Requires the connecting role to be a non-superuser that owns these tables -- see
-scripts/postgres-init.sql. A superuser, or a role with BYPASSRLS, would make every
-assertion below pass vacuously, so that precondition is asserted first.
-"""
+"""Row-level-security policies, exercised against real PostgreSQL. Model-free: raw DDL
+proves the *SQL* independently of the ORM. Every MTI assertion has a negative control,
+since "no rows" alone can't prove enforcement. Requires a non-superuser owning the tables."""
 
 import pytest
 from django.db import ProgrammingError, connection, transaction
@@ -48,11 +32,8 @@ CREATE TABLE {_CHILD_TABLE} (
 
 @pytest.fixture
 def probe_tables(db):
-    """Two tables in an MTI shape, both policied and FORCE'd, seeded for two tenants.
-
-    ``owner`` holds the tenant column; ``child`` shares its primary key and holds none --
-    exactly the shape Django multi-table inheritance produces.
-    """
+    """Two tables in an MTI shape, both policied and FORCE'd, seeded for two tenants --
+    ``owner`` holds the tenant column; ``child`` shares its primary key and holds none."""
     _execute(_DDL)
     _execute(
         *sql.create_table_rls(table=_OWNER_TABLE, columns={'tenant': 'tenant_id'}, force=True),
@@ -84,11 +65,8 @@ def probe_tables(db):
 
 
 def test_the_connecting_role_cannot_bypass_rls(db):
-    """Precondition for every other test in this module.
-
-    A superuser, or any role holding BYPASSRLS, ignores policies entirely -- so if this
-    fails, every assertion below is vacuous rather than merely wrong.
-    """
+    """Precondition for every other test in this module -- a superuser or BYPASSRLS role
+    ignores policies entirely, so if this fails, every assertion below is vacuous."""
     can_bypass = _scalar(
         'SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user'
     )
@@ -143,13 +121,9 @@ class TestOwnTablePolicy:
             assert _rows(f'SELECT tenant_id FROM {_OWNER_TABLE}') == [(TENANT_B,)]  # noqa: S608
 
     def test_an_insert_into_another_tenant_is_rejected(self, probe_tables):
-        """``WITH CHECK`` -- the half a read-only policy would miss.
-
-        Wrapped in ``atomic()`` because a policy violation aborts the PostgreSQL
-        transaction: without a savepoint to roll back to, every later statement in this
-        test -- including the fixture's teardown -- fails with "current transaction is
-        aborted" and the real assertion is lost behind that noise.
-        """
+        """``WITH CHECK`` -- the half a read-only policy would miss. Wrapped in
+        ``atomic()``: a violation aborts the transaction, and without a savepoint every
+        later statement (including teardown) fails on "current transaction is aborted"."""
         with tenant(tenant=TENANT_A), pytest.raises(TenantScopeError, match='tenant policy'):
             with transaction.atomic():
                 _execute(
@@ -184,13 +158,8 @@ class TestMtiOwnerJoinPolicy:
         assert notes == [('note-a',)]
 
     def test_the_ancestors_policy_inside_the_subquery_does_not_over_deny(self, probe_tables):
-        """The subtle one, called out in planning as needing proof rather than assumption.
-
-        The child's policy runs a subquery against the owner, and the *owner's* own RLS
-        policy applies to that subquery too. Both compare the same GUC, so a correctly
-        scoped read must still succeed -- if the nesting denied, this returns nothing and
-        the whole MTI approach is unsound.
-        """
+        """The owner's own RLS policy also applies inside the child's owner-join subquery
+        -- both compare the same GUC, so a correctly scoped read must still succeed."""
         with tenant(tenant=TENANT_A):
             assert _scalar(f'SELECT count(*) FROM {_CHILD_TABLE}') == 1  # noqa: S608
 
@@ -198,12 +167,8 @@ class TestMtiOwnerJoinPolicy:
             assert _scalar(f'SELECT count(*) FROM {_CHILD_TABLE}') == 1  # noqa: S608
 
     def test_a_child_only_update_is_confined_to_the_scoped_tenant(self, probe_tables):
-        """The gap this design closes.
-
-        ``UPDATE child SET note = ...`` touches no ancestor table, so an ancestor-only
-        policy never applies to it. This is the same blind spot ``set_parent_updated_at``
-        exists to cover for timestamps.
-        """
+        """The gap this design closes: ``UPDATE child`` touches no ancestor table, so an
+        ancestor-only policy never applies to it -- same blind spot as timestamps."""
         with tenant(tenant=TENANT_A):
             _execute(f"UPDATE {_CHILD_TABLE} SET note = 'rewritten'")  # noqa: S608
 
@@ -221,16 +186,9 @@ class TestMtiOwnerJoinPolicy:
             assert _rows(f'SELECT note FROM {_CHILD_TABLE}') == [('note-b',)]  # noqa: S608
 
     def test_an_unpolicied_child_leaks_every_tenant(self, probe_tables):
-        """Negative control, without which the tests above prove nothing.
-
-        This reproduces the arrangement guitars rejects: the ancestor is policied, the child
-        is not. A child-only statement then sails straight past the only policy there is.
-
-        Note it takes ``DISABLE`` as well as dropping the policy, and that is worth knowing:
-        a table with RLS *enabled* and no policies at all is default-**deny**, not
-        default-allow. Dropping the policy alone made the child return zero rows, which
-        looks reassuring and is the opposite of the situation being guarded against.
-        """
+        """Negative control: the ancestor is policied, the child is not, so a child-only
+        statement sails past the only policy. Takes ``DISABLE`` too -- RLS enabled with no
+        policy is default-**deny**, so dropping the policy alone would look reassuring."""
         _execute(sql.drop_tenant_policy(_CHILD_TABLE), sql.disable_rls(_CHILD_TABLE))
 
         with tenant(tenant=TENANT_A):
@@ -242,12 +200,8 @@ class TestMtiOwnerJoinPolicy:
         )
 
     def test_rls_enabled_with_no_policy_denies_everything(self, probe_tables):
-        """The behaviour discovered by the control above, pinned in its own right.
-
-        It matters for rollback safety: a half-applied teardown that drops the policy but
-        leaves ENABLE in place does not fail open, it fails shut -- so the table goes dark
-        rather than leaking. ``drop_table_rls`` orders its statements to avoid either.
-        """
+        """A half-applied teardown that drops the policy but leaves ENABLE in place fails
+        shut, not open -- the table goes dark rather than leaking."""
         _execute(sql.drop_tenant_policy(_CHILD_TABLE))
 
         with tenant(tenant=TENANT_A):
@@ -255,31 +209,15 @@ class TestMtiOwnerJoinPolicy:
 
 
 class TestThreeLevelMTIOwnerJoin:
-    """``TestMtiOwnerJoinPolicy`` above proves the owner-join for a two-level chain built
-    from raw DDL: one owner table, one MTI child. ``Tour -> WorldTour -> StadiumTour``
-    (tests/testapp/models.py) is the real, three-level case -- the tenant column lives on
-    the grandparent, two tables up from ``testapp_stadiumtour`` -- and its real, generated
-    policy (tests/testapp/migrations/0010_auto_enforcement.py) already correlates directly
-    against ``testapp_tour``, skipping ``testapp_worldtour`` entirely, via the shared-PK
-    invariant every MTI chain satisfies. Proven the same way as everywhere else in this
-    file: directly against the grandchild table, never through ``StadiumTour.objects``, so
-    a leak here cannot be masked by the manager's own Python-side filtering.
-    """
+    """The real, three-level case: ``Tour -> WorldTour -> StadiumTour``, tenant column two
+    tables up. Proven directly against the grandchild table, never through
+    ``StadiumTour.objects``, so a leak can't be masked by Python-side filtering."""
 
     @pytest.mark.django_db(transaction=True)
     def test_a_grandchild_only_select_leaks_without_its_own_policy(self, tenants):
-        """Negative control: with the grandchild's own policy gone *and RLS disabled* --
-        dropping the policy alone leaves RLS enabled with nothing to enforce, which is
-        default-**deny** (see ``TestMtiOwnerJoinPolicy.test_rls_enabled_with_no_policy_
-        denies_everything`` above), the opposite of the leak this is meant to demonstrate
-        -- a statement touching only ``testapp_stadiumtour`` is not filtered by anything,
-        proving the ancestor two tables up was never what did the filtering for a
-        grandchild-only read.
-
-        ``transaction=True``: the fixture's own inserts must be committed before the
-        ``ALTER TABLE`` below runs, or Postgres refuses it outright with "cannot ALTER
-        TABLE because it has pending trigger events" from the same transaction.
-        """
+        """Negative control: grandchild's policy gone *and RLS disabled* (dropping the
+        policy alone is default-deny, the opposite of the leak this demonstrates).
+        ``transaction=True``: inserts must commit before ``ALTER TABLE`` below runs."""
         _execute(
             sql.drop_tenant_policy(table='testapp_stadiumtour'),
             sql.disable_rls(table='testapp_stadiumtour'),
@@ -311,10 +249,8 @@ class TestThreeLevelMTIOwnerJoin:
         assert capacities == [(tenants.tour_a.capacity,)]
 
     def test_a_grandchild_only_update_under_the_wrong_tenant_touches_nothing(self, tenants):
-        """The USING half, at the grandchild level: a statement that only ever touches
-        ``testapp_stadiumtour`` and names another tenant's row by primary key still
-        affects zero rows -- the owner-join predicate, two tables up, filters it out
-        before the ``UPDATE`` ever sees it."""
+        """The USING half at the grandchild level: naming another tenant's row by pk still
+        affects zero rows -- the owner-join predicate, two tables up, filters it first."""
         with tenant(label=tenants.a):
             _execute(
                 'UPDATE testapp_stadiumtour SET capacity = 1 '
@@ -338,18 +274,9 @@ class TestThreeLevelMTIOwnerJoin:
 
 
 class TestRecoveryFromARejectedWrite:
-    """A rejected write must leave the connection usable.
-
-    Regression test. PostgreSQL fails the whole transaction on a policy violation and then
-    refuses every statement until rollback -- including the ``ROLLBACK TO SAVEPOINT`` Django
-    issues to recover, which travels through ``connection.cursor()`` and therefore reaches
-    the GUC publisher's execute wrapper first. When that wrapper insisted on publishing, it
-    blocked the one statement able to clear the error: the connection wedged permanently and
-    the original ``TenantScopeError`` was buried under "current transaction is aborted".
-
-    Any application catching a TenantScopeError inside ``atomic()`` hits this, so it is not
-    a test-only concern.
-    """
+    """A rejected write must leave the connection usable -- Postgres refuses every
+    statement until rollback, including the recovery ROLLBACK TO SAVEPOINT itself, which
+    reaches the GUC publisher's execute wrapper first. Not a test-only concern."""
 
     def test_the_connection_survives_a_policy_violation(self, probe_tables):
         with tenant(tenant=TENANT_A):
@@ -365,13 +292,8 @@ class TestRecoveryFromARejectedWrite:
             assert _scalar(f'SELECT count(*) FROM {_OWNER_TABLE}') == 1  # noqa: S608
 
     def test_a_tenant_switch_after_a_violation_still_republishes(self, probe_tables):
-        """The recovery path must not leave a stale frame cached.
-
-        Skipping the publish is only safe because the cache is left untouched; if the
-        skipped attempt had recorded state, the next block would trust it and read as the
-        *previous* tenant -- failing open, which is the one outcome this module exists to
-        rule out.
-        """
+        """Skipping the publish is only safe if the cache is left untouched -- if it
+        recorded state, the next block would trust it and read as the previous tenant."""
         with tenant(tenant=TENANT_A):
             with pytest.raises(TenantScopeError), transaction.atomic():
                 _execute(
@@ -387,12 +309,8 @@ class TestRecoveryFromARejectedWrite:
 
 class TestForceIsWhatMakesItBind:
     def test_without_force_the_owning_role_bypasses_the_policy(self, probe_tables):
-        """Why FORCE is emitted by default.
-
-        ENABLE alone is inert against the table's owner -- and the application role owns
-        its tables, because it runs the migrations. Silently: no error, no log, rows simply
-        come back unfiltered.
-        """
+        """Why FORCE is emitted by default: ENABLE alone is inert against the table's
+        owner (the application role, since it runs migrations) -- silently, no error."""
         _execute(sql.no_force_rls(_OWNER_TABLE))
 
         with tenant(tenant=TENANT_A):
@@ -406,31 +324,18 @@ class TestForceIsWhatMakesItBind:
 
 
 class TestReplacingAPolicyInPlace:
-    """What a changed coverage shape has to do, and why re-creating cannot.
-
-    PostgreSQL has no ``CREATE OR REPLACE POLICY`` and no ``CREATE POLICY IF NOT EXISTS``, so
-    a table whose tenant dimensions or tenant column changed cannot simply be
-    ``create_table_rls``'d again. The generator emits the replacement form once it sees a
-    recorded policy shape that no longer matches the models.
-    """
+    """A changed coverage shape can't simply be ``create_table_rls``'d again -- Postgres
+    has no CREATE OR REPLACE POLICY. The generator emits the replacement form instead."""
 
     def test_re_creating_a_policy_that_exists_fails(self, probe_tables):
-        """The reason ``replace_table_rls`` exists at all. Pinned so that if a future
-        PostgreSQL gains ``CREATE OR REPLACE POLICY``, this test says so.
-
-        Inside its own ``atomic()`` because the failed statement aborts the transaction, and
-        PostgreSQL then refuses everything until a rollback -- including the fixture's own
-        teardown. The savepoint is what contains that.
-        """
+        """The reason ``replace_table_rls`` exists -- pinned so a future Postgres gaining
+        CREATE OR REPLACE POLICY says so. Its own ``atomic()`` contains the abort."""
         with pytest.raises(ProgrammingError, match='already exists'), transaction.atomic():
             _execute(sql.create_tenant_policy(table=_OWNER_TABLE, columns={'tenant': 'tenant_id'}))
 
     def test_replacing_swaps_the_predicate_and_keeps_the_table_enforced(self, probe_tables):
-        """The new predicate binds, and ENABLE/FORCE are never dropped on the way.
-
-        Cycling them would leave the table momentarily unprotected -- or, worse, enabled with
-        no policy, which is default-DENY -- so the replacement touches only the policies.
-        """
+        """ENABLE/FORCE are never dropped on the way -- cycling them would leave the table
+        momentarily unprotected or, worse, enabled with no policy (default-DENY)."""
         _execute(
             *sql.replace_table_rls(table=_OWNER_TABLE, columns={'other': 'tenant_id'}, force=True)
         )
@@ -455,13 +360,8 @@ class TestReplacingAPolicyInPlace:
             assert _scalar(f'SELECT count(*) FROM {_OWNER_TABLE}') == 1  # noqa: S608
 
     def test_replacing_drops_an_exemption_for_a_role_no_longer_configured(self, probe_tables):
-        """A role removed from ``GUITARS_RLS_EXEMPT_ROLES`` must lose its exemption.
-
-        ``drop_exempt_policy`` can only drop a role it is told about, and the caller knows the
-        roles configured *now* -- not the ones the policy was written with. Discovering them
-        from ``pg_policy`` is what makes the replacement converge on the configured set instead
-        of accumulating exemptions nobody asked for.
-        """
+        """A role removed from ``GUITARS_RLS_EXEMPT_ROLES`` must lose its exemption --
+        discovered from ``pg_policy``, so the replacement converges instead of accumulating."""
         _execute(sql.create_exempt_policy(table=_OWNER_TABLE, role='guitars'))
         assert (
             _scalar(
@@ -520,14 +420,8 @@ class TestPolicyTeardown:
 
 
 class TestIdentifierSafety:
-    """Identifiers reaching policy SQL are proven bare, or quoted -- never assumed.
-
-    Nothing untrusted arrives here: tables and columns come from Django's ``model._meta``
-    and role names from ``settings``. So this is not an injection boundary, and these tests
-    do not pretend to be penetration tests. What they pin is *correctness* -- SQL that is
-    valid and binds the object actually named -- and the loudness of the failure when it
-    cannot be.
-    """
+    """Identifiers reaching policy SQL are proven bare or quoted, never assumed. Not an
+    injection boundary (nothing here is untrusted) -- what's pinned is *correctness*."""
 
     #: One case per interpolation site, so a new site added without a guard shows up here
     #: rather than at some consumer's `migrate`.
@@ -582,11 +476,8 @@ class TestIdentifierSafety:
         ],
     )
     def test_an_unquotable_identifier_is_refused_at_build_time(self, build, name):
-        """Loudly, and naming the culprit -- not emitted as SQL that fails later.
-
-        Emitting it would surface as a PostgreSQL syntax error inside `migrate`, pointing at
-        a generated file rather than at the field or setting that caused it.
-        """
+        """Loudly, naming the culprit -- not emitted as SQL that fails as a syntax error
+        inside `migrate`, pointing at a generated file rather than the real cause."""
         with pytest.raises(ValueError, match='not a plain lower-case SQL identifier'):
             build(name)
 
@@ -606,14 +497,9 @@ class TestIdentifierSafety:
         ],
     )
     def test_a_role_name_needing_quotes_still_produces_valid_sql(self, role, db):
-        """Round-tripped through PostgreSQL, because the escaping is nested twice.
-
-        The ``DO`` block's ``EXECUTE`` takes a *string literal* containing a statement that
-        itself quotes the role, so every quote is escaped once at each level. That is easy
-        to get wrong in a way no string assertion would catch -- only the parser will.
-        Running it also proves the ``pg_roles`` guard works: none of these roles exist here,
-        so each block must compile, find nothing, and do nothing.
-        """
+        """Round-tripped through Postgres: the ``DO`` block's ``EXECUTE`` nests escaping
+        twice, easy to get wrong in a way only the parser catches. Also proves the
+        ``pg_roles`` guard: none of these roles exist, so each block finds nothing."""
         _execute('CREATE TABLE IF NOT EXISTS guitars_ident_probe (id serial PRIMARY KEY)')
         try:
             _execute(sql.create_exempt_policy(table='guitars_ident_probe', role=role))
@@ -632,17 +518,9 @@ class TestIdentifierSafety:
         assert f'"{sql.EXEMPT_POLICY_PREFIX}{role}"' in dropped
 
     def test_an_exempt_role_actually_reads_across_tenants(self, probe_tables):
-        """The BI-exemption feature, end to end.
-
-        Uses the connecting role, because creating one would need CREATEROLE -- which this
-        suite's role deliberately lacks: before PostgreSQL 16, CREATEROLE could grant
-        BYPASSRLS, and a role able to hand itself that would undermine every other assertion
-        in this file.
-
-        Functional rather than structural. A mis-quoted role name, or one attached to the
-        folded spelling of the name, would leave this read at zero rows -- so the count is
-        what proves the binding, not a ``pg_policy`` lookup that would pass either way.
-        """
+        """The BI-exemption feature, end to end. Uses the connecting role -- creating one
+        needs CREATEROLE, deliberately absent (pre-PG16 it could grant BYPASSRLS). The
+        count proves the binding, not a ``pg_policy`` lookup that would pass either way."""
         role = _scalar('SELECT current_user')
 
         # Precondition: unscoped, the tenant policy shows nothing.

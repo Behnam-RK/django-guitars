@@ -1,13 +1,6 @@
-"""Tests for the ``audittenancy`` management command.
-
-``makeguitarmigrations --check`` is a *build* gate: it proves the migrations exist. It cannot
-prove they ran, that nobody dropped a policy by hand, or that enforcement actually binds.
-This command asks the database, so it is the gate that runs after a deploy -- and a deploy
-gate that can pass while unprotected is worse than no gate at all.
-
-Every test here therefore has to break something real and watch the command notice. Asserting
-only the happy path would prove the command runs, not that it audits.
-"""
+"""Tests for the ``audittenancy`` management command -- the gate that runs after a deploy,
+asking the database directly. Every test here breaks something real and watches the
+command notice; the happy path alone would only prove the command runs, not that it audits."""
 
 from __future__ import annotations
 
@@ -55,11 +48,8 @@ class TestAGoodDatabasePasses:
         assert '7 table(s) expected, 7 enforced' in output
 
     def test_force_is_already_on_everywhere(self, db):
-        """``GUITARS_RLS_FORCE`` defaults to True, so the strict gate passes out of the box.
-
-        This is the whole reason the default is True: a library that shipped policies which
-        the owning application role bypasses would ship an inert security feature.
-        """
+        """``GUITARS_RLS_FORCE`` defaults to True, so the strict gate passes out of the box
+        -- the whole reason: shipping policies the owning role bypasses is inert."""
         assert 'audit passed' in _audit(require_force=True)
 
     def test_it_reports_the_uncoverable_table(self, db):
@@ -67,19 +57,14 @@ class TestAGoodDatabasePasses:
         assert 'testapp_review' in _audit()
 
     def test_the_suite_role_is_not_a_bypassing_one(self, db):
-        """Load-bearing, not hygiene: a SUPERUSER or BYPASSRLS role would make every RLS
-        assertion in the suite pass vacuously. ``scripts/postgres-init.sql`` exists to
-        prevent it, and this is the assertion that would notice if it stopped working."""
+        """Load-bearing, not hygiene: SUPERUSER/BYPASSRLS would make every RLS assertion
+        pass vacuously. ``scripts/postgres-init.sql`` prevents it; this notices if it stops."""
         assert 'bypasses every tenant_scope policy' not in _audit()
 
 
 class TestABypassingRoleIsReported:
-    """The two conditions the catalog cannot show: they are attributes of the *connection*.
-
-    Stubbed rather than exercised for real, because granting SUPERUSER or BYPASSRLS to the
-    suite's role is exactly what ``scripts/postgres-init.sql`` refuses to do -- and doing it
-    mid-run would silently disarm every other RLS assertion in the session.
-    """
+    """The two conditions the catalog can't show, attributes of the *connection*. Stubbed,
+    not real: granting SUPERUSER/BYPASSRLS mid-run would disarm every RLS assertion."""
 
     @staticmethod
     def _notes(role: str, superuser: bool, bypassrls: bool) -> list[str]:
@@ -116,8 +101,8 @@ class TestABypassingRoleIsReported:
         assert 'prove nothing about whether enforcement binds' in note
 
     def test_it_is_printed_ahead_of_the_heading_and_does_not_fail_the_run(self, db, monkeypatch):
-        """It qualifies every line that follows, so it has to come first -- and a role the
-        pipeline chose is not a reason to fail a database that is correctly configured."""
+        """Qualifies every line that follows, so it comes first -- a role the pipeline
+        chose is not a reason to fail a correctly-configured database."""
         monkeypatch.setattr(
             AuditCommand, '_bypassing_role_notes', lambda self, connection: ['BYPASS WARNING']
         )
@@ -139,7 +124,7 @@ class TestItCatchesRealDamage:
         assert 'audit failed' in output
 
     def test_disabled_rls_fails_the_audit(self, _execute):
-        """A policy that exists but is not enabled enforces nothing, and looks fine in
+        """A policy that exists but isn't enabled enforces nothing, and looks fine in
         ``pg_policies``."""
         _execute(sql.disable_rls(table=Release._meta.db_table))
 
@@ -148,11 +133,8 @@ class TestItCatchesRealDamage:
         assert 'RLS not enabled' in output
 
     def test_a_missing_force_is_a_warning_by_default(self, _execute):
-        """Off by default so a project mid-retrofit can still audit its policy coverage.
-
-        It is a warning rather than silence because the table *looks* protected: the policy
-        is there, RLS is on, and the owning role sails straight past it.
-        """
+        """Off by default so a project mid-retrofit can still audit coverage -- a warning,
+        not silence, since the table *looks* protected while the owning role sails past."""
         _execute(sql.no_force_rls(table=Release._meta.db_table))
 
         output = _audit()
@@ -191,27 +173,13 @@ class TestItCatchesRealDamage:
 
 
 class TestAPolicyThatNoLongerMatchesTheModels:
-    """The finding existence checks cannot make: a healthy policy scoping on the wrong thing.
-
-    Every other check here asks "is there a ``tenant_scope`` policy, is RLS on, is it FORCE'd".
-    All three pass for a table whose policy predicates on a dimension the model dropped, or on
-    a column it renamed -- the table looks protected while every statement is filtered by a
-    weaker predicate than the Python layer believes. Nothing else in the kit sees it: the
-    generator now emits a replacement, but a replacement that was generated and never applied
-    leaves exactly this state.
-
-    Compared by the two facts a *stored* policy preserves, because PostgreSQL rewrites the
-    expression when it saves it and the text never matches what was emitted: the ``tenant.*``
-    settings it reads, and the columns ``pg_depend`` records it referencing.
-    """
+    """The finding existence checks can't make: a healthy policy scoping on the wrong
+    thing. Compared by the two facts a *stored* policy preserves (Postgres rewrites the
+    expression on save): the ``tenant.*`` settings it reads and the ``pg_depend`` columns."""
 
     def test_drift_is_a_warning_by_default(self, _execute):
-        """Reported, but not fatal without ``--require-match``.
-
-        A run that happens *before* the deploy's own ``migrate`` step is legitimately in this
-        state, and only the operator knows their ordering -- the same reason ``--require-force``
-        is opt-in. Warned rather than silent, because the table looks protected.
-        """
+        """Reported, but not fatal without ``--require-match`` -- a run before the deploy's
+        own ``migrate`` is legitimately in this state, same reason ``--require-force`` is opt-in."""
         table = Release._meta.db_table
         _execute(
             sql.drop_tenant_policy(table=table),
@@ -301,19 +269,9 @@ class TestAPolicyThatNoLongerMatchesTheModels:
             )
 
     def test_a_with_check_that_does_not_scope_is_caught(self, _execute, tenants):
-        """The write half, checked in its own right -- and the reason it has to be.
-
-        ``USING`` governs reads and ``WITH CHECK`` governs writes, and the two are
-        independently editable. A policy left as ``USING (<tenant match>) WITH CHECK (true)``
-        therefore scopes every read while accepting every cross-tenant *write*, which is the
-        more dangerous direction. Neither of the other two comparisons sees it: the GUC set of
-        the ``USING`` half is exactly right, and ``true`` records no ``pg_depend`` rows, so the
-        column set is exactly right too.
-
-        The insert below is raw SQL on purpose. The Python guard would refuse it long before
-        the database saw it, which is precisely why an audit of the database layer cannot lean
-        on Python having been in the call path.
-        """
+        """The write half, checked in its own right: ``USING (<tenant match>) WITH CHECK
+        (true)`` scopes reads while accepting every cross-tenant write -- invisible to the
+        other two comparisons. Raw SQL insert, since the Python guard would refuse it first."""
         table = Release._meta.db_table
         predicate = (
             f"(SELECT current_setting('tenant.bypass', true)) = 'on' OR "
@@ -349,11 +307,8 @@ class TestAPolicyThatNoLongerMatchesTheModels:
             )
 
     def test_a_policy_reading_an_unrelated_setting_is_not_reported_as_drift(self, _execute):
-        """Only ``tenant.*`` settings are compared.
-
-        A policy hand-tuned to also consult, say, ``statement_timeout`` is not what this check
-        is about, and reporting it would make the check something operators learn to ignore.
-        """
+        """Only ``tenant.*`` settings are compared -- a policy also consulting
+        ``statement_timeout`` reported here would train operators to ignore the check."""
         table = Release._meta.db_table
         _execute(
             sql.drop_tenant_policy(table=table),
@@ -373,21 +328,9 @@ class TestAPolicyThatNoLongerMatchesTheModels:
 
 
 class TestGeneratedPolicySQLIsStructurallySound:
-    """Parse ``sql.create_tenant_policy``'s own output rather than pattern-match it.
-
-    ``_predicate_drift`` (the audit logic above) deliberately compares a *live* policy by
-    its GUCs and column references rather than by text, because PostgreSQL rewrites a
-    stored expression when it deparses it -- see that method's docstring. The tests above
-    inherit that discipline for the database half.
-
-    The *generator's* half has no such excuse: nothing has rewritten this SQL yet, so a
-    substring assertion (``'DROP POLICY IF EXISTS tenant_scope' in operation``, used
-    elsewhere in this suite and in test_command.py) can still pass on output that is
-    subtly broken -- an extra paren, a misplaced clause -- because the substring survives
-    intact while the statement around it stops parsing. Parsing with ``pglast`` and
-    checking shape catches that class of error instead, alongside the substring checks
-    kept elsewhere; it does not replace them, since a few still document intent.
-    """
+    """Parse ``sql.create_tenant_policy``'s own output rather than pattern-match it -- a
+    substring assertion can pass on subtly broken SQL (extra paren, misplaced clause)
+    since the substring survives while the statement around it stops parsing."""
 
     @staticmethod
     def _parse(statement: str):
@@ -423,13 +366,9 @@ class TestGeneratedPolicySQLIsStructurallySound:
         assert SubLinkType.EXISTS_SUBLINK not in self._sublink_types(stmt.with_check)
 
     def test_an_mti_owner_policy_correlates_through_an_exists_subquery(self):
-        """The MTI shape's one genuinely intricate piece of SQL, checked by structure.
-
-        A correlated ``EXISTS`` against the owner table is exactly what a child-only
-        statement needs (see test_tenancy_rls.py's module docstring on why the parent's
-        policy does not protect it transitively); asserting the subquery *exists* rather
-        than matching its exact text is what lets this survive a rewording of the join.
-        """
+        """The MTI shape's one genuinely intricate piece of SQL, checked by structure --
+        asserting the correlated ``EXISTS`` subquery exists, not matching its exact text,
+        lets this survive a rewording of the join."""
         stmt = self._parse(
             sql.create_tenant_policy(
                 table='testapp_orchestra',
@@ -450,11 +389,8 @@ class TestGeneratedPolicySQLIsStructurallySound:
             )
 
     def test_force_rls_statements_are_two_alter_table_commands_in_order(self):
-        """``create_table_rls(force=True)`` must enable RLS before forcing it.
-
-        Reversed, ``FORCE`` on a table RLS is not yet enabled for is still valid SQL and
-        still parses -- a substring check for both keywords would not catch the swap.
-        """
+        """``create_table_rls(force=True)`` must enable RLS before forcing it -- reversed
+        is still valid SQL and parses, so a substring check wouldn't catch the swap."""
         statements = sql.create_table_rls(
             table='testapp_release', columns={'label': 'label_id'}, force=True
         )
@@ -478,12 +414,8 @@ class TestScoping:
         assert 'audit passed' in _audit('testapp')
 
     def test_an_unknown_app_label_is_rejected(self, db):
-        """Not "0 tables, passed".
-
-        A typo'd label in a deploy step would otherwise audit nothing and exit 0 -- a green
-        gate that verified nothing, which is the exact outcome this command exists to
-        prevent.
-        """
+        """Not "0 tables, passed" -- a typo'd label would otherwise audit nothing and exit
+        0, a green gate that verified nothing."""
         with pytest.raises(CommandError, match="No installed app with label 'nosuchapp'"):
             call_command('audittenancy', 'nosuchapp')
 
@@ -510,13 +442,8 @@ class TestOptions:
         assert 'not found in the database' in output
 
     def test_a_database_with_no_policies_at_all_is_reported_table_by_table(self, _execute, db):
-        """The state before the very first ``migrate``, and the other reason to run this.
-
-        Worth its own test because the column lookup is skipped entirely when nothing is
-        policied -- there are no policy oids to ask about -- so this is the one path where the
-        second query never runs. It has to report every expected table as unprotected rather
-        than sail through on an empty result set.
-        """
+        """The state before the very first ``migrate`` -- the column lookup is skipped
+        entirely with no policy oids to ask about, so this must not sail through empty."""
         from guitars.tenancy.discovery import expected_coverage
 
         tables = sorted(expected_coverage().tables)

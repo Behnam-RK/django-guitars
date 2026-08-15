@@ -1,13 +1,6 @@
-"""Where tenancy sends its audit signal, without knowing who is listening.
-
-Deliberately dependency-free (standard library only) so the package stays portable: a
-project with Sentry, structlog or loguru installs its own reporter via
-:func:`set_reporter`; a project with none gets the ``logging`` default and nothing
-breaks.
-
-Only ``'audit'`` enforcement mode reports -- ``'strict'`` raises instead, so nothing
-here is on the hot path of a healthy deployment.
-"""
+"""Where tenancy sends its audit signal, without knowing who is listening -- dependency-
+free so a project installs its own reporter via :func:`set_reporter`, or gets the
+``logging`` default. Only ``'audit'`` mode reports; ``'strict'`` raises instead."""
 
 from __future__ import annotations
 
@@ -49,12 +42,8 @@ def reset_reported() -> None:
 
 
 def report_once(key: object, message: str, /, **context: object) -> bool:
-    """Report ``message`` unless ``key`` was already reported. True if it was sent.
-
-    A reporter that raises must never take the caller's query down with it -- the whole
-    point of ``'audit'`` mode is to observe without breaking -- so failures here are
-    logged and swallowed.
-    """
+    """Report ``message`` unless ``key`` was already reported. True if sent. A reporter
+    that raises must never take the caller's query down with it -- logged and swallowed."""
     if key in _reported:
         return False
     _reported.add(key)

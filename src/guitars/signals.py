@@ -25,37 +25,17 @@ class _Stash(TypedDict):
     original: list
 
 
-# Process-global, keyed by signal, so overlapping DisableSignals() instances -- on
-# different threads, or nested on the same one -- agree on one true stash per signal
-# instead of each keeping its own. `signal.receivers` is itself process-global mutable
-# state with no lock of its own; without this, a second block's __exit__ would restore
-# from a stash it took *after* the first block had already emptied the list, overwriting
-# the first block's correct restore with an empty one and permanently losing every
-# receiver. `_lock` serialises every read/write of both this dict and `signal.receivers`
-# so "stash it" and "count the stash" never interleave across threads.
+# Process-global, keyed by signal, so overlapping DisableSignals() instances share one
+# stash. Without it, a second block's __exit__ could restore from a stash taken after the
+# first already emptied signal.receivers, permanently losing every receiver.
 _lock = threading.Lock()
 _state: dict[Signal, _Stash] = {}
 
 
 class DisableSignals:
-    """Context manager that temporarily disconnects Django signals.
-
-    Stashes all receivers for the given signals on enter and reconnects
-    them on exit. Used by ``UpdatableModel.update(_disable_signals=True)``
-    to suppress ``pre_save``/``post_save`` during silent updates.
-
-    Thread-safe and re-entrant: overlapping blocks (nested on one thread, or concurrent
-    across threads) for the same signal share one reference-counted stash, taken by
-    whichever block enters first and restored only when the last one exits.
-
-    Usage::
-
-        with DisableSignals() as ds:
-            instance.save()  # no signals fire
-
-        with DisableSignals(signals=[post_save]):
-            instance.save()  # only post_save is suppressed
-    """
+    """Context manager that temporarily disconnects Django signals, stashing receivers on
+    enter and reconnecting on exit. Thread-safe and re-entrant: overlapping blocks for the
+    same signal share one reference-counted stash, restored only when the last one exits."""
 
     DEFAULT_SIGNALS: list[Signal] = [
         pre_init,

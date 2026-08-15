@@ -1,27 +1,6 @@
-"""Every byte of raw SQL the kit emits, re-exported flat.
-
-Migrations generated *before* 1.1.0 do ``from guitars import sql`` and reference names
-off this module (``sql.CREATE_SOFT_DELETE_RULE.format(...)``); migrations generated from
-1.1.0 on carry their SQL literally and reference nothing here. Those pre-1.1.0 migration
-files are checked into consuming projects and already applied, so **this module's public
-names are a frozen interface** -- split the implementation across submodules as
-needed, but a name that ever appeared here must keep resolving here. The obligation is
-therefore fixed in size rather than still growing; see ``docs/migrations.md``.
-
-Organised by concern:
-
-* :mod:`.triggers` -- the DB-managed ``_updated_at`` column.
-* :mod:`.soft_delete` -- the ``ON DELETE`` rules, cascades, and the hard-deletion
-  session switch.
-* :mod:`.policy` -- row-level-security policies for tenant scoping. These are
-  *functions*, not format-string constants, because the tenant predicate is composed from
-  a variable-length ``{dimension: column}`` mapping.
-
-Multi-table inheritance (the ``*_MTI_*`` and ``*_PARENT_*`` names) spans both,
-because it needs the same treatment for timestamps and for deletion. It rests on
-one invariant -- see "The shared-PK invariant" in ``docs/mti.md`` for the full
-statement and why it is what makes every MTI rule/trigger here sound.
-"""
+"""Every byte of raw SQL the kit emits, re-exported flat. **This module's public names
+are a frozen interface** -- pre-1.1.0 migrations reference them by name and are already
+applied in consuming projects. See ``docs/api-reference.md``'s frozen-names list."""
 
 from .policy import (
     EXEMPT_POLICY_PREFIX,

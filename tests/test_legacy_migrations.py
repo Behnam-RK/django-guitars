@@ -1,25 +1,6 @@
-"""The one test that reproduces an already-migrated downstream project on upgrade.
-
-``tests/legacy_migrations/`` is a throwaway app -- installed (so pytest-django migrates it
-like any other app at session setup) but left out of ``LOCAL_APPS`` in ``tests/settings.py``,
-so nothing else in the suite touches it; this test opts it into scope for its own duration
-only, via ``override_settings``. Its two migrations are hand-written to match the *real*,
-pre-1.1.0 shape this project's own history once had (see
-``git show 2ba86a3^:tests/testapp/migrations/``): ``from guitars import sql``, operations
-built by calling ``sql.X.format(...)``, and headers with no ``[SQL:...]`` identity. That is
-precisely the shape a project generated before 1.1.0 and never regenerated since is still
-carrying today.
-
-The test below is the regression guard for the bug ``2ba86a3`` fixed: **before** it, any
-migration file with a recognised header comment read as "covered forever", regardless of
-whether it carried a matching (or any) ``[SQL:...]`` digest -- so ``makeguitarmigrations
---check`` against a database in exactly this shape wrongly reported clean, and the 1.0.0
-soft-delete guard rewrite (``= 'off'`` -> ``<> 'on'``) shipped to every already-migrated
-project without a way to notice it needed to. This is also the only test in the suite that
-runs the generator against migrations it did not itself just write, applies the delta it
-produces to a real database that already has the enforcement objects, and confirms neither
-step errors nor leaves the objects in a different final shape than a fresh install would.
-"""
+"""Reproduces an already-migrated downstream project, with migrations matching the real
+pre-1.1.0 shape (no ``[SQL:...]`` header identity). Regression guard for ``2ba86a3``: any
+recognised header used to read as "covered forever" regardless of a matching digest."""
 
 from __future__ import annotations
 

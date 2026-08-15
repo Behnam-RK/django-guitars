@@ -87,13 +87,12 @@ without a payoff.
 - **Without the setting the rung is inert.** `guitars.models` must stay importable
   for projects on the lower rungs, so a missing `GUITARS_TENANT_MODEL` is not an
   import error. It is caught by the `guitars.tenancy.E003` system check, which
-  names the offending models and offers both ways out — set the setting, or drop to
-  `SetarModel`. The check is registered at import of `guitars.models` rather than
-  by `tenancy.install()`, because `install()` never runs in exactly the
-  configuration that needs the check.
+  names the offending models and offers both ways out — set the setting, or drop
+  to `SetarModel`. The check registers at import of `guitars.models`, not by
+  `tenancy.install()`, since `install()` never runs in the configuration that
+  needs the check.
 
-**Reversibility.** Poor, as with any FK-bearing base class. That is priced in by
-the setting having no default: adopting the rung is an explicit act.
+**Reversibility.** Poor, as with any FK-bearing base class — priced in by the setting having no default: adopting the rung is an explicit act.
 
 ## Related
 

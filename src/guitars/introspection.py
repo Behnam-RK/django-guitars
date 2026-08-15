@@ -1,23 +1,6 @@
-"""Which physical table actually holds a column, given Django's two inheritance styles.
-
-The kit's SQL is written against *tables*, so "does this model have ``_deleted_at``?"
-is the wrong question -- ``hasattr`` answers yes for a multi-table-inheritance child
-whose column lives on an ancestor's table, and a rule referencing a column the child
-table does not have is invalid SQL.
-
-The distinction Django draws:
-
-* **Abstract base** -- fields are *copied onto* each concrete subclass, so they are
-  local, and the concrete model owns its own column.
-* **Multi-table inheritance** -- the child gets its own table whose primary key is a
-  ``OneToOneField(parent_link=True)``; inherited fields are *not* local, and the
-  column stays on the ancestor that declared it.
-
-Two consumers depend on getting this right, which is why it lives here rather than
-inside either of them: ``makeguitarmigrations`` (which table gets the trigger or
-rule) and ``guitars.tenancy.discovery`` (which table can carry a row-level-security
-policy predicating on a tenant column).
-"""
+"""Which physical table actually holds a column, given Django's two inheritance styles --
+see ``docs/mti.md``. ``hasattr`` is the wrong question: it answers yes for an MTI child
+whose column lives on an ancestor's table, where a rule referencing it is invalid SQL."""
 
 from __future__ import annotations
 
@@ -37,22 +20,14 @@ def has_column(model: type[models.Model], colname: str) -> bool:
 
 
 def owns_column(model: type[models.Model], colname: str) -> bool:
-    """Whether *colname* is a column on *model*'s OWN table.
-
-    True for a field declared on the model or copied from an abstract base; False for
-    a field inherited through MTI, which physically lives on an ancestor's table.
-    """
+    """Whether *colname* is a column on *model*'s OWN table -- true for a declared or
+    abstract-copied field, false for one inherited through MTI."""
     return any(field.name == colname for field in model._meta.local_fields)
 
 
 def column_owner(model: type[models.Model], colname: str) -> type[models.Model]:
-    """The concrete model whose physical table declares *colname*.
-
-    *model* itself for an own-table column; the owning ancestor for an MTI-inherited
-    one. Note this resolves the **owner**, not the immediate parent -- in a chain
-    three deep the column may live two tables up, and predicating against the
-    immediate parent would reference a table that has no such column either.
-    """
+    """The concrete model whose physical table declares *colname* -- resolves the
+    **owner**, not the immediate parent, since a chain three deep may need two hops up."""
     return model._meta.get_field(colname).model
 
 
@@ -66,14 +41,8 @@ def is_mti_child(model: type[models.Model], colname: str) -> bool:
 
 
 def mti_root(model: type[models.Model]) -> type[models.Model]:
-    """The top of *model*'s multi-table-inheritance chain -- *model* itself if it has none.
-
-    Walks ``_meta.parents`` up to the model with no MTI parent of its own. Every table in
-    an MTI chain shares the same primary-key value, so the root is where a walk over the
-    *whole* chain (ancestors and descendants alike, not just ancestors) has to start --
-    ``guitars.models.soft_deletion`` uses this to reach ancestor tables only otherwise
-    visible through the parent-link reverse relation.
-    """
+    """The top of *model*'s MTI chain -- *model* itself if it has none. Every table shares
+    one primary-key value, so a walk over the *whole* chain has to start at the root."""
     root = model
     while root._meta.parents:
         root = next(iter(root._meta.parents))

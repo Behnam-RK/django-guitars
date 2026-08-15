@@ -1,10 +1,6 @@
-"""Direct tests for guitars.local_apps -- the leaf module extracted from two duplicated
-``is_local`` copies (M5, #12) in ``guitars.tenancy.discovery`` and
-``guitars.management._generator``. Both re-export it (``from guitars.local_apps import
-is_local``) so existing call sites and imports are unaffected; this file is about the
-extracted function itself, not its consumers -- those stay covered by
-test_tenancy_discovery.py and the management-command tests.
-"""
+"""Direct tests for guitars.local_apps -- the leaf module extracted (M5, #12) from two
+duplicated ``is_local`` copies, both of which now re-export it. About the extracted
+function itself; consumers stay covered elsewhere."""
 
 from django.apps import apps as django_apps
 

@@ -1,19 +1,6 @@
-"""Guards on ``guitars.sql``'s public surface, which is a frozen interface.
-
-Generated migrations are written into consuming projects, checked into their VCS,
-and applied to their databases. Every one generated *before* 1.1.0 does
-``from guitars import sql`` and reads constants off it by name -- migrations
-generated from 1.1.0 on carry their SQL literally instead, but those pre-1.1.0 files
-are already committed and applied. So renaming or removing a public name here does
-not break *this* repo's tests -- it breaks ``migrate`` on a fresh database in every
-project that ever ran the generator before 1.1.0, at which point the only fix is
-hand-editing historical migration files.
-
-These tests exist so that failure is caught here instead. They are deliberately
-about *names*, not SQL text: the text may be corrected (a bug fix lands in every
-project on upgrade, which is the point of keeping it in the library), but a name
-that ever shipped must keep resolving.
-"""
+"""Guards on ``guitars.sql``'s public surface, a frozen interface: pre-1.1.0 migrations
+do ``from guitars import sql`` and read constants by name, so a rename breaks ``migrate``
+in every such project. About *names*, not text -- text may be corrected."""
 
 import re
 from pathlib import Path
@@ -22,18 +9,9 @@ import guitars
 from guitars import sql
 
 
-#: Every public *constant* ``guitars.sql`` has ever exported -- format strings that
-#: migrations call ``.format()`` on. Append-only: add when a feature adds SQL, never
-#: remove. A removal here is the one change that silently breaks already-applied
-#: migrations elsewhere.
-#:
-#: Exception, recorded rather than silently done: 2.0.0 removed
-#: ``CHECK_TRIGGER_FUNCTION_EXISTS``, ``CHECK_PARENT_TRIGGER_FUNCTION_EXISTS``,
-#: ``CHECK_TRIGGER_EXISTS_ON_TABLE`` and ``CHECK_RULE_EXISTS_ON_TABLE`` -- confirmed to have
-#: zero consumers anywhere in ``guitars.management.enforcement`` (nothing ever called
-#: ``.format()`` on them to build a migration operation) and zero references in any checked-in
-#: migration. Removing an *unused* name breaks nothing a fresh ``migrate`` depends on; this
-#: comment is the paper trail so a future reader does not mistake the gap for an oversight.
+#: Every public *constant* ``guitars.sql`` has ever exported. Append-only: a removal
+#: silently breaks already-applied migrations. Exception: 2.0.0 removed 4 unused
+#: ``CHECK_*`` constants, confirmed to have zero consumers anywhere.
 FROZEN_SQL_CONSTANTS = frozenset(
     {
         # _updated_at trigger function + per-table statement trigger
@@ -41,10 +19,8 @@ FROZEN_SQL_CONSTANTS = frozenset(
         'DROP_UPDATED_AT_TRIGGER_FUNCTION',
         'CREATE_UPDATED_AT_TRIGGER',
         'DROP_UPDATED_AT_TRIGGER',
-        # Refresh and adoption forms. Generated migrations inline their SQL rather than
-        # referencing these by name, so unlike the constants above they are not load-bearing
-        # for a consuming project's `migrate` -- but they are recorded here anyway, because
-        # the rule this file enforces is that no exported name may be renamed unnoticed.
+        # Refresh/adopt forms -- inlined by generated migrations, but recorded anyway:
+        # the rule here is that no exported name may be renamed unnoticed.
         'REPLACE_UPDATED_AT_TRIGGER_FUNCTION',
         'REPLACE_UPDATED_AT_TRIGGER',
         'ADOPT_UPDATED_AT_TRIGGER',
@@ -119,11 +95,8 @@ def test_no_frozen_sql_name_has_been_dropped():
 
 
 def test_all_is_exhaustive_and_matches_the_frozen_set():
-    """``__all__`` must describe reality, in both directions.
-
-    A name present but absent from ``__all__`` is invisible to ``import *`` and to
-    tooling; a name in ``__all__`` that does not exist raises on ``import *``.
-    """
+    """``__all__`` must describe reality both ways: a name absent from it is invisible to
+    ``import *``; a name in it that doesn't exist raises on ``import *``."""
     exported = set(sql.__all__)
     public = {
         name
@@ -157,13 +130,9 @@ def test_every_frozen_constant_is_a_usable_sql_string():
 
 
 def test_every_rule_is_created_or_replace():
-    """A rule must be redefinable without an instant in which the table has none.
-
-    That instant is not cosmetic: with no ``soft_delete`` rule a ``DELETE`` destroys the
-    row, so the documented way to replace a rule (re-running these constants in a one-off
-    migration) is only safe because PostgreSQL swaps the definition in place. Dropping and
-    re-creating instead would open the window between the two statements.
-    """
+    """A rule must be redefinable without an instant where the table has none -- with no
+    ``soft_delete`` rule a ``DELETE`` destroys the row, so replacement is only safe because
+    PostgreSQL swaps ``OR REPLACE`` in place instead of dropping and re-creating."""
     rule_constants = sorted(name for name in FROZEN_SQL_CONSTANTS if name.startswith('CREATE_'))
     creating_rules = [name for name in rule_constants if ' RULE ' in getattr(sql, name)]
 
@@ -186,17 +155,9 @@ def test_the_constant_and_callable_sets_do_not_overlap():
 
 
 def test_generator_templates_reference_only_names_that_resolve():
-    """Cross-check the generator's operation templates against the module.
-
-    The templates are strings, so a renamed constant is not a Python error here --
-    it becomes a broken generated migration that only fails when someone runs
-    ``migrate`` on a fresh database.
-
-    Scans every module in ``guitars.management.enforcement`` (the generator's own
-    package, split by concern in #10/M3) rather than a single file: a ``sql.*``
-    reference can live in any of them, and a scan bounded to one file would silently
-    stop checking most references the moment they moved to another.
-    """
+    """Cross-check the generator's templates: a renamed constant isn't a Python error
+    here, only a broken migration at ``migrate`` time. Scans every module under
+    ``guitars.management.enforcement``, since a ``sql.*`` reference can live in any."""
     enforcement_dir = _PACKAGE_ROOT / 'management' / 'enforcement'
     modules = sorted(enforcement_dir.glob('*.py'))
     assert modules, 'found no modules under guitars/management/enforcement/'
@@ -214,11 +175,8 @@ def test_generator_templates_reference_only_names_that_resolve():
 
 
 def test_checked_in_migrations_reference_only_names_that_resolve():
-    """The same check against the migrations the harness has already generated.
-
-    These stand in for the migration files living in consuming projects: if a name
-    they reference stops resolving, their ``migrate`` breaks.
-    """
+    """The same check against migrations the harness already generated -- these stand in
+    for migration files in consuming projects, whose ``migrate`` breaks the same way."""
     migrations = sorted((_REPO_ROOT / 'tests' / 'testapp' / 'migrations').glob('0*.py'))
     assert migrations, 'no generated migrations found to check'
 

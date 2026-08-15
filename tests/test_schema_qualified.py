@@ -1,29 +1,6 @@
-"""End-to-end coverage for M4's schema-qualified ``db_table`` support, against a real,
-non-``public`` PostgreSQL schema.
-
-``tests.schema_qualified`` is not in ``INSTALLED_APPS`` in ``tests/settings.py`` -- it is
-added only for the duration of a test, via ``override_settings``, the same pattern
-``tests/test_makemigrations_override.py`` uses for its own throwaway app. That matters
-here for a sharper reason than tidiness: Django's own flush (run by every
-``@pytest.mark.django_db(transaction=True)`` test's teardown) truncates tables by
-cross-referencing ``model._meta.db_table`` against ``connection.introspection.
-table_names()`` -- and that comparison never matches a quoted, schema-qualified
-``db_table`` like ``'"analytics"."events"'``, so the table is silently excluded from the
-truncate list. A table excluded that way, but still physically present with a foreign key
-into ``testapp_label``, makes flush() fail for *every* ``transaction=True`` test in the
-whole suite the moment ``testapp_label`` is truncated first -- not just tests that touch
-this app. Confirmed by hand while building this file: adding the app (and its migrations)
-to ``INSTALLED_APPS`` permanently broke three unrelated, pre-existing tests in
-``test_base.py`` with ``psycopg.errors.FeatureNotSupported: cannot truncate a table
-referenced in a foreign key constraint``.
-
-The fix is to never let the table persist past one test's transaction. Every test below
-uses the *default*, non-``transaction`` ``db`` fixture (savepoint-rollback teardown, no
-flush involved at all) and creates the schema, table, trigger, rule and policy by hand
-inside that same transaction -- schema editor and raw SQL alike -- so a rollback erases
-all of it as cleanly as it erases a row insert. Nothing here ever reaches ``migrate`` or a
-checked-in migration file.
-"""
+"""M4's schema-qualified ``db_table`` support, against a real non-``public`` schema.
+``tests.schema_qualified`` is added to ``INSTALLED_APPS`` only per-test: permanently
+installed, its quoted ``db_table`` breaks Django's flush-teardown for every other test."""
 
 from __future__ import annotations
 
@@ -44,13 +21,9 @@ pytestmark = pytest.mark.django_db
 
 @pytest.fixture
 def event_model():
-    """``tests.schema_qualified.models.Event`` (``db_table = '"analytics"."events"'``),
-    installed only for the duration of one test.
-
-    Imported lazily, inside the ``override_settings`` block: at module-collection time
-    ``tests.schema_qualified`` is not yet an installed app, and a model class needs its
-    app registered *before* it can be defined -- see the module docstring.
-    """
+    """``tests.schema_qualified.models.Event``, installed only for one test's duration.
+    Imported lazily inside the ``override_settings`` block: at collection time the app
+    isn't installed yet, and a model class needs its app registered before it's defined."""
     with override_settings(
         INSTALLED_APPS=[*django_settings.INSTALLED_APPS, 'tests.schema_qualified']
     ):
@@ -61,29 +34,9 @@ def event_model():
 
 @pytest.fixture
 def analytics_events_table(event_model):
-    """Physically create ``"analytics"."events"`` (schema, table, and every enforcement
-    statement the generator would write for it) inside the current test's transaction.
-
-    Uses ``connection.schema_editor()`` for the table itself -- not hand-written column
-    DDL -- so the columns/FK/index genuinely match what ``Event`` declares, the same
-    guarantee a real migration would give. The enforcement SQL is generated the same way
-    ``operations.py`` does: through ``_identifiers._quote_table`` and the public ``sql``
-    functions, not reimplemented here.
-
-    ``SET LOCAL search_path`` is not decoration. ``set_updated_at()`` (the shared, singleton
-    trigger function every *own-table* -- non-MTI -- ``_updated_at`` trigger calls) updates
-    ``TG_TABLE_NAME`` rather than a schema-qualified name, because ``TG_TABLE_NAME`` is
-    always the bare relation name -- Postgres has no equivalent that returns it
-    pre-qualified. That dynamic ``UPDATE`` is therefore resolved through the *firing
-    session's* ``search_path`` like any other unqualified reference, exactly as it always
-    was before schema-qualified ``db_table`` existed; this milestone makes that pre-existing
-    assumption newly *visible*, not newly true. A project putting a table outside the
-    session's default ``search_path`` (``"$user", public``) must include that schema in it --
-    the same operational requirement any schema-per-tenant Postgres deployment already has
-    for unqualified references. ``LOCAL`` scopes the change to this transaction, so it
-    reverts along with everything else in it on rollback, the same as ``rules.hard_deletion``
-    elsewhere in this kit. See ``docs/mti.md``.
-    """
+    """Create ``"analytics"."events"`` and its enforcement SQL in the current transaction.
+    ``SET LOCAL search_path`` matters: ``set_updated_at()`` updates the bare
+    ``TG_TABLE_NAME``, so ``search_path`` must include the table's schema -- see ``docs/mti.md``."""
     table = event_model._meta.db_table
     assert table == '"analytics"."events"'
     qualified = _identifiers._quote_table(table)
@@ -113,10 +66,8 @@ def analytics_events_table(event_model):
 
 
 class TestSchemaQualifiedTable:
-    """RLS, the updated-at trigger and the soft-delete rule, all against a table whose
-    ``db_table`` names a schema other than ``public`` -- the M4 scenario nothing else in
-    the suite exercises.
-    """
+    """RLS, the updated-at trigger, and the soft-delete rule against a table whose
+    ``db_table`` names a non-``public`` schema -- the M4 scenario nothing else exercises."""
 
     def test_a_negative_control_confirms_the_table_lives_outside_public(
         self, analytics_events_table
@@ -131,13 +82,9 @@ class TestSchemaQualifiedTable:
         assert schemas == {'analytics'}
 
     def test_updated_at_trigger_fires_and_stamps_a_real_timestamp(self, analytics_events_table):
-        """Proves the trigger *fired* (a non-null, DB-computed timestamp lands on the row)
-        rather than that time passed -- ``_updated_at = NOW()`` is transaction-*start* time
-        in PostgreSQL, not wall-clock time, so within this fixture's single savepoint-backed
-        transaction a strictly-later value can never be observed even when the trigger runs
-        correctly. See ``test_updated_at_trigger_genuinely_advances_across_committed_statements``
-        below for the real, cross-transaction advancement proof that needs.
-        """
+        """Proves the trigger fired (a non-null timestamp lands), not that time passed --
+        ``NOW()`` is transaction-start time, so a strictly-later value can never be observed
+        within one transaction; see the cross-transaction test below for that proof."""
         with tenancy_bypassed():
             label = Label.objects.create(name='Analytics Co')
         with tenant(label=label):
@@ -154,8 +101,7 @@ class TestSchemaQualifiedTable:
             event = analytics_events_table.objects.create(name='launch')
             pk = event.pk
             event.delete()
-            # Django's own Model.delete() sets the in-memory instance's pk to None once the
-            # statement succeeds -- captured above, before the call, for that reason.
+            # Model.delete() resets the instance's pk to None on success -- captured before.
             assert event.pk is None
             assert not analytics_events_table.objects.filter(pk=pk).exists()
             archived = analytics_events_table._all_objects.get(pk=pk)
@@ -177,19 +123,9 @@ class TestSchemaQualifiedTable:
 
 @pytest.mark.django_db(transaction=True)
 def test_updated_at_trigger_genuinely_advances_across_committed_statements():
-    """The one test in this file that needs a real, wall-clock time gap -- ``NOW()`` inside
-    a single transaction never changes, so proving the trigger *advances* ``_updated_at``
-    (not just sets it) needs two genuinely separate, committed transactions, which only
-    ``transaction=True`` provides.
-
-    Manual setup and teardown, not the ``analytics_events_table``/``event_model`` fixtures:
-    with ``transaction=True`` nothing is rolled back automatically, so the schema and table
-    must be dropped by hand -- and dropped *before* pytest-django's own flush-based
-    teardown runs, or this reproduces the whole-suite flush breakage described in the
-    module docstring. Doing it inside the test body's own ``finally``, rather than in a
-    fixture, is what guarantees that ordering: fixture teardown only runs after the test
-    function returns.
-    """
+    """Needs a real wall-clock gap: ``NOW()`` never changes within one transaction, so this
+    needs two committed transactions. Manual ``finally`` teardown, run before pytest-django's
+    flush, avoids the module docstring's flush breakage."""
     with override_settings(
         INSTALLED_APPS=[*django_settings.INSTALLED_APPS, 'tests.schema_qualified']
     ):
@@ -228,36 +164,12 @@ def test_updated_at_trigger_genuinely_advances_across_committed_statements():
 
 
 def test_mti_parent_trigger_fires_the_schema_qualified_branch(analytics_events_table):
-    """The one runtime path nothing else in the suite fires: ``set_parent_updated_at()``'s
-    4-arg, non-empty-``parent_schema`` branch (``UPDATE %I.%I ...``), reached only when an
-    MTI child whose *ancestor* lives outside ``public`` has one of its own, child-only
-    columns written -- exactly the scenario the function's ``TG_NARGS``/schema branching
-    exists for (see ``triggers.py``'s module docstring). ``tests/test_command.py`` and
-    ``tests/test_sql_identifiers.py`` only compare the *generated SQL text* for this
-    branch; nothing before this proved it actually fires against a real trigger.
-
-    Deliberately not a Django MTI model: a real ``class SpecialEvent(Event)`` subclass
-    registers a permanent parent-link relation on ``Event._meta`` for the rest of the test
-    process, regardless of ``INSTALLED_APPS`` -- Django's model graph has no way to
-    un-register a class once defined. That relation makes every *other* test's
-    ``Event.delete()`` (e.g. ``test_delete_soft_deletes_rather_than_removing_the_row``
-    above) try to cascade into the child's table too, which does not exist outside this
-    one test's transaction -- confirmed by hand while writing this test, which is why it
-    is a bare table instead. All this needs is the trigger's own SQL contract (a table
-    whose pk value matches the ancestor's), not real Django MTI machinery.
-
-    Also sidesteps the need for ``transaction=True``'s real wall-clock gap (see the
-    committed-statements test above): the ancestor row starts with an explicit sentinel
-    timestamp rather than ``_updated_at``'s ``db_default=Now()``, so any change away from
-    it -- not specifically a *later* value -- already proves the trigger fired, within one
-    ordinary, savepoint-rolled-back transaction.
-    """
+    """The one runtime path nothing else fires: ``set_parent_updated_at()``'s 4-arg,
+    non-empty-``parent_schema`` branch. Not a real MTI subclass: that would permanently
+    register a parent-link on ``Event._meta``, breaking other tests' cascade deletes."""
     table = analytics_events_table._meta.db_table
-    # analytics_events_table's fixture also enables the tenant RLS policy on this table
-    # (see its own docstring) -- bypassed here because this test is about the trigger, not
-    # tenancy, and a raw cursor INSERT/SELECT is not exempted by a Django-ORM tenant()
-    # scope the way an ORM call would be. label_id is still required (NOT NULL), so a real
-    # tenant row is created to satisfy it.
+    # The fixture also enables RLS on this table; bypassed since a raw cursor INSERT is
+    # not exempted by tenant() the way an ORM call is, but label_id is still NOT NULL.
     with tenancy_bypassed():
         label = Label.objects.create(name='Analytics Co')
     with tenancy_bypassed(), connection.cursor() as cursor:

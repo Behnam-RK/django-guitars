@@ -1,11 +1,5 @@
-"""Thin entry point. See ``guitars.management.enforcement`` for the implementation.
-
-Django's command loader only needs ``Command`` importable from this module path -- the
-generator itself was split into a package (``guitars.management.enforcement``) once its
-concerns (header templates, identity, scanning, operation building, CLI wiring) each grew
-enough to want their own module. This file is what keeps ``manage.py makeguitarmigrations``
-unaffected by that reorganization.
-"""
+"""Thin entry point -- see ``guitars.management.enforcement`` for the implementation. Keeps
+``manage.py makeguitarmigrations`` unaffected by that package's internal split."""
 
 from __future__ import annotations
 

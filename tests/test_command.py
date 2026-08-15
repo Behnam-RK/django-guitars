@@ -1,11 +1,6 @@
-"""Tests for the makeguitarmigrations management command.
-
-``_create_empty_migration_file`` (which shells out to ``makemigrations --empty``) is
-exercised in practice by the test app's committed enforcement migrations applying against
-Postgres, since running it for real would scaffold a new migration file on disk. Here we
-cover the scanning, idempotency, and SQL-operation-building logic directly, including
-``_write_migration_file`` against a throwaway ``tmp_path`` migrations directory.
-"""
+"""Tests for the makeguitarmigrations management command. ``_create_empty_migration_file``
+is exercised via the test app's committed migrations instead, since running it for real
+would scaffold a new file on disk; here it's scanning, idempotency, and SQL-building."""
 
 import types
 from io import StringIO
@@ -31,14 +26,9 @@ from tests.testapp.models import Album, Band, Ensemble, Orchestra
 
 
 def _pretend_function_migrations_are_current(command):
-    """Mark both singleton trigger-function migrations as existing *and* up to date.
-
-    Setting only the dependency is no longer enough to mean "already done": a singleton is
-    skipped only when the migration that defines it also carries the digest of the SQL the
-    kit emits today. That is the whole point of the digest -- before it, an edited function
-    body shipped no migration at all, because the first thing the ensure methods did was
-    return early on existence.
-    """
+    """Mark both singleton trigger-function migrations as existing *and* up to date --
+    setting only the dependency isn't enough: a singleton is skipped only when its
+    migration also carries today's SQL digest, not merely on existence."""
     command.trigger_function_dependency = ('albumb', '0001_pretend')
     command.parent_trigger_function_dependency = ('albumb', '0001_pretend_parent')
     command.trigger_function_sql = identity_module._sql_digest(
@@ -104,19 +94,8 @@ def test_build_operations_emits_mti_ops_for_child_models():
 
 
 def test_schema_qualified_table_headers_round_trip_and_stay_idempotent():
-    """Regression for a gap in M4's schema-qualified support: a header built from a table
-    containing a literal ``"`` -- Django's own pre-quoted schema-qualified ``db_table``
-    convention, e.g. ``'"analytics"."events"'`` -- used to embed that quote raw inside the
-    header's own quote-delimited slot (``# ... on "{table}" table!``). The scanner's capture
-    group excludes ``"`` by design, so it never matched its own freshly-written header, and
-    every subsequent run re-emitted a duplicate operation that fails ``migrate`` with
-    "already exists" instead of recognising the table as covered.
-
-    ``tests.schema_qualified`` is installed only for this test, the same
-    ``override_settings`` pattern ``tests/test_schema_qualified.py`` uses -- see that
-    module's docstring for why the app cannot simply live in ``INSTALLED_APPS``. Nothing
-    here touches the database: ``_build_operations`` only reads model ``_meta``.
-    """
+    """Regression: a table with a literal ``"`` (Django's pre-quoted form) used to embed
+    it raw in the header, so the scanner's own capture group never matched it back."""
     with override_settings(
         INSTALLED_APPS=[*django_settings.INSTALLED_APPS, 'tests.schema_qualified']
     ):
@@ -182,12 +161,8 @@ def test_cascade_operations_skip_non_cascade_and_non_deletable_relations():
 
 
 def test_related_rule_name_does_not_reject_a_hostile_unqualified_table():
-    """Regression: ``_related_rule_name`` must not require ``related_table`` to already be a
-    bare SQL identifier -- the returned name is quoted via ``_quote_ident`` regardless of
-    content, so a legal-but-hostile, *unqualified* Django ``db_table`` like ``'Order Items'``
-    (mixed case, an embedded space -- exactly what ``_quote_table`` elsewhere in this module
-    quotes rather than rejects) must render safely quoted here too, not raise at build time.
-    """
+    """Regression: a legal-but-hostile, unqualified ``db_table`` like ``'Order Items'``
+    (mixed case, embedded space) must render safely quoted, not raise at build time."""
     name = operations_module._related_rule_name('Order Items')
     assert name == '"soft_delete_related_Order Items"'
 
@@ -198,25 +173,16 @@ def test_related_rule_name_folds_in_a_hostile_schema_qualified_table():
 
 
 def test_related_rule_name_does_not_collide_across_the_schema_table_boundary():
-    """Regression: a plain ``f'{schema}_{table}'`` join is ambiguous whenever either part
-    contains an underscore -- schema ``'tenant_a'``/table ``'events'`` and schema
-    ``'tenant'``/table ``'a_events'`` both fold to the same joined string, which would
-    silently collide two distinct related tables' cascade rules onto one name (see the
-    docstring). The length-prefixed encoding must keep them apart.
-    """
+    """Regression: a plain ``f'{schema}_{table}'`` join would fold ``('tenant_a', 'events')``
+    and ``('tenant', 'a_events')`` to the same name, colliding two cascade rules."""
     first = operations_module._related_rule_name('tenant_a.events')
     second = operations_module._related_rule_name('tenant.a_events')
     assert first != second
 
 
 def test_cascade_operations_disambiguates_two_fks_to_the_same_related_table():
-    """Merch has two independent CASCADE FKs to Album -- ``album`` and ``bonus_album`` --
-    which is the exact shape the ``_via`` naming scheme exists for: a PostgreSQL rule is
-    namespaced by name alone, not by what it references, so without disambiguation the
-    second FK's ``CREATE OR REPLACE RULE "soft_delete_related_testapp_merch"`` would silently
-    replace the first FK's rule, leaving one of the two relations uncascaded with no error
-    anywhere (see ``sql.CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE_VIA``'s comment).
-    """
+    """Merch has two CASCADE FKs to Album -- the exact shape ``_via`` naming exists for:
+    without disambiguation, the second FK's rule would silently replace the first's."""
     command = Command()
     command.existing.soft_delete_related.clear()
 
@@ -240,12 +206,9 @@ def test_cascade_operations_disambiguates_two_fks_to_the_same_related_table():
 def test_cascade_operation_warns_when_related_model_is_mti_child_without_own_deleted_at(
     monkeypatch,
 ):
-    """Cascading into an MTI child through a FK declared on the child's own table, while
-    its ``_deleted_at`` lives on a farther ancestor, isn't supported (needs a join form) --
-    it must be surfaced as a warning instead of emitting a broken rule. Modeled here via a
-    synthetic reverse-relation entry (Orchestra doesn't actually have a FK to Band) rather
-    than a new schema field, since this is purely about the command's own logic.
-    """
+    """Cascading into an MTI child whose ``_deleted_at`` lives on a farther ancestor isn't
+    supported (needs a join form) -- must warn, not emit a broken rule. Synthetic
+    reverse-relation, not a new schema field: purely about the command's own logic."""
     command = Command()
     command._mti_cascade_warnings.clear()
     command.existing.soft_delete_related.clear()
@@ -284,12 +247,9 @@ def test_iter_migration_files_empty_when_no_migrations_dir(tmp_path):
     assert list(_generator.iter_migration_files(app)) == []
 
 
-# Must match Django's real ``makemigrations --empty`` output, in particular that
-# ``operations = [`` and its closing ``]`` are on SEPARATE lines. Operations are
-# inserted before the file's last line, so a single-line ``operations = []`` scaffold
-# would place them OUTSIDE the list -- producing a structurally broken migration that
-# a substring assertion still passes. See MIGRATION_TEMPLATE in
-# django/db/migrations/writer.py.
+# Must match Django's real --empty output: operations = [ and ] on SEPARATE lines, since
+# operations insert before the file's last line -- a single-line scaffold would place
+# them OUTSIDE the list, a broken migration a substring assertion still passes.
 _EMPTY_MIGRATION_SCAFFOLD = """# Generated by Django 5.2 on 2026-01-01
 
 from django.db import migrations
@@ -314,21 +274,9 @@ def _write_empty_migration(tmp_path, filename='0002_auto_enforcement.py'):
 
 
 def test_write_migration_file_output_is_exact(tmp_path, snapshot):
-    """Pin the generated file byte for byte.
-
-    Substring assertions cannot catch the failure that actually matters here: an
-    operation landing outside ``operations = [...]``. That produces a file which still
-    contains every expected fragment and still fails at ``migrate`` time in someone
-    else's project.
-
-    Note the absence of any ``from guitars import sql``. Operations carry their SQL
-    literally, so a generated migration imports nothing from the kit and cannot change
-    meaning when the kit is upgraded.
-
-    Snapshotted rather than a hand-written triple-quoted literal: the generator's own
-    output is the source of truth, and a future refactor (M3) updates one snapshot file
-    instead of re-typing whitespace here by hand.
-    """
+    """Pin the generated file byte for byte -- a substring assertion can't catch an
+    operation landing outside ``operations = [...]``, which still contains every expected
+    fragment and still fails at ``migrate`` time. No ``from guitars import sql`` import."""
     app, migration_file = _write_empty_migration(tmp_path)
 
     Command._write_migration_file(
@@ -344,12 +292,8 @@ def test_write_migration_file_output_is_exact(tmp_path, snapshot):
 
 
 def test_write_migration_file_puts_operations_inside_the_operations_list(tmp_path):
-    """The structural guarantee, asserted independently of exact formatting.
-
-    Parsed rather than pattern-matched: if the generated module does not import, or
-    the operation ends up outside the list, ``operations`` is empty and this fails --
-    which is the regression a substring check silently allows through.
-    """
+    """The structural guarantee, independent of exact formatting -- parsed, not
+    pattern-matched, so an operation landing outside the list makes this fail."""
     app, migration_file = _write_empty_migration(tmp_path)
 
     Command._write_migration_file(
@@ -404,12 +348,8 @@ def test_write_migration_file_skips_dependency_already_present(tmp_path):
 def test_write_migration_file_raises_command_error_when_scaffold_has_no_dependencies_list(
     tmp_path,
 ):
-    """A missing ``dependencies = [`` line must fail loudly, not as a bare StopIteration.
-
-    Only reachable if makemigrations' own ``--empty`` template ever drops or reformats
-    that line -- but if it does, the previous behaviour was an unhandled StopIteration
-    deep inside the dependency-insertion loop rather than a diagnosable CommandError.
-    """
+    """A missing ``dependencies = [`` line must fail loudly, not as a bare StopIteration
+    deep inside the dependency-insertion loop."""
     migrations_dir = tmp_path / 'migrations'
     migrations_dir.mkdir()
     filename = '0002_auto_enforcement.py'
@@ -492,13 +432,8 @@ def test_handle_generates_only_for_named_apps(monkeypatch):
 
 
 def test_handle_skips_an_in_scope_app_with_no_operations(monkeypatch):
-    """An in-scope app that needs no enforcement contributes nothing to generate.
-
-    Every real LOCAL_APP in this suite (just testapp) always has models needing
-    enforcement, so nothing exercises this otherwise -- ``_build_operations`` is
-    mocked directly rather than reaching for a fake app with no models, which
-    ``test_scoped_cascade_gap_*`` already does for a different method.
-    """
+    """An in-scope app that needs no enforcement contributes nothing to generate --
+    ``_build_operations`` mocked directly since every real LOCAL_APP here needs some."""
     created: list[str] = []
 
     command = Command()
@@ -535,10 +470,8 @@ def _fake_app_config(name: str, label: str, model_list: list) -> types.SimpleNam
 
 
 def _sponsor_fk_reverse_relation():
-    """Synthetic shape for the "generator would refuse this rule anyway" case: an FK on
-    an MTI child's own table while its ``_deleted_at`` lives on an ancestor -- same as
-    ``test_cascade_operation_warns_when_related_model_is_mti_child_without_own_deleted_at``.
-    """
+    """Synthetic shape: an FK on an MTI child's own table while ``_deleted_at`` lives on
+    an ancestor -- the generator-refuses-this-rule case."""
 
     class _FakeFKField:
         column = 'sponsor_id'
@@ -790,12 +723,8 @@ def test_handle_writes_scoped_cascade_gap_warning_to_stdout(monkeypatch):
 
 
 def test_function_dependencies_for_only_includes_deps_the_operations_use():
-    """The per-app migration must depend on a function migration only when its operations
-    actually call that function: own-table ``updated_at`` triggers need ``set_updated_at``;
-    MTI parent-propagation triggers need ``set_parent_updated_at``. Soft-delete and cascade
-    rules call no function, so an app emitting only those depends on neither -- avoiding a
-    spurious edge to the (MTI) parent-function migration and its host app's ordering.
-    """
+    """A per-app migration depends on a function migration only when its operations
+    actually call it -- soft-delete/cascade rules call none, so those apps depend on neither."""
     command = Command()
     command.trigger_function_dependency = ('testapp', '0002_trigger_function')
     command.parent_trigger_function_dependency = ('testapp', '0006_parent_trigger_function')
@@ -822,14 +751,9 @@ def test_function_dependencies_for_only_includes_deps_the_operations_use():
     assert command._function_dependencies_for(rules_only) == []
 
 
-# --- The singleton function migrations and the staged FORCE run ------------------
-#
-# These branches only fire on a project that has not generated them yet, or one part-way
-# through a staged RLS retrofit. Neither state exists in this repo, so each is driven
-# directly with the same throwaway-app pattern used above. They are worth driving rather
-# than leaving uncovered: the trigger-function migration is a hard prerequisite of every
-# other enforcement migration, and the FORCE stage is the one that makes an inert policy
-# bind.
+# --- The singleton function migrations and the staged FORCE run ---
+# Neither state exists in this repo (no project pre-function-migration, none mid-retrofit),
+# so each is driven directly with the throwaway-app pattern above.
 
 
 def _command_with_scaffold(monkeypatch, tmp_path, filename='0002_auto_enforcement.py'):
@@ -884,9 +808,7 @@ def test_ensure_trigger_function_migration_writes_and_records_the_dependency(
     extra_content_substring,
 ):
     """Every other enforcement migration depends on one of these two by name, so the
-    recorded ``(app_label, stem)`` is what makes the dependency resolvable rather than a
-    guess. The parent one is kept as its own migration so adding MTI support never
-    re-digests -- and therefore never regenerates -- the base function migration."""
+    recorded ``(app_label, stem)`` must be real, not guessed."""
     command, app, filename = _command_with_scaffold(monkeypatch, tmp_path, filename)
     if pre_setup is not None:
         attr, value = pre_setup
@@ -920,13 +842,8 @@ def test_tenant_force_operations_is_empty_when_policies_are_disabled():
 
 
 def test_tenant_operations_force_stage_only_touches_policies_that_shipped_unforced():
-    """The flag exists for one situation: policies shipped inert under
-    ``GUITARS_RLS_FORCE = False``, then the setting was turned on.
-
-    Keying on "a policy exists and has no separate FORCE operation" would match every policy
-    generated with FORCE inline -- which is the default -- and emit a redundant migration per
-    tenanted table.
-    """
+    """Keying on "a policy exists and has no separate FORCE operation" would match every
+    policy generated with FORCE inline -- the default -- emitting a redundant migration."""
     app = django_apps.get_app_config('testapp')
 
     command = Command()
@@ -1001,11 +918,8 @@ def test_force_rls_stage_check_only_reports_and_exits_non_zero(monkeypatch):
 def test_check_reports_a_missing_trigger_function_migration(
     dependency_attr, method_name, error_match
 ):
-    """``--check`` on a project that never generated the shared function migration.
-
-    It is a hard prerequisite -- every per-app enforcement migration declares a dependency on
-    it -- so ``--check`` has to fail rather than report the per-app migrations as fine.
-    """
+    """``--check`` on a project that never generated the shared function migration must
+    fail -- it's a hard prerequisite every per-app migration depends on."""
     command = Command()
     command.stdout = StringIO()
     setattr(command, dependency_attr, None)
@@ -1034,12 +948,8 @@ def test_tenant_policy_operations_are_emitted_for_uncovered_tables():
 
 
 def test_a_policy_whose_shape_is_unchanged_emits_nothing():
-    """The steady state. Re-running the generator on untouched models must be a no-op.
-
-    Pinned as its own test because it is the precondition for the two below meaning anything:
-    an identity that were unstable across runs would emit a replacement every time, and the
-    drift detection would be indistinguishable from a bug.
-    """
+    """The steady state: re-running on untouched models must be a no-op. Precondition for
+    the two tests below meaning anything -- an unstable identity would emit every time."""
     app = django_apps.get_app_config('testapp')
     command = Command()
     command.stdout = StringIO()
@@ -1048,14 +958,9 @@ def test_a_policy_whose_shape_is_unchanged_emits_nothing():
 
 
 def test_a_changed_coverage_shape_emits_a_replacement_not_nothing():
-    """A model gaining a tenant dimension must produce a migration.
-
-    The regression this guards is silent under-enforcement, and it is worth stating plainly:
-    the header used to record only the table name, so a table that had *any* policy was
-    treated as covered forever. Adding a dimension changed the predicate the models describe
-    while the database kept the old, weaker one -- and because the generator emitted nothing,
-    `makemigrations --check` reported nothing to do and CI stayed green.
-    """
+    """A model gaining a tenant dimension must produce a migration -- the header used to
+    record only the table name, so any policy read as covered forever, silently
+    under-enforcing while `--check` reported nothing and CI stayed green."""
     app = django_apps.get_app_config('testapp')
     command = Command()
     command.stdout = StringIO()
@@ -1068,10 +973,8 @@ def test_a_changed_coverage_shape_emits_a_replacement_not_nothing():
 
     assert len(headers) == 1
     assert headers[0].startswith('# Tenant RLS replaced on "testapp_release" table!')
-    # The replacement form, because PostgreSQL has no CREATE OR REPLACE POLICY -- re-emitting
-    # the CREATE form would fail migrate with "policy tenant_scope already exists". Asserted
-    # on the emitted SQL rather than on a `sql.replace_table_rls(` call, because the operation
-    # now carries the statements literally.
+    # The replacement form, since Postgres has no CREATE OR REPLACE POLICY. Asserted on the
+    # emitted SQL, not a `sql.replace_table_rls(` call, since operations carry it literally.
     assert 'DROP POLICY IF EXISTS tenant_scope ON testapp_release' in operations[0]
     assert operations[0].index('DROP POLICY IF EXISTS tenant_scope') < operations[0].index(
         'CREATE POLICY tenant_scope'
@@ -1079,12 +982,8 @@ def test_a_changed_coverage_shape_emits_a_replacement_not_nothing():
 
 
 def test_check_fails_when_a_policy_shape_changed(monkeypatch):
-    """The gate, end to end -- this is what the whole identity mechanism is for.
-
-    `makemigrations --check` used to exit 0 on a model that had gained a tenant dimension,
-    because the generator emitted nothing and so there was nothing to report. CI stayed green
-    while the database enforced a strictly weaker predicate than every call site implied.
-    """
+    """The gate, end to end: `--check` used to exit 0 on a model that gained a tenant
+    dimension, because the generator emitted nothing to report. CI stayed green regardless."""
     app = django_apps.get_app_config('testapp')
     real = app_coverage(app)
     widened = real.tables['testapp_release']._replace(
@@ -1109,12 +1008,8 @@ def test_check_fails_when_a_policy_shape_changed(monkeypatch):
 
 
 def test_the_policy_identity_covers_the_predicate_and_the_exempt_roles():
-    """What must change the identity, and what must not.
-
-    ``force`` is excluded deliberately: it is an ALTER TABLE with its own staged mechanism
-    (``--force-rls``), so folding it in would make flipping GUITARS_RLS_FORCE replace every
-    policy and defeat the retrofit that setting exists for.
-    """
+    """What must change the identity, and what must not -- ``force`` is excluded, since
+    folding it in would make flipping GUITARS_RLS_FORCE replace every policy."""
     app = django_apps.get_app_config('testapp')
     command = Command()
     coverage = app_coverage(app).tables['testapp_release']
@@ -1153,13 +1048,8 @@ def test_force_rls_stage_skips_an_operation_set_already_written(monkeypatch):
 
 
 def _unforced_policy_tables(content: str) -> set[str]:
-    """Find the ``_RE_TENANT_POLICY`` matches *content* needs, then defer to the real thing.
-
-    ``unforced_policy_tables`` takes them as an argument rather than finding them itself --
-    its caller (``scanning.scan_existing_operations``) already scans for the same pattern
-    and passes its own matches in, so a second scan here would be exactly the double work
-    that changed.
-    """
+    """Find the matches ``unforced_policy_tables`` needs, then defer to the real thing --
+    it takes them as an argument since its real caller already scanned for them once."""
     matches = list(headers_module._RE_TENANT_POLICY.finditer(content))
     return identity_module.unforced_policy_tables(content, matches)
 
@@ -1179,14 +1069,8 @@ _TWO_POLICY_OPERATIONS = """
 
 
 def test_unforced_policy_tables_reads_each_operation_in_isolation():
-    """Two adjacent operations, one forced and one not -- which is every real file.
-
-    A regex spanning a few lines after the header cannot do this: operations are about that
-    long, so a lazy match from the ``force=True`` operation reaches into the next one, claims
-    *its* ``force=False``, and consumes the header on the way. The result is exactly backwards
-    -- the already-forced table gets flagged and the inert one is missed -- so `--force-rls`
-    would force what needs nothing and leave the unprotected table unprotected.
-    """
+    """Two adjacent operations, one forced and one not -- an unbounded regex would let a
+    lazy match from the first reach into the second and read backwards, exactly wrong."""
     assert _unforced_policy_tables(_TWO_POLICY_OPERATIONS) == {'table_b'}
 
 
@@ -1204,13 +1088,8 @@ def test_unforced_policy_tables_handles_the_last_operation_in_a_file():
 
 
 def test_unforced_policy_tables_bounds_a_replacement_operation_too():
-    """A replacement operation is a policy operation, so it must bound the one before it.
-
-    ``--force-rls`` reads ``force=`` out of each operation's own text. If the replacement
-    header were not one of the bounds, a preceding ``force=True`` operation would run on into
-    the replacement, read *its* ``force=False``, and flag the wrong table -- the same
-    off-by-one-operation bug the isolation test above pins for the CREATE form.
-    """
+    """A replacement operation is a policy operation too, so it must bound the one before
+    it -- else a preceding force=True would run into it and read the wrong force= value."""
     with_replacement = _TWO_POLICY_OPERATIONS.replace(
         '# Tenant RLS on "table_b"', '# Tenant RLS replaced on "table_b"'
     )
@@ -1219,14 +1098,8 @@ def test_unforced_policy_tables_bounds_a_replacement_operation_too():
 
 
 def test_unforced_policy_tables_is_last_write_wins_within_one_file():
-    """Two operations for the SAME table: the later one is the state the database ends in.
-
-    Accumulating into a set instead answers "was this table ever shipped inert", which is a
-    different and useless question -- a table replaced with ``force=True`` would stay on the
-    FORCE backlog forever and ``--force-rls`` would keep writing a migration that changes
-    nothing. Across files the caller already applies this rule; within one it has to hold
-    here, because the caller cannot see the operation boundaries.
-    """
+    """Two operations for the SAME table: the later is the state the database ends in --
+    accumulating into a set instead would leave an already-forced table on the backlog."""
     inert_then_forced = (
         _TWO_POLICY_OPERATIONS.replace('table_b', 'table_a')
         + """
@@ -1242,17 +1115,8 @@ def test_unforced_policy_tables_is_last_write_wins_within_one_file():
 
 
 def test_a_replacement_carrying_force_takes_a_table_off_the_backlog(tmp_path, monkeypatch):
-    """The scan is last-write-wins per table, not a union across every migration file.
-
-    The shape that matters is a finished retrofit: ``table_b``'s policy shipped inert under
-    ``GUITARS_RLS_FORCE = False``, then the model changed and the replacement was generated
-    with the setting back on. That replacement inlines FORCE, so it writes no
-    ``# Tenant FORCE RLS`` header for ``tenant_forces`` to find -- and if the scan merely
-    unioned every ``force=False`` it ever saw, ``table_b`` would stay on the backlog forever
-    and ``--force-rls`` would keep emitting a migration for a table that is already forced.
-    That is the same redundant-migration bug the flag was fixed for once already, one file
-    further along.
-    """
+    """The scan is last-write-wins per table, across files -- a finished retrofit
+    (shipped inert, later replaced with force=True inlined) must come off the backlog."""
     migrations_dir = tmp_path / 'migrations'
     migrations_dir.mkdir()
     # Both tables ship inert first, so the assertion below distinguishes "came off the
@@ -1277,10 +1141,8 @@ def test_a_replacement_carrying_force_takes_a_table_off_the_backlog(tmp_path, mo
 
 
 def test_the_real_migrations_ship_every_policy_forced():
-    """GUITARS_RLS_FORCE defaults to True, so this repo's own migrations carry FORCE inline.
-
-    Pinned because it is the precondition for `--force-rls` correctly finding nothing to do.
-    """
+    """GUITARS_RLS_FORCE defaults to True, so this repo's own migrations carry FORCE
+    inline -- the precondition for `--force-rls` correctly finding nothing to do."""
     command = Command()
 
     assert command.existing.tenant_policies

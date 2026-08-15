@@ -1,6 +1,6 @@
-"""Raw SQL for the DB-managed ``_updated_at`` column: a shared trigger *function* and a
-per-table statement *trigger* calling it. Public ``CREATE_PARENT_UPDATED_AT_*`` keep their
-frozen pre-2.0.0 3-arg call; the private ``_CREATE_PARENT_...`` forms below are current."""
+"""Raw SQL for the DB-managed ``_updated_at`` column and for tenant autofill (ADR 0005):
+shared trigger *functions* plus the per-table *triggers* calling them. Public
+``CREATE_PARENT_UPDATED_AT_*`` keep their frozen 3-arg call; ``_``-prefixed forms are not."""
 
 # *****************************************************************************************
 # ****************************** Updated At Trigger Function ******************************
@@ -202,4 +202,76 @@ _ADOPT_PARENT_UPDATED_AT_TRIGGER = (
     DROP TRIGGER IF EXISTS updated_at_trigger ON {child_table};
 """
     + _CREATE_PARENT_UPDATED_AT_TRIGGER
+)
+
+# ---- Private, non-frozen tenant-autofill templates (ADR 0005): fill a NULL tenant column
+# from the active scope's GUC, covering multi-row INSERT, INSERT ... SELECT and raw SQL,
+# which reach no pre_save. One function per (column, GUC) pair -- see the ADR's benchmark. ----
+
+# The column is baked in statically rather than reached via TG_ARGV: PL/pgSQL cannot write a
+# dynamically-named column on NEW, and the to_jsonb/jsonb_populate_record round trip that
+# would is +61% per row against +3% for this form (ADR 0005, measured on 20,000-row inserts).
+
+# The bypass guard reads `= 'on'`, NOT the `<> 'on'` of soft_delete.py's rules: there the safe
+# answer is "keep guarding", here it is "decline to fill", so the safe direction is the
+# opposite one. Every guard below fails toward leaving NULL, which WITH CHECK then refuses.
+
+# The separator guard is the multi-tenant scope, and cannot be dropped because `guc._scalar`
+# now refuses a separator inside a *scalar* -- a collection scope legitimately publishes
+# `a,b`, and filling from either half would write the row into a tenant nobody named.
+_CREATE_TENANT_AUTOFILL_FUNCTION = """
+    CREATE FUNCTION {function}()
+       RETURNS TRIGGER
+       LANGUAGE PLPGSQL
+    AS
+    $$
+    BEGIN
+        IF NEW."{column}" IS NOT NULL
+           OR COALESCE(current_setting('{bypass_guc}', true), '') = 'on'
+           OR COALESCE(current_setting('{guc}', true), '') = ''
+           OR position('{separator}' in current_setting('{guc}', true)) > 0
+        THEN
+            RETURN NEW;
+        END IF;
+        NEW."{column}" := current_setting('{guc}', true);
+        RETURN NEW;
+    END;
+    $$
+"""
+
+_DROP_TENANT_AUTOFILL_FUNCTION = """
+    DROP FUNCTION {function}();
+"""
+
+# OR REPLACE for the same reason as REPLACE_UPDATED_AT_TRIGGER_FUNCTION above: DROP FUNCTION
+# refuses while a trigger depends on it, and CASCADE would take those triggers with it.
+_REPLACE_TENANT_AUTOFILL_FUNCTION = _CREATE_TENANT_AUTOFILL_FUNCTION.replace(
+    'CREATE FUNCTION', 'CREATE OR REPLACE FUNCTION', 1
+)
+
+_CREATE_TENANT_AUTOFILL_TRIGGER = """
+    CREATE TRIGGER tenant_autofill_trigger
+        BEFORE INSERT ON {table}
+        FOR EACH ROW
+        EXECUTE FUNCTION {function}();
+"""
+
+_DROP_TENANT_AUTOFILL_TRIGGER = """
+    DROP TRIGGER tenant_autofill_trigger ON {table};
+"""
+
+# Same two-form split as REPLACE_/ADOPT_UPDATED_AT_TRIGGER above: IF EXISTS is a knowledge
+# claim, so only the --adopt path -- which is honest about not knowing -- may assert it.
+_REPLACE_TENANT_AUTOFILL_TRIGGER = (
+    """
+    DROP TRIGGER tenant_autofill_trigger ON {table};
+"""
+    + _CREATE_TENANT_AUTOFILL_TRIGGER
+)
+
+_ADOPT_TENANT_AUTOFILL_TRIGGER = (
+    """
+    DROP TRIGGER IF EXISTS tenant_autofill_trigger ON {table};
+"""
+    + _CREATE_TENANT_AUTOFILL_TRIGGER
 )

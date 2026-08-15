@@ -76,7 +76,7 @@ class TestWhichTablesAreCovered:
 class TestHowEachTableIsPredicated:
     def test_an_own_column_table_needs_no_join(self, coverage):
         assert coverage.tables[Release._meta.db_table] == TableCoverage(
-            columns={'label': 'label_id'}
+            columns={'label': 'label_id'}, autofill_columns={'label': 'label_id'}
         )
 
     def test_the_mti_root_owns_its_column(self, coverage):
@@ -136,6 +136,40 @@ class TestAsKwargs:
 
         assert 'testapp_tour AS _guitars_owner' in statements[0]
         assert "current_setting('tenant.label', true)" in statements[0]
+
+
+class TestWhichTablesAutofill:
+    """``autofill_columns`` is what ADR 0005's INSERT trigger is generated from, so a table
+    listed here gains one and a table absent stays fillable only from Python."""
+
+    @pytest.mark.parametrize('model', [Release, Tour], ids=lambda m: m.__name__)
+    def test_a_guitar_model_autofills_its_own_column(self, coverage, model):
+        assert coverage.tables[model._meta.db_table].autofill_columns == {'label': 'label_id'}
+
+    @pytest.mark.parametrize('model', [Booking, HeadlineFestival], ids=lambda m: m.__name__)
+    def test_a_hand_declared_manager_does_not_autofill_by_default(self, coverage, model):
+        """None of these pass ``autofill=``, so they fall back to ``GUITARS_TENANT_AUTOFILL``
+        (``False`` in this harness) -- and the opt-out becomes visible as an absent trigger."""
+        assert coverage.tables[model._meta.db_table].autofill_columns is None
+
+    @pytest.mark.parametrize('model', [WorldTour, StadiumTour], ids=lambda m: m.__name__)
+    def test_an_mti_child_leaves_autofill_to_the_column_owner(self, coverage, model):
+        """The column lives on ``testapp_tour``; a trigger here would have nothing to write.
+        The owner appears in the same scan with the column local to it and gets the trigger."""
+        assert coverage.tables[model._meta.db_table].autofill_columns is None
+
+    def test_a_multi_hop_table_is_not_covered_at_all(self, coverage):
+        """``Review`` scopes on ``release__label`` -- no column here to fill or predicate on."""
+        assert Review._meta.db_table not in coverage.tables
+
+    def test_autofill_columns_stays_out_of_the_policy_kwargs(self, coverage):
+        """Load-bearing: ``_policy_identity`` digests ``as_kwargs()``, so if the new field
+        leaked in, every existing ``[POLICY:...]`` header would go stale and 2.1.0 would
+        replace every policy in every consuming project instead of only adding triggers."""
+        release = coverage.tables[Release._meta.db_table]
+        assert release.autofill_columns
+        assert 'autofill_columns' not in release.as_kwargs()
+        assert release.as_kwargs() == TableCoverage(columns={'label': 'label_id'}).as_kwargs()
 
 
 class TestScoping:

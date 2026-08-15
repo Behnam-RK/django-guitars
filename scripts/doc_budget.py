@@ -100,6 +100,12 @@ def _docstring_violations(path: Path, tree: ast.Module) -> list[str]:
     return violations
 
 
+def _flush_comment_run(path: Path, run_start: int | None, run_len: int) -> list[str]:
+    if run_len > COMMENT_BLOCK_CAP:
+        return [f'{path}:{run_start}  comment block is {run_len} lines (cap {COMMENT_BLOCK_CAP})']
+    return []
+
+
 def _comment_block_violations(path: Path, source: str) -> list[str]:
     lines = source.splitlines()
     violations = []
@@ -118,19 +124,13 @@ def _comment_block_violations(path: Path, source: str) -> list[str]:
             if row == prev_line + 1:
                 run_len += 1
             else:
-                if run_len > COMMENT_BLOCK_CAP:
-                    violations.append(
-                        f'{path}:{run_start}  comment block is {run_len} lines (cap {COMMENT_BLOCK_CAP})'
-                    )
+                violations += _flush_comment_run(path, run_start, run_len)
                 run_start = row
                 run_len = 1
             prev_line = row
     except tokenize.TokenError:
         pass
-    if run_len > COMMENT_BLOCK_CAP:
-        violations.append(
-            f'{path}:{run_start}  comment block is {run_len} lines (cap {COMMENT_BLOCK_CAP})'
-        )
+    violations += _flush_comment_run(path, run_start, run_len)
     return violations
 
 
@@ -149,17 +149,20 @@ def _markdown_violations(path: Path, text: str) -> list[str]:
     return []
 
 
-def _headings(path: Path, headings_cache: dict) -> set:
+def _headings(path: Path, markdown_sources: dict, headings_cache: dict) -> set:
     if path not in headings_cache:
+        text = markdown_sources.get(path)
+        if text is None:
+            text = path.read_text(encoding='utf-8')
         headings_cache[path] = {
-            h.group(1).strip('*').strip()
-            for line in path.read_text().splitlines()
+            h.group(1).strip('*`').strip()
+            for line in text.splitlines()
             if (h := HEADING_RE.match(line))
         }
     return headings_cache[path]
 
 
-def _reference_violations(py_sources: dict) -> list[str]:
+def _reference_violations(py_sources: dict, markdown_sources: dict) -> list[str]:
     violations = []
     headings_cache: dict = {}
     for path, text in py_sources.items():
@@ -174,7 +177,7 @@ def _reference_violations(py_sources: dict) -> list[str]:
             target = REPO_ROOT / 'docs' / doc_name
             if not target.exists():
                 continue
-            if title not in _headings(target, headings_cache):
+            if title not in _headings(target, markdown_sources, headings_cache):
                 violations.append(
                     f'{path}  cites "{title}" section of docs/{doc_name}, '
                     f'no such heading found there'
@@ -185,9 +188,10 @@ def _reference_violations(py_sources: dict) -> list[str]:
 def main() -> int:
     violations: list[str] = []
     py_sources: dict = {}
+    markdown_sources: dict = {}
 
     for path in _iter_py_files():
-        source = path.read_text()
+        source = path.read_text(encoding='utf-8')
         py_sources[path] = source
         try:
             tree = ast.parse(source, filename=str(path))
@@ -198,9 +202,11 @@ def main() -> int:
         violations += _comment_block_violations(path, source)
 
     for path in _iter_markdown_files():
-        violations += _markdown_violations(path, path.read_text())
+        text = path.read_text(encoding='utf-8')
+        markdown_sources[path] = text
+        violations += _markdown_violations(path, text)
 
-    violations += _reference_violations(py_sources)
+    violations += _reference_violations(py_sources, markdown_sources)
 
     if violations:
         _out(f'doc-budget: {len(violations)} violation(s)\n')

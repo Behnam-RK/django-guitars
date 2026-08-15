@@ -16,17 +16,23 @@ either the frozen enforcement interface (`HEADER_*` in
 fixture modelling one -- rewriting either for a line count would falsify what
 it exists to prove.
 
-Two markdown files (`CONTEXT.md`, `docs/api-reference.md`) are enumerations
-whose length tracks the API surface, not verbosity; they opt out of the
-markdown cap with an in-file marker:
+Some markdown files (`CONTEXT.md`, `docs/api-reference.md`, `CHANGELOG.md`)
+have length that tracks something other than verbosity -- API surface, release
+count -- so they opt out of the markdown cap with an in-file marker, anchored
+to the first few lines:
 
     <!-- doc-budget: exempt — <reason> -->
 
+The separator accepts an em dash, en dash, or one-or-more literal hyphens, so
+an autocorrected marker still matches.
+
 Axis 5 (dangling references) only checks what the shrink pass actually had to
-protect: `docs/*.md` path references from source, and the three section
-citations quoted as `"Title" section` near such a path. It is a targeted
-check, not a general prose parser -- new citation shapes need a matching new
-check, not a wider regex.
+protect: `docs/*.md` path references from source, and section citations in
+the two idioms the codebase actually uses -- `` `docs/X.md`'s "Title" `` and
+`"Title" section of docs/X.md` -- each matched as one paired path+title
+regex, never by proximity-guessing which nearby path a bare `"Title" section`
+belongs to. It is a targeted check, not a general prose parser -- new
+citation shapes need a matching new check, not a wider regex.
 """
 
 from __future__ import annotations
@@ -46,9 +52,13 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 PY_ROOTS = ('src', 'tests')
 MARKDOWN_ROOT_FILES = ('README.md', 'CLAUDE.md', 'CONTEXT.md', 'CHANGELOG.md')
 
-EXEMPT_RE = re.compile(r'<!--\s*doc-budget:\s*exempt\s*(?:—|--)\s*(.*?)\s*-->')
+EXEMPT_PREAMBLE_LINES = 10
+EXEMPT_RE = re.compile(r'<!--\s*doc-budget:\s*exempt\s*[-‐-―]+\s*(.*?)\s*-->')
 DOC_PATH_RE = re.compile(r'docs/([\w][\w\-]*\.md)')
-SECTION_CITE_RE = re.compile(r'"([A-Z][^"\n]{2,60})"\s+section')
+# The two section-citation idioms actually used in this codebase, each capturing
+# its path and title together so attribution never has to guess by proximity.
+CITE_PATH_FIRST_RE = re.compile(r'`{1,2}docs/([\w][\w\-]*\.md)`{1,2}\'s\s+"([A-Z][^"\n]{2,60})"')
+CITE_TITLE_FIRST_RE = re.compile(r'"([A-Z][^"\n]{2,60})"\s+section\s+of\s+docs/([\w][\w\-]*\.md)')
 HEADING_RE = re.compile(r'^#+\s*(.+?)\s*$')
 
 
@@ -128,7 +138,8 @@ def _markdown_violations(path: Path, text: str) -> list[str]:
     lines = text.splitlines()
     if len(lines) <= MARKDOWN_CAP:
         return []
-    match = EXEMPT_RE.search(text)
+    preamble = '\n'.join(lines[:EXEMPT_PREAMBLE_LINES])
+    match = EXEMPT_RE.search(preamble)
     if match is None:
         return [
             f'{path}  is {len(lines)} lines (cap {MARKDOWN_CAP}), no doc-budget exemption marker'
@@ -138,31 +149,34 @@ def _markdown_violations(path: Path, text: str) -> list[str]:
     return []
 
 
-def _reference_violations() -> list[str]:
+def _headings(path: Path, headings_cache: dict) -> set:
+    if path not in headings_cache:
+        headings_cache[path] = {
+            h.group(1).strip('*').strip()
+            for line in path.read_text().splitlines()
+            if (h := HEADING_RE.match(line))
+        }
+    return headings_cache[path]
+
+
+def _reference_violations(py_sources: dict) -> list[str]:
     violations = []
-    for path in _iter_py_files():
-        text = path.read_text()
+    headings_cache: dict = {}
+    for path, text in py_sources.items():
         for m in DOC_PATH_RE.finditer(text):
             target = REPO_ROOT / 'docs' / m.group(1)
             if not target.exists():
                 violations.append(f'{path}  references missing docs/{m.group(1)}')
-        for m in SECTION_CITE_RE.finditer(text):
-            window = text[max(0, m.start() - 200) : m.end() + 200]
-            doc_match = DOC_PATH_RE.search(window)
-            if doc_match is None:
-                continue
-            target = REPO_ROOT / 'docs' / doc_match.group(1)
+
+        citations = [(m.group(2), m.group(1)) for m in CITE_PATH_FIRST_RE.finditer(text)]
+        citations += [(m.group(1), m.group(2)) for m in CITE_TITLE_FIRST_RE.finditer(text)]
+        for title, doc_name in citations:
+            target = REPO_ROOT / 'docs' / doc_name
             if not target.exists():
                 continue
-            title = m.group(1)
-            headings = {
-                h.group(1).strip('*').strip()
-                for line in target.read_text().splitlines()
-                if (h := HEADING_RE.match(line))
-            }
-            if title not in headings:
+            if title not in _headings(target, headings_cache):
                 violations.append(
-                    f'{path}  cites "{title}" section of docs/{doc_match.group(1)}, '
+                    f'{path}  cites "{title}" section of docs/{doc_name}, '
                     f'no such heading found there'
                 )
     return violations
@@ -170,9 +184,11 @@ def _reference_violations() -> list[str]:
 
 def main() -> int:
     violations: list[str] = []
+    py_sources: dict = {}
 
     for path in _iter_py_files():
         source = path.read_text()
+        py_sources[path] = source
         try:
             tree = ast.parse(source, filename=str(path))
         except SyntaxError as exc:
@@ -184,7 +200,7 @@ def main() -> int:
     for path in _iter_markdown_files():
         violations += _markdown_violations(path, path.read_text())
 
-    violations += _reference_violations()
+    violations += _reference_violations(py_sources)
 
     if violations:
         _out(f'doc-budget: {len(violations)} violation(s)\n')

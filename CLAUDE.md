@@ -16,6 +16,8 @@ The wheel ships **only** `src/guitars/`, mapped to top-level `guitars` (`[tool.h
 
 Abstract bases named by string count, each rung adds capability via mixins: `TarModel` = `UpdatableModel` + `HasCachedPropertyModel` (no columns, no DB behaviour — the root, unnumbered, "tār" = string); `DutarModel` (2) = `DatedModel` + `TarModel` (DB-managed `_created_at`/`_updated_at` + `app_label()`/`model_name()`/`class_name()` + field-listing `__repr__`); `SetarModel` (3) = `DutarModel` + `SoftDeletableModel` (its `Meta` inherits `SoftDeletableModel.Meta` — **the default rung** for a model that isn't tenanted); `GuitarModel` (6) = `SetarModel` + tenancy, the full kit — see [`docs/tenancy.md`](docs/tenancy.md). Each capability is also a standalone mixin exported from `guitars.models`.
 
+> ⚠️ **Renamed in 1.0.0** — every rung shifted down one to make room for tenancy: 0.7's `DutarModel`→`TarModel`, `SetarModel`→`DutarModel`, `GuitarModel`→`SetarModel` (behaviour-identical); `GuitarModel` kept its name but now means "`SetarModel` + tenancy". See `CHANGELOG.md`.
+
 ### Database-enforced behavior is the whole design
 
 The non-obvious core: **behavior is enforced by Postgres, not Python.** Three pieces work together:
@@ -95,5 +97,4 @@ uv run bandit -c pyproject.toml -r src
 
 - Metadata fields are underscore-prefixed (`_created_at`, `_updated_at`, `_deleted_at`); non-default managers too (`_archives`, `_all_objects`).
 - Editing SQL behavior means editing the relevant module under `src/guitars/sql/` **and** verifying `makeguitarmigrations` still emits/matches it. A new SQL name needs `sql/__init__.py` re-export *and* `FROZEN_SQL_NAMES` (`tests/test_sql_interface.py`), so a later rename is caught rather than shipped.
-- Migration-file mechanics live once in `src/guitars/management/_generator.py`; MTI column-ownership resolution lives in `src/guitars/introspection.py` — both shared across every generating command.
-- After model changes in `tests/testapp/`, regenerate migrations with `makemigrations` (also emits trigger/rule migrations by default).
+- Migration-file mechanics live once in `src/guitars/management/_generator.py`; MTI column-ownership resolution lives in `src/guitars/introspection.py` — both shared across every generating command. After model changes in `tests/testapp/`, regenerate migrations with `makemigrations` (also emits trigger/rule migrations by default).

@@ -70,7 +70,11 @@ repos:
         types: [python]
         pass_filenames: false
       - id: doc-budget
+        # Covers both types, unlike ty/bandit above: it checks .py docstrings/comments
+        # *and* markdown line budgets + dangling docs/ references, so a markdown-only
+        # commit (e.g. CHANGELOG.md) must still trigger it.
         name: doc budget
         entry: uv run python scripts/doc_budget.py
         language: system
+        types_or: [python, markdown]
         pass_filenames: false

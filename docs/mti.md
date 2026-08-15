@@ -27,11 +27,10 @@ referencing them there is invalid SQL, and `hasattr(Child, "_deleted_at")` is
 `True` and useless, a question about Python attributes, not columns.
 
 Everything below resolves the **owner** — the concrete model whose physical
-table declares the column — via `model._meta.get_field(name).model`. Note
-*owner*, not *parent*: the column may live two tables up in a deeper chain.
-Every table in an MTI chain also shares one primary-key **value** (the
-child's PK is a `OneToOneField(parent_link=True)` holding the ancestor's
-id), a correlated `WHERE owner_pk = child_pk`.
+table declares the column — via `model._meta.get_field(name).model` (not
+*parent*: the column may live two tables up). Every table in an MTI chain
+shares one primary-key **value** via a `OneToOneField(parent_link=True)`,
+a correlated `WHERE owner_pk = child_pk`.
 
 ## What each child table gets
 
@@ -62,7 +61,9 @@ CREATE TRIGGER updated_at_trigger AFTER UPDATE ON <child>
 Schema-qualified `db_table` is supported: the function takes the parent's
 schema/table as two separate arguments (`%I` can't render a two-part name)
 and still understands the older three-argument form, frozen per-trigger at
-`CREATE TRIGGER` time. See `tests/test_schema_qualified.py`.
+`CREATE TRIGGER` time. See `tests/test_schema_qualified.py`. The own-table
+(non-MTI) trigger has the same constraint via `search_path`: a table outside
+the default (`"$user", public`) needs it included to find its own row.
 
 **Tenancy — an owner-join policy**, correlated to the owner rather than
 relying on the ancestor's policy:
@@ -78,17 +79,16 @@ exists, reached the other way. See [ADR 0003](adr/0003-mti-owner-join-policy.md)
 
 ## Cascades and hard deletion
 
-- **Cascades *into* an MTI child** attach to the target's **owner** table,
-  since the FK column holds the shared PK. The parent-link itself (a
-  `CASCADE` `OneToOne`) is skipped as structural, already handled by the
-  redirect rule; an FK reached *through* MTI is the same physical column.
-- **Instance-level `hard_delete()`** DFS starts from the MTI **root** (the
-  parent-link reverse relation is itself `CASCADE`); every table in the
-  chain, and any `CASCADE` child of any ancestor, is collected child-first.
-- **Queryset-level `hard_delete()`** deletes the whole table chain
+- **Cascades *into* an MTI child** attach to the target's **owner** table
+  (the FK column holds the shared PK); the parent-link itself is skipped as
+  structural, already handled by the redirect rule — an FK reached *through*
+  MTI is the same physical column.
+- **`hard_delete()`** DFS from the MTI **root** at the instance level (the
+  parent-link reverse relation is itself `CASCADE`), collecting every table
+  in the chain child-first; at the queryset level it deletes the whole chain
   leaf-to-root by shared PK, leaving no orphaned ancestor row.
-- **Known limitation:** cascading into a child via an FK on the child's
-  **own** table while `_deleted_at` lives farther up isn't supported yet —
+- **Known limitation:** cascading into a child via an FK on its own table
+  while `_deleted_at` lives farther up isn't supported yet —
   `makeguitarmigrations` warns rather than emits broken SQL.
 
 `tests/testapp/models.py` carries `Ensemble → Orchestra → ChamberOrchestra`

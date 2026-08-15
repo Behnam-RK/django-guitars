@@ -1,5 +1,7 @@
 # Changelog
 
+<!-- doc-budget: exempt — release history; length tracks release count, not verbosity -->
+
 All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
@@ -98,3 +100,25 @@ First stable release. **BREAKING:** the instrument ladder shifted down one rung 
 ## [0.1.0] - 2026-06-04
 
 - Added: initial release — `SetarModel`, `GuitarModel`, `SoftDeletableModel`, `DisableSignals`, `makeguitarmigrations`.
+
+[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.0.3...HEAD
+[2.0.3]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.0.3
+[2.0.2]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.0.2
+[2.0.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.0.1
+[2.0.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.0.0
+[1.3.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v1.3.0
+[1.2.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v1.2.0
+[1.1.3]: https://github.com/Behnam-RK/django-guitars/releases/tag/v1.1.3
+[1.1.2]: https://github.com/Behnam-RK/django-guitars/releases/tag/v1.1.2
+[1.1.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v1.1.1
+[1.1.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v1.1.0
+[1.0.2]: https://github.com/Behnam-RK/django-guitars/releases/tag/v1.0.2
+[1.0.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v1.0.1
+[1.0.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v1.0.0
+[0.7.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v0.7.0
+[0.6.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v0.6.0
+[0.5.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v0.5.1
+[0.5.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v0.5.0
+[0.3.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v0.3.0
+[0.2.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v0.2.0
+[0.1.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v0.1.0

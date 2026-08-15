@@ -6,9 +6,7 @@ Most Django soft-delete and timestamp libraries live in Python: a signal here, a
 
 **django-guitars pushes that work down into PostgreSQL itself** — rules and triggers, not signals. So `_created_at`/`_updated_at`/`_deleted_at` stay honest no matter how a row gets touched: ORM, bulk, raw SQL, all of it. The database keeps score; you just write models. Use only the pieces you need.
 
-[![PyPI version](https://img.shields.io/pypi/v/django-guitars.svg)](https://pypi.org/project/django-guitars/)
-[![Python versions](https://img.shields.io/pypi/pyversions/django-guitars.svg)](https://pypi.org/project/django-guitars/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![PyPI version](https://img.shields.io/pypi/v/django-guitars.svg)](https://pypi.org/project/django-guitars/) [![Python versions](https://img.shields.io/pypi/pyversions/django-guitars.svg)](https://pypi.org/project/django-guitars/) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ## Requirements
 
@@ -46,6 +44,8 @@ INSTALLED_APPS = [
 ## Pick your instrument
 
 The base models are named after string instruments, fewest strings to most — and the strings *are* the feature ladder (`du` = two, `se` = three in Persian; `tar` = "string"; a guitar has six): `TarModel` (`.update()`/`.aupdate()`, cached-property invalidation, no columns) → `DutarModel` (+ DB-managed `_created_at`/`_updated_at`, `app_label()`/`model_name()`/`class_name()`) → `SetarModel` (+ PostgreSQL soft deletion — **the one to reach for by default**) → `GuitarModel` (+ [multi-tenancy](docs/tenancy.md): a tenant FK, tenant-scoped managers, an RLS policy — the full kit). Each capability is also a standalone mixin in `guitars.models`: `UpdatableModel`, `HasCachedPropertyModel`, `DatedModel`, `SoftDeletableModel`.
+
+> ⚠️ **Renamed in 1.0.0** — 0.7's `DutarModel`→`TarModel`, `SetarModel`→`DutarModel`, `GuitarModel`→`SetarModel` (behaviour-identical); `GuitarModel` now means "`SetarModel` + tenancy". See [`CHANGELOG.md`](CHANGELOG.md).
 
 ```python
 from django.db import models

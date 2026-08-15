@@ -38,7 +38,7 @@ Soft-delete rules and trigger functions are the two exceptions, always `CREATE O
 
 ## Singletons, cross-app cascades, scaffolding
 
-`set_updated_at()`/`set_parent_updated_at()` are shared functions with one migration each in `TRIGGER_FUNCTION_APP`, kept separate so adding MTI support doesn't re-digest the single-table function migration. A cascade rule is written into the **parent** model's migration; if that app isn't in a scoped run, it's skipped with a warning naming the app to include — the accepted "pragmatic scope" tradeoff. The generator rewrites a `makemigrations --empty` scaffold; one that fails after Django wrote it is left in place, carrying no `[DIGEST:…]`, so a later run can't mistake it for coverage.
+`set_updated_at()`/`set_parent_updated_at()` are shared functions with one migration each in `TRIGGER_FUNCTION_APP`, kept separate so adding MTI support doesn't re-digest the single-table function migration. The singleton is still ensured in its host app even when a scoped run named a different app, because every other enforcement migration depends on it. A cascade rule is written into the **parent** model's migration; if that app isn't in a scoped run, it's skipped with a warning naming the app to include — the accepted "pragmatic scope" tradeoff. The generator rewrites a `makemigrations --empty` scaffold; one that fails after Django wrote it is left in place, carrying no `[DIGEST:…]`, so a later run can't mistake it for coverage.
 
 ## Staging row-level security
 

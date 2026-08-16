@@ -10,6 +10,13 @@ Full history and diffs: [GitHub releases](https://github.com/Behnam-RK/django-gu
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-08-16
+
+- Added: tenant autofill is now a `BEFORE INSERT` trigger ([ADR-0005](docs/adr/0005-trigger-based-tenant-autofill.md)), covering `bulk_create`, multi-row `INSERT`, `INSERT … SELECT` and raw SQL. Run `makemigrations` + `migrate`; **no backfill is needed or possible** — the tenant column is `NOT NULL`, so an existing `NULL` cannot exist.
+- Changed: the `pre_save` write guard is now diagnostics. `DisableSignals` (and `update(_disable_signals=True)`) no longer disables tenancy enforcement; it costs the friendly message, not the guarantee.
+- Added: `audittenancy` reports a table whose manager autofills but whose trigger is missing — warned by default, fatal under `--require-match`.
+- Added: `TableCoverage.autofill_columns`, and `autofill_function_name()` in `guitars.tenancy.discovery`.
+
 ## [2.0.3] - 2026-08-14
 
 - Repo-wide documentation shrink pass under an enforced line budget (`scripts/doc_budget.py`, wired into pre-commit).
@@ -101,7 +108,8 @@ First stable release. **BREAKING:** the instrument ladder shifted down one rung 
 
 - Added: initial release — `SetarModel`, `GuitarModel`, `SoftDeletableModel`, `DisableSignals`, `makeguitarmigrations`.
 
-[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.0.3...HEAD
+[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.1.0
 [2.0.3]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.0.3
 [2.0.2]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.0.2
 [2.0.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.0.1

@@ -2,7 +2,7 @@
 
 ## Vocabulary
 
-An **enforcement migration** is a generated migration of `RunSQL` operations, describing what the database **guarantees about the rows** (not schema, already covered by Django's own migrations) for every code path, including ones that never call `save()`. An **enforcement operation** is one `RunSQL` entry: a timestamp trigger (`_updated_at`), a soft-delete rule (`_deleted_at`), an MTI redirect rule/trigger, or a tenant policy (RLS). All four ship from one command sharing discovery, dedupe, scaffolding, digest stamping, and app scoping. The shape of the model *is* the opt-in — no registry.
+An **enforcement migration** is a generated migration of `RunSQL` operations, describing what the database **guarantees about the rows** (not schema, already covered by Django's own migrations) for every code path, including ones that never call `save()`. An **enforcement operation** is one `RunSQL` entry: a timestamp trigger (`_updated_at`), a soft-delete rule (`_deleted_at`), an MTI redirect rule/trigger, a tenant policy (RLS), or a tenant-autofill `BEFORE INSERT` trigger. All five ship from one command sharing discovery, dedupe, scaffolding, digest stamping, and app scoping. The shape of the model *is* the opt-in — no registry.
 
 ## Generating them
 
@@ -38,7 +38,7 @@ Soft-delete rules and trigger functions are the two exceptions, always `CREATE O
 
 ## Singletons, cross-app cascades, scaffolding
 
-`set_updated_at()`/`set_parent_updated_at()` are shared functions with one migration each in `TRIGGER_FUNCTION_APP`, kept separate so adding MTI support doesn't re-digest the single-table function migration. The singleton is still ensured in its host app even when a scoped run named a different app, because every other enforcement migration depends on it. A cascade rule is written into the **parent** model's migration; if that app isn't in a scoped run, it's skipped with a warning naming the app to include — the accepted "pragmatic scope" tradeoff. The generator rewrites a `makemigrations --empty` scaffold; one that fails after Django wrote it is left in place, carrying no `[DIGEST:…]`, so a later run can't mistake it for coverage.
+`set_updated_at()`/`set_parent_updated_at()` are shared functions with one migration each in `TRIGGER_FUNCTION_APP`, kept separate so adding MTI support doesn't re-digest the single-table function migration. Tenant autofill hosts its functions there too, but keyed by name rather than as singletons — one per distinct `(column, GUC)` pair, which is **one** for a typical project since `GUITARS_TENANT_FIELD` is project-wide. Its trigger header names the function it calls, so an app depends only on the function migrations its own triggers use. The singleton is still ensured in its host app even when a scoped run named a different app, because every other enforcement migration depends on it. A cascade rule is written into the **parent** model's migration; if that app isn't in a scoped run, it's skipped with a warning naming the app to include — the accepted "pragmatic scope" tradeoff. The generator rewrites a `makemigrations --empty` scaffold; one that fails after Django wrote it is left in place, carrying no `[DIGEST:…]`, so a later run can't mistake it for coverage.
 
 ## Staging row-level security
 

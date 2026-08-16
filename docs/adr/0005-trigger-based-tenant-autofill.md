@@ -1,10 +1,8 @@
 # 0005 — Tenant autofill belongs in a trigger; the signal stays for diagnostics
 
-- **Status:** accepted — **not yet implemented**, targeted at 2.1.0
-- **Date:** 2026-07-30 (accepted 2026-08-14)
+- **Status:** accepted — implemented in 2.1.0
+- **Date:** 2026-07-30 (accepted 2026-08-14, implemented 2026-08-16)
 - **Affects:** `guitars.sql.triggers`, `makeguitarmigrations`, `guitars.tenancy.enforcement`, `GUITARS_TENANT_AUTOFILL`
-
-> **Read this before trusting the present tense below.** The decision is settled; the code is not written. Autofill today is still the `pre_save` receiver installed by `install_write_guards()` in `guitars/tenancy/enforcement.py`, and `DisableSignals` still switches it off — the finding that motivated this ADR is live behaviour, not history. Everything in **Decision** describes what 2.1.0 will do.
 
 ## Context
 
@@ -24,7 +22,7 @@ Being on a signal has a measured cost: the kit's own `DisableSignals` (reachable
 
 The trigger covers what the signal cannot — verified against PostgreSQL 18, with the scope opened through `tenant()` so the real execute wrapper publishes it: `instance.save()`/`create()` and `bulk_create()` already work via `pre_save` or the queryset override, but multi-row `INSERT`, `INSERT … SELECT`, and raw SQL outside the ORM reach none of that and only the trigger covers them.
 
-The ordering works, and it had to be checked: `WITH CHECK` and `NOT NULL` are both evaluated on the row the `BEFORE` trigger returns, not the one the statement supplied — an `INSERT` omitting the tenant column succeeds, and the stored value is the scoped tenant. Had it been the other way round the design would be dead on arrival, since the pre-trigger row's `NULL` satisfies neither. It does not weaken `WITH CHECK`: the trigger only fills a `NULL`; an explicit cross-tenant value is still refused (measured — scope active + column omitted: filled; scope active + explicit cross-tenant value: refused; no scope: refused, stays `NULL`; scope names several tenants: refused, declines to guess; `tenancy_bypassed()` + column omitted: `NOT NULL` violation; `tenancy_bypassed()` + explicit value: allowed, the deliberate cross-tenant path).
+The ordering works, and it had to be checked (measured on PostgreSQL 18; `tests/test_tenancy_rls.py` asserts it directly, and CI runs that on 14 as well): `WITH CHECK` and `NOT NULL` are both evaluated on the row the `BEFORE` trigger returns, not the one the statement supplied — an `INSERT` omitting the tenant column succeeds, and the stored value is the scoped tenant. Had it been the other way round the design would be dead on arrival, since the pre-trigger row's `NULL` satisfies neither. It does not weaken `WITH CHECK`: the trigger only fills a `NULL`; an explicit cross-tenant value is still refused (measured — scope active + column omitted: filled; scope active + explicit cross-tenant value: refused; no scope: refused, stays `NULL`; scope names several tenants: refused, declines to guess; `tenancy_bypassed()` + column omitted: `NOT NULL` violation; `tenancy_bypassed()` + explicit value: allowed, the deliberate cross-tenant path).
 
 **One function per (column, GUC) pair, because the generic form is measurably slower.** PL/pgSQL cannot write a dynamically-named column on `NEW`; reaching one needs a `to_jsonb`/`jsonb_populate_record` round trip. Server-side, one 20,000-row `INSERT` isolated from round-trip time: no trigger 3.76 µs/row, static `NEW.org_id` 3.87 µs/row (+3%), generic `TG_ARGV`+jsonb round trip 6.05 µs/row (**+61%**). An earlier measurement through `executemany` saw only a 3% gap, dominated by network round-trip and hiding the real ratio — the isolated numbers are the ones to trust.
 
@@ -46,7 +44,7 @@ So the receiver earns its place as a diagnostic layer. What changes is that it s
 
 - **`DisableSignals` stops being able to disable tenancy enforcement.** It will still suppress the friendly error; the trigger and `WITH CHECK` do not notice it. This is the finding that motivated the ADR.
 - **`bulk_create`'s queryset override becomes belt-and-braces**, kept for the error message rather than correctness — `_untenanted_queryset_class.bulk_create`'s `_guarded()` call keeps its comment but loses its load-bearing status.
-- **New frozen SQL names**, re-exported from `sql/__init__.py` and recorded in `FROZEN_SQL_NAMES` — per CLAUDE.md, a name that ships must keep resolving.
+- **New SQL templates, private and *not* frozen** (`_CREATE_TENANT_AUTOFILL_*`). Amended during implementation: this ADR originally said to freeze them. The frozen-name rule exists for migrations generated *before* 1.1.0, which resolve `guitars.sql` names at `migrate` time — none can reference a name that did not exist when they were written, so freezing a new one buys nothing and bans a rename forever. 2.0.0 had already set the precedent with `_CREATE_PARENT_UPDATED_AT_TRIGGER`. Private → public stays available later; the reverse does not.
 - **A migration per tenanted table**, plus one function migration. Existing databases need `makemigrations` + `migrate`; nothing is rewritten.
 - **`autofill=False` becomes visible in the schema.** A model that opts out (an append-only archive) gets no trigger, so the opt-out is auditable in `pg_trigger` instead of living only in a manager argument.
 - **`audittenancy` should learn to check it.** A tenanted table whose manager autofills but whose trigger is missing is exactly the "looks fine, is not" state the command exists to catch, invisible to every current check.
@@ -54,6 +52,6 @@ So the receiver earns its place as a diagnostic layer. What changes is that it s
 
 ## Related
 
-- [Issue #24](https://github.com/Behnam-RK/django-guitars/issues/24) — the implementation this ADR is waiting on. Flip the status note above to plain `accepted` when it lands.
+- [Issue #24](https://github.com/Behnam-RK/django-guitars/issues/24) — the implementation, shipped in 2.1.0.
 - [ADR 0002](0002-force-rls-by-default.md) (FORCE RLS by default) · [ADR 0004](0004-unscoped-base-manager.md) (`base_manager_name` left unset — the same "which layer owns this?" question, answered the other way)
 - [docs/tenancy.md](../tenancy.md), [docs/migrations.md](../migrations.md)

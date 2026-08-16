@@ -15,6 +15,7 @@ from guitars.management import _generator
 from guitars.management.enforcement.headers import (
     _RE_MTI_UPDATED_AT,
     _RE_TENANT_AUTOFILL,
+    _RE_TENANT_AUTOFILL_RETIRED,
     _RE_UPDATED_AT,
     HEADER_MTI_SOFT_DELETE,
     HEADER_MTI_UPDATED_AT,
@@ -22,6 +23,7 @@ from guitars.management.enforcement.headers import (
     HEADER_SOFT_DELETE_RELATED,
     HEADER_SOFT_DELETE_RELATED_VIA,
     HEADER_TENANT_AUTOFILL,
+    HEADER_TENANT_AUTOFILL_RETIRED,
     HEADER_TENANT_FORCE,
     HEADER_TENANT_POLICY,
     HEADER_TENANT_POLICY_REPLACED,
@@ -403,9 +405,55 @@ class OperationsMixin:
         return (
             operations
             + deferred
+            # Retire before create: a rename emits both in one migration, and "retire, then
+            # create" is the order that reads correctly. The names never collide, so this
+            # is legibility rather than correctness.
+            + self._retired_autofill_operations(app, adopt=adopt)
             + self._tenant_autofill_operations(app, adopt=adopt)
             + self._tenant_policy_operations(app, adopt=adopt)
         )
+
+    @staticmethod
+    def _autofill_slots(table: str, function: str) -> dict[str, str]:
+        """The DDL slots every autofill trigger template takes. Derivable from the recorded
+        ``(table, function)`` key alone -- no model or column lookup -- which is what lets
+        retirement still build a DROP after the column that named it is gone."""
+        return {
+            'table': _identifiers._quote_table(table),
+            'function': _identifiers._safe_ident(function),
+            'trigger': _identifiers._safe_ident(autofill_trigger_name(function)),
+        }
+
+    @staticmethod
+    def _table_app_labels() -> dict[str, str]:
+        """``db_table`` -> the local app whose migrations host operations on it, first app
+        winning. One table, one host: two apps each emitting the same DROP would fail the
+        second at ``migrate``. Shared by retirement and owner-attributed autofill."""
+        hosting: dict[str, str] = {}
+        for app in django_apps.get_app_configs():
+            if not _generator.is_local(app):
+                continue
+            for model in app.get_models():
+                hosting.setdefault(model._meta.db_table, app.label)
+        return hosting
+
+    def _required_autofill_keys(self) -> dict[tuple[str, str], tuple[str, str]]:
+        """Every ``(table, function)`` the models currently require -> its ``(dimension,
+        column)``. Deliberately project-wide: retirement subtracts from this, and a scoped
+        view would read another app's live trigger as no longer required and drop it."""
+        required: dict[tuple[str, str], tuple[str, str]] = {}
+        if not self._tenant_policies_enabled():
+            return required
+        for app in django_apps.get_app_configs():
+            if not _generator.is_local(app):
+                continue
+            for table, coverage in app_coverage(app).tables.items():
+                for dimension, column in (coverage.autofill_columns or {}).items():
+                    required[(table, autofill_function_name(dimension, column))] = (
+                        dimension,
+                        column,
+                    )
+        return required
 
     def _tenant_autofill_operations(self, app: AppConfig, *, adopt: bool = False) -> list[str]:
         """``BEFORE INSERT`` autofill triggers *app* is missing or has outdated (ADR 0005).
@@ -414,35 +462,108 @@ class OperationsMixin:
         if not self._tenant_policies_enabled():
             return []
 
+        # This app's own coverage, not the project-wide required map: _build_operations is
+        # called directly with apps outside LOCAL_APPS, which that map excludes. Notes are
+        # collected by _tenant_policy_operations off the same call, else each prints twice.
+        own: dict[tuple[str, str], None] = {}
+        for table, coverage in app_coverage(app).tables.items():
+            for dimension, column in (coverage.autofill_columns or {}).items():
+                own[(table, autofill_function_name(dimension, column))] = None
+
         operations: list[str] = []
-        for table, table_coverage in sorted(app_coverage(app).tables.items()):
-            # Notes are collected by _tenant_policy_operations off the same app_coverage
-            # call; gathering them here too would print every one twice.
-            for dimension, column in sorted((table_coverage.autofill_columns or {}).items()):
-                function = autofill_function_name(dimension, column)
-                slots = {
-                    'table': _identifiers._quote_table(table),
-                    'function': _identifiers._safe_ident(function),
-                    'trigger': _identifiers._safe_ident(autofill_trigger_name(function)),
-                }
-                self._append_if_stale(
-                    operations,
-                    self.existing.tenant_autofill,
-                    # Keyed on the pair, not the table: a table tenanted on two local
-                    # dimensions carries one trigger per (column, GUC) pair, and the table
-                    # alone would let the second overwrite the first's recorded digest.
-                    (table, function),
-                    HEADER_TENANT_AUTOFILL.format(
-                        table=_identifiers._escape_ident(table),
-                        function=_identifiers._escape_ident(function),
-                    ),
-                    _triggers._CREATE_TENANT_AUTOFILL_TRIGGER.format(**slots),
-                    _triggers._DROP_TENANT_AUTOFILL_TRIGGER.format(**slots),
-                    is_adopt=adopt,
-                    replace=_triggers._REPLACE_TENANT_AUTOFILL_TRIGGER.format(**slots),
-                    adopt=_triggers._ADOPT_TENANT_AUTOFILL_TRIGGER.format(**slots),
-                )
+        for table, function in sorted(own):
+            slots = self._autofill_slots(table, function)
+            self._append_if_stale(
+                operations,
+                self.existing.tenant_autofill,
+                # Keyed on the pair, not the table: a table tenanted on two local
+                # dimensions carries one trigger per (column, GUC) pair, and the table
+                # alone would let the second overwrite the first's recorded digest.
+                (table, function),
+                HEADER_TENANT_AUTOFILL.format(
+                    table=_identifiers._escape_ident(table),
+                    function=_identifiers._escape_ident(function),
+                ),
+                _triggers._CREATE_TENANT_AUTOFILL_TRIGGER.format(**slots),
+                _triggers._DROP_TENANT_AUTOFILL_TRIGGER.format(**slots),
+                is_adopt=adopt,
+                replace=_triggers._REPLACE_TENANT_AUTOFILL_TRIGGER.format(**slots),
+                adopt=_triggers._ADOPT_TENANT_AUTOFILL_TRIGGER.format(**slots),
+            )
         return operations
+
+    def _retired_autofill_operations(self, app: AppConfig, *, adopt: bool = False) -> list[str]:
+        """Drop autofill triggers *app*'s tables record but the models no longer require. A
+        renamed dimension or column names a new function, orphaning the old trigger -- which
+        still dereferences the dropped column and fails every INSERT on the table."""
+        if not self._tenant_policies_enabled():
+            return []
+
+        hosting = self._table_app_labels()
+        required = self._required_autofill_keys()
+        operations: list[str] = []
+        for table, function in sorted(set(self.existing.tenant_autofill) - set(required)):
+            if hosting.get(table) != app.label:
+                continue
+            slots = self._autofill_slots(table, function)
+            drop = _triggers._DROP_TENANT_AUTOFILL_TRIGGER.format(**slots)
+            # Not _append_if_stale: its "recorded digest differs -> replace" branch is
+            # meaningless for a drop. The set difference above is the whole idempotency
+            # mechanism, so the [SQL:...] stamped here is written and never read.
+            source, _ = _operation(
+                HEADER_TENANT_AUTOFILL_RETIRED.format(
+                    table=_identifiers._escape_ident(table),
+                    function=_identifiers._escape_ident(function),
+                ),
+                drop,
+                _triggers._CREATE_TENANT_AUTOFILL_TRIGGER.format(**slots),
+                emit=_triggers._ADOPT_DROP_TENANT_AUTOFILL_TRIGGER.format(**slots)
+                if adopt
+                else drop,
+            )
+            operations.append(source)
+        return operations
+
+    def _unmapped_autofill_notes(self) -> list[str]:
+        """Recorded triggers on tables no local model claims. Not retired -- there is no app
+        to write the migration into, and this generator has no migration-state graph to ask
+        which app used to own the table. Named rather than dropped, because skips are design."""
+        if not self._tenant_policies_enabled():
+            return []
+
+        hosting = self._table_app_labels()
+        required = self._required_autofill_keys()
+        notes: list[str] = []
+        for table, function in sorted(set(self.existing.tenant_autofill) - set(required)):
+            if table in hosting:
+                continue
+            slots = self._autofill_slots(table, function)
+            notes.append(
+                f"Tenant autofill trigger on '{table}' (function '{function}') is recorded "
+                f'but no local model maps to that table, so it cannot be retired here. If '
+                f'the table still exists, drop it by hand: '
+                f'{_triggers._DROP_TENANT_AUTOFILL_TRIGGER.format(**slots).strip()}'
+            )
+        return notes
+
+    def _orphaned_autofill_function_notes(self) -> list[str]:
+        """Autofill functions no recorded or required trigger still calls. Inert, so noted
+        rather than dropped: DROP FUNCTION must follow every trigger that depends on it, and
+        a scoped run cannot prove an out-of-scope app has no trigger left calling it."""
+        if not self._tenant_policies_enabled():
+            return []
+
+        called = {function for _, function in self.existing.tenant_autofill}
+        called.update(function for _, function in self._required_autofill_keys())
+        return [
+            f"Tenant autofill function '{function}' is no longer called by any trigger this "
+            f'command records. It is inert; retire it deliberately once you are sure no '
+            f'hand-written trigger uses it: '
+            f'{_triggers._DROP_TENANT_AUTOFILL_FUNCTION.format(function=_identifiers._safe_ident(function)).strip()}'
+            for function in sorted(
+                set(self.existing.tenant_autofill_function_dependencies) - called
+            )
+        ]
 
     @staticmethod
     def _is_cascade_candidate(related_model, fk_field, on_delete) -> bool:
@@ -604,13 +725,15 @@ class OperationsMixin:
         if self.parent_trigger_function_dependency and _RE_MTI_UPDATED_AT.search(operations_blob):
             deps.append(self.parent_trigger_function_dependency)
         # Per function, not per kind: an app depends only on the autofill functions its own
-        # triggers name, which the trigger header carries for exactly this purpose.
-        for match in _RE_TENANT_AUTOFILL.finditer(operations_blob):
-            dependency = self.tenant_autofill_dependencies.get(
-                _identifiers._unescape_ident(match.group(RE_TENANT_AUTOFILL_FUNCTION))
-            )
-            if dependency and dependency not in deps:
-                deps.append(dependency)
+        # triggers name. The retired header counts too -- its reverse_sql recreates the
+        # trigger, so this edge is what makes reversing a retirement possible.
+        for pattern in (_RE_TENANT_AUTOFILL, _RE_TENANT_AUTOFILL_RETIRED):
+            for match in pattern.finditer(operations_blob):
+                dependency = self.tenant_autofill_dependencies.get(
+                    _identifiers._unescape_ident(match.group(RE_TENANT_AUTOFILL_FUNCTION))
+                )
+                if dependency and dependency not in deps:
+                    deps.append(dependency)
         return deps
 
     def _generate_stage(

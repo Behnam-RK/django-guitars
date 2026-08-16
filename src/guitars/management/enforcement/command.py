@@ -29,7 +29,6 @@ from guitars.management.enforcement.operations import OperationsMixin
 from guitars.management.enforcement.scanning import ExistingOperations, scan_existing_operations
 from guitars.sql import _identifiers
 from guitars.sql import triggers as _triggers
-from guitars.tenancy.discovery import app_coverage, autofill_function_name
 
 
 if TYPE_CHECKING:
@@ -319,16 +318,15 @@ class Command(OperationsMixin, BaseCommand):
         """``function name -> (dimension, column)`` every in-scope table's autofill trigger
         will call. Read from the same coverage the triggers are built from, so the function
         migrations and the triggers depending on them can never disagree about the name."""
-        required: dict[str, tuple[str, str]] = {}
-        if not self._tenant_policies_enabled():
-            return required
-        for app in django_apps.get_app_configs():
-            if not _generator.is_in_scope(app, requested):
-                continue
-            for coverage in app_coverage(app).tables.values():
-                for dimension, column in (coverage.autofill_columns or {}).items():
-                    required[autofill_function_name(dimension, column)] = (dimension, column)
-        return required
+        # Scoped by the app that will *host* the trigger, not the one declaring the
+        # dimension: the two differ once a trigger is attributed to an ancestor's app, and
+        # scoping by the declarer would emit a trigger calling a function never written.
+        hosting = self._table_app_labels()
+        return {
+            function: value
+            for (table, function), value in self._required_autofill_keys().items()
+            if _generator.is_in_scope(django_apps.get_app_config(hosting[table]), requested)
+        }
 
     def _ensure_tenant_autofill_function_migration(
         self,
@@ -472,6 +470,11 @@ class Command(OperationsMixin, BaseCommand):
 
         # Tables tenancy could not cover, and why. Skips are design, never silent.
         for note in self._tenancy_notes:
+            self.stdout.write(self.style.WARNING(note))
+
+        # Autofill coverage this command recorded but can no longer retire or attribute --
+        # an orphaned function is inert, an unmapped table has no app to migrate into.
+        for note in self._unmapped_autofill_notes() + self._orphaned_autofill_function_notes():
             self.stdout.write(self.style.WARNING(note))
 
         if check_missing or function_check_messages:

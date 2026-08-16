@@ -75,6 +75,11 @@ HEADER_SCANNERS = [
         headers_module._RE_TENANT_AUTOFILL,
         {'table': 'shop_order', 'function': 'guitars_fill_4_shop_shop_id'},
     ),
+    (
+        headers_module.HEADER_TENANT_AUTOFILL_RETIRED,
+        headers_module._RE_TENANT_AUTOFILL_RETIRED,
+        {'table': 'shop_order', 'function': 'guitars_fill_4_shop_shop_id'},
+    ),
 ]
 
 
@@ -144,6 +149,22 @@ def test_the_autofill_headers_cannot_be_read_as_any_other_trigger():
         assert scanner.search(autofill) is None
     assert headers_module._RE_TENANT_AUTOFILL.search(function) is None
     assert headers_module._RE_TENANT_AUTOFILL.search(autofill) is not None
+
+
+def test_the_live_and_retired_autofill_headers_never_match_each_other():
+    """The two forms mean opposite things about existence, unlike the policy header's fused
+    ``on``/``replaced on``. One scanner reading both would pop every key it just recorded,
+    so a live trigger would read as retired and be re-created on every run, forever."""
+    slots = {'table': 'shop_order', 'function': 'guitars_fill_4_shop_shop_id'}
+    live = headers_module.HEADER_TENANT_AUTOFILL.format(**slots)
+    retired = headers_module.HEADER_TENANT_AUTOFILL_RETIRED.format(**slots)
+
+    assert headers_module._RE_TENANT_AUTOFILL.search(retired) is None
+    assert headers_module._RE_TENANT_AUTOFILL_RETIRED.search(live) is None
+    assert headers_module._RE_TENANT_AUTOFILL_RETIRED.search(retired).groups() == (
+        'shop_order',
+        'guitars_fill_4_shop_shop_id',
+    )
 
 
 def test_the_autofill_trigger_header_reads_the_table_and_the_function():

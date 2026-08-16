@@ -47,6 +47,12 @@ HEADER_TENANT_FORCE = '# Tenant FORCE RLS on "{table}" table!'
 # it calls so an app's dependency on that function migration can be keyed off the header.
 HEADER_TENANT_AUTOFILL_FUNCTION = '# Tenant autofill function "{function}"!'
 HEADER_TENANT_AUTOFILL = '# Tenant autofill Trigger on "{table}" table (function "{function}")!'
+# The retirement of the above, and the one header meaning an operation *removed* something:
+# a rename produces a new (table, function) key and orphans the old trigger, which still
+# calls a function dereferencing a dropped column. See ``docs/migrations.md``'s "Retirement".
+HEADER_TENANT_AUTOFILL_RETIRED = (
+    '# Tenant autofill Trigger retired on "{table}" table (function "{function}")!'
+)
 
 
 # --- Deriving scanners from headers: most _RE_* are *derived* from their HEADER_*
@@ -77,6 +83,10 @@ _RE_UPDATED_AT = _derive_scanner(HEADER_UPDATED_AT)
 _RE_SOFT_DELETE = _derive_scanner(HEADER_SOFT_DELETE)
 _RE_TENANT_FORCE = _derive_scanner(HEADER_TENANT_FORCE)
 _RE_TENANT_AUTOFILL_FUNCTION = _derive_scanner(HEADER_TENANT_AUTOFILL_FUNCTION)
+# Derived, and deliberately NOT fused with _RE_TENANT_AUTOFILL the way _RE_TENANT_POLICY
+# fuses its two forms: there both forms mean "recorded, and this is its shape", here they
+# mean opposite things about existence, so one scanner reading both would retire forever.
+_RE_TENANT_AUTOFILL_RETIRED = _derive_scanner(HEADER_TENANT_AUTOFILL_RETIRED)
 
 # Captures BOTH halves, unlike the MTI pair below: two local dimensions mean one trigger per
 # (column, GUC) pair on one table, so the table alone let the second's digest overwrite the

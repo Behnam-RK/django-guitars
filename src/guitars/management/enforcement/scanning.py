@@ -19,6 +19,7 @@ from guitars.management.enforcement.headers import (
     _RE_SOFT_DELETE_RELATED,
     _RE_TENANT_AUTOFILL,
     _RE_TENANT_AUTOFILL_FUNCTION,
+    _RE_TENANT_AUTOFILL_RETIRED,
     _RE_TENANT_FORCE,
     _RE_TENANT_POLICY,
     _RE_TRIGGER_FUNCTION,
@@ -62,8 +63,8 @@ class ExistingOperations(NamedTuple):
     unforced_policies: set[str]
     tenant_forces: set[str]
     #: ``(table, function)`` -> the ``[SQL:...]`` digest of its most recent tenant-autofill
-    #: trigger operation. The pair, since two local dimensions mean one trigger per
-    #: ``(column, GUC)`` pair on one table -- the table alone re-emitted one of them forever.
+    #: trigger operation, and the one field this scan *subtracts* from: a retired key must
+    #: read as absent, not recorded. The pair because one table can carry several triggers.
     tenant_autofill: dict[tuple[str, str], str | None]
     #: Function name -> the migration defining it, and that migration's ``[SQL:...]`` digest.
     #: Dicts rather than the singletons below because autofill is one function per
@@ -126,15 +127,13 @@ def scan_existing_operations() -> ExistingOperations:
             existing_mti_soft_deletes,
             lambda m: _identifiers._unescape_ident(m.group(1)),
         ),
-        (
-            _RE_TENANT_AUTOFILL,
-            existing_tenant_autofill,
-            lambda m: (
-                _identifiers._unescape_ident(m.group(RE_TENANT_AUTOFILL_TABLE)),
-                _identifiers._unescape_ident(m.group(RE_TENANT_AUTOFILL_FUNCTION)),
-            ),
-        ),
     ]
+
+    def _autofill_key(match: re.Match) -> tuple[str, str]:
+        return (
+            _identifiers._unescape_ident(match.group(RE_TENANT_AUTOFILL_TABLE)),
+            _identifiers._unescape_ident(match.group(RE_TENANT_AUTOFILL_FUNCTION)),
+        )
 
     existing_tenant_policies: set[str] = set()
     existing_policy_identities: dict[str, str] = {}
@@ -179,6 +178,16 @@ def scan_existing_operations() -> ExistingOperations:
             for pattern, target, key_fn in scan_table:
                 for match in pattern.finditer(content):
                     target[key_fn(match)] = _recorded_sql_identity(content, match)
+
+            # Bespoke rather than a scan_table row, because these two headers partition one
+            # key space and retirement *subtracts* -- the only place this scan does. A pop,
+            # not a sentinel: a re-adopted column must read as uncovered and plainly CREATE.
+            for match in _RE_TENANT_AUTOFILL.finditer(content):
+                existing_tenant_autofill[_autofill_key(match)] = _recorded_sql_identity(
+                    content, match
+                )
+            for match in _RE_TENANT_AUTOFILL_RETIRED.finditer(content):
+                existing_tenant_autofill.pop(_autofill_key(match), None)
 
             policy_matches = list(_RE_TENANT_POLICY.finditer(content))
             unforced_in_file = unforced_policy_tables(content, policy_matches)

@@ -16,7 +16,7 @@ from guitars import sql
 from guitars.management.commands.audittenancy import Command as AuditCommand
 from guitars.tenancy import tenant
 from tests.conftest import execute
-from tests.testapp.models import Release
+from tests.testapp.models import Booking, Release
 
 
 def _audit(*args, **options) -> str:
@@ -170,6 +170,49 @@ class TestItCatchesRealDamage:
             assert 'no longer expect one' in output
         finally:
             _execute(*sql.drop_table_rls(table='testapp_band'))
+
+
+class TestAMissingAutofillTrigger:
+    """The state no other check sees (ADR 0005): policy present and correct, reads and
+    cross-tenant writes refused, and only an INSERT omitting the tenant fails -- with a bare
+    NOT NULL instead of taking the active scope. Exactly "looks fine, is not"."""
+
+    def test_a_missing_trigger_is_a_warning_by_default(self, _execute):
+        """Warned, not fatal, for the same reason drift is: a run before the deploy's own
+        ``migrate`` legitimately has the migration written but not yet applied."""
+        table = Release._meta.db_table
+        _execute(f'DROP TRIGGER tenant_autofill_trigger ON {table}')
+
+        output = _audit()
+
+        assert 'no tenant autofill trigger' in output
+        assert table in output
+
+    def test_it_names_the_function_and_the_fix(self, _execute):
+        """A finding that does not say what to run makes the operator go and read the ADR."""
+        _execute(f'DROP TRIGGER tenant_autofill_trigger ON {Release._meta.db_table}')
+
+        output = _audit()
+
+        assert 'guitars_fill_5_label_label_id' in output
+        assert 'makeguitarmigrations' in output
+
+    def test_it_is_fatal_under_require_match(self, _execute):
+        _execute(f'DROP TRIGGER tenant_autofill_trigger ON {Release._meta.db_table}')
+
+        output = _audit_failure(require_match=True)
+
+        assert 'no tenant autofill trigger' in output
+        assert 'not enforcing what the models describe' in output
+
+    def test_a_table_that_does_not_autofill_is_not_expected_to_have_one(self, db):
+        """``Booking``'s hand-declared manager passes no ``autofill=``, so it falls back to
+        ``GUITARS_TENANT_AUTOFILL`` (False here) and correctly carries no trigger. Reporting
+        that as a finding would make the opt-out unusable."""
+        output = _audit()
+
+        assert 'no tenant autofill trigger' not in output
+        assert Booking._meta.db_table not in output.split('Tenant RLS audit on')[0]
 
 
 class TestAPolicyThatNoLongerMatchesTheModels:

@@ -129,6 +129,9 @@ def _guarded_queryset_class(base: type[models.QuerySet]) -> type[models.QuerySet
     be the queryset, not the manager -- ``Model.objects.filter(...).bulk_create(...)`` is
     Django's own method on a plain queryset with no manager left in the call."""
 
+    # Kept for the message, not the fill: since 2.1.0 the ADR 0005 trigger fills this path
+    # in the database, so losing this override would cost a good error, not correctness.
+
     class _GuardedQuerySet(base):  # ty: ignore[unsupported-base]  # dynamic base
         """The manager's own queryset with the batched write path guarded."""
 

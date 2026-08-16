@@ -8,6 +8,7 @@ import pytest
 from django.db.utils import IntegrityError
 
 from guitars.tenancy import TenantScopeError, reporting, tenancy_bypassed, tenant
+from guitars.tenancy.testing import install_write_guards, uninstall_write_guards
 from tests.conftest import execute as _execute
 from tests.conftest import scalar as _scalar
 from tests.testapp.models import Band, Booking, Label, Release, Review, StadiumTour, Tour, Track
@@ -144,6 +145,33 @@ class TestWrites:
             Release.objects.filter(title='irrelevant').bulk_create([Release(title='z')])
 
             assert Release.objects.filter(title='z').get().label_id == tenants.a.pk
+
+    def test_bulk_create_is_filled_by_the_database_not_the_queryset_override(self, tenants):
+        """The assertion that matters for ADR 0005: with the Python write guard uninstalled,
+        the rows still land in the right tenant, so it was the trigger that filled them. With
+        the guard installed both layers fill and the test could not tell which one did."""
+        uninstall_write_guards()
+        try:
+            with tenant(label=tenants.a):
+                Release.objects.bulk_create([Release(title='trigger-filled')])
+        finally:
+            install_write_guards()
+
+        with tenancy_bypassed():
+            assert Release._all_objects.get(title='trigger-filled').label_id == tenants.a.pk
+
+    def test_raw_sql_outside_the_orm_is_filled_by_the_database(self, tenants):
+        """Raw SQL constructs no instance and sends no signal, so before 2.1.0 nothing filled
+        it -- the insert simply failed on ``NOT NULL``."""
+        with tenant(label=tenants.a):
+            _execute(
+                f'INSERT INTO {Release._meta.db_table} (title, _created_at, _updated_at) '  # noqa: S608
+                f'VALUES (%s, NOW(), NOW())',
+                params=['raw-filled'],
+            )
+
+        with tenancy_bypassed():
+            assert Release._all_objects.get(title='raw-filled').label_id == tenants.a.pk
 
     def test_bulk_create_into_another_tenant_is_refused(self, tenants):
         with tenant(label=tenants.a), pytest.raises(TenantScopeError, match='may not cross'):

@@ -4,9 +4,14 @@ since "no rows" alone can't prove enforcement. Requires a non-superuser owning t
 
 import pytest
 from django.db import ProgrammingError, connection, transaction
+from django.db.utils import IntegrityError
 
 from guitars import sql
+from guitars.gucs import BYPASS_GUC, VALUE_SEPARATOR, guc_name
+from guitars.sql import _identifiers
+from guitars.sql import triggers
 from guitars.tenancy import TenantScopeError, tenancy_bypassed, tenant
+from guitars.tenancy.discovery import autofill_function_name
 from tests.conftest import execute as _execute
 from tests.conftest import rows as _rows
 from tests.conftest import scalar as _scalar
@@ -535,3 +540,148 @@ class TestIdentifierSafety:
 
         # And the drop puts it back -- SELECT-only exemptions must not outlive their removal.
         assert _scalar(f'SELECT count(*) FROM {_OWNER_TABLE}') == 0  # noqa: S608
+
+
+class TestTenantAutofillTrigger:
+    """ADR 0005's ``BEFORE INSERT`` trigger, against real DDL and no models. The matrix in
+    that ADR's "what it refuses to guess" is the test list: filling from an unambiguous
+    scope, and declining -- toward ``NULL``, which the policy then refuses -- otherwise."""
+
+    @pytest.fixture
+    def autofill(self, probe_tables):
+        """Layer the autofill function and trigger onto the owner probe table."""
+        function = autofill_function_name('tenant', 'tenant_id')
+        slots = {
+            'function': _identifiers._safe_ident(function),
+            'column': _identifiers._escape_ident('tenant_id'),
+            'guc': _identifiers._escape_literal(guc_name('tenant')),
+            'bypass_guc': _identifiers._escape_literal(BYPASS_GUC),
+            'separator': _identifiers._escape_literal(VALUE_SEPARATOR),
+        }
+        table_slots = {
+            'table': _identifiers._quote_table(_OWNER_TABLE),
+            'function': _identifiers._safe_ident(function),
+        }
+        _execute(
+            triggers._CREATE_TENANT_AUTOFILL_FUNCTION.format(**slots),
+            triggers._CREATE_TENANT_AUTOFILL_TRIGGER.format(**table_slots),
+        )
+        yield
+        _execute(
+            triggers._DROP_TENANT_AUTOFILL_TRIGGER.format(**table_slots),
+            triggers._DROP_TENANT_AUTOFILL_FUNCTION.format(**slots),
+        )
+
+    def _tenant_of(self, name):
+        """Read a row's stored tenant with the policy out of the way, so the assertion is
+        about what was *written*, not about what the current scope can see."""
+        with tenancy_bypassed():
+            return _scalar(
+                f'SELECT tenant_id FROM {_OWNER_TABLE} WHERE name = %s',  # noqa: S608
+                [name],
+            )
+
+    def test_an_insert_omitting_the_tenant_is_filled_from_the_scope(self, autofill):
+        """The load-bearing ordering claim: ``WITH CHECK`` and ``NOT NULL`` see the row the
+        ``BEFORE`` trigger *returned*, whose ``NULL`` predecessor satisfies neither -- so the
+        reverse order would fail this outright. Measured on PG 18 only; CI also runs 14."""
+        with tenant(tenant=TENANT_A):
+            _execute(f"INSERT INTO {_OWNER_TABLE} (name) VALUES ('filled')")  # noqa: S608
+
+        assert self._tenant_of('filled') == TENANT_A
+
+    def test_an_explicit_cross_tenant_value_is_still_refused(self, autofill):
+        """The trigger only fills a ``NULL``; it must not soften ``WITH CHECK``."""
+        with (
+            tenant(tenant=TENANT_A),
+            pytest.raises(TenantScopeError, match='tenant policy'),
+            transaction.atomic(),
+        ):
+            _execute(
+                f'INSERT INTO {_OWNER_TABLE} (tenant_id, name) VALUES (%s, %s)',  # noqa: S608
+                params=[TENANT_B, 'crossed'],
+            )
+
+    def test_without_a_scope_it_declines_and_the_policy_refuses(self, autofill):
+        """No scope means no value to take, so the column stays ``NULL`` and the write is
+        refused -- never filled from whatever the session last held."""
+        with pytest.raises(TenantScopeError), transaction.atomic():
+            _execute(f"INSERT INTO {_OWNER_TABLE} (name) VALUES ('unscoped')")  # noqa: S608
+
+    def test_a_scope_naming_several_tenants_declines_rather_than_guessing(self, autofill):
+        """A collection scope legitimately publishes ``a,b``. Picking either half would write
+        the row into a tenant nobody named, so the separator guard leaves it ``NULL``."""
+        with (
+            tenant(tenant=[TENANT_A, TENANT_B]),
+            pytest.raises(TenantScopeError),
+            transaction.atomic(),
+        ):
+            _execute(f"INSERT INTO {_OWNER_TABLE} (name) VALUES ('ambiguous')")  # noqa: S608
+
+    def test_under_bypass_an_omitted_tenant_hits_not_null(self, autofill):
+        """``tenancy_bypassed()`` is a deliberate cross-tenant frame, so the trigger declines
+        to fill and the column's own ``NOT NULL`` is what stops the write."""
+        with (
+            tenancy_bypassed(),
+            pytest.raises(IntegrityError, match='not-null'),
+            transaction.atomic(),
+        ):
+            _execute(f"INSERT INTO {_OWNER_TABLE} (name) VALUES ('bypassed')")  # noqa: S608
+
+    def test_under_bypass_an_explicit_tenant_is_allowed(self, autofill):
+        """The deliberate cross-tenant write, which is the whole point of the bypass."""
+        with tenancy_bypassed():
+            _execute(
+                f'INSERT INTO {_OWNER_TABLE} (tenant_id, name) VALUES (%s, %s)',  # noqa: S608
+                params=[TENANT_B, 'deliberate'],
+            )
+
+        assert self._tenant_of('deliberate') == TENANT_B
+
+    def test_a_multi_row_insert_fills_every_row(self, autofill):
+        """One of the three paths that reach no ``pre_save``, and the reason this moved into
+        the database: the receiver fires per instance, so a single multi-row statement was
+        never covered by it at all."""
+        with tenant(tenant=TENANT_A):
+            _execute(
+                f"INSERT INTO {_OWNER_TABLE} (name) VALUES ('multi-1'), ('multi-2'), ('multi-3')"  # noqa: S608
+            )
+
+        assert [self._tenant_of(f'multi-{n}') for n in (1, 2, 3)] == [TENANT_A] * 3
+
+    def test_an_insert_select_fills_from_the_scope(self, autofill):
+        """``INSERT ... SELECT`` never constructs a Python instance at all."""
+        with tenant(tenant=TENANT_A):
+            _execute(
+                f"INSERT INTO {_OWNER_TABLE} (name) SELECT 'copied-' || name "  # noqa: S608
+                f'FROM {_OWNER_TABLE} WHERE name = %s',
+                params=['a'],
+            )
+
+        assert self._tenant_of('copied-a') == TENANT_A
+
+    def test_the_trigger_does_not_meet_the_soft_delete_rule(self, autofill):
+        """A ``DO INSTEAD`` rule on ``DELETE`` and a ``BEFORE`` trigger on ``INSERT`` do not
+        interact -- a claim about PostgreSQL, not about this code, so it is worth one test on
+        a table carrying both rather than an assertion in a comment."""
+        _execute(f'ALTER TABLE {_OWNER_TABLE} ADD COLUMN _deleted_at timestamptz NULL')
+        _execute(
+            sql.CREATE_SOFT_DELETE_RULE.format(
+                table=_identifiers._quote_table(_OWNER_TABLE), primary_key='id'
+            )
+        )
+        try:
+            with tenant(tenant=TENANT_A):
+                _execute(f"INSERT INTO {_OWNER_TABLE} (name) VALUES ('both')")  # noqa: S608
+                _execute(f"DELETE FROM {_OWNER_TABLE} WHERE name = 'both'")  # noqa: S608
+
+            with tenancy_bypassed():
+                stamped = _scalar(
+                    f'SELECT _deleted_at IS NOT NULL FROM {_OWNER_TABLE} WHERE name = %s',  # noqa: S608
+                    ['both'],
+                )
+            # Filled by the trigger, then archived rather than destroyed by the rule.
+            assert self._tenant_of('both') == TENANT_A
+            assert stamped is True
+        finally:
+            _execute(sql.DROP_SOFT_DELETE_RULE.format(table=_identifiers._quote_table(_OWNER_TABLE)))

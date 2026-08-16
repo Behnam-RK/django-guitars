@@ -1,6 +1,6 @@
-"""The write guards: fill in a missing tenant, or refuse a write that contradicts one. A
-``pre_save`` receiver covers every ``save()``; ``bulk_create`` is guarded separately since
-it sends no signal. Doesn't cover ``update()``/cascades/raw SQL -- see ``docs/tenancy.md``."""
+"""The write guards, **diagnostics since 2.1.0**: correctness is the ADR 0005 autofill
+trigger plus the policy's ``WITH CHECK``, which no signal can switch off. What survives here
+is the message naming model/dimension/fix, and audit mode -- see ``docs/tenancy.md``."""
 
 from __future__ import annotations
 
@@ -158,6 +158,9 @@ def apply_write_guard(instance: models.Model) -> None:
                     dimension=dimension,
                 )
             else:
+                # NOT redundant with the database trigger, which cannot reach back into the
+                # instance: this is what makes `obj.tenant_id` readable the moment `save()`
+                # returns, instead of None until the row is refetched. Do not delete.
                 setattr(instance, attname, _pk(expected))
         elif not _matches(expected, actual):
             _violation(
@@ -173,8 +176,9 @@ def apply_write_guard(instance: models.Model) -> None:
 
 
 def _guarded(objs) -> list:
-    """Materialise ``objs`` and guard each one -- shared by every ``bulk_create``
-    override, since the batched path sends no ``pre_save`` to trigger it automatically."""
+    """Materialise ``objs`` and guard each one -- shared by every ``bulk_create`` override,
+    since the batched path sends no ``pre_save``. Belt-and-braces since 2.1.0: the autofill
+    trigger covers this path too, so what this adds is the better message, not the fill."""
     objs = list(objs)
     for obj in objs:
         apply_write_guard(obj)

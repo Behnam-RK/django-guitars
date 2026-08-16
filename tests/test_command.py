@@ -21,7 +21,7 @@ from guitars.management.enforcement import identity as identity_module
 from guitars.management.enforcement import operations as operations_module
 from guitars.management.enforcement.command import Command
 from guitars.sql import _identifiers
-from guitars.tenancy.discovery import app_coverage
+from guitars.tenancy.discovery import app_coverage, autofill_function_name
 from tests.testapp.models import Album, Band, Ensemble, Orchestra
 
 
@@ -703,6 +703,27 @@ def test_check_reports_a_missing_parent_trigger_function_migration_alongside_app
     assert 'MTI parent trigger function migration' in stderr
 
 
+def test_check_reports_a_missing_autofill_function_alongside_the_other_gaps():
+    """Collected into the same report rather than raising straight out, so a project missing
+    both a function migration and per-app operations hears about both in one run instead of
+    fixing one, re-running, and discovering the next."""
+    command = Command()
+    command.stdout = StringIO()
+    command.stderr = StringIO()
+    # Force the lazy scan before overriding: `handle` touches `self.existing`, which
+    # repopulates these from disk and would undo the setup below.
+    _ = command.existing
+    _pretend_function_migrations_are_current(command)
+    # Everything else current; only the autofill function migration is unrecorded.
+    command.tenant_autofill_dependencies = {}
+    command.tenant_autofill_sql = {}
+
+    with pytest.raises(CommandError, match='Run `manage.py makeguitarmigrations`'):
+        command.handle('testapp', check_only=True)
+
+    assert 'tenant autofill function migration' in command.stderr.getvalue()
+
+
 @override_settings(LOCAL_APPS=['fake.banda', 'fake.albumb'])
 def test_handle_writes_scoped_cascade_gap_warning_to_stdout(monkeypatch):
     command = Command()
@@ -846,6 +867,102 @@ def test_ensure_trigger_function_migration_writes_and_records_the_dependency(
     assert getattr(command, dependency_attr) == ('testapp', filename.removesuffix('.py'))
     # Second call is a no-op: the singleton is a singleton, and it is now current.
     assert getattr(command, method_name)() is False
+
+
+def test_ensure_tenant_autofill_function_migration_writes_and_records_the_dependency(
+    monkeypatch, tmp_path
+):
+    """Keyed by function name rather than a singleton, since autofill is one function per
+    ``(column, GUC)`` pair -- so the recorded dependency has to be per function too, or a
+    second pair would silently reuse the first's migration."""
+    command, app, filename = _command_with_scaffold(
+        monkeypatch, tmp_path, '0001_auto_enforcement_guitars_fill_5_label_label_id.py'
+    )
+    function = autofill_function_name('label', 'label_id')
+
+    assert command._ensure_tenant_autofill_function_migration(function, 'label', 'label_id')
+
+    content = (tmp_path / 'migrations' / filename).read_text()
+    assert f'CREATE FUNCTION "{function}"()' in content
+    # The GUC and column are baked in, not read from a constant at migrate time (ADR 0006).
+    assert "current_setting('tenant.label', true)" in content
+    assert 'NEW."label_id"' in content
+    assert 'from guitars import sql' not in content
+    assert 'CREATE OR REPLACE FUNCTION' not in content
+    assert command.tenant_autofill_dependencies[function] == (
+        'testapp',
+        filename.removesuffix('.py'),
+    )
+    # Second call is a no-op: this function is now recorded and current.
+    assert not command._ensure_tenant_autofill_function_migration(function, 'label', 'label_id')
+
+
+def test_a_changed_tenant_field_renames_the_function_and_regenerates(monkeypatch, tmp_path):
+    """ADR 0005 says to confirm rather than assume this. A different ``GUITARS_TENANT_FIELD``
+    means a different column, which renames the function, which is a different header -- so
+    the header scan reads it as a new operation instead of covered-forever."""
+    command, app, filename = _command_with_scaffold(monkeypatch, tmp_path, '0001_auto.py')
+    first = autofill_function_name('label', 'label_id')
+    second = autofill_function_name('org', 'org_id')
+
+    assert first != second
+    assert command._ensure_tenant_autofill_function_migration(first, 'label', 'label_id')
+    # A recorded first function must not satisfy the second: different name, different header.
+    assert command._ensure_tenant_autofill_function_migration(second, 'org', 'org_id')
+    assert set(command.tenant_autofill_dependencies) == {first, second}
+
+
+def test_a_missing_autofill_function_migration_is_reported_under_check(monkeypatch, tmp_path):
+    """``--check`` has to name this gap rather than raising past the per-app report, or a
+    project with both a missing function and a missing trigger only hears about one."""
+    command, app, _ = _command_with_scaffold(monkeypatch, tmp_path, '0001_auto.py')
+
+    with pytest.raises(CommandError, match='tenant autofill function migration'):
+        command._ensure_tenant_autofill_function_migration(
+            autofill_function_name('label', 'label_id'), 'label', 'label_id', check_only=True
+        )
+
+
+def test_function_dependencies_for_keys_autofill_on_the_function_the_trigger_names():
+    """An app depends on the autofill functions its own triggers call and no others, which is
+    why the trigger header carries the function name at all."""
+    command = Command()
+    command.trigger_function_dependency = None
+    command.parent_trigger_function_dependency = None
+    command.tenant_autofill_dependencies = {
+        'guitars_fill_5_label_label_id': ('testapp', '0019_fn'),
+        'guitars_fill_3_org_org_id': ('testapp', '0021_other_fn'),
+    }
+    blob = headers_module.HEADER_TENANT_AUTOFILL.format(
+        table='shop_order', function='guitars_fill_5_label_label_id'
+    )
+
+    assert command._function_dependencies_for(blob) == [('testapp', '0019_fn')]
+
+
+def test_function_dependencies_for_ignores_an_autofill_function_it_has_not_written():
+    """A header naming a function with no recorded migration must not fabricate a dependency
+    on a migration that does not exist -- Django would refuse to load the graph."""
+    command = Command()
+    command.trigger_function_dependency = None
+    command.parent_trigger_function_dependency = None
+    command.tenant_autofill_dependencies = {}
+    blob = headers_module.HEADER_TENANT_AUTOFILL.format(
+        table='shop_order', function='guitars_fill_5_label_label_id'
+    )
+
+    assert command._function_dependencies_for(blob) == []
+
+
+def test_tenant_autofill_operations_is_empty_when_policies_are_disabled():
+    """``GUITARS_TENANT_POLICIES = False`` is documented as leaving the database untouched,
+    and a trigger is a database object -- so the Python-only rollout stage must not receive
+    one, the same gate ``_tenant_force_operations`` applies."""
+    with override_settings(GUITARS_TENANT_POLICIES=False):
+        command = Command()
+        app = django_apps.get_app_config('testapp')
+        assert command._tenant_autofill_operations(app) == []
+        assert command._required_autofill_functions(set()) == {}
 
 
 def test_tenant_force_operations_is_empty_when_policies_are_disabled():

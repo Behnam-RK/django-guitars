@@ -15,7 +15,7 @@ from guitars.gucs import GUC_PREFIX
 from guitars.management import _generator
 from guitars.sql.policy import TENANT_POLICY
 from guitars.tenancy import TenantEnforcement
-from guitars.tenancy.discovery import expected_coverage
+from guitars.tenancy.discovery import autofill_function_name, expected_coverage
 
 
 if TYPE_CHECKING:
@@ -40,6 +40,9 @@ class TableState(NamedTuple):
     #: Same, off the WITH CHECK half (governs writes) -- see docs/tenancy.md's "USING
     #: (<tenant match>) WITH CHECK (true)" hazard. Falls back to USING when NULL.
     policy_check_gucs: frozenset[str]
+    #: Names of the functions this table's row-level INSERT triggers call (ADR 0005). A
+    #: table that should autofill but calls none is the "looks fine, is not" state.
+    autofill_functions: frozenset[str]
 
 
 #: Live enforcement state for every table in the search path. Ordered search-path-descending
@@ -59,6 +62,19 @@ JOIN pg_namespace n ON n.oid = c.relnamespace
 LEFT JOIN pg_policy p ON p.polrelid = c.oid AND p.polname = %s
 WHERE c.relkind = 'r' AND n.nspname = ANY(current_schemas(false))
 ORDER BY array_position(current_schemas(false), n.nspname) DESC
+"""
+
+#: Which functions each table's own row triggers call (ADR 0005). ``tgisinternal`` excludes
+#: the ones Postgres creates for foreign keys and constraints.
+_AUTOFILL_TRIGGER_SQL = """
+SELECT c.relname, p.proname
+FROM pg_trigger t
+JOIN pg_class c ON c.oid = t.tgrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+JOIN pg_proc p ON p.oid = t.tgfoid
+WHERE NOT t.tgisinternal
+  AND c.relkind = 'r'
+  AND n.nspname = ANY(current_schemas(false))
 """
 
 #: Columns each policy references, from pg_depend rather than a regex over pg_get_expr --
@@ -152,6 +168,11 @@ class Command(BaseCommand):
                 for oid, table, column in cursor.fetchall():
                     columns.setdefault(oid, set()).add((table, column))
 
+            cursor.execute(_AUTOFILL_TRIGGER_SQL)
+            triggers: dict[str, set[str]] = {}
+            for table, function in cursor.fetchall():
+                triggers.setdefault(table, set()).add(function)
+
             state: dict[str, TableState] = {}
             for name, schema, enabled, forced, oid, qual, with_check in rows:
                 state[name] = TableState(
@@ -164,6 +185,7 @@ class Command(BaseCommand):
                     # NULL polwithcheck means "use USING for writes too" (Postgres's own
                     # rule for a FOR ALL policy with no explicit WITH CHECK).
                     policy_check_gucs=_tenant_gucs(qual if with_check is None else with_check),
+                    autofill_functions=frozenset(triggers.get(name, ())),
                 )
             return state
 
@@ -185,6 +207,23 @@ class Command(BaseCommand):
             f'below describe the catalog correctly and prove nothing about whether '
             f'enforcement binds for this connection. Re-run as the application role.'
         ]
+
+    @staticmethod
+    def _autofill_drift(table: str, coverage: TableCoverage, state: TableState) -> str | None:
+        """Report a table whose manager autofills but whose ADR 0005 trigger is absent. No
+        other check sees it: the policy is present and correct, reads and cross-tenant writes
+        are refused, and only an insert omitting the tenant fails -- with a bare NOT NULL."""
+        expected_functions = {
+            autofill_function_name(dimension, column)
+            for dimension, column in (coverage.autofill_columns or {}).items()
+        }
+        if missing := sorted(expected_functions - state.autofill_functions):
+            return (
+                f"'{table}': no tenant autofill trigger calling {missing} -- its manager "
+                f'autofills, so an INSERT omitting the tenant will fail on NOT NULL instead '
+                f'of taking the active scope. Run `manage.py makeguitarmigrations` + migrate.'
+            )
+        return None
 
     @staticmethod
     def _predicate_drift(table: str, coverage: TableCoverage, state: TableState) -> str | None:
@@ -279,6 +318,9 @@ class Command(BaseCommand):
                 continue
             if drift := self._predicate_drift(table, expected.tables[table], state):
                 drifted.append(drift)
+                unhealthy.add(table)
+            if autofill_drift := self._autofill_drift(table, expected.tables[table], state):
+                drifted.append(autofill_drift)
                 unhealthy.add(table)
             if not state.rls_forced:
                 unforced.append(table)

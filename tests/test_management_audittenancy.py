@@ -14,6 +14,7 @@ from pglast.enums import AlterTableType, SubLinkType
 
 from guitars import sql
 from guitars.management.commands.audittenancy import Command as AuditCommand
+from guitars.sql import triggers
 from guitars.tenancy import tenant
 from tests.conftest import execute
 from guitars.tenancy.discovery import autofill_function_name, autofill_trigger_name
@@ -46,7 +47,7 @@ class TestAGoodDatabasePasses:
         assert 'audit passed' in output
         # The count is part of the assertion: "passed" over zero tables is the failure mode
         # a deploy gate has to be incapable of.
-        assert '7 table(s) expected, 7 enforced' in output
+        assert '12 table(s) expected, 12 enforced' in output
 
     def test_force_is_already_on_everywhere(self, db):
         """``GUITARS_RLS_FORCE`` defaults to True, so the strict gate passes out of the box
@@ -234,6 +235,82 @@ class TestAMissingAutofillTrigger:
         assert Booking._meta.db_table not in output.split('Tenant RLS audit on')[0]
 
 
+class TestAStrayAutofillTrigger:
+    """The other direction, and the live half of issue #27: a rename mints a new function
+    and leaves the old trigger dereferencing a dropped column, so every INSERT on the table
+    fails. Presence-only checks call that healthy, which is what made it worth catching."""
+
+    def _stray(self, _execute, table: str) -> str:
+        """Create a guitars-shaped trigger the models do not expect, on *table*."""
+        function = 'guitars_fill_9_gone_gone_id'
+        _execute(
+            triggers._CREATE_TENANT_AUTOFILL_FUNCTION.format(
+                function=f'"{function}"',
+                column='label_id',
+                bypass_guc='tenant.bypass',
+                guc='tenant.gone',
+                separator=',',
+            ),
+            triggers._CREATE_TENANT_AUTOFILL_TRIGGER.format(
+                trigger=f'"{autofill_trigger_name(function)}"',
+                table=f'"{table}"',
+                function=f'"{function}"',
+            ),
+        )
+        return function
+
+    def test_a_trigger_the_models_no_longer_expect_is_reported(self, _execute):
+        table = Release._meta.db_table
+        function = self._stray(_execute, table)
+        try:
+            output = _audit()
+
+            assert 'no longer expect' in output
+            assert function in output
+        finally:
+            _execute(
+                f'DROP TRIGGER "{autofill_trigger_name(function)}" ON "{table}"',
+                f'DROP FUNCTION "{function}"()',
+            )
+
+    def test_an_applications_own_insert_trigger_is_never_reported(self, _execute):
+        """Only this library's own functions are its business. Reporting every BEFORE INSERT
+        trigger in the database would make the finding useless on any real project."""
+        table = Release._meta.db_table
+        _execute(
+            """
+            CREATE FUNCTION app_own_trigger_fn() RETURNS TRIGGER LANGUAGE PLPGSQL
+            AS $$ BEGIN RETURN NEW; END; $$
+            """,
+            f'CREATE TRIGGER app_own_trigger BEFORE INSERT ON "{table}" '
+            f'FOR EACH ROW EXECUTE FUNCTION app_own_trigger_fn()',
+        )
+        try:
+            output = _audit()
+
+            assert 'app_own_trigger_fn' not in output
+        finally:
+            _execute(
+                f'DROP TRIGGER app_own_trigger ON "{table}"',
+                'DROP FUNCTION app_own_trigger_fn()',
+            )
+
+    def test_a_scoped_audit_stays_quiet(self, _execute):
+        """A scoped run cannot tell "not mine" from "gone" -- the same reason the policy
+        side gates its own unexpected check on a full-repo run."""
+        table = Release._meta.db_table
+        function = self._stray(_execute, table)
+        try:
+            output = _audit('testapp')
+
+            assert 'no longer expect' not in output
+        finally:
+            _execute(
+                f'DROP TRIGGER "{autofill_trigger_name(function)}" ON "{table}"',
+                f'DROP FUNCTION "{function}"()',
+            )
+
+
 class TestAPolicyThatNoLongerMatchesTheModels:
     """The finding existence checks can't make: a healthy policy scoping on the wrong
     thing. Compared by the two facts a *stored* policy preserves (Postgres rewrites the
@@ -253,7 +330,7 @@ class TestAPolicyThatNoLongerMatchesTheModels:
             assert 'audit passed' in output
             assert 'not by the scope the models describe' in output
             # Still not counted as enforced: it is protected by the wrong scope.
-            assert '6 enforced' in output
+            assert '11 enforced' in output
         finally:
             _execute(
                 sql.drop_tenant_policy(table=table),
@@ -321,7 +398,7 @@ class TestAPolicyThatNoLongerMatchesTheModels:
             assert 'not by the scope the models describe' in output
             assert 'bypasses it' in output
             # Seven expected tables, one of them unhealthy for two reasons -> six enforced.
-            assert '6 enforced' in output
+            assert '11 enforced' in output
             assert '1 enabled without FORCE' in output
             assert '1 not matching the models' in output
         finally:

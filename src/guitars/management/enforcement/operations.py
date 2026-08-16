@@ -448,12 +448,53 @@ class OperationsMixin:
             if not _generator.is_local(app):
                 continue
             for table, coverage in app_coverage(app).tables.items():
-                for dimension, column in (coverage.autofill_columns or {}).items():
-                    required[(table, autofill_function_name(dimension, column))] = (
-                        dimension,
-                        column,
-                    )
+                pairs = [(table, coverage.autofill_columns)]
+                # A relocated dimension's trigger lives on the ancestor's table, so it is
+                # keyed there -- and several children may resolve to the same one key.
+                if coverage.owner_autofill_columns and coverage.owner_table:
+                    pairs.append((coverage.owner_table, coverage.owner_autofill_columns))
+                for host_table, columns in pairs:
+                    for dimension, column in (columns or {}).items():
+                        required[(host_table, autofill_function_name(dimension, column))] = (
+                            dimension,
+                            column,
+                        )
         return required
+
+    def _relocated_autofill_keys(self) -> dict[tuple[str, str], tuple[str, str]]:
+        """The subset of :meth:`_required_autofill_keys` whose trigger sits on an MTI
+        ancestor's table. Project-wide on purpose: the child declaring the dimension may be
+        out of a scoped run while the owner hosting the trigger is in it."""
+        relocated: dict[tuple[str, str], tuple[str, str]] = {}
+        if not self._tenant_policies_enabled():
+            return relocated
+        for app in django_apps.get_app_configs():
+            if not _generator.is_local(app):
+                continue
+            for coverage in app_coverage(app).tables.values():
+                if not (coverage.owner_autofill_columns and coverage.owner_table):
+                    continue
+                for dimension, column in coverage.owner_autofill_columns.items():
+                    key = (coverage.owner_table, autofill_function_name(dimension, column))
+                    relocated[key] = (dimension, column)
+        return relocated
+
+    def _scoped_autofill_gap_notes(self, requested: set[str]) -> list[str]:
+        """Relocated autofill triggers this scoped run won't create -- keyed off the app
+        hosting the *ancestor's* table, so scoping that app out skips it. Closed by a later,
+        unscoped run; the same pragmatic tradeoff cross-app cascade rules already make."""
+        if not requested:
+            return []
+        hosting = self._table_app_labels()
+        return [
+            f"Tenant autofill trigger on '{table}' (function '{function}') skipped: the "
+            f"tenant column lives on that ancestor, whose app '{hosting[table]}' is not in "
+            f'this scoped run.'
+            for table, function in sorted(self._relocated_autofill_keys())
+            if table in hosting
+            and hosting[table] not in requested
+            and (table, function) not in self.existing.tenant_autofill
+        ]
 
     def _tenant_autofill_operations(self, app: AppConfig, *, adopt: bool = False) -> list[str]:
         """``BEFORE INSERT`` autofill triggers *app* is missing or has outdated (ADR 0005).
@@ -465,13 +506,20 @@ class OperationsMixin:
         # This app's own coverage, not the project-wide required map: _build_operations is
         # called directly with apps outside LOCAL_APPS, which that map excludes. Notes are
         # collected by _tenant_policy_operations off the same call, else each prints twice.
-        own: dict[tuple[str, str], None] = {}
+        keys: dict[tuple[str, str], None] = {}
         for table, coverage in app_coverage(app).tables.items():
             for dimension, column in (coverage.autofill_columns or {}).items():
-                own[(table, autofill_function_name(dimension, column))] = None
+                keys[(table, autofill_function_name(dimension, column))] = None
+
+        # Triggers relocated onto an ancestor's table are attributed to the app hosting that
+        # table, wherever the child lives -- the same inversion cascade rules already use.
+        hosting = self._table_app_labels()
+        for (table, function), _ in self._relocated_autofill_keys().items():
+            if hosting.get(table) == app.label:
+                keys[(table, function)] = None
 
         operations: list[str] = []
-        for table, function in sorted(own):
+        for table, function in sorted(keys):
             slots = self._autofill_slots(table, function)
             self._append_if_stale(
                 operations,

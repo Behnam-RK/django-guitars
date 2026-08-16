@@ -10,6 +10,14 @@ Full history and diffs: [GitHub releases](https://github.com/Behnam-RK/django-gu
 
 ## [Unreleased]
 
+## [2.1.1] - 2026-08-16
+
+- Fixed: a renamed `GUITARS_TENANT_FIELD` or tenant-FK `db_column` left the previous autofill trigger in place, still calling a function that dereferenced a dropped column — **every `INSERT` on the table then failed**, while `audittenancy` reported it healthy. `makeguitarmigrations` now retires an autofill trigger the models no longer require, and `audittenancy` reports one the database has and the models do not expect ([#27](https://github.com/Behnam-RK/django-guitars/issues/27), `docs/migrations.md`'s "Retirement").
+- Fixed: flipping a manager to `autofill=False` was a no-op in the database — the trigger kept filling. It is now dropped, making ADR-0005's "the opt-out is auditable in `pg_trigger`" true.
+- Fixed: a tenant column owned by an untenanted MTI ancestor got **no** autofill trigger at all, silently. The trigger now goes on the ancestor's table, attributed to that ancestor's app ([ADR-0009](docs/adr/0009-relocated-owner-table-autofill.md), [#28](https://github.com/Behnam-RK/django-guitars/issues/28)). It is refused, with a note, where descendants sharing the column disagree about autofilling it or claim it under different dimensions. **Note:** the trigger also fills the ancestor's own direct inserts, which are untenanted — pass `autofill=False` if that is wrong for your models.
+- Changed: 2.1.0's note that `DisableSignals` "costs the friendly message, not the guarantee" held only where a trigger was actually emitted, which the two fixes above make true generally.
+- Added: `TableCoverage.owner_autofill_columns` and `owner_autofill_notes()` in `guitars.tenancy.discovery`, and `AUTOFILL_FUNCTION_PREFIX`, which `audittenancy` uses to tell this library's triggers from an application's own.
+
 ## [2.1.0] - 2026-08-16
 
 - Added: tenant autofill is now a `BEFORE INSERT` trigger ([ADR-0005](docs/adr/0005-trigger-based-tenant-autofill.md)), covering `bulk_create`, multi-row `INSERT`, `INSERT … SELECT` and raw SQL. Run `makemigrations` + `migrate`; **no backfill is needed or possible** — the tenant column is `NOT NULL`, so an existing `NULL` cannot exist.
@@ -108,7 +116,8 @@ First stable release. **BREAKING:** the instrument ladder shifted down one rung 
 
 - Added: initial release — `SetarModel`, `GuitarModel`, `SoftDeletableModel`, `DisableSignals`, `makeguitarmigrations`.
 
-[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.1.0...HEAD
+[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.1.1...HEAD
+[2.1.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.1.1
 [2.1.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.1.0
 [2.0.3]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.0.3
 [2.0.2]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.0.2

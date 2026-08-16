@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 
 
 __all__ = [
+    'AUTOFILL_FUNCTION_PREFIX',
     'Coverage',
     'PolicyKwargs',
     'TableCoverage',
@@ -30,14 +31,21 @@ __all__ = [
     'autofill_trigger_name',
     'expected_coverage',
     'is_local',
+    'owner_autofill_notes',
 ]
+
+
+#: What marks a trigger function as this library's. ``audittenancy`` needs it to tell a
+#: stray autofill trigger from an application's own ``BEFORE INSERT`` trigger, which it must
+#: never report -- so the two sides read one constant rather than repeating the literal.
+AUTOFILL_FUNCTION_PREFIX = 'guitars_fill_'
 
 
 def autofill_function_name(dimension: str, column: str) -> str:
     """Bare name of the trigger function filling *column* from *dimension*'s GUC. The
     length prefix keeps ``('a', 'b_c')`` and ``('a_b', 'c')`` apart, the same collision
     ``_related_rule_name`` guards against; callers quote it, ``audittenancy`` does not."""
-    return _safe_identifier(f'guitars_fill_{len(dimension)}_{dimension}_{column}')
+    return _safe_identifier(f'{AUTOFILL_FUNCTION_PREFIX}{len(dimension)}_{dimension}_{column}')
 
 
 def autofill_trigger_name(function: str) -> str:
@@ -73,6 +81,10 @@ class TableCoverage(NamedTuple):
     #: Own-table columns only, and only when the manager autofills -- deliberately outside
     #: ``as_kwargs`` so adding it churns no ``[POLICY:...]`` digest and the release stays additive.
     autofill_columns: dict[str, str] | None = None
+    #: Same, for columns living on ``owner_table``: the trigger goes *there*, attributed to
+    #: the owner's app, since a trigger here could not write an ancestor's column (ADR 0009).
+    #: Outside ``as_kwargs`` for the same reason as above.
+    owner_autofill_columns: dict[str, str] | None = None
 
     def as_kwargs(self) -> PolicyKwargs:
         """The keyword arguments ``guitars.sql.create_table_rls`` expects -- owner keys
@@ -187,9 +199,16 @@ def _classify(model: type[models.Model]) -> tuple[TableCoverage | None, list[str
         child_pk = _meta(model).pk.column
 
     # Sourced from ``own``, never ``owner_columns``: a trigger here could not write an
-    # ancestor's column. That only *relocates* the trigger when the ancestor is itself
-    # tenanted and autofilling -- otherwise those dimensions get none, filled by pre_save.
+    # ancestor's column. Those relocate onto the owner's table instead (ADR 0009), when
+    # every model sharing that one trigger agrees it should exist.
     autofill_columns = dict(own) if own and _autofills(model) else None
+    relocated: dict[str, str] = {}
+    if by_owner:
+        relocated = {
+            dimension: column
+            for dimension, column in owner_columns.items()
+            if _relocatable(owner, column)[0] == dimension
+        }
 
     return (
         TableCoverage(
@@ -199,9 +218,83 @@ def _classify(model: type[models.Model]) -> tuple[TableCoverage | None, list[str
             child_pk=child_pk,
             owner_columns=owner_columns or None,
             autofill_columns=autofill_columns,
+            owner_autofill_columns=relocated or None,
         ),
         notes,
     )
+
+
+def _owner_column_claims(owner: type[models.Model], column: str) -> dict[type[models.Model], str]:
+    """Every concrete model whose tenant scoping resolves *column* to *owner*'s table, mapped
+    to the dimension it claims it under -- *owner* included when tenanted on it. One trigger
+    is shared by all of them, so whether to stamp it is their joint decision, not any one's."""
+    claims: dict[type[models.Model], str] = {}
+    for model in django_apps.get_models():
+        if not (model is owner or issubclass(model, owner)) or _meta(model).proxy:
+            continue
+        for dimension, field_name in local_tenant_fields(model).items():
+            field = _meta(model).get_field(field_name)
+            if field.column == column and column_owner(model, field_name) is owner:
+                claims[model] = dimension
+    return claims
+
+
+def _relocatable(owner: type[models.Model], column: str) -> tuple[str | None, str | None]:
+    """``(dimension to relocate under, refusal note)``. At most one is set; both are ``None``
+    when *owner* already autofills *column* itself, which is the MTI case that was always
+    correct -- the ancestor's own trigger fires on the row Django writes into its table."""
+    claims = _owner_column_claims(owner, column)
+    owner_table = _meta(owner).db_table
+    dimensions = set(claims.values())
+
+    # Nobody wants it, so there is nothing to refuse. Checked before the conflicts below so
+    # a column no claimant autofills stays silent rather than earning a note about a trigger
+    # it was never going to get -- the "two notes for one fact" this module already avoids.
+    if not any(_autofills(claimant) for claimant in claims):
+        return None, None
+
+    if len(dimensions) > 1:
+        return None, (
+            f"'{owner_table}'.{column} is claimed as tenant dimensions {sorted(dimensions)} "
+            f'by {sorted(_meta(m).db_table for m in claims)}, so autofilling it would need '
+            f'two triggers racing on one table in name order -- left to Python scoping.'
+        )
+
+    opted_out = sorted(_meta(m).db_table for m in claims if not _autofills(m))
+    if opted_out:
+        return None, (
+            f"'{owner_table}'.{column} is not autofilled: {opted_out} share that column and "
+            f'do not autofill, and an MTI insert of theirs writes a row into this same table, '
+            f'so one trigger would overwrite their opt-out. Left to Python scoping.'
+        )
+
+    if owner in claims and _autofills(owner):
+        # Already covered by the owner's own ``autofill_columns`` -- relocating here too
+        # would emit a second CREATE TRIGGER on that table and fail migrate.
+        return None, None
+
+    return (next(iter(dimensions)), None) if dimensions else (None, None)
+
+
+def owner_autofill_notes() -> list[str]:
+    """One refusal note per ``(owner_table, column)``, regardless of how many descendants
+    claim it: the fact is about the owner's table, not about any one child, and ``_classify``
+    runs once per descendant -- emitting there would print the same note N times."""
+    seen: dict[tuple[type[models.Model], str], str] = {}
+    for model in django_apps.get_models():
+        if _meta(model).proxy or not tenant_spec(model):
+            continue
+        for field_name in local_tenant_fields(model).values():
+            if owns_column(model, field_name):
+                continue
+            owner = column_owner(model, field_name)
+            key = (owner, _meta(model).get_field(field_name).column)
+            if key in seen:
+                continue
+            _, note = _relocatable(*key)
+            if note:
+                seen[key] = note
+    return [seen[key] for key in sorted(seen, key=lambda k: (_meta(k[0]).db_table, k[1]))]
 
 
 def _skip_note(model: type[models.Model], spec: dict[str, str]) -> str:
@@ -241,4 +334,7 @@ def expected_coverage(requested: set[str] | None = None) -> Coverage:
         coverage = app_coverage(app)
         tables.update(coverage.tables)
         notes.extend(coverage.notes)
+    # Appended once for the whole run, not per app: a refused relocation is a fact about the
+    # owner's table, which several apps' children can share.
+    notes.extend(owner_autofill_notes())
     return Coverage(tables=tables, notes=notes)

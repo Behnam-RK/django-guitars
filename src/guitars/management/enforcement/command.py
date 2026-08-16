@@ -461,7 +461,9 @@ class Command(OperationsMixin, BaseCommand):
 
         # Step 3: surface cross-app cascade rules this scoped run intentionally
         # did not create, so the "pragmatic scope" tradeoff is never silent.
-        for note in self._scoped_cascade_gap_notes(requested):
+        for note in self._scoped_cascade_gap_notes(requested) + self._scoped_autofill_gap_notes(
+            requested
+        ):
             self.stdout.write(self.style.WARNING(note))
 
         # Surface MTI cascade rules skipped because cascading INTO an MTI child is unsupported.

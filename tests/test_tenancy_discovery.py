@@ -28,10 +28,15 @@ def coverage():
 class TestWhichTablesAreCovered:
     def test_every_tenanted_table_and_nothing_else(self, coverage):
         assert set(coverage.tables) == {
+            'testapp_arena',
             'testapp_booking',
+            'testapp_concerthall',
             'testapp_headlinefestival',
+            'testapp_lecturehall',
             'testapp_release',
+            'testapp_squashcourt',
             'testapp_stadiumtour',
+            'testapp_tenniscourt',
             'testapp_tour',
             'testapp_track',
             'testapp_worldtour',

@@ -15,7 +15,11 @@ from guitars.gucs import GUC_PREFIX
 from guitars.management import _generator
 from guitars.sql.policy import TENANT_POLICY
 from guitars.tenancy import TenantEnforcement
-from guitars.tenancy.discovery import autofill_function_name, expected_coverage
+from guitars.tenancy.discovery import (
+    AUTOFILL_FUNCTION_PREFIX,
+    autofill_function_name,
+    expected_coverage,
+)
 
 
 if TYPE_CHECKING:
@@ -23,7 +27,7 @@ if TYPE_CHECKING:
 
     from django.db.backends.base.base import BaseDatabaseWrapper
 
-    from guitars.tenancy.discovery import TableCoverage
+    from guitars.tenancy.discovery import Coverage, TableCoverage
 
 
 class TableState(NamedTuple):
@@ -217,21 +221,72 @@ class Command(BaseCommand):
         ]
 
     @staticmethod
-    def _autofill_drift(table: str, coverage: TableCoverage, state: TableState) -> str | None:
+    def _autofill_drift(
+        table: str, coverage: TableCoverage, live: Mapping[str, TableState]
+    ) -> list[str]:
         """Report a table whose manager autofills but whose ADR 0005 trigger is absent. No
         other check sees it: the policy is present and correct, reads and cross-tenant writes
         are refused, and only an insert omitting the tenant fails -- with a bare NOT NULL."""
-        expected_functions = {
-            autofill_function_name(dimension, column)
-            for dimension, column in (coverage.autofill_columns or {}).items()
-        }
-        if missing := sorted(expected_functions - state.autofill_functions):
-            return (
-                f"'{table}': no tenant autofill trigger calling {missing} -- its manager "
-                f'autofills, so an INSERT omitting the tenant will fail on NOT NULL instead '
-                f'of taking the active scope. Run `manage.py makeguitarmigrations` + migrate.'
+        findings: list[str] = []
+        # Takes the whole live map, not one TableState: a relocated trigger sits on the
+        # ancestor's table (ADR 0009), so the fix is on a different table than the subject.
+        for host, columns in (
+            (table, coverage.autofill_columns),
+            (coverage.owner_table, coverage.owner_autofill_columns),
+        ):
+            if not (columns and host):
+                continue
+            expected = {
+                autofill_function_name(dimension, column) for dimension, column in columns.items()
+            }
+            host_state = live.get(host)
+            if host_state is None:
+                findings.append(
+                    f"'{table}': its tenant column lives on '{host}', which this database "
+                    f'does not expose on the search path, so its autofill trigger cannot be '
+                    f'verified.'
+                )
+                continue
+            if missing := sorted(expected - host_state.autofill_functions):
+                where = '' if host == table else f" on its ancestor '{host}'"
+                findings.append(
+                    f"'{table}': no tenant autofill trigger calling {missing}{where} -- its "
+                    f'manager autofills, so an INSERT omitting the tenant will fail on NOT '
+                    f'NULL instead of taking the active scope. Run `manage.py '
+                    f'makeguitarmigrations` + migrate.'
+                )
+        return findings
+
+    @staticmethod
+    def _stray_autofill_findings(expected: Coverage, live: Mapping[str, TableState]) -> list[str]:
+        """Autofill triggers the database has and the models do not expect -- the live half
+        of a rename, where the orphan still dereferences a dropped column and breaks every
+        INSERT. Full-repo only: a scoped run cannot tell "not mine" from "gone"."""
+        wanted: dict[str, set[str]] = {}
+        for table, coverage in expected.tables.items():
+            for host, columns in (
+                (table, coverage.autofill_columns),
+                (coverage.owner_table, coverage.owner_autofill_columns),
+            ):
+                if columns and host:
+                    wanted.setdefault(host, set()).update(
+                        autofill_function_name(dimension, column)
+                        for dimension, column in columns.items()
+                    )
+        return [
+            f"'{state.schema}.{table}': has tenant autofill trigger(s) calling {stray} that "
+            f'the models no longer expect. A renamed dimension or column leaves the old '
+            f'trigger dereferencing a dropped column, failing every INSERT on this table. '
+            f'Run `manage.py makeguitarmigrations` + migrate.'
+            for table, state in sorted(live.items())
+            if (
+                stray := sorted(
+                    function
+                    for function in state.autofill_functions - wanted.get(table, set())
+                    if function.startswith(AUTOFILL_FUNCTION_PREFIX)
+                )
             )
-        return None
+        ]
 
     @staticmethod
     def _predicate_drift(table: str, coverage: TableCoverage, state: TableState) -> str | None:
@@ -327,8 +382,8 @@ class Command(BaseCommand):
             if drift := self._predicate_drift(table, expected.tables[table], state):
                 drifted.append(drift)
                 unhealthy.add(table)
-            if autofill_drift := self._autofill_drift(table, expected.tables[table], state):
-                drifted.append(autofill_drift)
+            if autofill_drift := self._autofill_drift(table, expected.tables[table], live):
+                drifted.extend(autofill_drift)
                 unhealthy.add(table)
             if not state.rls_forced:
                 unforced.append(table)
@@ -345,6 +400,8 @@ class Command(BaseCommand):
             if not requested
             else []
         )
+        if not requested:
+            drifted.extend(self._stray_autofill_findings(expected, live))
 
         # First, and before the heading: it qualifies every line that follows.
         for note in self._bypassing_role_notes(connection):

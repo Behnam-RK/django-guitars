@@ -1084,8 +1084,10 @@ def test_tenant_policy_operations_are_emitted_for_uncovered_tables():
     headers = [line for op in operations for line in op.splitlines() if line.startswith('#')]
 
     assert any(header.startswith('# Tenant RLS on "testapp_release" table!') for header in headers)
-    # One per policy-eligible table, and none for the multi-hop model.
-    assert len(headers) == 7
+    # One per policy-eligible table, and none for the multi-hop model -- asserted directly
+    # rather than left implied by the count, which every new tenanted test model shifts.
+    assert not any('testapp_review' in header for header in headers)
+    assert len(headers) == 12
     # The CREATE form, not the replacement: there was no policy to replace.
     assert not any('replaced' in header for header in headers)
 

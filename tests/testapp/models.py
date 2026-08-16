@@ -255,3 +255,95 @@ class HeadlineFestival(TouringFestival):
 
     class Meta:
         pass
+
+
+# ────────────── an ancestor that holds the column but isn't tenanted ────────────── #
+# The tenant column lives on an untenanted MTI ancestor, so the trigger relocates onto that
+# ancestor's table (ADR 0009). Three roots, because one chain's refusal would mask the rest.
+
+
+class Venue(SetarModel):
+    """Untenanted MTI root that merely *holds* a tenant column its child scopes on."""
+
+    name = CharField(max_length=100)
+    label = ForeignKey(Label, on_delete=CASCADE, related_name='venues')
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class Arena(Venue):
+    """The happy path: sole claimant, autofills, so the trigger relocates onto ``Venue``."""
+
+    seats = IntegerField(default=0)
+
+    objects = tenanted_manager(_manager_class=LiveManager, label='label', autofill=True)
+
+    class Meta:
+        pass
+
+
+class Hall(SetarModel):
+    """Root whose column two children claim, one of which opts out of autofill."""
+
+    name = CharField(max_length=100)
+    label = ForeignKey(Label, on_delete=CASCADE, related_name='halls')
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class ConcertHall(Hall):
+    """Wants the trigger; cannot have it, because ``LectureHall`` shares the table."""
+
+    stage = CharField(max_length=50, default='')
+
+    objects = tenanted_manager(_manager_class=LiveManager, label='label', autofill=True)
+
+    class Meta:
+        pass
+
+
+class LectureHall(Hall):
+    """Opts out. An MTI insert here writes a row into ``Hall``, so a trigger there would
+    overwrite the opt-out ADR 0005 makes auditable as an *absent* trigger."""
+
+    rows = IntegerField(default=0)
+
+    objects = tenanted_manager(_manager_class=LiveManager, label='label', autofill=False)
+
+    class Meta:
+        pass
+
+
+class Court(SetarModel):
+    """Root whose one column two children claim under *different* dimensions."""
+
+    name = CharField(max_length=100)
+    label = ForeignKey(Label, on_delete=CASCADE, related_name='courts')
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class TennisCourt(Court):
+    """Claims ``Court.label_id`` as the ``label`` dimension."""
+
+    net_height = IntegerField(default=0)
+
+    objects = tenanted_manager(_manager_class=LiveManager, label='label', autofill=True)
+
+    class Meta:
+        pass
+
+
+class SquashCourt(Court):
+    """Claims the *same column* as ``market`` -- a second GUC, so a second trigger would
+    race the first on one table in name order, an ordering nobody declared."""
+
+    walls = IntegerField(default=4)
+
+    objects = tenanted_manager(_manager_class=LiveManager, market='label', autofill=True)
+
+    class Meta:
+        pass

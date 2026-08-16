@@ -832,10 +832,11 @@ class OperationsMixin:
         build_ops: Callable[[AppConfig], list[str]],
         check_only: bool,
         dependencies_for: Callable[[str], list[tuple[str, str]]] | None = None,
+        adopt: bool = False,
     ) -> tuple[bool, list[tuple[str, list[str]]]]:
         """Scaffold-and-write one migration per in-scope app with new operations. Shared by
-        ``handle()`` and :meth:`_handle_force_rls_stage`, once near-identical copies.
-        Returns ``(changes_made, check_missing)`` since callers flush different warnings."""
+        ``handle()`` and :meth:`_handle_force_rls_stage`, once near-identical copies. Returns
+        ``(changes_made, check_missing)``: callers flush different warnings. See *adopt* below."""
         changes_made = False
         check_missing: list[tuple[str, list[str]]] = []
         for app in django_apps.get_app_configs():
@@ -847,12 +848,12 @@ class OperationsMixin:
                 continue
 
             operations_digest = _generator.digest_of(operations)
-            # Retirement breaks the file-digest guard's assumption that an operation set never
-            # recurs: retire an autofill trigger, re-adopt it, and the CREATE is byte-identical
-            # to an earlier migration's. Past one, the exact per-operation guards stand alone.
-            if (
-                app.label not in self.existing.autofill_retirement_apps
-                and operations_digest in self.existing.existing_digests.get(app.label, set())
+            # Retirement makes an operation set recur (retire, re-adopt, same CREATE), so the
+            # guard must yield -- but never under *adopt*, where it is the only idempotency
+            # there is. Safe: the adopt form's DROP ... IF EXISTS digests differently.
+            waive_digest_guard = not adopt and app.label in self.existing.autofill_retirement_apps
+            if not waive_digest_guard and operations_digest in self.existing.existing_digests.get(
+                app.label, set()
             ):
                 continue
 

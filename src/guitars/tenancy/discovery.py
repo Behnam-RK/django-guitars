@@ -20,6 +20,11 @@ if TYPE_CHECKING:
     from django.apps import AppConfig
     from django.db import models
 
+    #: ``(owner, column) -> _relocatable``'s answer, threaded through one ``app_coverage``
+    #: call. That resolution sweeps the *whole* model registry and ``_classify`` runs once
+    #: per descendant, so N children of one ancestor otherwise ask it N times over.
+    _RelocationMemo = dict[tuple[type[models.Model], str], tuple[str | None, str | None]]
+
 
 __all__ = [
     'AUTOFILL_FUNCTION_PREFIX',
@@ -132,8 +137,12 @@ class Coverage(NamedTuple):
     notes: list[str]
 
 
-def _classify(model: type[models.Model]) -> tuple[TableCoverage | None, list[str]]:
-    """Split a model's tenant dimensions into own-table and ancestor-held, or explain why not."""
+def _classify(
+    model: type[models.Model], memo: _RelocationMemo | None = None
+) -> tuple[TableCoverage | None, list[str]]:
+    """Split a model's tenant dimensions into own-table and ancestor-held, or explain why not.
+    *memo* is a caller-owned cache of :func:`_relocatable` answers, shared across the
+    descendants of one ancestor -- see its type alias for why that matters."""
     spec = tenant_spec(model)
     notes: list[str] = []
 
@@ -203,11 +212,14 @@ def _classify(model: type[models.Model]) -> tuple[TableCoverage | None, list[str
     # every model sharing that one trigger agrees it should exist.
     autofill_columns = dict(own) if own and _autofills(model) else None
     relocated: dict[str, str] = {}
-    if by_owner:
+    # ``_autofills`` short-circuits ``_relocatable``'s registry sweep and cannot change its
+    # answer: *model* claims every column in ``owner_columns``, so one that does not autofill
+    # is always refused. The note is unaffected -- ``owner_autofill_notes`` computes its own.
+    if by_owner and _autofills(model):
         relocated = {
             dimension: column
             for dimension, column in owner_columns.items()
-            if _relocatable(owner, column)[0] == dimension
+            if _relocatable(owner, column, memo)[0] == dimension
         }
 
     return (
@@ -224,11 +236,14 @@ def _classify(model: type[models.Model]) -> tuple[TableCoverage | None, list[str
     )
 
 
-def _owner_column_claims(owner: type[models.Model], column: str) -> dict[type[models.Model], str]:
-    """Every concrete model whose tenant scoping resolves *column* to *owner*'s table, mapped
-    to the dimension it claims it under -- *owner* included when tenanted on it. One trigger
-    is shared by all of them, so whether to stamp it is their joint decision, not any one's."""
+def _owner_column_claims(
+    owner: type[models.Model], column: str
+) -> tuple[dict[type[models.Model], str], set[str]]:
+    """Every concrete model resolving *column* to *owner*'s table, mapped to the dimension it
+    claims it under, plus that dimension *set* -- returned, not read back off the values,
+    since one model naming two dimensions would overwrite itself and slip past rule 2."""
     claims: dict[type[models.Model], str] = {}
+    dimensions: set[str] = set()
     for model in django_apps.get_models():
         if not (model is owner or issubclass(model, owner)) or _meta(model).proxy:
             continue
@@ -236,16 +251,30 @@ def _owner_column_claims(owner: type[models.Model], column: str) -> dict[type[mo
             field = _meta(model).get_field(field_name)
             if field.column == column and column_owner(model, field_name) is owner:
                 claims[model] = dimension
-    return claims
+                dimensions.add(dimension)
+    return claims, dimensions
 
 
-def _relocatable(owner: type[models.Model], column: str) -> tuple[str | None, str | None]:
+def _relocatable(
+    owner: type[models.Model], column: str, memo: _RelocationMemo | None = None
+) -> tuple[str | None, str | None]:
+    """:func:`_resolve_relocatable`, answered from *memo* when the caller supplies one. Split
+    from the rules themselves so the whole-registry sweep below runs once per
+    ``(owner, column)`` rather than once per descendant asking about the same one."""
+    if memo is None:
+        return _resolve_relocatable(owner, column)
+    key = (owner, column)
+    if key not in memo:
+        memo[key] = _resolve_relocatable(owner, column)
+    return memo[key]
+
+
+def _resolve_relocatable(owner: type[models.Model], column: str) -> tuple[str | None, str | None]:
     """``(dimension to relocate under, refusal note)``. At most one is set; both are ``None``
     when *owner* already autofills *column* itself, which is the MTI case that was always
     correct -- the ancestor's own trigger fires on the row Django writes into its table."""
-    claims = _owner_column_claims(owner, column)
+    claims, dimensions = _owner_column_claims(owner, column)
     owner_table = _meta(owner).db_table
-    dimensions = set(claims.values())
 
     # Nobody wants it, so there is nothing to refuse. Checked before the conflicts below so
     # a column no claimant autofills stays silent rather than earning a note about a trigger
@@ -336,18 +365,36 @@ def _skip_note(model: type[models.Model], spec: dict[str, str]) -> str:
     )
 
 
+def _proxy_note(model: type[models.Model]) -> str:
+    """A proxy's tenanted manager buys no enforcement. Named rather than dropped in silence:
+    the manager reads like the concrete model's, so nothing else says the table went bare."""
+    return (
+        f"'{_meta(model).db_table}' skipped: '{model.__name__}' is a proxy, which owns no "
+        f'columns of its own, so its tenanted manager cannot be turned into a policy or an '
+        f'autofill trigger. Declare tenanted_manager() on '
+        f"'{_meta(model).concrete_model.__name__}' instead. Python scoping still applies."
+    )
+
+
 def app_coverage(app: AppConfig) -> Coverage:
     """Policy-eligible tables for one app -- proxies are skipped, their concrete model
     contributing the same table."""
     tables: dict[str, TableCoverage] = {}
     notes: list[str] = []
+    # Owned by this call, not module-level: the model registry moves between calls (a test
+    # registering a model, an app loaded late), and a stale answer here retires a trigger.
+    memo: _RelocationMemo = {}
     for model in app.get_models():
-        # A proxy has no ``local_fields``, so ``owns_column`` is False for every dimension it
-        # *inherits* and ``_classify`` returns a self-join with no columns and no autofill.
-        # Keyed by db_table, that answer overwrote the real one -- and retired its trigger.
-        if _meta(model).proxy or not tenant_spec(model):
+        if not tenant_spec(model):
             continue
-        coverage, model_notes = _classify(model)
+        if _meta(model).proxy:
+            # A proxy has no ``local_fields``, so ``_classify`` returns a self-join that, keyed
+            # by db_table, overwrote the real answer and retired its trigger. Silent where the
+            # concrete model covers the table; a manager *on* the proxy does not, so it is named.
+            if not tenant_spec(_meta(model).concrete_model):
+                notes.append(_proxy_note(model))
+            continue
+        coverage, model_notes = _classify(model, memo)
         notes.extend(model_notes)
         if coverage is not None:
             tables[_meta(model).db_table] = coverage

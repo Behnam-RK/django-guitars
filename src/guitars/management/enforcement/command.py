@@ -465,6 +465,7 @@ class Command(OperationsMixin, BaseCommand):
             build_ops=lambda app: self._build_operations(app, adopt=adopt),
             check_only=check_only,
             dependencies_for=self._function_dependencies_for,
+            adopt=adopt,
         )
         changes_made = changes_made or stage_changed
 

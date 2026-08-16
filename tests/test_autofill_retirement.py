@@ -212,12 +212,13 @@ class TestTheFileDigestGuardYieldsToRetirement:
 
     _OPERATIONS = ['# pretend!\nmigrations.RunSQL(\n    sql="",\n    reverse_sql="",\n),\n']
 
-    def _missing(self, command) -> list[tuple[str, list[str]]]:
+    def _missing(self, command, *, adopt: bool = False) -> list[tuple[str, list[str]]]:
         _, missing = command._generate_stage(
             {'testapp'},
             migration_name='auto_enforcement',
             build_ops=lambda app: list(self._OPERATIONS),
             check_only=True,
+            adopt=adopt,
         )
         return missing
 
@@ -232,6 +233,15 @@ class TestTheFileDigestGuardYieldsToRetirement:
         _command.existing.autofill_retirement_apps.add('testapp')
 
         assert self._missing(_command) == [('testapp', self._OPERATIONS)]
+
+    def test_adopt_keeps_the_guard_because_it_re_emits_everything(self, _command):
+        """``--adopt`` re-emits everything by design, so this guard is its only idempotency:
+        waiving it appends a byte-identical migration every run. No waiver is needed there
+        anyway -- the adopt form's ``DROP ... IF EXISTS`` digests differently from history."""
+        _command.existing.existing_digests['testapp'] = {_generator.digest_of(self._OPERATIONS)}
+        _command.existing.autofill_retirement_apps.add('testapp')
+
+        assert self._missing(_command, adopt=True) == []
 
 
 class TestNotesRatherThanOperations:

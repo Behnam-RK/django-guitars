@@ -7,6 +7,7 @@ from __future__ import annotations
 import pytest
 from django.apps import apps as django_apps
 
+from guitars.tenancy import tenanted_manager
 from guitars.tenancy.discovery import TableCoverage, app_coverage, expected_coverage, is_local
 from tests.testapp.models import (
     Booking,
@@ -16,6 +17,7 @@ from tests.testapp.models import (
     Review,
     StadiumTour,
     Tour,
+    Venue,
     WorldTour,
 )
 
@@ -39,6 +41,23 @@ def release_proxy():
     yield ReleaseProxy
     # ``AppConfig.models`` *is* ``apps.all_models[label]``, so one pop withdraws both.
     django_apps.all_models['testapp'].pop('releaseproxy', None)
+    django_apps.clear_cache()
+
+
+@pytest.fixture
+def venue_proxy():
+    """A proxy declaring the tenanted manager its *concrete* model does not have -- the one
+    shape where skipping proxies loses coverage rather than restoring it."""
+
+    class VenueProxy(Venue):
+        objects = tenanted_manager(label='label')
+
+        class Meta:
+            proxy = True
+            app_label = 'testapp'
+
+    yield VenueProxy
+    django_apps.all_models['testapp'].pop('venueproxy', None)
     django_apps.clear_cache()
 
 
@@ -69,6 +88,24 @@ class TestWhichTablesAreCovered:
         assert release.columns == {'label': 'label_id'}
         assert release.autofill_columns == {'label': 'label_id'}
         assert release.owner_table is None
+
+    def test_a_proxy_tenanted_on_its_own_is_named_rather_than_dropped_in_silence(
+        self, venue_proxy
+    ):
+        """Skipping proxies is right, but a manager declared *on* one is the case where the
+        concrete model contributes nothing in its place. Left silent, a model that reads as
+        tenanted gets no policy and no trigger and nothing anywhere says so."""
+        coverage = app_coverage(django_apps.get_app_config('testapp'))
+
+        assert Venue._meta.db_table not in coverage.tables
+        assert [note for note in coverage.notes if 'VenueProxy' in note]
+
+    def test_a_proxy_inheriting_the_manager_earns_no_note(self, release_proxy):
+        """Its concrete model already covers the table, so a note would name a gap that
+        isn't one -- the "two notes for one fact" this module avoids elsewhere."""
+        coverage = app_coverage(django_apps.get_app_config('testapp'))
+
+        assert not [note for note in coverage.notes if 'ReleaseProxy' in note]
 
     def test_the_tenant_model_itself_is_not_covered(self, coverage):
         """``Label`` *is* the tenant. Scoping it to itself is meaningless, and a policy on it

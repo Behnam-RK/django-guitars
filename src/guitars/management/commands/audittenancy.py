@@ -406,10 +406,18 @@ class Command(BaseCommand):
             else []
         )
         if not requested:
+            # The ADR 0009 shape: an untenanted ancestor is nowhere in `expected.tables` and
+            # cannot be subtracted itself, but its orphan fails every descendant's INSERT.
+            # Untreated the heading reads "N expected, N enforced, 1 not matching the models".
+            dependents: dict[str, set[str]] = {}
+            for child, child_coverage in expected.tables.items():
+                if child_coverage.owner_table:
+                    dependents.setdefault(child_coverage.owner_table, set()).add(child)
             for table, finding in self._stray_autofill_findings(expected, live):
                 drifted.append(finding)
                 # Only an expected table can be *subtracted* from the expected count; a
                 # stray on a table the models dropped entirely is reported, not counted.
+                unhealthy |= dependents.get(table, set())
                 if table in expected.tables:
                     unhealthy.add(table)
 

@@ -493,13 +493,13 @@ class OperationsMixin:
         return self._autofill_key_maps()[1]
 
     def _scoped_autofill_gap_notes(self, requested: set[str]) -> list[str]:
-        """Relocated autofill triggers this scoped run won't create -- keyed off the app
-        hosting the *ancestor's* table, so scoping that app out skips it. Closed by a later,
-        unscoped run; the same pragmatic tradeoff cross-app cascade rules already make."""
-        if not requested:
+        """Autofill triggers this scoped run won't touch: a relocated one it won't create
+        (keyed off the app hosting the *ancestor's* table) and a stale one it won't retire.
+        Closed by a later unscoped run -- the tradeoff cross-app cascade rules already make."""
+        if not requested or not self._tenant_policies_enabled():
             return []
         hosting = self._table_app_labels()
-        return [
+        notes = [
             f"Tenant autofill trigger on '{table}' (function '{function}') skipped: the "
             f"tenant column lives on that ancestor, whose app '{hosting[table]}' is not in "
             f'this scoped run.'
@@ -508,6 +508,19 @@ class OperationsMixin:
             and hosting[table] not in requested
             and (table, function) not in self.existing.tenant_autofill
         ]
+        # The other direction, and the dangerous half to leave silent: an orphaned trigger
+        # dereferences a dropped column and fails *every* INSERT on its table, so a scoped
+        # run that cannot retire it has to say which app to name instead.
+        required = self._required_autofill_keys()
+        notes.extend(
+            f"Tenant autofill trigger on '{table}' (function '{function}') is recorded but "
+            f"no longer required, and the app hosting that table, '{hosting[table]}', is not "
+            f'in this scoped run, so it was not retired. Re-run without a scope, or name '
+            f'that app.'
+            for table, function in sorted(set(self.existing.tenant_autofill) - set(required))
+            if table in hosting and hosting[table] not in requested
+        )
+        return notes
 
     def _tenant_autofill_operations(self, app: AppConfig, *, adopt: bool = False) -> list[str]:
         """``BEFORE INSERT`` autofill triggers *app* is missing or has outdated (ADR 0005), on
@@ -832,7 +845,13 @@ class OperationsMixin:
                 continue
 
             operations_digest = _generator.digest_of(operations)
-            if operations_digest in self.existing.existing_digests.get(app.label, set()):
+            # Retirement breaks the file-digest guard's assumption that an operation set never
+            # recurs: retire an autofill trigger, re-adopt it, and the CREATE is byte-identical
+            # to an earlier migration's. Past one, the exact per-operation guards stand alone.
+            if (
+                app.label not in self.existing.autofill_retirement_apps
+                and operations_digest in self.existing.existing_digests.get(app.label, set())
+            ):
                 continue
 
             if check_only:

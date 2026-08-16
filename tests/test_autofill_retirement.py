@@ -82,6 +82,22 @@ class TestScanningSubtracts:
 
         assert _KEY not in existing.tenant_autofill
 
+    def test_a_retirement_marks_its_app(self, monkeypatch):
+        """The file-level ``[DIGEST:...]`` guard assumes an app's operation set never
+        recurs. Retirement breaks that, so the scan has to say which apps it broke it for."""
+        existing = _scan_with(
+            monkeypatch,
+            _header(HEADER_TENANT_AUTOFILL),
+            _header(HEADER_TENANT_AUTOFILL_RETIRED),
+        )
+
+        assert 'testapp' in existing.autofill_retirement_apps
+
+    def test_an_app_that_never_retired_is_not_marked(self, monkeypatch):
+        existing = _scan_with(monkeypatch, _header(HEADER_TENANT_AUTOFILL))
+
+        assert existing.autofill_retirement_apps == set()
+
     def test_a_retirement_does_not_pop_a_different_function_on_the_same_table(
         self, monkeypatch
     ):
@@ -189,6 +205,35 @@ class TestRetirementEmission:
         assert ('testapp', '0019_auto_enforcement') in _command._function_dependencies_for(blob)
 
 
+class TestTheFileDigestGuardYieldsToRetirement:
+    """Retire a trigger, then re-adopt it, and the plain CREATE the second run builds is
+    byte-identical to the one the original migration carries -- so is its file digest. The
+    guard would then skip writing it, leaving the trigger dropped with ``--check`` green."""
+
+    _OPERATIONS = ['# pretend!\nmigrations.RunSQL(\n    sql="",\n    reverse_sql="",\n),\n']
+
+    def _missing(self, command) -> list[tuple[str, list[str]]]:
+        _, missing = command._generate_stage(
+            {'testapp'},
+            migration_name='auto_enforcement',
+            build_ops=lambda app: list(self._OPERATIONS),
+            check_only=True,
+        )
+        return missing
+
+    def test_a_recurring_digest_is_skipped_without_a_retirement(self, _command):
+        """The guard itself, unchanged for an app whose history only ever added."""
+        _command.existing.existing_digests['testapp'] = {_generator.digest_of(self._OPERATIONS)}
+
+        assert self._missing(_command) == []
+
+    def test_a_recurring_digest_is_written_once_the_app_has_retired_something(self, _command):
+        _command.existing.existing_digests['testapp'] = {_generator.digest_of(self._OPERATIONS)}
+        _command.existing.autofill_retirement_apps.add('testapp')
+
+        assert self._missing(_command) == [('testapp', self._OPERATIONS)]
+
+
 class TestNotesRatherThanOperations:
     def test_a_table_no_local_model_maps_to_is_named_not_retired(self, _command):
         """There is no app to write the migration into, and this generator has no
@@ -201,6 +246,17 @@ class TestNotesRatherThanOperations:
         assert len(notes) == 1
         assert 'gone_table' in notes[0]
         assert f'DROP TRIGGER "{autofill_trigger_name(_STALE)}" ON "gone_table";' in notes[0]
+
+    def test_a_scoped_run_names_the_retirement_it_could_not_write(self, _command):
+        """The dangerous half to leave silent: the orphan dereferences a dropped column and
+        fails every INSERT on its table until some later, wider run retires it."""
+        notes = _command._scoped_autofill_gap_notes({'other_app'})
+
+        assert [note for note in notes if _TABLE in note and 'not retired' in note]
+
+    def test_an_unscoped_run_has_no_retirement_gap(self, _command):
+        """It writes the retirement itself, so there is nothing to warn about."""
+        assert _command._scoped_autofill_gap_notes(set()) == []
 
     def test_an_orphaned_function_is_named_not_dropped(self, _command):
         """Inert: DROP FUNCTION must follow every trigger depending on it, and a scoped run

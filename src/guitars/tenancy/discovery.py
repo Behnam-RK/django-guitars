@@ -11,8 +11,9 @@ from django.apps import apps as django_apps
 from guitars.gucs import BYPASS_GUC, guc_name
 from guitars.introspection import column_owner, owns_column
 from guitars.local_apps import is_local
+from guitars.sql._identifiers import _safe_identifier
 
-from .spec import _meta, local_tenant_fields, tenant_spec
+from .spec import _autofills, _meta, local_tenant_fields, tenant_spec
 
 
 if TYPE_CHECKING:
@@ -25,9 +26,25 @@ __all__ = [
     'PolicyKwargs',
     'TableCoverage',
     'app_coverage',
+    'autofill_function_name',
+    'autofill_trigger_name',
     'expected_coverage',
     'is_local',
 ]
+
+
+def autofill_function_name(dimension: str, column: str) -> str:
+    """Bare name of the trigger function filling *column* from *dimension*'s GUC. The
+    length prefix keeps ``('a', 'b_c')`` and ``('a_b', 'c')`` apart, the same collision
+    ``_related_rule_name`` guards against; callers quote it, ``audittenancy`` does not."""
+    return _safe_identifier(f'guitars_fill_{len(dimension)}_{dimension}_{column}')
+
+
+def autofill_trigger_name(function: str) -> str:
+    """Bare name of the trigger calling *function*. Derived, not fixed: a trigger name is
+    unique **per table**, and a table tenanted on two local dimensions needs one trigger per
+    (column, GUC) pair -- under a constant name the second ``CREATE TRIGGER`` collided."""
+    return _safe_identifier(f'{function}_trigger')
 
 
 class PolicyKwargs(TypedDict, total=False):
@@ -52,6 +69,10 @@ class TableCoverage(NamedTuple):
     owner_pk: str | None = None
     child_pk: str | None = None
     owner_columns: dict[str, str] | None = None
+    #: ``{dimension: column}`` this table's own INSERT trigger fills from scope (ADR 0005).
+    #: Own-table columns only, and only when the manager autofills -- deliberately outside
+    #: ``as_kwargs`` so adding it churns no ``[POLICY:...]`` digest and the release stays additive.
+    autofill_columns: dict[str, str] | None = None
 
     def as_kwargs(self) -> PolicyKwargs:
         """The keyword arguments ``guitars.sql.create_table_rls`` expects -- owner keys
@@ -165,6 +186,11 @@ def _classify(model: type[models.Model]) -> tuple[TableCoverage | None, list[str
         # chain shares one primary-key VALUE -- which is what makes this join sound.
         child_pk = _meta(model).pk.column
 
+    # Sourced from ``own``, never ``owner_columns``: a trigger here could not write an
+    # ancestor's column. That only *relocates* the trigger when the ancestor is itself
+    # tenanted and autofilling -- otherwise those dimensions get none, filled by pre_save.
+    autofill_columns = dict(own) if own and _autofills(model) else None
+
     return (
         TableCoverage(
             columns=own,
@@ -172,6 +198,7 @@ def _classify(model: type[models.Model]) -> tuple[TableCoverage | None, list[str
             owner_pk=owner_pk,
             child_pk=child_pk,
             owner_columns=owner_columns or None,
+            autofill_columns=autofill_columns,
         ),
         notes,
     )

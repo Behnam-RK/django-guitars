@@ -8,12 +8,14 @@ import ast
 import pytest
 from django.core.management import CommandError, call_command
 from django.db import models
+from django.db.models.signals import pre_save
 from django.test import override_settings
 
 from guitars import sql
 from guitars.management import _generator
 from guitars.management.enforcement.identity import _literal
 from guitars.models import GuitarModel, LiveManager
+from guitars.signals import DisableSignals
 from guitars.tenancy import (
     TenantScopeError,
     reporting,
@@ -120,6 +122,40 @@ class TestDimensionsOnTwoAncestors:
 
         assert len(notes) == 1
         assert 'skipped:' not in notes[0]
+
+
+# ─────────────────────────── disable-signals ───────────────────────────── #
+
+
+class TestDisableSignalsNoLongerDisablesEnforcement:
+    """The finding that motivated ADR 0005. ``DisableSignals`` suppresses ``pre_save``, which
+    is where the write guard lives, and ``update(_disable_signals=True)`` reaches it through
+    a supported argument -- so before 2.1.0 a sibling feature switched tenancy autofill off."""
+
+    def test_autofill_survives_a_suppressed_pre_save(self, tenants):
+        """The trigger does not notice ``DisableSignals``, so the row still lands in the
+        active tenant. Losing the receiver now costs the friendly message, not the fill."""
+        with DisableSignals([pre_save]), tenant(label=tenants.a):
+            release = Release(title='signals-off')
+            release.save()
+
+        with tenancy_bypassed():
+            assert Release._all_objects.get(title='signals-off').label_id == tenants.a.pk
+
+    def test_a_cross_tenant_write_is_still_refused_with_signals_off(self, tenants):
+        """The other half: suppressing the guard must not turn a refusal into a write. The
+        message is the database's now rather than the guard's, so this matches on neither."""
+        with DisableSignals([pre_save]), tenant(label=tenants.a), pytest.raises(TenantScopeError):
+            Release(title='crossed', label=tenants.b).save()
+
+    def test_the_friendly_message_is_what_is_lost(self, tenants):
+        """What the demotion actually costs, pinned so it is a known trade rather than a
+        surprise: with the guard live the error names the model, dimension and fix."""
+        with tenant(label=tenants.a), pytest.raises(TenantScopeError) as caught:
+            Release(title='crossed', label=tenants.b).save()
+
+        assert 'may not cross' in str(caught.value)
+        assert 'tenancy_bypassed()' in str(caught.value)
 
 
 # ─────────────────────────────── audit mode ────────────────────────────── #

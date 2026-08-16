@@ -32,7 +32,7 @@ The non-obvious core: **behavior is enforced by Postgres, not Python.** Three pi
 
 [`soft-deletion.md`](docs/soft-deletion.md) (rules, cascades, `hard_delete` two-phase) · [`migrations.md`](docs/migrations.md) (vocabulary, idempotency, frozen names, scaffolding, staged RLS) · [`mti.md`](docs/mti.md) (owner resolution, redirect rule, parent trigger, owner-join policy) · [`tenancy.md`](docs/tenancy.md) (both layers, settings, rollout, auditing) · [`api-reference.md`](docs/api-reference.md) (flat public-surface enumeration).
 
-Decisions that were hard to reverse and are surprising without context are ADRs — see the index at [`docs/adr/`](docs/adr/README.md). ADR-0005 is **accepted but not yet implemented** (targeted at 2.1.0): autofill today is still the `pre_save` receiver in `tenancy/enforcement.py`.
+Decisions that were hard to reverse and are surprising without context are ADRs — see the index at [`docs/adr/`](docs/adr/README.md).
 
 **Load-bearing details that are easy to break, kept here as a checklist:**
 

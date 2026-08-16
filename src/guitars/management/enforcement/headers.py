@@ -42,6 +42,11 @@ HEADER_TENANT_POLICY = '# Tenant RLS on "{table}" table! [POLICY:{identity}]'
 # POLICY, so re-emitting CREATE would fail migrate with "policy already exists".
 HEADER_TENANT_POLICY_REPLACED = '# Tenant RLS replaced on "{table}" table! [POLICY:{identity}]'
 HEADER_TENANT_FORCE = '# Tenant FORCE RLS on "{table}" table!'
+# One function per (column, GUC) pair rather than per table -- GUITARS_TENANT_FIELD is
+# project-wide, so this is normally one function, and the trigger header names the function
+# it calls so an app's dependency on that function migration can be keyed off the header.
+HEADER_TENANT_AUTOFILL_FUNCTION = '# Tenant autofill function "{function}"!'
+HEADER_TENANT_AUTOFILL = '# Tenant autofill Trigger on "{table}" table (function "{function}")!'
 
 
 # --- Deriving scanners from headers: most _RE_* are *derived* from their HEADER_*
@@ -71,6 +76,19 @@ _RE_PARENT_TRIGGER_FUNCTION = _derive_scanner(HEADER_PARENT_TRIGGER_FUNCTION)
 _RE_UPDATED_AT = _derive_scanner(HEADER_UPDATED_AT)
 _RE_SOFT_DELETE = _derive_scanner(HEADER_SOFT_DELETE)
 _RE_TENANT_FORCE = _derive_scanner(HEADER_TENANT_FORCE)
+_RE_TENANT_AUTOFILL_FUNCTION = _derive_scanner(HEADER_TENANT_AUTOFILL_FUNCTION)
+
+# Captures BOTH halves, unlike the MTI pair below: two local dimensions mean one trigger per
+# (column, GUC) pair on one table, so the table alone let the second's digest overwrite the
+# first's. A rename reads as uncovered, which is right -- the trigger is named after it.
+_RE_TENANT_AUTOFILL = re.compile(
+    rf'# Tenant autofill Trigger on "({_QUOTED_CONTENT})" table \(function "({_QUOTED_CONTENT})"\)'
+)
+#: Group numbers on :data:`_RE_TENANT_AUTOFILL`, named so the two readers of that header --
+#: the ``(table, function)`` dedupe key and ``_function_dependencies_for``'s edge to the
+#: function migration -- index it by meaning rather than by a bare 1/2.
+RE_TENANT_AUTOFILL_TABLE = 1
+RE_TENANT_AUTOFILL_FUNCTION = 2
 
 # Hand-written: fuses HEADER_SOFT_DELETE_RELATED and its _VIA sibling into one optional
 # trailing group. Stops short of the header's trailing "!", harmless since [SQL:...] is

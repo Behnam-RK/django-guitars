@@ -32,6 +32,13 @@ _BASELINE = {
         r'# Tenant RLS (?:replaced )?on "([^"]+)" table! \[POLICY:(?P<identity>\w+)\]'
     ),
     '_RE_TENANT_FORCE': re.compile(r'# Tenant FORCE RLS on "([^"]+)" table!'),
+    # Born derived/hand-written in 2.1.0 rather than converted, so these two have no
+    # pre-derivation history; the baseline is the naive `[^"]+` spelling anyway, which is
+    # what pins the escaped-quote and stop-before-the-function behaviour against the corpus.
+    '_RE_TENANT_AUTOFILL_FUNCTION': re.compile(r'# Tenant autofill function "([^"]+)"!'),
+    '_RE_TENANT_AUTOFILL': re.compile(
+        r'# Tenant autofill Trigger on "([^"]+)" table \(function "([^"]+)"\)'
+    ),
 }
 
 #: No committed migration has ever gone through the ``--force-rls`` retrofit stage, so this
@@ -45,8 +52,31 @@ _EXPECTED_EMPTY = {'_RE_TENANT_FORCE'}
 _IDENTITY_VIA_TAIL_SEARCH = {'_RE_TENANT_POLICY': identity_module._recorded_policy_identity}
 
 
+#: Scanners that read a header's *tail* rather than a header, so the corpus comparison
+#: above does not apply to them -- they have no ``HEADER_*`` template of their own.
+_NOT_HEADER_SCANNERS = {
+    '_RE_SQL_IDENTITY',
+    '_RE_POLICY_IDENTITY',
+    '_RE_FORCED',
+}
+
+
 def _corpus_text() -> str:
     return '\n'.join(path.read_text() for path in sorted(_CORPUS_DIR.glob('*.py')))
+
+
+def test_every_header_scanner_has_a_corpus_baseline():
+    """Exhaustiveness, the sibling of ``test_the_header_table_lists_every_header_the_module
+    _defines``: without it a scanner added with no baseline is simply never compared against
+    the real corpus, and reads as covered because the parametrised test still passes."""
+    defined = {
+        name
+        for name in dir(headers_module)
+        if name.startswith('_RE_') and name not in _NOT_HEADER_SCANNERS
+    }
+    assert defined == set(_BASELINE), (
+        f'header scanners with no corpus baseline: {defined - set(_BASELINE)}'
+    )
 
 
 @pytest.mark.parametrize('name', sorted(_BASELINE))

@@ -438,60 +438,59 @@ class OperationsMixin:
             if not _generator.is_local(app):
                 continue
             for model in app.get_models():
+                # Proxies come through ``get_models`` but own no table. Letting one declared
+                # in an earlier app claim the host would write the DROP (or a relocated
+                # CREATE) into an app with no ordering against the migration that created it.
+                if model._meta.proxy:
+                    continue
                 hosting.setdefault(model._meta.db_table, app.label)
         self._table_app_labels_cache = hosting
         return hosting
+
+    def _autofill_key_maps(
+        self,
+    ) -> tuple[dict[tuple[str, str], tuple[str, str]], dict[tuple[str, str], tuple[str, str]]]:
+        """``(required, relocated)``, both from **one** sweep of every local app's coverage.
+        Relocated is a subset of required, and the sweep is the expensive part -- each
+        ``_classify`` of an ancestor-owned column scans the whole model registry."""
+        required, relocated = self._required_autofill_cache, self._relocated_autofill_cache
+        if required is not None and relocated is not None:
+            return required, relocated
+        # Bound to the cache slots up front rather than at each return: the loop below fills
+        # these same objects, so one assignment covers both exits.
+        required, relocated = {}, {}
+        self._required_autofill_cache, self._relocated_autofill_cache = required, relocated
+        if not self._tenant_policies_enabled():
+            return required, relocated
+        for app in django_apps.get_app_configs():
+            if not _generator.is_local(app):
+                continue
+            for table, coverage in app_coverage(app).tables.items():
+                for dimension, column in (coverage.autofill_columns or {}).items():
+                    required[(table, autofill_function_name(dimension, column))] = (
+                        dimension,
+                        column,
+                    )
+                # A relocated dimension's trigger lives on the ancestor's table, so it is
+                # keyed there -- and several children may resolve to the same one key.
+                if not (coverage.owner_autofill_columns and coverage.owner_table):
+                    continue
+                for dimension, column in coverage.owner_autofill_columns.items():
+                    key = (coverage.owner_table, autofill_function_name(dimension, column))
+                    required[key] = relocated[key] = (dimension, column)
+        return required, relocated
 
     def _required_autofill_keys(self) -> dict[tuple[str, str], tuple[str, str]]:
         """Every ``(table, function)`` the models currently require -> its ``(dimension,
         column)``. Deliberately project-wide: retirement subtracts from this, and a scoped
         view would read another app's live trigger as no longer required and drop it."""
-        if self._required_autofill_cache is not None:
-            return self._required_autofill_cache
-        # Bound to the cache slot up front rather than at each return: the loop below fills
-        # this same object, so one assignment covers both exits.
-        required: dict[tuple[str, str], tuple[str, str]] = {}
-        self._required_autofill_cache = required
-        if not self._tenant_policies_enabled():
-            return required
-        for app in django_apps.get_app_configs():
-            if not _generator.is_local(app):
-                continue
-            for table, coverage in app_coverage(app).tables.items():
-                pairs = [(table, coverage.autofill_columns)]
-                # A relocated dimension's trigger lives on the ancestor's table, so it is
-                # keyed there -- and several children may resolve to the same one key.
-                if coverage.owner_autofill_columns and coverage.owner_table:
-                    pairs.append((coverage.owner_table, coverage.owner_autofill_columns))
-                for host_table, columns in pairs:
-                    for dimension, column in (columns or {}).items():
-                        required[(host_table, autofill_function_name(dimension, column))] = (
-                            dimension,
-                            column,
-                        )
-        return required
+        return self._autofill_key_maps()[0]
 
     def _relocated_autofill_keys(self) -> dict[tuple[str, str], tuple[str, str]]:
         """The subset of :meth:`_required_autofill_keys` whose trigger sits on an MTI
         ancestor's table. Project-wide on purpose: the child declaring the dimension may be
         out of a scoped run while the owner hosting the trigger is in it."""
-        if self._relocated_autofill_cache is not None:
-            return self._relocated_autofill_cache
-        # Bound to the cache slot up front, for the reason above.
-        relocated: dict[tuple[str, str], tuple[str, str]] = {}
-        self._relocated_autofill_cache = relocated
-        if not self._tenant_policies_enabled():
-            return relocated
-        for app in django_apps.get_app_configs():
-            if not _generator.is_local(app):
-                continue
-            for coverage in app_coverage(app).tables.values():
-                if not (coverage.owner_autofill_columns and coverage.owner_table):
-                    continue
-                for dimension, column in coverage.owner_autofill_columns.items():
-                    key = (coverage.owner_table, autofill_function_name(dimension, column))
-                    relocated[key] = (dimension, column)
-        return relocated
+        return self._autofill_key_maps()[1]
 
     def _scoped_autofill_gap_notes(self, requested: set[str]) -> list[str]:
         """Relocated autofill triggers this scoped run won't create -- keyed off the app
@@ -511,9 +510,9 @@ class OperationsMixin:
         ]
 
     def _tenant_autofill_operations(self, app: AppConfig, *, adopt: bool = False) -> list[str]:
-        """``BEFORE INSERT`` autofill triggers *app* is missing or has outdated (ADR 0005).
-        Emitted only where coverage reports a *local* tenant column on a manager that
-        autofills, so a model opting out is auditable as an absent trigger."""
+        """``BEFORE INSERT`` autofill triggers *app* is missing or has outdated (ADR 0005), on
+        *app*'s own tables plus any ancestor table it hosts for a relocated dimension (ADR
+        0009). Only where a manager autofills, so an opt-out is auditable as an absent one."""
         if not self._tenant_policies_enabled():
             return []
 

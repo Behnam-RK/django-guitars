@@ -284,7 +284,9 @@ def _relocatable(owner: type[models.Model], column: str) -> tuple[str | None, st
         # would emit a second CREATE TRIGGER on that table and fail migrate.
         return None, None
 
-    return (next(iter(dimensions)), None) if dimensions else (None, None)
+    # Exactly one dimension by here: an empty ``claims`` returns at rule 1 above, and more
+    # than one is refused at rule 2 -- so this is the single dimension every claimant agrees on.
+    return next(iter(dimensions)), None
 
 
 def owner_autofill_notes() -> list[str]:
@@ -295,7 +297,10 @@ def owner_autofill_notes() -> list[str]:
     # doesn't re-run the whole-registry scan ``_relocatable`` performs.
     seen: dict[tuple[type[models.Model], str], str] = {}
     for model in django_apps.get_models():
-        if _meta(model).proxy or not tenant_spec(model):
+        # Local claimants only, matching ``expected_coverage``'s gate: a third-party app's
+        # models produce no coverage, so a refusal about one names a trigger never to be
+        # emitted. ``_relocatable`` below still counts *every* descendant's opt-out.
+        if _meta(model).proxy or not tenant_spec(model) or not is_local(_meta(model).app_config):
             continue
         for field_name in local_tenant_fields(model).values():
             if owns_column(model, field_name):

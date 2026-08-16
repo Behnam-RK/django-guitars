@@ -186,9 +186,9 @@ def _classify(model: type[models.Model]) -> tuple[TableCoverage | None, list[str
         # chain shares one primary-key VALUE -- which is what makes this join sound.
         child_pk = _meta(model).pk.column
 
-    # Sourced from ``own``, never ``owner_columns``: an MTI child's inherited tenant column
-    # lives on the ancestor's table, so the ancestor -- which this same loop reaches with the
-    # column local to it -- carries the trigger, as cascade rules go to the owner's app.
+    # Sourced from ``own``, never ``owner_columns``: a trigger here could not write an
+    # ancestor's column. That only *relocates* the trigger when the ancestor is itself
+    # tenanted and autofilling -- otherwise those dimensions get none, filled by pre_save.
     autofill_columns = dict(own) if own and _autofills(model) else None
 
     return (

@@ -1,6 +1,6 @@
 """Audit a live database's tenant RLS enforcement against the models -- the gate to run
 after a deploy, since ``makeguitarmigrations --check`` only proves migrations exist, not
-that they ran or still bind. See ``docs/tenancy.md``'s "Auditing" for the five findings."""
+that they ran or still bind. See ``docs/tenancy.md``'s "Auditing" for the findings."""
 
 from __future__ import annotations
 

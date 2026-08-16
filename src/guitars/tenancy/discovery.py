@@ -253,15 +253,24 @@ def _relocatable(owner: type[models.Model], column: str) -> tuple[str | None, st
     if not any(_autofills(claimant) for claimant in claims):
         return None, None
 
+    owner_fills_it = owner in claims and _autofills(owner)
     if len(dimensions) > 1:
+        # The split the opted-out pair below also makes: "left to Python scoping" holds only
+        # where no trigger exists. Where the owner autofills this column, one does, stamping
+        # every descendant's row from *that* dimension's GUC -- a different, louder fact.
+        outcome = (
+            f"its owner's own trigger fills it from the '{claims[owner]}' dimension for "
+            f'every descendant inserted through this table'
+            if owner_fills_it
+            else 'left to Python scoping'
+        )
         return None, (
             f"'{owner_table}'.{column} is claimed as tenant dimensions {sorted(dimensions)} "
             f'by {sorted(_meta(m).db_table for m in claims)}, so autofilling it would need '
-            f'two triggers racing on one table in name order -- left to Python scoping.'
+            f'two triggers racing on one table in name order -- {outcome}.'
         )
 
     opted_out = sorted(_meta(m).db_table for m in claims if not _autofills(m))
-    owner_fills_it = owner in claims and _autofills(owner)
     if opted_out and owner_fills_it:
         # Same refusal, different *fact*: the owner's own ``autofill_columns`` already puts a
         # trigger on this table, so "left to Python scoping" below would be false -- the
@@ -328,12 +337,15 @@ def _skip_note(model: type[models.Model], spec: dict[str, str]) -> str:
 
 
 def app_coverage(app: AppConfig) -> Coverage:
-    """Policy-eligible tables for one app -- proxies share their concrete model's table,
-    so tables dedupe naturally via the dict key."""
+    """Policy-eligible tables for one app -- proxies are skipped, their concrete model
+    contributing the same table."""
     tables: dict[str, TableCoverage] = {}
     notes: list[str] = []
     for model in app.get_models():
-        if not tenant_spec(model):
+        # A proxy has no ``local_fields``, so ``owns_column`` is False for every dimension it
+        # *inherits* and ``_classify`` returns a self-join with no columns and no autofill.
+        # Keyed by db_table, that answer overwrote the real one -- and retired its trigger.
+        if _meta(model).proxy or not tenant_spec(model):
             continue
         coverage, model_notes = _classify(model)
         notes.extend(model_notes)

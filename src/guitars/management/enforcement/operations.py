@@ -644,7 +644,9 @@ class OperationsMixin:
         return [
             f"Tenant autofill function '{function}' is no longer called by any trigger this "
             f'command records. It is inert; retire it deliberately once you are sure no '
-            f'hand-written trigger uses it: '
+            f"hand-written trigger uses it -- and note that a retirement migration's "
+            f'reverse_sql recreates the trigger calling it, so dropping it makes that '
+            f'migration irreversible: '
             f'{_triggers._DROP_TENANT_AUTOFILL_FUNCTION.format(function=_identifiers._safe_ident(function)).strip()}'
             for function in sorted(
                 set(self.existing.tenant_autofill_function_dependencies) - called

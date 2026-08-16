@@ -25,6 +25,23 @@ def coverage():
     return app_coverage(django_apps.get_app_config('testapp'))
 
 
+@pytest.fixture
+def release_proxy():
+    """A proxy over a tenanted model, registered for one test and withdrawn afterwards --
+    left in the registry it would join every other test's model sweep (and, through
+    ``reverse_relations_mapping``, the generator's cascade candidates)."""
+
+    class ReleaseProxy(Release):
+        class Meta:
+            proxy = True
+            app_label = 'testapp'
+
+    yield ReleaseProxy
+    # ``AppConfig.models`` *is* ``apps.all_models[label]``, so one pop withdraws both.
+    django_apps.all_models['testapp'].pop('releaseproxy', None)
+    django_apps.clear_cache()
+
+
 class TestWhichTablesAreCovered:
     def test_every_tenanted_table_and_nothing_else(self, coverage):
         assert set(coverage.tables) == {
@@ -41,6 +58,17 @@ class TestWhichTablesAreCovered:
             'testapp_track',
             'testapp_worldtour',
         }
+
+    def test_a_proxy_does_not_overwrite_its_concrete_models_coverage(self, release_proxy):
+        """A proxy has no ``local_fields``, so ``_classify`` can only read it as an MTI child
+        of its own table. Declared after ``Release``, that answer replaced the real one: the
+        policy became a self-join and merely adding a proxy generated a ``DROP TRIGGER``."""
+        coverage = app_coverage(django_apps.get_app_config('testapp'))
+        release = coverage.tables[Release._meta.db_table]
+
+        assert release.columns == {'label': 'label_id'}
+        assert release.autofill_columns == {'label': 'label_id'}
+        assert release.owner_table is None
 
     def test_the_tenant_model_itself_is_not_covered(self, coverage):
         """``Label`` *is* the tenant. Scoping it to itself is meaningless, and a policy on it

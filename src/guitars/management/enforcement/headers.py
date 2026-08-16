@@ -78,15 +78,17 @@ _RE_SOFT_DELETE = _derive_scanner(HEADER_SOFT_DELETE)
 _RE_TENANT_FORCE = _derive_scanner(HEADER_TENANT_FORCE)
 _RE_TENANT_AUTOFILL_FUNCTION = _derive_scanner(HEADER_TENANT_AUTOFILL_FUNCTION)
 
-# Hand-written like the MTI pair below: deriving would also capture `function`, so a renamed
-# function (what a changed GUITARS_TENANT_FIELD causes) would read the table's recorded
-# trigger as uncovered and duplicate its CREATE, rather than as stale and replace it.
-_RE_TENANT_AUTOFILL = re.compile(rf'# Tenant autofill Trigger on "({_QUOTED_CONTENT})" table')
-# Reads the function name off the same header, for _function_dependencies_for: an app gets
-# an edge to the function migrations its own triggers call, and to no others.
-_RE_TENANT_AUTOFILL_FUNCTION_REF = re.compile(
-    rf'# Tenant autofill Trigger on "{_QUOTED_CONTENT}" table \(function "({_QUOTED_CONTENT})"\)'
+# Captures BOTH halves, unlike the MTI pair below: two local dimensions mean one trigger per
+# (column, GUC) pair on one table, so the table alone let the second's digest overwrite the
+# first's. A rename reads as uncovered, which is right -- the trigger is named after it.
+_RE_TENANT_AUTOFILL = re.compile(
+    rf'# Tenant autofill Trigger on "({_QUOTED_CONTENT})" table \(function "({_QUOTED_CONTENT})"\)'
 )
+#: Group numbers on :data:`_RE_TENANT_AUTOFILL`, named so the two readers of that header --
+#: the ``(table, function)`` dedupe key and ``_function_dependencies_for``'s edge to the
+#: function migration -- index it by meaning rather than by a bare 1/2.
+RE_TENANT_AUTOFILL_TABLE = 1
+RE_TENANT_AUTOFILL_FUNCTION = 2
 
 # Hand-written: fuses HEADER_SOFT_DELETE_RELATED and its _VIA sibling into one optional
 # trailing group. Stops short of the header's trailing "!", harmless since [SQL:...] is

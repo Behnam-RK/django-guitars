@@ -27,7 +27,11 @@ from .test_command import _command_with_scaffold, _unforced_policy_tables
 #: where nothing else stops emitter and scanner drifting apart.
 HEADER_SCANNERS = [
     (headers_module.HEADER_TRIGGER_FUNCTION, headers_module._RE_TRIGGER_FUNCTION, {}),
-    (headers_module.HEADER_PARENT_TRIGGER_FUNCTION, headers_module._RE_PARENT_TRIGGER_FUNCTION, {}),
+    (
+        headers_module.HEADER_PARENT_TRIGGER_FUNCTION,
+        headers_module._RE_PARENT_TRIGGER_FUNCTION,
+        {},
+    ),
     (headers_module.HEADER_UPDATED_AT, headers_module._RE_UPDATED_AT, {'table': 'shop_order'}),
     (headers_module.HEADER_SOFT_DELETE, headers_module._RE_SOFT_DELETE, {'table': 'shop_order'}),
     (
@@ -142,10 +146,10 @@ def test_the_autofill_headers_cannot_be_read_as_any_other_trigger():
     assert headers_module._RE_TENANT_AUTOFILL.search(autofill) is not None
 
 
-def test_the_autofill_trigger_header_reads_the_table_but_not_the_function():
-    """The table is the dedupe key; the function is carried for dependency keying only. A
-    renamed function must leave the record *stale* (re-emitted as DROP+CREATE by the
-    ``[SQL:...]`` digest), never *absent* -- absent would duplicate the CREATE."""
+def test_the_autofill_trigger_header_reads_the_table_and_the_function():
+    """``(table, function)`` is the dedupe key, because a table tenanted on two local
+    dimensions carries one trigger per (column, GUC) pair. Reading the function too is what
+    keeps the second pair's digest from overwriting the first's and re-emitting it forever."""
     before = headers_module.HEADER_TENANT_AUTOFILL.format(
         table='shop_order', function='guitars_fill_4_shop_shop_id'
     )
@@ -153,11 +157,28 @@ def test_the_autofill_trigger_header_reads_the_table_but_not_the_function():
         table='shop_order', function='guitars_fill_5_store_store_id'
     )
 
-    assert headers_module._RE_TENANT_AUTOFILL.search(before).groups() == ('shop_order',)
-    assert headers_module._RE_TENANT_AUTOFILL.search(after).groups() == ('shop_order',)
-    assert headers_module._RE_TENANT_AUTOFILL_FUNCTION_REF.search(after).group(1) == (
-        'guitars_fill_5_store_store_id'
+    assert headers_module._RE_TENANT_AUTOFILL.search(before).groups() == (
+        'shop_order',
+        'guitars_fill_4_shop_shop_id',
     )
+    assert headers_module._RE_TENANT_AUTOFILL.search(after).groups() == (
+        'shop_order',
+        'guitars_fill_5_store_store_id',
+    )
+
+
+def test_two_dimensions_on_one_table_are_two_distinct_autofill_records():
+    """The bug the composite key exists for: one trigger per (column, GUC) pair, each named
+    after its own function, so neither the dedupe key nor the ``CREATE TRIGGER`` collides."""
+    headers = [
+        headers_module.HEADER_TENANT_AUTOFILL.format(table='shop_order', function=function)
+        for function in ('guitars_fill_3_org_org_id', 'guitars_fill_6_region_region_id')
+    ]
+
+    keys = {headers_module._RE_TENANT_AUTOFILL.search(header).groups() for header in headers}
+
+    assert len(keys) == 2
+    assert {table for table, _ in keys} == {'shop_order'}
 
 
 def test_a_header_without_the_sql_token_reads_as_stale_not_covered():

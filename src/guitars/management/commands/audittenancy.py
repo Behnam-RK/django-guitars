@@ -64,15 +64,20 @@ WHERE c.relkind = 'r' AND n.nspname = ANY(current_schemas(false))
 ORDER BY array_position(current_schemas(false), n.nspname) DESC
 """
 
-#: Which functions each table's own row triggers call (ADR 0005). ``tgisinternal`` excludes
-#: the ones Postgres creates for foreign keys and constraints.
+#: Which functions each table's own ``BEFORE INSERT ... FOR EACH ROW`` triggers call (ADR
+#: 0005), by ``tgtype`` bits 0/1/2. ``tgenabled <> 'D'`` is load-bearing: a disabled trigger
+#: still has its ``pg_trigger`` row while nothing fires -- "looks fine, is not" exactly.
 _AUTOFILL_TRIGGER_SQL = """
-SELECT c.relname, p.proname
+SELECT n.nspname, c.relname, p.proname
 FROM pg_trigger t
 JOIN pg_class c ON c.oid = t.tgrelid
 JOIN pg_namespace n ON n.oid = c.relnamespace
 JOIN pg_proc p ON p.oid = t.tgfoid
 WHERE NOT t.tgisinternal
+  AND t.tgenabled <> 'D'
+  AND (t.tgtype & 1) = 1
+  AND (t.tgtype & 2) = 2
+  AND (t.tgtype & 4) = 4
   AND c.relkind = 'r'
   AND n.nspname = ANY(current_schemas(false))
 """
@@ -169,9 +174,12 @@ class Command(BaseCommand):
                     columns.setdefault(oid, set()).add((table, column))
 
             cursor.execute(_AUTOFILL_TRIGGER_SQL)
-            triggers: dict[str, set[str]] = {}
-            for table, function in cursor.fetchall():
-                triggers.setdefault(table, set()).add(function)
+            # Keyed by (schema, table), not the bare name: the state rows below resolve to
+            # one schema off the search path, so folding every schema's triggers together
+            # would let a trigger on tenant_b.orders vouch for public.orders.
+            triggers: dict[tuple[str, str], set[str]] = {}
+            for schema_name, table, function in cursor.fetchall():
+                triggers.setdefault((schema_name, table), set()).add(function)
 
             state: dict[str, TableState] = {}
             for name, schema, enabled, forced, oid, qual, with_check in rows:
@@ -185,7 +193,7 @@ class Command(BaseCommand):
                     # NULL polwithcheck means "use USING for writes too" (Postgres's own
                     # rule for a FOR ALL policy with no explicit WITH CHECK).
                     policy_check_gucs=_tenant_gucs(qual if with_check is None else with_check),
-                    autofill_functions=frozenset(triggers.get(name, ())),
+                    autofill_functions=frozenset(triggers.get((schema, name), ())),
                 )
             return state
 

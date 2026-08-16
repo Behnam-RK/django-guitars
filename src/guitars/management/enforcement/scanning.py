@@ -23,6 +23,8 @@ from guitars.management.enforcement.headers import (
     _RE_TENANT_POLICY,
     _RE_TRIGGER_FUNCTION,
     _RE_UPDATED_AT,
+    RE_TENANT_AUTOFILL_FUNCTION,
+    RE_TENANT_AUTOFILL_TABLE,
 )
 from guitars.management.enforcement.identity import (
     _recorded_policy_identity,
@@ -59,8 +61,10 @@ class ExistingOperations(NamedTuple):
     #: :func:`unforced_policy_tables`. These are the only ones a second FORCE stage can act on.
     unforced_policies: set[str]
     tenant_forces: set[str]
-    #: Table -> the ``[SQL:...]`` digest of its most recent tenant-autofill trigger operation.
-    tenant_autofill: dict[str, str | None]
+    #: ``(table, function)`` -> the ``[SQL:...]`` digest of its most recent tenant-autofill
+    #: trigger operation. The pair, since two local dimensions mean one trigger per
+    #: ``(column, GUC)`` pair on one table -- the table alone re-emitted one of them forever.
+    tenant_autofill: dict[tuple[str, str], str | None]
     #: Function name -> the migration defining it, and that migration's ``[SQL:...]`` digest.
     #: Dicts rather than the singletons below because autofill is one function per
     #: ``(column, GUC)`` pair -- normally one, but a hand-rolled manager can add more.
@@ -90,7 +94,7 @@ def scan_existing_operations() -> ExistingOperations:
     existing_soft_delete_related: dict[tuple[str, str, str | None], str | None] = {}
     existing_mti_triggers: dict[str, str | None] = {}
     existing_mti_soft_deletes: dict[str, str | None] = {}
-    existing_tenant_autofill: dict[str, str | None] = {}
+    existing_tenant_autofill: dict[tuple[str, str], str | None] = {}
     # (regex, dict, key_fn) for every plain "finditer, record by key" scan -- the
     # singleton-function and tenant-policy/force blocks below don't fit this shape.
     # Every group is _unescape_ident'd, undoing operations.py's doubled '"'.
@@ -125,7 +129,10 @@ def scan_existing_operations() -> ExistingOperations:
         (
             _RE_TENANT_AUTOFILL,
             existing_tenant_autofill,
-            lambda m: _identifiers._unescape_ident(m.group(1)),
+            lambda m: (
+                _identifiers._unescape_ident(m.group(RE_TENANT_AUTOFILL_TABLE)),
+                _identifiers._unescape_ident(m.group(RE_TENANT_AUTOFILL_FUNCTION)),
+            ),
         ),
     ]
 

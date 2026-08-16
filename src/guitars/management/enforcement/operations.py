@@ -14,7 +14,7 @@ from guitars.introspection import column_owner, has_column, is_mti_child, owns_c
 from guitars.management import _generator
 from guitars.management.enforcement.headers import (
     _RE_MTI_UPDATED_AT,
-    _RE_TENANT_AUTOFILL_FUNCTION_REF,
+    _RE_TENANT_AUTOFILL,
     _RE_UPDATED_AT,
     HEADER_MTI_SOFT_DELETE,
     HEADER_MTI_UPDATED_AT,
@@ -26,12 +26,13 @@ from guitars.management.enforcement.headers import (
     HEADER_TENANT_POLICY,
     HEADER_TENANT_POLICY_REPLACED,
     HEADER_UPDATED_AT,
+    RE_TENANT_AUTOFILL_FUNCTION,
 )
 from guitars.management.enforcement.identity import _literal, _operation
 from guitars.sql import _identifiers
 from guitars.sql import soft_delete as _soft_delete
 from guitars.sql import triggers as _triggers
-from guitars.tenancy.discovery import app_coverage, autofill_function_name
+from guitars.tenancy.discovery import app_coverage, autofill_function_name, autofill_trigger_name
 
 
 if TYPE_CHECKING:
@@ -422,11 +423,15 @@ class OperationsMixin:
                 slots = {
                     'table': _identifiers._quote_table(table),
                     'function': _identifiers._safe_ident(function),
+                    'trigger': _identifiers._safe_ident(autofill_trigger_name(function)),
                 }
                 self._append_if_stale(
                     operations,
                     self.existing.tenant_autofill,
-                    table,
+                    # Keyed on the pair, not the table: a table tenanted on two local
+                    # dimensions carries one trigger per (column, GUC) pair, and the table
+                    # alone would let the second overwrite the first's recorded digest.
+                    (table, function),
                     HEADER_TENANT_AUTOFILL.format(
                         table=_identifiers._escape_ident(table),
                         function=_identifiers._escape_ident(function),
@@ -600,9 +605,9 @@ class OperationsMixin:
             deps.append(self.parent_trigger_function_dependency)
         # Per function, not per kind: an app depends only on the autofill functions its own
         # triggers name, which the trigger header carries for exactly this purpose.
-        for match in _RE_TENANT_AUTOFILL_FUNCTION_REF.finditer(operations_blob):
+        for match in _RE_TENANT_AUTOFILL.finditer(operations_blob):
             dependency = self.tenant_autofill_dependencies.get(
-                _identifiers._unescape_ident(match.group(1))
+                _identifiers._unescape_ident(match.group(RE_TENANT_AUTOFILL_FUNCTION))
             )
             if dependency and dependency not in deps:
                 deps.append(dependency)

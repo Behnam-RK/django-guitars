@@ -249,29 +249,32 @@ _REPLACE_TENANT_AUTOFILL_FUNCTION = _CREATE_TENANT_AUTOFILL_FUNCTION.replace(
     'CREATE FUNCTION', 'CREATE OR REPLACE FUNCTION', 1
 )
 
+# Named after the function it calls, not a fixed `tenant_autofill_trigger`: a trigger name is
+# unique per table, and `tenanted_manager(org='org', region='region', autofill=True)` needs
+# one per (column, GUC) pair -- under a constant name the second CREATE failed migrate.
 _CREATE_TENANT_AUTOFILL_TRIGGER = """
-    CREATE TRIGGER tenant_autofill_trigger
+    CREATE TRIGGER {trigger}
         BEFORE INSERT ON {table}
         FOR EACH ROW
         EXECUTE FUNCTION {function}();
 """
 
 _DROP_TENANT_AUTOFILL_TRIGGER = """
-    DROP TRIGGER tenant_autofill_trigger ON {table};
+    DROP TRIGGER {trigger} ON {table};
 """
 
 # Same two-form split as REPLACE_/ADOPT_UPDATED_AT_TRIGGER above: IF EXISTS is a knowledge
 # claim, so only the --adopt path -- which is honest about not knowing -- may assert it.
 _REPLACE_TENANT_AUTOFILL_TRIGGER = (
     """
-    DROP TRIGGER tenant_autofill_trigger ON {table};
+    DROP TRIGGER {trigger} ON {table};
 """
     + _CREATE_TENANT_AUTOFILL_TRIGGER
 )
 
 _ADOPT_TENANT_AUTOFILL_TRIGGER = (
     """
-    DROP TRIGGER IF EXISTS tenant_autofill_trigger ON {table};
+    DROP TRIGGER IF EXISTS {trigger} ON {table};
 """
     + _CREATE_TENANT_AUTOFILL_TRIGGER
 )

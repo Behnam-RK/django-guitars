@@ -36,7 +36,9 @@ _BASELINE = {
     # pre-derivation history; the baseline is the naive `[^"]+` spelling anyway, which is
     # what pins the escaped-quote and stop-before-the-function behaviour against the corpus.
     '_RE_TENANT_AUTOFILL_FUNCTION': re.compile(r'# Tenant autofill function "([^"]+)"!'),
-    '_RE_TENANT_AUTOFILL': re.compile(r'# Tenant autofill Trigger on "([^"]+)" table'),
+    '_RE_TENANT_AUTOFILL': re.compile(
+        r'# Tenant autofill Trigger on "([^"]+)" table \(function "([^"]+)"\)'
+    ),
 }
 
 #: No committed migration has ever gone through the ``--force-rls`` retrofit stage, so this
@@ -56,7 +58,6 @@ _NOT_HEADER_SCANNERS = {
     '_RE_SQL_IDENTITY',
     '_RE_POLICY_IDENTITY',
     '_RE_FORCED',
-    '_RE_TENANT_AUTOFILL_FUNCTION_REF',
 }
 
 

@@ -27,6 +27,7 @@ __all__ = [
     'TableCoverage',
     'app_coverage',
     'autofill_function_name',
+    'autofill_trigger_name',
     'expected_coverage',
     'is_local',
 ]
@@ -37,6 +38,13 @@ def autofill_function_name(dimension: str, column: str) -> str:
     length prefix keeps ``('a', 'b_c')`` and ``('a_b', 'c')`` apart, the same collision
     ``_related_rule_name`` guards against; callers quote it, ``audittenancy`` does not."""
     return _safe_identifier(f'guitars_fill_{len(dimension)}_{dimension}_{column}')
+
+
+def autofill_trigger_name(function: str) -> str:
+    """Bare name of the trigger calling *function*. Derived, not fixed: a trigger name is
+    unique **per table**, and a table tenanted on two local dimensions needs one trigger per
+    (column, GUC) pair -- under a constant name the second ``CREATE TRIGGER`` collided."""
+    return _safe_identifier(f'{function}_trigger')
 
 
 class PolicyKwargs(TypedDict, total=False):

@@ -11,7 +11,7 @@ from guitars.gucs import BYPASS_GUC, VALUE_SEPARATOR, guc_name
 from guitars.sql import _identifiers
 from guitars.sql import triggers
 from guitars.tenancy import TenantScopeError, tenancy_bypassed, tenant
-from guitars.tenancy.discovery import autofill_function_name
+from guitars.tenancy.discovery import autofill_function_name, autofill_trigger_name
 from tests.conftest import execute as _execute
 from tests.conftest import rows as _rows
 from tests.conftest import scalar as _scalar
@@ -561,6 +561,7 @@ class TestTenantAutofillTrigger:
         table_slots = {
             'table': _identifiers._quote_table(_OWNER_TABLE),
             'function': _identifiers._safe_ident(function),
+            'trigger': _identifiers._safe_ident(autofill_trigger_name(function)),
         }
         _execute(
             triggers._CREATE_TENANT_AUTOFILL_FUNCTION.format(**slots),

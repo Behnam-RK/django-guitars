@@ -121,13 +121,19 @@ def test_schema_qualified_table_headers_round_trip_and_stay_idempotent():
         assert _identifiers._unescape_ident(trigger_match.group(1)) == '"analytics"."events"'
 
         # Same round trip for the autofill trigger, whose scanner is hand-written and has to
-        # walk past the escaped quotes to stop before "(function ..." rather than at the
+        # walk past the escaped quotes to reach "(function ..." rather than stopping at the
         # first quote it meets -- a schema-qualified name is where that goes wrong.
         autofill_match = headers_module._RE_TENANT_AUTOFILL.search(blob)
         assert autofill_match, f'schema-qualified autofill header not matched: {blob!r}'
-        assert _identifiers._unescape_ident(autofill_match.group(1)) == '"analytics"."events"'
-        function_match = headers_module._RE_TENANT_AUTOFILL_FUNCTION_REF.search(blob)
-        assert function_match, 'autofill header carried no readable function name'
+        assert (
+            _identifiers._unescape_ident(
+                autofill_match.group(headers_module.RE_TENANT_AUTOFILL_TABLE)
+            )
+            == '"analytics"."events"'
+        )
+        assert autofill_match.group(headers_module.RE_TENANT_AUTOFILL_FUNCTION), (
+            'autofill header carried no readable function name'
+        )
 
         # Simulate a second run reading this run's own output back, the same way
         # scanning.py really does: extract every header, unescape its captured table name,
@@ -141,7 +147,12 @@ def test_schema_qualified_table_headers_round_trip_and_stay_idempotent():
                 blob, match
             )
         for match in headers_module._RE_TENANT_AUTOFILL.finditer(blob):
-            key = _identifiers._unescape_ident(match.group(1))
+            key = (
+                _identifiers._unescape_ident(match.group(headers_module.RE_TENANT_AUTOFILL_TABLE)),
+                _identifiers._unescape_ident(
+                    match.group(headers_module.RE_TENANT_AUTOFILL_FUNCTION)
+                ),
+            )
             command.existing.tenant_autofill[key] = identity_module._recorded_sql_identity(
                 blob, match
             )

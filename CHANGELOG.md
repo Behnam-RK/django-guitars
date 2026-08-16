@@ -15,7 +15,7 @@ Full history and diffs: [GitHub releases](https://github.com/Behnam-RK/django-gu
 - Added: tenant autofill is now a `BEFORE INSERT` trigger ([ADR-0005](docs/adr/0005-trigger-based-tenant-autofill.md)), covering `bulk_create`, multi-row `INSERT`, `INSERT … SELECT` and raw SQL. Run `makemigrations` + `migrate`; **no backfill is needed or possible** — the tenant column is `NOT NULL`, so an existing `NULL` cannot exist.
 - Changed: the `pre_save` write guard is now diagnostics. `DisableSignals` (and `update(_disable_signals=True)`) no longer disables tenancy enforcement; it costs the friendly message, not the guarantee.
 - Added: `audittenancy` reports a table whose manager autofills but whose trigger is missing — warned by default, fatal under `--require-match`.
-- Added: `TableCoverage.autofill_columns`, and `autofill_function_name()` in `guitars.tenancy.discovery`.
+- Added: `TableCoverage.autofill_columns`, and `autofill_function_name()`/`autofill_trigger_name()` in `guitars.tenancy.discovery`. The trigger is named after the function it calls, so a table tenanted on two local dimensions gets one trigger per `(column, GUC)` pair instead of two colliding on one name.
 
 ## [2.0.3] - 2026-08-14
 

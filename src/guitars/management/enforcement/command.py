@@ -29,6 +29,7 @@ from guitars.management.enforcement.operations import OperationsMixin
 from guitars.management.enforcement.scanning import ExistingOperations, scan_existing_operations
 from guitars.sql import _identifiers
 from guitars.sql import triggers as _triggers
+from guitars.tenancy.discovery import owner_autofill_notes
 
 
 if TYPE_CHECKING:
@@ -69,6 +70,13 @@ class Command(OperationsMixin, BaseCommand):
         self._tenancy_notes: list[str] = []
 
         self._existing: ExistingOperations | None = None
+
+        # Project-wide autofill maps, memoised for one command: `_build_operations` runs per
+        # in-scope app and each sweeps *every* local app's coverage. Safe to cache -- they read
+        # only the model registry and GUITARS_TENANT_POLICIES, neither moving mid-`handle()`.
+        self._table_app_labels_cache: dict[str, str] | None = None
+        self._required_autofill_cache: dict[tuple[str, str], tuple[str, str]] | None = None
+        self._relocated_autofill_cache: dict[tuple[str, str], tuple[str, str]] | None = None
 
     @property
     def existing(self) -> ExistingOperations:
@@ -318,14 +326,15 @@ class Command(OperationsMixin, BaseCommand):
         """``function name -> (dimension, column)`` every in-scope table's autofill trigger
         will call. Read from the same coverage the triggers are built from, so the function
         migrations and the triggers depending on them can never disagree about the name."""
-        # Scoped by the app that will *host* the trigger, not the one declaring the
-        # dimension: the two differ once a trigger is attributed to an ancestor's app, and
-        # scoping by the declarer would emit a trigger calling a function never written.
+        # Scoped by the trigger's *host* app, not the declarer: they differ once a trigger is
+        # attributed to an ancestor's app, and the declarer's scope would emit a trigger calling
+        # a function never written. ``.get``: an ancestor outside LOCAL_APPS hosts nothing.
         hosting = self._table_app_labels()
         return {
             function: value
             for (table, function), value in self._required_autofill_keys().items()
-            if _generator.is_in_scope(django_apps.get_app_config(hosting[table]), requested)
+            if (host := hosting.get(table)) is not None
+            and _generator.is_in_scope(django_apps.get_app_config(host), requested)
         }
 
     def _ensure_tenant_autofill_function_migration(
@@ -470,8 +479,11 @@ class Command(OperationsMixin, BaseCommand):
         for note in self._mti_cascade_warnings:
             self.stderr.write(self.style.WARNING(note))
 
-        # Tables tenancy could not cover, and why. Skips are design, never silent.
-        for note in self._tenancy_notes:
+        # Tables tenancy could not cover, and why. Skips are design, never silent -- so the
+        # relocation refusals print here too, not only via `expected_coverage`. Once per run,
+        # not per app: a refusal is a fact about the owner's table, shared by every child.
+        relocation_notes = owner_autofill_notes() if self._tenant_policies_enabled() else []
+        for note in self._tenancy_notes + relocation_notes:
             self.stdout.write(self.style.WARNING(note))
 
         # Autofill coverage this command recorded but can no longer retire or attribute --

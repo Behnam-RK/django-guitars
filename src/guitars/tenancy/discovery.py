@@ -261,6 +261,17 @@ def _relocatable(owner: type[models.Model], column: str) -> tuple[str | None, st
         )
 
     opted_out = sorted(_meta(m).db_table for m in claims if not _autofills(m))
+    owner_fills_it = owner in claims and _autofills(owner)
+    if opted_out and owner_fills_it:
+        # Same refusal, different *fact*: the owner's own ``autofill_columns`` already puts a
+        # trigger on this table, so "left to Python scoping" below would be false -- the
+        # opt-out is being overwritten today, and only dropping that trigger can honour it.
+        return None, (
+            f"'{owner_table}'.{column} is autofilled by its owner's own trigger, and "
+            f'{opted_out} share that column but do not autofill -- an MTI insert of theirs '
+            f'writes a row into this same table, so that trigger overwrites their opt-out. '
+            f'Pass autofill=False on the owner too if that is wrong.'
+        )
     if opted_out:
         return None, (
             f"'{owner_table}'.{column} is not autofilled: {opted_out} share that column and "
@@ -268,7 +279,7 @@ def _relocatable(owner: type[models.Model], column: str) -> tuple[str | None, st
             f'so one trigger would overwrite their opt-out. Left to Python scoping.'
         )
 
-    if owner in claims and _autofills(owner):
+    if owner_fills_it:
         # Already covered by the owner's own ``autofill_columns`` -- relocating here too
         # would emit a second CREATE TRIGGER on that table and fail migrate.
         return None, None
@@ -280,6 +291,8 @@ def owner_autofill_notes() -> list[str]:
     """One refusal note per ``(owner_table, column)``, regardless of how many descendants
     claim it: the fact is about the owner's table, not about any one child, and ``_classify``
     runs once per descendant -- emitting there would print the same note N times."""
+    # ``''`` records "already resolved, no note" so a second descendant sharing the key
+    # doesn't re-run the whole-registry scan ``_relocatable`` performs.
     seen: dict[tuple[type[models.Model], str], str] = {}
     for model in django_apps.get_models():
         if _meta(model).proxy or not tenant_spec(model):
@@ -292,9 +305,10 @@ def owner_autofill_notes() -> list[str]:
             if key in seen:
                 continue
             _, note = _relocatable(*key)
-            if note:
-                seen[key] = note
-    return [seen[key] for key in sorted(seen, key=lambda k: (_meta(k[0]).db_table, k[1]))]
+            seen[key] = note or ''
+    return [
+        seen[key] for key in sorted(seen, key=lambda k: (_meta(k[0]).db_table, k[1])) if seen[key]
+    ]
 
 
 def _skip_note(model: type[models.Model], spec: dict[str, str]) -> str:

@@ -258,10 +258,12 @@ class Command(BaseCommand):
         return findings
 
     @staticmethod
-    def _stray_autofill_findings(expected: Coverage, live: Mapping[str, TableState]) -> list[str]:
-        """Autofill triggers the database has and the models do not expect -- the live half
-        of a rename, where the orphan still dereferences a dropped column and breaks every
-        INSERT. Full-repo only: a scoped run cannot tell "not mine" from "gone"."""
+    def _stray_autofill_findings(
+        expected: Coverage, live: Mapping[str, TableState]
+    ) -> list[tuple[str, str]]:
+        """Autofill triggers the database has and the models do not expect: a rename's live half,
+        whose orphan dereferences a dropped column, breaking every INSERT. Full-repo only: a
+        scoped run cannot tell "not mine" from "gone". Paired with its table -- not "enforced"."""
         wanted: dict[str, set[str]] = {}
         for table, coverage in expected.tables.items():
             for host, columns in (
@@ -274,10 +276,13 @@ class Command(BaseCommand):
                         for dimension, column in columns.items()
                     )
         return [
-            f"'{state.schema}.{table}': has tenant autofill trigger(s) calling {stray} that "
-            f'the models no longer expect. A renamed dimension or column leaves the old '
-            f'trigger dereferencing a dropped column, failing every INSERT on this table. '
-            f'Run `manage.py makeguitarmigrations` + migrate.'
+            (
+                table,
+                f"'{state.schema}.{table}': has tenant autofill trigger(s) calling {stray} "
+                f'that the models no longer expect. A renamed dimension or column leaves the '
+                f'old trigger dereferencing a dropped column, failing every INSERT on this '
+                f'table. Run `manage.py makeguitarmigrations` + migrate.',
+            )
             for table, state in sorted(live.items())
             if (
                 stray := sorted(
@@ -401,7 +406,12 @@ class Command(BaseCommand):
             else []
         )
         if not requested:
-            drifted.extend(self._stray_autofill_findings(expected, live))
+            for table, finding in self._stray_autofill_findings(expected, live):
+                drifted.append(finding)
+                # Only an expected table can be *subtracted* from the expected count; a
+                # stray on a table the models dropped entirely is reported, not counted.
+                if table in expected.tables:
+                    unhealthy.add(table)
 
         # First, and before the heading: it qualifies every line that follows.
         for note in self._bypassing_role_notes(connection):

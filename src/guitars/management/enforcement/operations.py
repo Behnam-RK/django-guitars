@@ -93,6 +93,9 @@ class OperationsMixin:
         parent_trigger_function_dependency: tuple[str, str] | None
         tenant_autofill_dependencies: dict[str, tuple[str, str]]
         reverse_relations_mapping: dict[type[models.Model], set]
+        _table_app_labels_cache: dict[str, str] | None
+        _required_autofill_cache: dict[tuple[str, str], tuple[str, str]] | None
+        _relocated_autofill_cache: dict[tuple[str, str], tuple[str, str]] | None
 
         @staticmethod
         def _write_migration_file(
@@ -424,24 +427,31 @@ class OperationsMixin:
             'trigger': _identifiers._safe_ident(autofill_trigger_name(function)),
         }
 
-    @staticmethod
-    def _table_app_labels() -> dict[str, str]:
+    def _table_app_labels(self) -> dict[str, str]:
         """``db_table`` -> the local app whose migrations host operations on it, first app
         winning. One table, one host: two apps each emitting the same DROP would fail the
         second at ``migrate``. Shared by retirement and owner-attributed autofill."""
+        if self._table_app_labels_cache is not None:
+            return self._table_app_labels_cache
         hosting: dict[str, str] = {}
         for app in django_apps.get_app_configs():
             if not _generator.is_local(app):
                 continue
             for model in app.get_models():
                 hosting.setdefault(model._meta.db_table, app.label)
+        self._table_app_labels_cache = hosting
         return hosting
 
     def _required_autofill_keys(self) -> dict[tuple[str, str], tuple[str, str]]:
         """Every ``(table, function)`` the models currently require -> its ``(dimension,
         column)``. Deliberately project-wide: retirement subtracts from this, and a scoped
         view would read another app's live trigger as no longer required and drop it."""
+        if self._required_autofill_cache is not None:
+            return self._required_autofill_cache
+        # Bound to the cache slot up front rather than at each return: the loop below fills
+        # this same object, so one assignment covers both exits.
         required: dict[tuple[str, str], tuple[str, str]] = {}
+        self._required_autofill_cache = required
         if not self._tenant_policies_enabled():
             return required
         for app in django_apps.get_app_configs():
@@ -465,7 +475,11 @@ class OperationsMixin:
         """The subset of :meth:`_required_autofill_keys` whose trigger sits on an MTI
         ancestor's table. Project-wide on purpose: the child declaring the dimension may be
         out of a scoped run while the owner hosting the trigger is in it."""
+        if self._relocated_autofill_cache is not None:
+            return self._relocated_autofill_cache
+        # Bound to the cache slot up front, for the reason above.
         relocated: dict[tuple[str, str], tuple[str, str]] = {}
+        self._relocated_autofill_cache = relocated
         if not self._tenant_policies_enabled():
             return relocated
         for app in django_apps.get_app_configs():
@@ -514,7 +528,7 @@ class OperationsMixin:
         # Triggers relocated onto an ancestor's table are attributed to the app hosting that
         # table, wherever the child lives -- the same inversion cascade rules already use.
         hosting = self._table_app_labels()
-        for (table, function), _ in self._relocated_autofill_keys().items():
+        for table, function in self._relocated_autofill_keys():
             if hosting.get(table) == app.label:
                 keys[(table, function)] = None
 
@@ -573,9 +587,9 @@ class OperationsMixin:
         return operations
 
     def _unmapped_autofill_notes(self) -> list[str]:
-        """Recorded triggers on tables no local model claims. Not retired -- there is no app
-        to write the migration into, and this generator has no migration-state graph to ask
-        which app used to own the table. Named rather than dropped, because skips are design."""
+        """Triggers on tables no local model claims: recorded ones that cannot be retired and
+        required ones that cannot be created, both for want of an app to write the migration
+        into -- this generator has no migration-state graph. Named, because skips are design."""
         if not self._tenant_policies_enabled():
             return []
 
@@ -591,6 +605,18 @@ class OperationsMixin:
                 f'but no local model maps to that table, so it cannot be retired here. If '
                 f'the table still exists, drop it by hand: '
                 f'{_triggers._DROP_TENANT_AUTOFILL_TRIGGER.format(**slots).strip()}'
+            )
+        # The other direction: a relocated trigger whose ancestor lives outside LOCAL_APPS.
+        # Nothing hosts it, so `audittenancy` would report it missing on every run forever.
+        for table, function in sorted(required):
+            if table in hosting:
+                continue
+            notes.append(
+                f"Tenant autofill trigger on '{table}' (function '{function}') is required "
+                f'but no local model maps to that table -- the tenant column lives on an '
+                f'ancestor outside LOCAL_APPS, so there is no app to write the migration '
+                f'into. Add that app to LOCAL_APPS, or pass autofill=False on the '
+                f'descendants claiming the column.'
             )
         return notes
 

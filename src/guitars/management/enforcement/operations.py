@@ -14,12 +14,14 @@ from guitars.introspection import column_owner, has_column, is_mti_child, owns_c
 from guitars.management import _generator
 from guitars.management.enforcement.headers import (
     _RE_MTI_UPDATED_AT,
+    _RE_TENANT_AUTOFILL_FUNCTION_REF,
     _RE_UPDATED_AT,
     HEADER_MTI_SOFT_DELETE,
     HEADER_MTI_UPDATED_AT,
     HEADER_SOFT_DELETE,
     HEADER_SOFT_DELETE_RELATED,
     HEADER_SOFT_DELETE_RELATED_VIA,
+    HEADER_TENANT_AUTOFILL,
     HEADER_TENANT_FORCE,
     HEADER_TENANT_POLICY,
     HEADER_TENANT_POLICY_REPLACED,
@@ -29,7 +31,7 @@ from guitars.management.enforcement.identity import _literal, _operation
 from guitars.sql import _identifiers
 from guitars.sql import soft_delete as _soft_delete
 from guitars.sql import triggers as _triggers
-from guitars.tenancy.discovery import app_coverage
+from guitars.tenancy.discovery import app_coverage, autofill_function_name
 
 
 if TYPE_CHECKING:
@@ -86,6 +88,7 @@ class OperationsMixin:
         _mti_cascade_warnings: list[str]
         trigger_function_dependency: tuple[str, str] | None
         parent_trigger_function_dependency: tuple[str, str] | None
+        tenant_autofill_dependencies: dict[str, tuple[str, str]]
         reverse_relations_mapping: dict[type[models.Model], set]
 
         @staticmethod
@@ -396,7 +399,45 @@ class OperationsMixin:
 
         # Tenant policies last: they are independent of the triggers and rules above (a
         # policy references neither), so they sort to the end where they read as a group.
-        return operations + deferred + self._tenant_policy_operations(app, adopt=adopt)
+        return (
+            operations
+            + deferred
+            + self._tenant_autofill_operations(app, adopt=adopt)
+            + self._tenant_policy_operations(app, adopt=adopt)
+        )
+
+    def _tenant_autofill_operations(self, app: AppConfig, *, adopt: bool = False) -> list[str]:
+        """``BEFORE INSERT`` autofill triggers *app* is missing or has outdated (ADR 0005).
+        Emitted only where coverage reports a *local* tenant column on a manager that
+        autofills, so a model opting out is auditable as an absent trigger."""
+        if not self._tenant_policies_enabled():
+            return []
+
+        operations: list[str] = []
+        for table, table_coverage in sorted(app_coverage(app).tables.items()):
+            # Notes are collected by _tenant_policy_operations off the same app_coverage
+            # call; gathering them here too would print every one twice.
+            for dimension, column in sorted((table_coverage.autofill_columns or {}).items()):
+                function = autofill_function_name(dimension, column)
+                slots = {
+                    'table': _identifiers._quote_table(table),
+                    'function': _identifiers._safe_ident(function),
+                }
+                self._append_if_stale(
+                    operations,
+                    self.existing.tenant_autofill,
+                    table,
+                    HEADER_TENANT_AUTOFILL.format(
+                        table=_identifiers._escape_ident(table),
+                        function=_identifiers._escape_ident(function),
+                    ),
+                    _triggers._CREATE_TENANT_AUTOFILL_TRIGGER.format(**slots),
+                    _triggers._DROP_TENANT_AUTOFILL_TRIGGER.format(**slots),
+                    is_adopt=adopt,
+                    replace=_triggers._REPLACE_TENANT_AUTOFILL_TRIGGER.format(**slots),
+                    adopt=_triggers._ADOPT_TENANT_AUTOFILL_TRIGGER.format(**slots),
+                )
+        return operations
 
     @staticmethod
     def _is_cascade_candidate(related_model, fk_field, on_delete) -> bool:
@@ -550,13 +591,21 @@ class OperationsMixin:
 
     def _function_dependencies_for(self, operations_blob: str) -> list[tuple[str, str]]:
         """Function-migration dependencies an app's operations actually require -- keyed off
-        the operation headers, since only ``updated_at`` triggers call a shared function, so
-        an app never depends on a function migration (or its ordering) it doesn't use."""
+        the operation headers, since only ``updated_at`` and autofill triggers call a shared
+        function, so an app never depends on a migration (or its ordering) it doesn't use."""
         deps: list[tuple[str, str]] = []
         if self.trigger_function_dependency and _RE_UPDATED_AT.search(operations_blob):
             deps.append(self.trigger_function_dependency)
         if self.parent_trigger_function_dependency and _RE_MTI_UPDATED_AT.search(operations_blob):
             deps.append(self.parent_trigger_function_dependency)
+        # Per function, not per kind: an app depends only on the autofill functions its own
+        # triggers name, which the trigger header carries for exactly this purpose.
+        for match in _RE_TENANT_AUTOFILL_FUNCTION_REF.finditer(operations_blob):
+            dependency = self.tenant_autofill_dependencies.get(
+                _identifiers._unescape_ident(match.group(1))
+            )
+            if dependency and dependency not in deps:
+                deps.append(dependency)
         return deps
 
     def _generate_stage(

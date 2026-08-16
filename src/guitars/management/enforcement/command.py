@@ -16,15 +16,20 @@ from django.core.management.base import BaseCommand
 from django.db import models
 
 from guitars import sql
+from guitars.gucs import BYPASS_GUC, VALUE_SEPARATOR, guc_name
 from guitars.introspection import is_mti_child, owns_column
 from guitars.management import _generator
 from guitars.management.enforcement.headers import (
     HEADER_PARENT_TRIGGER_FUNCTION,
+    HEADER_TENANT_AUTOFILL_FUNCTION,
     HEADER_TRIGGER_FUNCTION,
 )
 from guitars.management.enforcement.identity import _operation
 from guitars.management.enforcement.operations import OperationsMixin
 from guitars.management.enforcement.scanning import ExistingOperations, scan_existing_operations
+from guitars.sql import _identifiers
+from guitars.sql import triggers as _triggers
+from guitars.tenancy.discovery import app_coverage, autofill_function_name
 
 
 if TYPE_CHECKING:
@@ -54,6 +59,10 @@ class Command(OperationsMixin, BaseCommand):
         self.parent_trigger_function_dependency: tuple[str, str] | None = None
         self.trigger_function_sql: str | None = None
         self.parent_trigger_function_sql: str | None = None
+        # Keyed by function name, not singletons: autofill is one function per (column, GUC)
+        # pair -- normally one, since GUITARS_TENANT_FIELD is project-wide.
+        self.tenant_autofill_dependencies: dict[str, tuple[str, str]] = {}
+        self.tenant_autofill_sql: dict[str, str | None] = {}
 
         # Cross-app / MTI cascade rules skipped this run, surfaced as warnings (not silent).
         self._mti_cascade_warnings: list[str] = []
@@ -75,6 +84,10 @@ class Command(OperationsMixin, BaseCommand):
             )
             self.trigger_function_sql = self._existing.trigger_function_sql
             self.parent_trigger_function_sql = self._existing.parent_trigger_function_sql
+            self.tenant_autofill_dependencies = dict(
+                self._existing.tenant_autofill_function_dependencies
+            )
+            self.tenant_autofill_sql = dict(self._existing.tenant_autofill_function_sql)
         return self._existing
 
     def add_arguments(self, parser):
@@ -302,6 +315,67 @@ class Command(OperationsMixin, BaseCommand):
     # Main entry point
     # ------------------------------------------------------------------
 
+    def _required_autofill_functions(self, requested: set[str]) -> dict[str, tuple[str, str]]:
+        """``function name -> (dimension, column)`` every in-scope table's autofill trigger
+        will call. Read from the same coverage the triggers are built from, so the function
+        migrations and the triggers depending on them can never disagree about the name."""
+        required: dict[str, tuple[str, str]] = {}
+        if not self._tenant_policies_enabled():
+            return required
+        for app in django_apps.get_app_configs():
+            if not _generator.is_in_scope(app, requested):
+                continue
+            for coverage in app_coverage(app).tables.values():
+                for dimension, column in (coverage.autofill_columns or {}).items():
+                    required[autofill_function_name(dimension, column)] = (dimension, column)
+        return required
+
+    def _ensure_tenant_autofill_function_migration(
+        self,
+        function: str,
+        dimension: str,
+        column: str,
+        *,
+        check_only: bool = False,
+        adopt: bool = False,
+    ) -> bool:
+        """Ensure a current migration for one autofill trigger function. Kept off the two
+        singletons above for the reason they are kept off each other: re-digesting an
+        existing function migration regenerates it, for a function that did not change."""
+        slots = {
+            'function': _identifiers._safe_ident(function),
+            'column': _identifiers._escape_ident(column),
+            'guc': _identifiers._escape_literal(guc_name(dimension)),
+            'bypass_guc': _identifiers._escape_literal(BYPASS_GUC),
+            'separator': _identifiers._escape_literal(VALUE_SEPARATOR),
+        }
+        written = self._ensure_function_migration(
+            recorded=self.tenant_autofill_dependencies.get(function),
+            recorded_digest=self.tenant_autofill_sql.get(function),
+            header=HEADER_TENANT_AUTOFILL_FUNCTION.format(
+                function=_identifiers._escape_ident(function)
+            ),
+            create=_triggers._CREATE_TENANT_AUTOFILL_FUNCTION.format(**slots),
+            replace=_triggers._REPLACE_TENANT_AUTOFILL_FUNCTION.format(**slots),
+            drop=_triggers._DROP_TENANT_AUTOFILL_FUNCTION.format(**slots),
+            name=f'auto_enforcement_{function}',
+            missing_message=(
+                f'\n\tRun `manage.py makeguitarmigrations` to create the tenant '
+                f'autofill function migration for {column!r}!\n'
+            ),
+            stale_message=(
+                f'\n\tThe tenant autofill function for {column!r} has changed since the '
+                f'migration that defines it was written.\n\tRun '
+                f'`manage.py makeguitarmigrations` to regenerate it.\n'
+            ),
+            check_only=check_only,
+            adopt=adopt,
+        )
+        if written is None:
+            return False
+        self.tenant_autofill_dependencies[function], self.tenant_autofill_sql[function] = written
+        return True
+
     def handle(self, *app_labels, **options):
         check_only: bool = options['check_only']
         force_rls: bool = options.get('force_rls', False)
@@ -356,6 +430,20 @@ class Command(OperationsMixin, BaseCommand):
                 changes_made = (
                     self._ensure_parent_trigger_function_migration(
                         check_only=check_only, adopt=adopt
+                    )
+                    or changes_made
+                )
+            except CommandError as err:
+                function_check_messages.append(str(err))
+        # Sorted so two functions in one run write their migrations in a stable order, which
+        # a digest-stamped file must have or successive runs disagree about what changed.
+        for function, (dimension, column) in sorted(
+            self._required_autofill_functions(requested).items()
+        ):
+            try:
+                changes_made = (
+                    self._ensure_tenant_autofill_function_migration(
+                        function, dimension, column, check_only=check_only, adopt=adopt
                     )
                     or changes_made
                 )

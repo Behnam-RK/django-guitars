@@ -61,6 +61,16 @@ HEADER_SCANNERS = [
         {'table': 'shop_order', 'identity': '0b7c94cc2edc'},
     ),
     (headers_module.HEADER_TENANT_FORCE, headers_module._RE_TENANT_FORCE, {'table': 'shop_order'}),
+    (
+        headers_module.HEADER_TENANT_AUTOFILL_FUNCTION,
+        headers_module._RE_TENANT_AUTOFILL_FUNCTION,
+        {'function': 'guitars_fill_4_shop_shop_id'},
+    ),
+    (
+        headers_module.HEADER_TENANT_AUTOFILL,
+        headers_module._RE_TENANT_AUTOFILL,
+        {'table': 'shop_order', 'function': 'guitars_fill_4_shop_shop_id'},
+    ),
 ]
 
 
@@ -106,6 +116,48 @@ def test_the_two_function_headers_cannot_be_read_as_each_other():
     parent = headers_module.HEADER_PARENT_TRIGGER_FUNCTION
     assert headers_module._RE_TRIGGER_FUNCTION.search(parent) is None
     assert headers_module._RE_PARENT_TRIGGER_FUNCTION.search(base) is None
+
+
+def test_the_autofill_headers_cannot_be_read_as_any_other_trigger():
+    """``# Tenant autofill Trigger on ...`` sits close enough to the updated-at and MTI
+    trigger headers that a careless scanner would fuse them, and an app would then declare a
+    dependency on the ``set_updated_at`` migration it never calls -- or skip one it does."""
+    autofill = headers_module.HEADER_TENANT_AUTOFILL.format(
+        table='shop_order', function='guitars_fill_4_shop_shop_id'
+    )
+    function = headers_module.HEADER_TENANT_AUTOFILL_FUNCTION.format(
+        function='guitars_fill_4_shop_shop_id'
+    )
+
+    for scanner in (
+        headers_module._RE_UPDATED_AT,
+        headers_module._RE_MTI_UPDATED_AT,
+        headers_module._RE_SOFT_DELETE,
+        headers_module._RE_TENANT_POLICY,
+        headers_module._RE_TENANT_FORCE,
+        headers_module._RE_TENANT_AUTOFILL_FUNCTION,
+    ):
+        assert scanner.search(autofill) is None
+    assert headers_module._RE_TENANT_AUTOFILL.search(function) is None
+    assert headers_module._RE_TENANT_AUTOFILL.search(autofill) is not None
+
+
+def test_the_autofill_trigger_header_reads_the_table_but_not_the_function():
+    """The table is the dedupe key; the function is carried for dependency keying only. A
+    renamed function must leave the record *stale* (re-emitted as DROP+CREATE by the
+    ``[SQL:...]`` digest), never *absent* -- absent would duplicate the CREATE."""
+    before = headers_module.HEADER_TENANT_AUTOFILL.format(
+        table='shop_order', function='guitars_fill_4_shop_shop_id'
+    )
+    after = headers_module.HEADER_TENANT_AUTOFILL.format(
+        table='shop_order', function='guitars_fill_5_store_store_id'
+    )
+
+    assert headers_module._RE_TENANT_AUTOFILL.search(before).groups() == ('shop_order',)
+    assert headers_module._RE_TENANT_AUTOFILL.search(after).groups() == ('shop_order',)
+    assert headers_module._RE_TENANT_AUTOFILL_FUNCTION_REF.search(after).group(1) == (
+        'guitars_fill_5_store_store_id'
+    )
 
 
 def test_a_header_without_the_sql_token_reads_as_stale_not_covered():

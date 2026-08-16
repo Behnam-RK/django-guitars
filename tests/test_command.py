@@ -105,6 +105,7 @@ def test_schema_qualified_table_headers_round_trip_and_stay_idempotent():
         command = Command()
         command.existing.triggers.clear()
         command.existing.soft_deletes.clear()
+        command.existing.tenant_autofill.clear()
 
         first_run = command._build_operations(app)
         blob = '\n'.join(first_run)
@@ -119,6 +120,15 @@ def test_schema_qualified_table_headers_round_trip_and_stay_idempotent():
         # the same value a later run recomputes fresh as its dict key.
         assert _identifiers._unescape_ident(trigger_match.group(1)) == '"analytics"."events"'
 
+        # Same round trip for the autofill trigger, whose scanner is hand-written and has to
+        # walk past the escaped quotes to stop before "(function ..." rather than at the
+        # first quote it meets -- a schema-qualified name is where that goes wrong.
+        autofill_match = headers_module._RE_TENANT_AUTOFILL.search(blob)
+        assert autofill_match, f'schema-qualified autofill header not matched: {blob!r}'
+        assert _identifiers._unescape_ident(autofill_match.group(1)) == '"analytics"."events"'
+        function_match = headers_module._RE_TENANT_AUTOFILL_FUNCTION_REF.search(blob)
+        assert function_match, 'autofill header carried no readable function name'
+
         # Simulate a second run reading this run's own output back, the same way
         # scanning.py really does: extract every header, unescape its captured table name,
         # and record its [SQL:...] digest.
@@ -128,6 +138,11 @@ def test_schema_qualified_table_headers_round_trip_and_stay_idempotent():
         for match in headers_module._RE_SOFT_DELETE.finditer(blob):
             key = _identifiers._unescape_ident(match.group(1))
             command.existing.soft_deletes[key] = identity_module._recorded_sql_identity(
+                blob, match
+            )
+        for match in headers_module._RE_TENANT_AUTOFILL.finditer(blob):
+            key = _identifiers._unescape_ident(match.group(1))
+            command.existing.tenant_autofill[key] = identity_module._recorded_sql_identity(
                 blob, match
             )
         policy_matches = list(headers_module._RE_TENANT_POLICY.finditer(blob))

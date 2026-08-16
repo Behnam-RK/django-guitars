@@ -17,6 +17,8 @@ from guitars.management.enforcement.headers import (
     _RE_PARENT_TRIGGER_FUNCTION,
     _RE_SOFT_DELETE,
     _RE_SOFT_DELETE_RELATED,
+    _RE_TENANT_AUTOFILL,
+    _RE_TENANT_AUTOFILL_FUNCTION,
     _RE_TENANT_FORCE,
     _RE_TENANT_POLICY,
     _RE_TRIGGER_FUNCTION,
@@ -57,6 +59,13 @@ class ExistingOperations(NamedTuple):
     #: :func:`unforced_policy_tables`. These are the only ones a second FORCE stage can act on.
     unforced_policies: set[str]
     tenant_forces: set[str]
+    #: Table -> the ``[SQL:...]`` digest of its most recent tenant-autofill trigger operation.
+    tenant_autofill: dict[str, str | None]
+    #: Function name -> the migration defining it, and that migration's ``[SQL:...]`` digest.
+    #: Dicts rather than the singletons below because autofill is one function per
+    #: ``(column, GUC)`` pair -- normally one, but a hand-rolled manager can add more.
+    tenant_autofill_function_dependencies: dict[str, tuple[str, str]]
+    tenant_autofill_function_sql: dict[str, str | None]
     #: App label -> every ``[DIGEST:...]`` already stamped on its migration files. Harvested
     #: in the same pass as everything above, so "already written" is a dict lookup, not a
     #: fresh directory re-scan.
@@ -81,6 +90,7 @@ def scan_existing_operations() -> ExistingOperations:
     existing_soft_delete_related: dict[tuple[str, str, str | None], str | None] = {}
     existing_mti_triggers: dict[str, str | None] = {}
     existing_mti_soft_deletes: dict[str, str | None] = {}
+    existing_tenant_autofill: dict[str, str | None] = {}
     # (regex, dict, key_fn) for every plain "finditer, record by key" scan -- the
     # singleton-function and tenant-policy/force blocks below don't fit this shape.
     # Every group is _unescape_ident'd, undoing operations.py's doubled '"'.
@@ -112,6 +122,11 @@ def scan_existing_operations() -> ExistingOperations:
             existing_mti_soft_deletes,
             lambda m: _identifiers._unescape_ident(m.group(1)),
         ),
+        (
+            _RE_TENANT_AUTOFILL,
+            existing_tenant_autofill,
+            lambda m: _identifiers._unescape_ident(m.group(1)),
+        ),
     ]
 
     existing_tenant_policies: set[str] = set()
@@ -127,6 +142,8 @@ def scan_existing_operations() -> ExistingOperations:
     parent_trigger_function_dep: tuple[str, str] | None = None
     trigger_function_sql: str | None = None
     parent_trigger_function_sql: str | None = None
+    autofill_function_deps: dict[str, tuple[str, str]] = {}
+    autofill_function_sql: dict[str, str | None] = {}
 
     for app in django_apps.get_app_configs():
         if not _generator.is_local(app):
@@ -144,6 +161,13 @@ def scan_existing_operations() -> ExistingOperations:
             if parent_match:
                 parent_trigger_function_dep = (app.label, path.stem)
                 parent_trigger_function_sql = _recorded_sql_identity(content, parent_match)
+
+            # finditer, not search: unlike the two singletons above, one migration may define
+            # several autofill functions, and each is recorded under its own name.
+            for autofill_match in _RE_TENANT_AUTOFILL_FUNCTION.finditer(content):
+                function = _identifiers._unescape_ident(autofill_match.group(1))
+                autofill_function_deps[function] = (app.label, path.stem)
+                autofill_function_sql[function] = _recorded_sql_identity(content, autofill_match)
 
             for pattern, target, key_fn in scan_table:
                 for match in pattern.finditer(content):
@@ -185,6 +209,9 @@ def scan_existing_operations() -> ExistingOperations:
         tenant_policy_sql=existing_policy_sql,
         unforced_policies={table for table, unforced in existing_policy_force.items() if unforced},
         tenant_forces=existing_tenant_forces,
+        tenant_autofill=existing_tenant_autofill,
+        tenant_autofill_function_dependencies=autofill_function_deps,
+        tenant_autofill_function_sql=autofill_function_sql,
         existing_digests=dict(existing_digests),
         trigger_function_dependency=trigger_function_dep,
         parent_trigger_function_dependency=parent_trigger_function_dep,

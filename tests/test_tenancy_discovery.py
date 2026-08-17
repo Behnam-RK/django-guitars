@@ -7,6 +7,7 @@ from __future__ import annotations
 import pytest
 from django.apps import apps as django_apps
 
+from guitars.tenancy import tenanted_manager
 from guitars.tenancy.discovery import TableCoverage, app_coverage, expected_coverage, is_local
 from tests.testapp.models import (
     Booking,
@@ -16,6 +17,7 @@ from tests.testapp.models import (
     Review,
     StadiumTour,
     Tour,
+    Venue,
     WorldTour,
 )
 
@@ -25,17 +27,85 @@ def coverage():
     return app_coverage(django_apps.get_app_config('testapp'))
 
 
+@pytest.fixture
+def release_proxy():
+    """A proxy over a tenanted model, registered for one test and withdrawn afterwards --
+    left in the registry it would join every other test's model sweep (and, through
+    ``reverse_relations_mapping``, the generator's cascade candidates)."""
+
+    class ReleaseProxy(Release):
+        class Meta:
+            proxy = True
+            app_label = 'testapp'
+
+    yield ReleaseProxy
+    # ``AppConfig.models`` *is* ``apps.all_models[label]``, so one pop withdraws both.
+    django_apps.all_models['testapp'].pop('releaseproxy', None)
+    django_apps.clear_cache()
+
+
+@pytest.fixture
+def venue_proxy():
+    """A proxy declaring the tenanted manager its *concrete* model does not have -- the one
+    shape where skipping proxies loses coverage rather than restoring it."""
+
+    class VenueProxy(Venue):
+        objects = tenanted_manager(label='label')
+
+        class Meta:
+            proxy = True
+            app_label = 'testapp'
+
+    yield VenueProxy
+    django_apps.all_models['testapp'].pop('venueproxy', None)
+    django_apps.clear_cache()
+
+
 class TestWhichTablesAreCovered:
     def test_every_tenanted_table_and_nothing_else(self, coverage):
         assert set(coverage.tables) == {
+            'testapp_arena',
             'testapp_booking',
+            'testapp_concerthall',
             'testapp_headlinefestival',
+            'testapp_lecturehall',
             'testapp_release',
+            'testapp_squashcourt',
             'testapp_stadiumtour',
+            'testapp_tenniscourt',
             'testapp_tour',
             'testapp_track',
             'testapp_worldtour',
         }
+
+    def test_a_proxy_does_not_overwrite_its_concrete_models_coverage(self, release_proxy):
+        """A proxy has no ``local_fields``, so ``_classify`` can only read it as an MTI child
+        of its own table. Declared after ``Release``, that answer replaced the real one: the
+        policy became a self-join and merely adding a proxy generated a ``DROP TRIGGER``."""
+        coverage = app_coverage(django_apps.get_app_config('testapp'))
+        release = coverage.tables[Release._meta.db_table]
+
+        assert release.columns == {'label': 'label_id'}
+        assert release.autofill_columns == {'label': 'label_id'}
+        assert release.owner_table is None
+
+    def test_a_proxy_tenanted_on_its_own_is_named_rather_than_dropped_in_silence(
+        self, venue_proxy
+    ):
+        """Skipping proxies is right, but a manager declared *on* one is the case where the
+        concrete model contributes nothing in its place. Left silent, a model that reads as
+        tenanted gets no policy and no trigger and nothing anywhere says so."""
+        coverage = app_coverage(django_apps.get_app_config('testapp'))
+
+        assert Venue._meta.db_table not in coverage.tables
+        assert [note for note in coverage.notes if 'VenueProxy' in note]
+
+    def test_a_proxy_inheriting_the_manager_earns_no_note(self, release_proxy):
+        """Its concrete model already covers the table, so a note would name a gap that
+        isn't one -- the "two notes for one fact" this module avoids elsewhere."""
+        coverage = app_coverage(django_apps.get_app_config('testapp'))
+
+        assert not [note for note in coverage.notes if 'ReleaseProxy' in note]
 
     def test_the_tenant_model_itself_is_not_covered(self, coverage):
         """``Label`` *is* the tenant. Scoping it to itself is meaningless, and a policy on it

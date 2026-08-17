@@ -42,12 +42,12 @@ So the receiver earns its place as a diagnostic layer. What changes is that it s
 
 ## Consequences
 
-- **`DisableSignals` stops being able to disable tenancy enforcement.** It will still suppress the friendly error; the trigger and `WITH CHECK` do not notice it. This is the finding that motivated the ADR.
+- **`DisableSignals` stops being able to disable tenancy enforcement.** It will still suppress the friendly error; the trigger and `WITH CHECK` do not notice it. This is the finding that motivated the ADR. Amended in 2.1.1: this held only where a trigger was actually emitted — an ancestor-owned column got none until [ADR 0009](0009-relocated-owner-table-autofill.md) relocated it there.
 - **`bulk_create`'s queryset override becomes belt-and-braces**, kept for the error message rather than correctness — `_untenanted_queryset_class.bulk_create`'s `_guarded()` call keeps its comment but loses its load-bearing status.
 - **New SQL templates, private and *not* frozen** (`_CREATE_TENANT_AUTOFILL_*`). Amended during implementation: this ADR originally said to freeze them. The frozen-name rule exists for migrations generated *before* 1.1.0, which resolve `guitars.sql` names at `migrate` time — none can reference a name that did not exist when they were written, so freezing a new one buys nothing and bans a rename forever. 2.0.0 had already set the precedent with `_CREATE_PARENT_UPDATED_AT_TRIGGER`. Private → public stays available later; the reverse does not.
 - **A migration per tenanted table**, plus one function migration. Existing databases need `makemigrations` + `migrate`; nothing is rewritten.
-- **`autofill=False` becomes visible in the schema.** A model that opts out (an append-only archive) gets no trigger, so the opt-out is auditable in `pg_trigger` instead of living only in a manager argument.
-- **`audittenancy` should learn to check it.** A tenanted table whose manager autofills but whose trigger is missing is exactly the "looks fine, is not" state the command exists to catch, invisible to every current check.
+- **`autofill=False` becomes visible in the schema.** A model that opts out (an append-only archive) gets no trigger, so the opt-out is auditable in `pg_trigger` instead of living only in a manager argument. Amended in 2.1.1: true only once a trigger could be *removed* — through 2.1.0 flipping the flag emitted nothing and the database kept filling. See [issue #27](https://github.com/Behnam-RK/django-guitars/issues/27) and `docs/migrations.md`'s "Retirement".
+- **`audittenancy` should learn to check it.** A tenanted table whose manager autofills but whose trigger is missing is exactly the "looks fine, is not" state the command exists to catch, invisible to every current check. Shipped in 2.1.0; 2.1.1 added the other direction, a trigger the models no longer expect.
 - **Multi-hop dimensions still cannot be autofilled**, by the same reasoning that excludes them from policies — no column on this table to write. Unchanged from today, where `tenanted_manager()` rejects `autofill` with a multi-hop lookup.
 
 ## Related

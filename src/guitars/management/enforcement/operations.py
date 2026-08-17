@@ -15,6 +15,7 @@ from guitars.management import _generator
 from guitars.management.enforcement.headers import (
     _RE_MTI_UPDATED_AT,
     _RE_TENANT_AUTOFILL,
+    _RE_TENANT_AUTOFILL_RETIRED,
     _RE_UPDATED_AT,
     HEADER_MTI_SOFT_DELETE,
     HEADER_MTI_UPDATED_AT,
@@ -22,6 +23,7 @@ from guitars.management.enforcement.headers import (
     HEADER_SOFT_DELETE_RELATED,
     HEADER_SOFT_DELETE_RELATED_VIA,
     HEADER_TENANT_AUTOFILL,
+    HEADER_TENANT_AUTOFILL_RETIRED,
     HEADER_TENANT_FORCE,
     HEADER_TENANT_POLICY,
     HEADER_TENANT_POLICY_REPLACED,
@@ -91,6 +93,9 @@ class OperationsMixin:
         parent_trigger_function_dependency: tuple[str, str] | None
         tenant_autofill_dependencies: dict[str, tuple[str, str]]
         reverse_relations_mapping: dict[type[models.Model], set]
+        _table_app_labels_cache: dict[str, str] | None
+        _required_autofill_cache: dict[tuple[str, str], tuple[str, str]] | None
+        _relocated_autofill_cache: dict[tuple[str, str], tuple[str, str]] | None
 
         @staticmethod
         def _write_migration_file(
@@ -403,46 +408,251 @@ class OperationsMixin:
         return (
             operations
             + deferred
+            # Retire before create: a rename emits both in one migration, and "retire, then
+            # create" is the order that reads correctly. The names never collide, so this
+            # is legibility rather than correctness.
+            + self._retired_autofill_operations(app, adopt=adopt)
             + self._tenant_autofill_operations(app, adopt=adopt)
             + self._tenant_policy_operations(app, adopt=adopt)
         )
 
+    @staticmethod
+    def _autofill_slots(table: str, function: str) -> dict[str, str]:
+        """The DDL slots every autofill trigger template takes. Derivable from the recorded
+        ``(table, function)`` key alone -- no model or column lookup -- which is what lets
+        retirement still build a DROP after the column that named it is gone."""
+        return {
+            'table': _identifiers._quote_table(table),
+            'function': _identifiers._safe_ident(function),
+            'trigger': _identifiers._safe_ident(autofill_trigger_name(function)),
+        }
+
+    def _table_app_labels(self) -> dict[str, str]:
+        """``db_table`` -> the local app whose migrations host operations on it, first app
+        winning. One table, one host: two apps each emitting the same DROP would fail the
+        second at ``migrate``. Shared by retirement and owner-attributed autofill."""
+        if self._table_app_labels_cache is not None:
+            return self._table_app_labels_cache
+        hosting: dict[str, str] = {}
+        # Only a model with a ``CreateModel`` behind it can host: a proxy owns no table, and an
+        # unmanaged one shadowing another app's would write the DROP into an app with no
+        # ordering against the table's creation. Unmanaged still hosts as a fallback.
+        for managed in (True, False):
+            for app in django_apps.get_app_configs():
+                if not _generator.is_local(app):
+                    continue
+                for model in app.get_models():
+                    if model._meta.proxy or bool(model._meta.managed) is not managed:
+                        continue
+                    hosting.setdefault(model._meta.db_table, app.label)
+        self._table_app_labels_cache = hosting
+        return hosting
+
+    def _autofill_key_maps(
+        self,
+    ) -> tuple[dict[tuple[str, str], tuple[str, str]], dict[tuple[str, str], tuple[str, str]]]:
+        """``(required, relocated)``, both from **one** sweep of every local app's coverage.
+        Relocated is a subset of required, and the sweep is the expensive part -- each
+        ``_classify`` of an ancestor-owned column scans the whole model registry."""
+        required, relocated = self._required_autofill_cache, self._relocated_autofill_cache
+        if required is not None and relocated is not None:
+            return required, relocated
+        # Bound to the cache slots up front rather than at each return: the loop below fills
+        # these same objects, so one assignment covers both exits.
+        required, relocated = {}, {}
+        self._required_autofill_cache, self._relocated_autofill_cache = required, relocated
+        if not self._tenant_policies_enabled():
+            return required, relocated
+        for app in django_apps.get_app_configs():
+            if not _generator.is_local(app):
+                continue
+            for table, coverage in app_coverage(app).tables.items():
+                for dimension, column in (coverage.autofill_columns or {}).items():
+                    required[(table, autofill_function_name(dimension, column))] = (
+                        dimension,
+                        column,
+                    )
+                # A relocated dimension's trigger lives on the ancestor's table, so it is
+                # keyed there -- and several children may resolve to the same one key.
+                if not (coverage.owner_autofill_columns and coverage.owner_table):
+                    continue
+                for dimension, column in coverage.owner_autofill_columns.items():
+                    key = (coverage.owner_table, autofill_function_name(dimension, column))
+                    required[key] = relocated[key] = (dimension, column)
+        return required, relocated
+
+    def _required_autofill_keys(self) -> dict[tuple[str, str], tuple[str, str]]:
+        """Every ``(table, function)`` the models currently require -> its ``(dimension,
+        column)``. Deliberately project-wide: retirement subtracts from this, and a scoped
+        view would read another app's live trigger as no longer required and drop it."""
+        return self._autofill_key_maps()[0]
+
+    def _relocated_autofill_keys(self) -> dict[tuple[str, str], tuple[str, str]]:
+        """The subset of :meth:`_required_autofill_keys` whose trigger sits on an MTI
+        ancestor's table. Project-wide on purpose: the child declaring the dimension may be
+        out of a scoped run while the owner hosting the trigger is in it."""
+        return self._autofill_key_maps()[1]
+
+    def _scoped_autofill_gap_notes(self, requested: set[str]) -> list[str]:
+        """Autofill triggers this scoped run won't touch: a relocated one it won't create
+        (keyed off the app hosting the *ancestor's* table) and a stale one it won't retire.
+        Closed by a later unscoped run -- the tradeoff cross-app cascade rules already make."""
+        if not requested or not self._tenant_policies_enabled():
+            return []
+        hosting = self._table_app_labels()
+        notes = [
+            f"Tenant autofill trigger on '{table}' (function '{function}') skipped: the "
+            f"tenant column lives on that ancestor, whose app '{hosting[table]}' is not in "
+            f'this scoped run.'
+            for table, function in sorted(self._relocated_autofill_keys())
+            if table in hosting
+            and hosting[table] not in requested
+            and (table, function) not in self.existing.tenant_autofill
+        ]
+        # The other direction, and the dangerous half to leave silent: an orphaned trigger
+        # dereferences a dropped column and fails *every* INSERT on its table, so a scoped
+        # run that cannot retire it has to say which app to name instead.
+        required = self._required_autofill_keys()
+        notes.extend(
+            f"Tenant autofill trigger on '{table}' (function '{function}') is recorded but "
+            f"no longer required, and the app hosting that table, '{hosting[table]}', is not "
+            f'in this scoped run, so it was not retired. Re-run without a scope, or name '
+            f'that app.'
+            for table, function in sorted(set(self.existing.tenant_autofill) - set(required))
+            if table in hosting and hosting[table] not in requested
+        )
+        return notes
+
     def _tenant_autofill_operations(self, app: AppConfig, *, adopt: bool = False) -> list[str]:
-        """``BEFORE INSERT`` autofill triggers *app* is missing or has outdated (ADR 0005).
-        Emitted only where coverage reports a *local* tenant column on a manager that
-        autofills, so a model opting out is auditable as an absent trigger."""
+        """``BEFORE INSERT`` autofill triggers *app* is missing or has outdated (ADR 0005), on
+        *app*'s own tables plus any ancestor table it hosts for a relocated dimension (ADR
+        0009). Only where a manager autofills, so an opt-out is auditable as an absent one."""
         if not self._tenant_policies_enabled():
             return []
 
+        # This app's own coverage, not the project-wide required map: _build_operations is
+        # called directly with apps outside LOCAL_APPS, which that map excludes. Notes are
+        # collected by _tenant_policy_operations off the same call, else each prints twice.
+        keys: dict[tuple[str, str], None] = {}
+        for table, coverage in app_coverage(app).tables.items():
+            for dimension, column in (coverage.autofill_columns or {}).items():
+                keys[(table, autofill_function_name(dimension, column))] = None
+
+        # Triggers relocated onto an ancestor's table are attributed to the app hosting that
+        # table, wherever the child lives -- the same inversion cascade rules already use.
+        hosting = self._table_app_labels()
+        for table, function in self._relocated_autofill_keys():
+            if hosting.get(table) == app.label:
+                keys[(table, function)] = None
+
         operations: list[str] = []
-        for table, table_coverage in sorted(app_coverage(app).tables.items()):
-            # Notes are collected by _tenant_policy_operations off the same app_coverage
-            # call; gathering them here too would print every one twice.
-            for dimension, column in sorted((table_coverage.autofill_columns or {}).items()):
-                function = autofill_function_name(dimension, column)
-                slots = {
-                    'table': _identifiers._quote_table(table),
-                    'function': _identifiers._safe_ident(function),
-                    'trigger': _identifiers._safe_ident(autofill_trigger_name(function)),
-                }
-                self._append_if_stale(
-                    operations,
-                    self.existing.tenant_autofill,
-                    # Keyed on the pair, not the table: a table tenanted on two local
-                    # dimensions carries one trigger per (column, GUC) pair, and the table
-                    # alone would let the second overwrite the first's recorded digest.
-                    (table, function),
-                    HEADER_TENANT_AUTOFILL.format(
-                        table=_identifiers._escape_ident(table),
-                        function=_identifiers._escape_ident(function),
-                    ),
-                    _triggers._CREATE_TENANT_AUTOFILL_TRIGGER.format(**slots),
-                    _triggers._DROP_TENANT_AUTOFILL_TRIGGER.format(**slots),
-                    is_adopt=adopt,
-                    replace=_triggers._REPLACE_TENANT_AUTOFILL_TRIGGER.format(**slots),
-                    adopt=_triggers._ADOPT_TENANT_AUTOFILL_TRIGGER.format(**slots),
-                )
+        for table, function in sorted(keys):
+            slots = self._autofill_slots(table, function)
+            self._append_if_stale(
+                operations,
+                self.existing.tenant_autofill,
+                # Keyed on the pair, not the table: a table tenanted on two local
+                # dimensions carries one trigger per (column, GUC) pair, and the table
+                # alone would let the second overwrite the first's recorded digest.
+                (table, function),
+                HEADER_TENANT_AUTOFILL.format(
+                    table=_identifiers._escape_ident(table),
+                    function=_identifiers._escape_ident(function),
+                ),
+                _triggers._CREATE_TENANT_AUTOFILL_TRIGGER.format(**slots),
+                _triggers._DROP_TENANT_AUTOFILL_TRIGGER.format(**slots),
+                is_adopt=adopt,
+                replace=_triggers._REPLACE_TENANT_AUTOFILL_TRIGGER.format(**slots),
+                adopt=_triggers._ADOPT_TENANT_AUTOFILL_TRIGGER.format(**slots),
+            )
         return operations
+
+    def _retired_autofill_operations(self, app: AppConfig, *, adopt: bool = False) -> list[str]:
+        """Drop autofill triggers *app*'s tables record but the models no longer require. A
+        renamed dimension or column names a new function, orphaning the old trigger -- which
+        still dereferences the dropped column and fails every INSERT on the table."""
+        if not self._tenant_policies_enabled():
+            return []
+
+        hosting = self._table_app_labels()
+        required = self._required_autofill_keys()
+        operations: list[str] = []
+        for table, function in sorted(set(self.existing.tenant_autofill) - set(required)):
+            if hosting.get(table) != app.label:
+                continue
+            slots = self._autofill_slots(table, function)
+            drop = _triggers._DROP_TENANT_AUTOFILL_TRIGGER.format(**slots)
+            # Not _append_if_stale: its "recorded digest differs -> replace" branch is
+            # meaningless for a drop. The set difference above is the whole idempotency
+            # mechanism, so the [SQL:...] stamped here is written and never read.
+            source, _ = _operation(
+                HEADER_TENANT_AUTOFILL_RETIRED.format(
+                    table=_identifiers._escape_ident(table),
+                    function=_identifiers._escape_ident(function),
+                ),
+                drop,
+                _triggers._CREATE_TENANT_AUTOFILL_TRIGGER.format(**slots),
+                emit=_triggers._ADOPT_DROP_TENANT_AUTOFILL_TRIGGER.format(**slots)
+                if adopt
+                else drop,
+            )
+            operations.append(source)
+        return operations
+
+    def _unmapped_autofill_notes(self) -> list[str]:
+        """Triggers on tables no local model claims: recorded ones that cannot be retired and
+        required ones that cannot be created, both for want of an app to write the migration
+        into -- this generator has no migration-state graph. Named, because skips are design."""
+        if not self._tenant_policies_enabled():
+            return []
+
+        hosting = self._table_app_labels()
+        required = self._required_autofill_keys()
+        notes: list[str] = []
+        for table, function in sorted(set(self.existing.tenant_autofill) - set(required)):
+            if table in hosting:
+                continue
+            slots = self._autofill_slots(table, function)
+            notes.append(
+                f"Tenant autofill trigger on '{table}' (function '{function}') is recorded "
+                f'but no local model maps to that table, so it cannot be retired here. If '
+                f'the table still exists, drop it by hand: '
+                f'{_triggers._DROP_TENANT_AUTOFILL_TRIGGER.format(**slots).strip()}'
+            )
+        # The other direction: a relocated trigger whose ancestor lives outside LOCAL_APPS.
+        # Nothing hosts it, so `audittenancy` would report it missing on every run forever.
+        for table, function in sorted(required):
+            if table in hosting:
+                continue
+            notes.append(
+                f"Tenant autofill trigger on '{table}' (function '{function}') is required "
+                f'but no local model maps to that table -- the tenant column lives on an '
+                f'ancestor outside LOCAL_APPS, so there is no app to write the migration '
+                f'into. Add that app to LOCAL_APPS, or pass autofill=False on the '
+                f'descendants claiming the column.'
+            )
+        return notes
+
+    def _orphaned_autofill_function_notes(self) -> list[str]:
+        """Autofill functions no recorded or required trigger still calls. Inert, so noted
+        rather than dropped: DROP FUNCTION must follow every trigger that depends on it, and
+        a scoped run cannot prove an out-of-scope app has no trigger left calling it."""
+        if not self._tenant_policies_enabled():
+            return []
+
+        called = {function for _, function in self.existing.tenant_autofill}
+        called.update(function for _, function in self._required_autofill_keys())
+        return [
+            f"Tenant autofill function '{function}' is no longer called by any trigger this "
+            f'command records. It is inert; retire it deliberately once you are sure no '
+            f"hand-written trigger uses it -- and note that a retirement migration's "
+            f'reverse_sql recreates the trigger calling it, so dropping it makes that '
+            f'migration irreversible: '
+            f'{_triggers._DROP_TENANT_AUTOFILL_FUNCTION.format(function=_identifiers._safe_ident(function)).strip()}'
+            for function in sorted(
+                set(self.existing.tenant_autofill_function_dependencies) - called
+            )
+        ]
 
     @staticmethod
     def _is_cascade_candidate(related_model, fk_field, on_delete) -> bool:
@@ -604,13 +814,15 @@ class OperationsMixin:
         if self.parent_trigger_function_dependency and _RE_MTI_UPDATED_AT.search(operations_blob):
             deps.append(self.parent_trigger_function_dependency)
         # Per function, not per kind: an app depends only on the autofill functions its own
-        # triggers name, which the trigger header carries for exactly this purpose.
-        for match in _RE_TENANT_AUTOFILL.finditer(operations_blob):
-            dependency = self.tenant_autofill_dependencies.get(
-                _identifiers._unescape_ident(match.group(RE_TENANT_AUTOFILL_FUNCTION))
-            )
-            if dependency and dependency not in deps:
-                deps.append(dependency)
+        # triggers name. The retired header counts too -- its reverse_sql recreates the
+        # trigger, so this edge is what makes reversing a retirement possible.
+        for pattern in (_RE_TENANT_AUTOFILL, _RE_TENANT_AUTOFILL_RETIRED):
+            for match in pattern.finditer(operations_blob):
+                dependency = self.tenant_autofill_dependencies.get(
+                    _identifiers._unescape_ident(match.group(RE_TENANT_AUTOFILL_FUNCTION))
+                )
+                if dependency and dependency not in deps:
+                    deps.append(dependency)
         return deps
 
     def _generate_stage(
@@ -621,10 +833,11 @@ class OperationsMixin:
         build_ops: Callable[[AppConfig], list[str]],
         check_only: bool,
         dependencies_for: Callable[[str], list[tuple[str, str]]] | None = None,
+        adopt: bool = False,
     ) -> tuple[bool, list[tuple[str, list[str]]]]:
         """Scaffold-and-write one migration per in-scope app with new operations. Shared by
-        ``handle()`` and :meth:`_handle_force_rls_stage`, once near-identical copies.
-        Returns ``(changes_made, check_missing)`` since callers flush different warnings."""
+        ``handle()`` and :meth:`_handle_force_rls_stage`, once near-identical copies. Returns
+        ``(changes_made, check_missing)``: callers flush different warnings. See *adopt* below."""
         changes_made = False
         check_missing: list[tuple[str, list[str]]] = []
         for app in django_apps.get_app_configs():
@@ -636,7 +849,13 @@ class OperationsMixin:
                 continue
 
             operations_digest = _generator.digest_of(operations)
-            if operations_digest in self.existing.existing_digests.get(app.label, set()):
+            # Retirement makes an operation set recur (retire, re-adopt, same CREATE), so the
+            # guard must yield -- but never under *adopt*, where it is the only idempotency
+            # there is. Safe: the adopt form's DROP ... IF EXISTS digests differently.
+            waive_digest_guard = not adopt and app.label in self.existing.autofill_retirement_apps
+            if not waive_digest_guard and operations_digest in self.existing.existing_digests.get(
+                app.label, set()
+            ):
                 continue
 
             if check_only:

@@ -39,12 +39,15 @@ _BASELINE = {
     '_RE_TENANT_AUTOFILL': re.compile(
         r'# Tenant autofill Trigger on "([^"]+)" table \(function "([^"]+)"\)'
     ),
+    '_RE_TENANT_AUTOFILL_RETIRED': re.compile(
+        r'# Tenant autofill Trigger retired on "([^"]+)" table \(function "([^"]+)"\)'
+    ),
 }
 
-#: No committed migration has ever gone through the ``--force-rls`` retrofit stage, so this
-#: is the one scanner with nothing to match in the real corpus -- both baseline and current
-#: agreeing on zero matches is the whole assertion for it, not a weaker check.
-_EXPECTED_EMPTY = {'_RE_TENANT_FORCE'}
+#: No committed migration has ever gone through the ``--force-rls`` retrofit stage, nor had
+#: an autofill trigger retired, so these are the scanners with nothing to match in the real
+#: corpus -- baseline and current agreeing on zero is the whole assertion, not a weaker check.
+_EXPECTED_EMPTY = {'_RE_TENANT_FORCE', '_RE_TENANT_AUTOFILL_RETIRED'}
 
 #: ``_RE_TENANT_POLICY``'s baseline captures ``[POLICY:...]`` inline; current reads it via
 #: a tail search instead -- shape changed on purpose, so this is checked by round-tripping

@@ -265,16 +265,14 @@ _DROP_TENANT_AUTOFILL_TRIGGER = """
 
 # Same two-form split as REPLACE_/ADOPT_UPDATED_AT_TRIGGER above: IF EXISTS is a knowledge
 # claim, so only the --adopt path -- which is honest about not knowing -- may assert it.
-_REPLACE_TENANT_AUTOFILL_TRIGGER = (
-    """
-    DROP TRIGGER {trigger} ON {table};
-"""
-    + _CREATE_TENANT_AUTOFILL_TRIGGER
-)
-
-_ADOPT_TENANT_AUTOFILL_TRIGGER = (
-    """
+_ADOPT_DROP_TENANT_AUTOFILL_TRIGGER = """
     DROP TRIGGER IF EXISTS {trigger} ON {table};
 """
-    + _CREATE_TENANT_AUTOFILL_TRIGGER
+
+# Both halves are the drop templates above verbatim, so retirement (which emits a drop alone)
+# and replacement can never disagree about how a trigger is dropped.
+_REPLACE_TENANT_AUTOFILL_TRIGGER = _DROP_TENANT_AUTOFILL_TRIGGER + _CREATE_TENANT_AUTOFILL_TRIGGER
+
+_ADOPT_TENANT_AUTOFILL_TRIGGER = (
+    _ADOPT_DROP_TENANT_AUTOFILL_TRIGGER + _CREATE_TENANT_AUTOFILL_TRIGGER
 )

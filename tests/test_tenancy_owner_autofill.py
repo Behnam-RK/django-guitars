@@ -10,7 +10,7 @@ import pytest
 from django.apps import apps as django_apps
 
 from guitars.management.commands.makeguitarmigrations import Command
-from guitars.tenancy import tenancy_bypassed, tenant
+from guitars.tenancy import discovery, tenancy_bypassed, tenant
 from guitars.tenancy.discovery import (
     app_coverage,
     autofill_function_name,
@@ -133,6 +133,23 @@ class TestTheMtiRegression:
 
         assert table.autofill_columns is None
         assert table.owner_autofill_columns is None
+
+    def test_an_opted_out_child_is_told_the_owners_trigger_overwrites_it(self, monkeypatch):
+        """The refusal every other opt-out earns says the column is "left to Python scoping".
+        Here a trigger does exist -- the owner's own -- and it stamps the child's row on every
+        MTI insert, so that wording would tell the operator the opposite of what happens."""
+        real = discovery._autofills
+        monkeypatch.setattr(
+            discovery,
+            '_autofills',
+            lambda model: False if model is StadiumTour else real(model),
+        )
+
+        notes = [note for note in owner_autofill_notes() if 'testapp_tour' in note]
+
+        assert len(notes) == 1
+        assert 'overwrites their opt-out' in notes[0]
+        assert 'left to Python scoping' not in notes[0]
 
     def test_the_owners_table_gets_exactly_one_trigger(self):
         """Three models resolve to ``testapp_tour``. Without the "owner already autofills"

@@ -4,9 +4,11 @@ dropped column and fails every INSERT on the table until it is dropped."""
 
 from __future__ import annotations
 
+import io
 import types
 
 import pytest
+from django.core.management import call_command
 
 from guitars.management import _generator
 from guitars.management.commands.makeguitarmigrations import Command
@@ -14,6 +16,7 @@ from guitars.management.enforcement.headers import (
     HEADER_TENANT_AUTOFILL,
     HEADER_TENANT_AUTOFILL_RETIRED,
 )
+from guitars.management.enforcement.operations import OperationsMixin
 from guitars.management.enforcement.scanning import scan_existing_operations
 from guitars.sql import triggers as _triggers
 from guitars.tenancy.discovery import autofill_trigger_name
@@ -257,6 +260,19 @@ class TestNotesRatherThanOperations:
         assert 'gone_table' in notes[0]
         assert f'DROP TRIGGER "{autofill_trigger_name(_STALE)}" ON "gone_table";' in notes[0]
 
+    def test_a_required_trigger_with_no_local_host_is_named_too(self, _command):
+        """The other direction: the tenant column lives on an ancestor outside LOCAL_APPS, so
+        nothing hosts the trigger and it is never written -- left silent, ``audittenancy``
+        would report it missing on every run forever with no way to act on that."""
+        _command._required_autofill_cache = {('vendor_base', _STALE): ('venue', 'venue_id')}
+        _command._relocated_autofill_cache = {}
+
+        notes = [note for note in _command._unmapped_autofill_notes() if 'vendor_base' in note]
+
+        assert len(notes) == 1
+        assert 'is required' in notes[0]
+        assert 'LOCAL_APPS' in notes[0]
+
     def test_a_scoped_run_names_the_retirement_it_could_not_write(self, _command):
         """The dangerous half to leave silent: the orphan dereferences a dropped column and
         fails every INSERT on its table until some later, wider run retires it."""
@@ -291,6 +307,19 @@ class TestNotesRatherThanOperations:
         )
 
         assert _command._orphaned_autofill_function_notes() == []
+
+    @pytest.mark.parametrize(
+        'method', ['_unmapped_autofill_notes', '_orphaned_autofill_function_notes']
+    )
+    def test_the_notes_reach_the_operator(self, monkeypatch, method):
+        """Building a note nobody prints is the same as skipping in silence. Both of these
+        are reachable only through ``handle()``, so nothing else proves they are surfaced."""
+        monkeypatch.setattr(OperationsMixin, method, lambda self: ['a note about a skip'])
+        out = io.StringIO()
+
+        call_command('makeguitarmigrations', '--check', stdout=out, stderr=io.StringIO())
+
+        assert 'a note about a skip' in out.getvalue()
 
 
 class TestAgainstTheRealDatabase:

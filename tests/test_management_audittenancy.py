@@ -17,8 +17,12 @@ from guitars.management.commands.audittenancy import Command as AuditCommand
 from guitars.sql import triggers
 from guitars.tenancy import tenant
 from tests.conftest import execute
-from guitars.tenancy.discovery import autofill_function_name, autofill_trigger_name
-from tests.testapp.models import Booking, Release
+from guitars.tenancy.discovery import (
+    autofill_function_name,
+    autofill_trigger_name,
+    expected_coverage,
+)
+from tests.testapp.models import Arena, Booking, Release
 
 
 def _audit(*args, **options) -> str:
@@ -270,6 +274,35 @@ class TestAStrayAutofillTrigger:
         finally:
             _execute(
                 f'DROP TRIGGER "{autofill_trigger_name(function)}" ON "{table}"',
+                f'DROP FUNCTION "{function}"()',
+            )
+
+    def test_only_a_covered_table_drops_out_of_the_enforced_count(self, _execute):
+        """Both are reported, but only a table the models cover can be *subtracted* from the
+        expected count -- ``testapp_band`` is not tenanted, so counting it would push
+        "enforced" below zero's worth of meaning. Two strays, since the split is per finding."""
+        covered, uncovered = Release._meta.db_table, 'testapp_band'
+        expected = len(expected_coverage().tables)
+        function = self._stray(_execute, uncovered)
+        _execute(
+            triggers._CREATE_TENANT_AUTOFILL_TRIGGER.format(
+                trigger=f'"{autofill_trigger_name(function)}"',
+                table=f'"{covered}"',
+                function=f'"{function}"',
+            )
+        )
+        try:
+            output = _audit_failure('--require-match')
+
+            assert covered in output
+            assert uncovered in output
+            assert f'{expected} table(s) expected, {expected - 1} enforced' in output
+        finally:
+            _execute(
+                *(
+                    f'DROP TRIGGER "{autofill_trigger_name(function)}" ON "{t}"'
+                    for t in (covered, uncovered)
+                ),
                 f'DROP FUNCTION "{function}"()',
             )
 

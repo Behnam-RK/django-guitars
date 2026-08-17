@@ -434,16 +434,17 @@ class OperationsMixin:
         if self._table_app_labels_cache is not None:
             return self._table_app_labels_cache
         hosting: dict[str, str] = {}
-        for app in django_apps.get_app_configs():
-            if not _generator.is_local(app):
-                continue
-            for model in app.get_models():
-                # Proxies come through ``get_models`` but own no table. Letting one declared
-                # in an earlier app claim the host would write the DROP (or a relocated
-                # CREATE) into an app with no ordering against the migration that created it.
-                if model._meta.proxy:
+        # Only a model with a ``CreateModel`` behind it can host: a proxy owns no table, and an
+        # unmanaged one shadowing another app's would write the DROP into an app with no
+        # ordering against the table's creation. Unmanaged still hosts as a fallback.
+        for managed in (True, False):
+            for app in django_apps.get_app_configs():
+                if not _generator.is_local(app):
                     continue
-                hosting.setdefault(model._meta.db_table, app.label)
+                for model in app.get_models():
+                    if model._meta.proxy or bool(model._meta.managed) is not managed:
+                        continue
+                    hosting.setdefault(model._meta.db_table, app.label)
         self._table_app_labels_cache = hosting
         return hosting
 

@@ -24,7 +24,7 @@ from guitars.tenancy.discovery import (
 
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterator, Mapping
 
     from django.db.backends.base.base import BaseDatabaseWrapper
 
@@ -129,6 +129,18 @@ def _tenant_gucs(expression: str | None) -> frozenset[str]:
     return frozenset(
         guc for guc in _RE_GUC.findall(expression or '') if guc.startswith(GUC_PREFIX)
     )
+
+
+def _autofill_hosts(table: str, coverage: TableCoverage) -> Iterator[tuple[str, dict[str, str]]]:
+    """``(table the trigger lives on, {dimension: column} it fills)`` -- its own columns, then
+    any relocated onto an MTI ancestor (ADR 0009). One definition for the three checks below:
+    they must agree, or a change made in two leaves the third auditing a host nobody reads."""
+    for host, columns in (
+        (table, coverage.autofill_columns),
+        (coverage.owner_table, coverage.owner_autofill_columns),
+    ):
+        if columns and host:
+            yield host, columns
 
 
 class Command(BaseCommand):
@@ -238,12 +250,7 @@ class Command(BaseCommand):
         findings: list[str] = []
         # Takes the whole live map, not one TableState: a relocated trigger sits on the
         # ancestor's table (ADR 0009), so the fix is on a different table than the subject.
-        for host, columns in (
-            (table, coverage.autofill_columns),
-            (coverage.owner_table, coverage.owner_autofill_columns),
-        ):
-            if not (columns and host):
-                continue
+        for host, columns in _autofill_hosts(table, coverage):
             # Names only: this check asks whether a trigger is there at all. What the body is
             # rendered from is :meth:`_autofill_bodies`' business, which walks coverage itself.
             expected = {
@@ -257,8 +264,8 @@ class Command(BaseCommand):
                     f'verified.'
                 )
                 continue
-            where = '' if host == table else f" on its ancestor '{host}'"
             if missing := sorted(expected - host_state.autofill_function_names):
+                where = '' if host == table else f" on its ancestor '{host}'"
                 findings.append(
                     f"'{table}': no tenant autofill trigger calling {missing}{where} -- its "
                     f'manager autofills, so an INSERT omitting the tenant will fail on NOT '
@@ -274,19 +281,17 @@ class Command(BaseCommand):
         column)`` pair, so its body is one fact however many triggers call it."""
         wanted: dict[str, tuple[str, str, set[str], set[str]]] = {}
         for table, coverage in expected.tables.items():
-            for host, columns in (
-                (table, coverage.autofill_columns),
-                (coverage.owner_table, coverage.owner_autofill_columns),
-            ):
-                if not (columns and host):
-                    continue
+            for host, columns in _autofill_hosts(table, coverage):
                 for dimension, column in columns.items():
-                    entry = wanted.setdefault(
-                        autofill_function_name(dimension, column),
-                        (dimension, column, set(), set()),
-                    )
-                    entry[2].add(table)
-                    entry[3].add(host)
+                    function = autofill_function_name(dimension, column)
+                    # Not ``setdefault``: the two sets are the accumulators, and building a
+                    # discarded pair of them for every column after the first is the one
+                    # allocation this loop repeats per table rather than per function.
+                    if function not in wanted:
+                        wanted[function] = (dimension, column, set(), set())
+                    _, _, filled_for, hosted_on = wanted[function]
+                    filled_for.add(table)
+                    hosted_on.add(host)
         return wanted
 
     @classmethod
@@ -306,7 +311,7 @@ class Command(BaseCommand):
                 (
                     found
                     for host in sorted(hosts)
-                    if (state := live.get(host))
+                    if (state := live.get(host)) is not None
                     for name, found in state.autofill_functions
                     if name == function
                 ),
@@ -358,15 +363,11 @@ class Command(BaseCommand):
         scoped run cannot tell "not mine" from "gone". Paired with its table -- not "enforced"."""
         wanted: dict[str, set[str]] = {}
         for table, coverage in expected.tables.items():
-            for host, columns in (
-                (table, coverage.autofill_columns),
-                (coverage.owner_table, coverage.owner_autofill_columns),
-            ):
-                if columns and host:
-                    wanted.setdefault(host, set()).update(
-                        autofill_function_name(dimension, column)
-                        for dimension, column in columns.items()
-                    )
+            for host, columns in _autofill_hosts(table, coverage):
+                wanted.setdefault(host, set()).update(
+                    autofill_function_name(dimension, column)
+                    for dimension, column in columns.items()
+                )
         return [
             (
                 table,

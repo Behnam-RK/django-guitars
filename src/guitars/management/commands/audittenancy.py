@@ -13,6 +13,7 @@ from django.db import DEFAULT_DB_ALIAS, connections
 
 from guitars.gucs import GUC_PREFIX
 from guitars.management import _generator
+from guitars.sql import triggers as _triggers
 from guitars.sql.policy import TENANT_POLICY
 from guitars.tenancy import TenantEnforcement
 from guitars.tenancy.discovery import (
@@ -44,9 +45,15 @@ class TableState(NamedTuple):
     #: Same, off the WITH CHECK half (governs writes) -- see docs/tenancy.md's "USING
     #: (<tenant match>) WITH CHECK (true)" hazard. Falls back to USING when NULL.
     policy_check_gucs: frozenset[str]
-    #: Names of the functions this table's row-level INSERT triggers call (ADR 0005). A
-    #: table that should autofill but calls none is the "looks fine, is not" state.
-    autofill_functions: frozenset[str]
+    #: ``(name, body)`` for every function this table's row-level INSERT triggers call (ADR
+    #: 0005). A table that autofills but calls none is "looks fine, is not", and so is one
+    #: whose body lost a guard -- hence the body travels with the name, never beside it.
+    autofill_functions: frozenset[tuple[str, str]]
+
+    @property
+    def autofill_function_names(self) -> frozenset[str]:
+        """Just the names -- for the two checks that only ask whether a trigger is there."""
+        return frozenset(name for name, _ in self.autofill_functions)
 
 
 #: Live enforcement state for every table in the search path. Ordered search-path-descending
@@ -72,7 +79,7 @@ ORDER BY array_position(current_schemas(false), n.nspname) DESC
 #: 0005), by ``tgtype`` bits 0/1/2. ``tgenabled <> 'D'`` is load-bearing: a disabled trigger
 #: still has its ``pg_trigger`` row while nothing fires -- "looks fine, is not" exactly.
 _AUTOFILL_TRIGGER_SQL = """
-SELECT n.nspname, c.relname, p.proname
+SELECT n.nspname, c.relname, p.proname, p.prosrc
 FROM pg_trigger t
 JOIN pg_class c ON c.oid = t.tgrelid
 JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -121,6 +128,13 @@ def _tenant_gucs(expression: str | None) -> frozenset[str]:
     return frozenset(
         guc for guc in _RE_GUC.findall(expression or '') if guc.startswith(GUC_PREFIX)
     )
+
+
+def _squeeze(statement: str) -> str:
+    """Collapse runs of whitespace to one space. PostgreSQL stores a dollar-quoted body
+    verbatim and the generator re-indents what it inlines, so indentation is the one
+    difference a body comparison must never report -- see :meth:`_autofill_body_drift`."""
+    return ' '.join(statement.split())
 
 
 class Command(BaseCommand):
@@ -181,9 +195,9 @@ class Command(BaseCommand):
             # Keyed by (schema, table), not the bare name: the state rows below resolve to
             # one schema off the search path, so folding every schema's triggers together
             # would let a trigger on tenant_b.orders vouch for public.orders.
-            triggers: dict[tuple[str, str], set[str]] = {}
-            for schema_name, table, function in cursor.fetchall():
-                triggers.setdefault((schema_name, table), set()).add(function)
+            triggers: dict[tuple[str, str], set[tuple[str, str]]] = {}
+            for schema_name, table, function, body in cursor.fetchall():
+                triggers.setdefault((schema_name, table), set()).add((function, body))
 
             state: dict[str, TableState] = {}
             for name, schema, enabled, forced, oid, qual, with_check in rows:
@@ -224,9 +238,9 @@ class Command(BaseCommand):
     def _autofill_drift(
         table: str, coverage: TableCoverage, live: Mapping[str, TableState]
     ) -> list[str]:
-        """Report a table whose manager autofills but whose ADR 0005 trigger is absent. No
-        other check sees it: the policy is present and correct, reads and cross-tenant writes
-        are refused, and only an insert omitting the tenant fails -- with a bare NOT NULL."""
+        """Report a table whose manager autofills but whose ADR 0005 trigger is absent, or
+        whose function no longer has the body the models imply. Nothing else sees either: the
+        policy is intact, and only an insert omitting the tenant misbehaves."""
         findings: list[str] = []
         # Takes the whole live map, not one TableState: a relocated trigger sits on the
         # ancestor's table (ADR 0009), so the fix is on a different table than the subject.
@@ -236,8 +250,11 @@ class Command(BaseCommand):
         ):
             if not (columns and host):
                 continue
+            # Keyed by function name and carrying its (dimension, column) pair: the presence
+            # check needs the names, and the body check needs what the body is rendered from.
             expected = {
-                autofill_function_name(dimension, column) for dimension, column in columns.items()
+                autofill_function_name(dimension, column): (dimension, column)
+                for dimension, column in columns.items()
             }
             host_state = live.get(host)
             if host_state is None:
@@ -247,15 +264,41 @@ class Command(BaseCommand):
                     f'verified.'
                 )
                 continue
-            if missing := sorted(expected - host_state.autofill_functions):
-                where = '' if host == table else f" on its ancestor '{host}'"
+            where = '' if host == table else f" on its ancestor '{host}'"
+            if missing := sorted(expected.keys() - host_state.autofill_function_names):
                 findings.append(
                     f"'{table}': no tenant autofill trigger calling {missing}{where} -- its "
                     f'manager autofills, so an INSERT omitting the tenant will fail on NOT '
                     f'NULL instead of taking the active scope. Run `manage.py '
                     f'makeguitarmigrations` + migrate.'
                 )
+            for function, body in sorted(host_state.autofill_functions):
+                if (pair := expected.get(function)) is None:
+                    # Not ours to judge: an unexpected guitars-shaped function is the stray
+                    # check's finding, and any other BEFORE INSERT trigger is the app's own.
+                    continue
+                if drift := Command._autofill_body_drift(table, function, *pair, body, where):
+                    findings.append(drift)
         return findings
+
+    @staticmethod
+    def _autofill_body_drift(
+        table: str, function: str, dimension: str, column: str, body: str, where: str
+    ) -> str | None:
+        """How a live autofill function's body differs from the one the models imply, if it
+        does. Presence was never the guarantee -- the guards inside it are, and a hand-edited
+        or older-kit body keeps the name while losing them. Whitespace-collapsed on both."""
+        if _squeeze(body) == _squeeze(_triggers._tenant_autofill_body(dimension, column)):
+            return None
+        problems = _triggers._tenant_autofill_guard_findings(dimension, column, body) or [
+            'is not the function this kit writes, though it still carries every guard'
+        ]
+        return (
+            f"'{table}': the tenant autofill function '{function}'{where} "
+            f'{" and ".join(problems)}. Run `manage.py makeguitarmigrations` + migrate to '
+            f'replace it; if that generates nothing, the function was edited in the database '
+            f'and has to be replaced there.'
+        )
 
     @staticmethod
     def _stray_autofill_findings(
@@ -287,7 +330,7 @@ class Command(BaseCommand):
             if (
                 stray := sorted(
                     function
-                    for function in state.autofill_functions - wanted.get(table, set())
+                    for function in state.autofill_function_names - wanted.get(table, set())
                     if function.startswith(AUTOFILL_FUNCTION_PREFIX)
                 )
             )

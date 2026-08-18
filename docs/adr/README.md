@@ -17,3 +17,4 @@ New ADR? Start from [`template.md`](template.md).
 | [`0007`](0007-identifier-quoting-and-schema-qualification.md) | why every generated identifier is quoted/validated, and how schema-qualified `db_table` is supported |
 | [`0008`](0008-unscoped-queryset-allow-list.md) | why the unscoped-queryset guard is an allow-list, and why `Manager.raw()` is denied unscoped |
 | [`0009`](0009-relocated-owner-table-autofill.md) | why a tenant autofill trigger moves onto the MTI ancestor owning its column, what the shared trigger makes every descendant agree on, and why stamping the untenanted ancestor's own inserts is accepted (2.1.1) |
+| [`0010`](0010-autofill-body-comparison.md) | why `audittenancy` compares an autofill function's *body* whitespace-collapsed against the kit's template, instead of recording a digest at generation time (2.2.0) |

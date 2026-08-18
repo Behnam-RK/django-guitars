@@ -4,6 +4,7 @@ command notice; the happy path alone would only prove the command runs, not that
 
 from __future__ import annotations
 
+import textwrap
 import types
 
 import pglast
@@ -342,6 +343,94 @@ class TestAStrayAutofillTrigger:
                 f'DROP TRIGGER "{autofill_trigger_name(function)}" ON "{table}"',
                 f'DROP FUNCTION "{function}"()',
             )
+
+
+class TestAWrongAutofillBody:
+    """Issue #29: presence was never the guarantee -- the guards inside the function are. A
+    hand-edited or older-kit ``guitars_fill_*`` keeps its name while losing one, and every
+    other check stays green: the policy is intact, and only the value written is wrong."""
+
+    DIMENSION, COLUMN = 'label', 'label_id'
+    BYPASS_GUARD = "COALESCE(current_setting('tenant.bypass', true), '') = 'on'"
+    SEPARATOR_GUARD = "position(',' in current_setting('tenant.label', true)) > 0"
+
+    @property
+    def function(self) -> str:
+        return autofill_function_name(self.DIMENSION, self.COLUMN)
+
+    def _body(self) -> str:
+        return triggers._tenant_autofill_body(self.DIMENSION, self.COLUMN)
+
+    def _replace(self, _execute, body: str) -> None:
+        """Redefine the live function with *body*, leaving its triggers attached -- exactly
+        what a hand-edit or an upgrade from an older kit leaves behind."""
+        _execute(
+            f'CREATE OR REPLACE FUNCTION "{self.function}"()\n'
+            f'RETURNS TRIGGER LANGUAGE PLPGSQL AS $${body}$$'
+        )
+
+    @pytest.fixture
+    def restore(self, _execute):
+        """Put the correct body back however the test ends -- one broken function would make
+        every later test in the session assert against a database this one damaged."""
+        yield
+        self._replace(_execute, self._body())
+
+    @staticmethod
+    def _without(body: str, fragment: str) -> str:
+        """*body* with the line carrying *fragment* deleted -- a guard dropped, not disabled."""
+        kept = [line for line in body.splitlines() if fragment not in line]
+        assert len(kept) == len(body.splitlines()) - 1
+        return '\n'.join(kept)
+
+    def test_a_missing_bypass_guard_is_reported(self, _execute, restore):
+        """The widest one: every insert inside ``tenancy_bypassed()`` is stamped with whatever
+        scope was published last, into a tenant nobody named."""
+        self._replace(_execute, self._without(self._body(), self.BYPASS_GUARD))
+
+        output = _audit()
+
+        assert self.function in output
+        assert 'no tenant bypass guard' in output
+
+    def test_a_missing_separator_guard_is_reported(self, _execute, restore):
+        """A collection scope legitimately publishes ``a,b``; without the guard the whole
+        list is written into the column, matching no tenant at all."""
+        self._replace(_execute, self._without(self._body(), self.SEPARATOR_GUARD))
+
+        output = _audit()
+
+        assert 'no separator guard' in output
+
+    def test_a_reindented_body_is_not_drift(self, _execute, restore):
+        """The false positive that kept issue #29 open: the generator re-indents the SQL it
+        inlines, so a project migrated from a differently-indented kit has a differently-
+        indented function and is not drifted. Compared whitespace-collapsed for this reason."""
+        self._replace(_execute, textwrap.indent(self._body(), ' ' * 8))
+
+        assert 'audit passed' in _audit(require_match=True)
+
+    def test_an_edit_that_keeps_every_guard_is_still_reported(self, _execute, restore):
+        """The guards are what the message can name, not what it checks: the comparison is
+        the whole body, so an addition no guard probe knows about is still drift."""
+        self._replace(_execute, f'{self._body()}\n-- edited by hand\n')
+
+        output = _audit()
+
+        assert 'still carries every guard' in output
+
+    def test_it_is_fatal_under_require_match(self, _execute, restore):
+        """Same severity as predicate drift -- both are "matching the models"."""
+        self._replace(_execute, self._without(self._body(), self.BYPASS_GUARD))
+
+        output = _audit_failure('--require-match')
+
+        assert 'no tenant bypass guard' in output
+        assert 'audit failed' in output
+
+    def test_a_healthy_database_says_nothing(self, db):
+        """The check that makes the four above mean something: the shipped body passes."""
+        assert 'autofill function' not in _audit()
 
 
 class TestAPolicyThatNoLongerMatchesTheModels:

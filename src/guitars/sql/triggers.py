@@ -2,6 +2,12 @@
 shared trigger *functions* plus the per-table *triggers* calling them. Public
 ``CREATE_PARENT_UPDATED_AT_*`` keep their frozen 3-arg call; ``_``-prefixed forms are not."""
 
+from __future__ import annotations
+
+from guitars.gucs import BYPASS_GUC, VALUE_SEPARATOR, guc_name
+from guitars.sql._identifiers import _escape_ident, _escape_literal, _safe_ident
+
+
 # *****************************************************************************************
 # ****************************** Updated At Trigger Function ******************************
 # *****************************************************************************************
@@ -276,3 +282,63 @@ _REPLACE_TENANT_AUTOFILL_TRIGGER = _DROP_TENANT_AUTOFILL_TRIGGER + _CREATE_TENAN
 _ADOPT_TENANT_AUTOFILL_TRIGGER = (
     _ADOPT_DROP_TENANT_AUTOFILL_TRIGGER + _CREATE_TENANT_AUTOFILL_TRIGGER
 )
+
+
+def _tenant_autofill_slots(dimension: str, column: str, function: str = '') -> dict[str, str]:
+    """The slots every ``_*_TENANT_AUTOFILL_FUNCTION`` template takes -- one builder for the
+    generator and for ``audittenancy``, since two copies could disagree about what a healthy
+    body is. Only the CREATE header uses *function*, so a body-only caller omits it."""
+    return {
+        'function': _safe_ident(function),
+        'column': _escape_ident(column),
+        'guc': _escape_literal(guc_name(dimension)),
+        'bypass_guc': _escape_literal(BYPASS_GUC),
+        'separator': _escape_literal(VALUE_SEPARATOR),
+    }
+
+
+def _tenant_autofill_body(dimension: str, column: str) -> str:
+    """What PostgreSQL stores in ``pg_proc.prosrc`` for this pair -- the text between the
+    template's two ``$$`` delimiters, which a dollar-quoted body keeps verbatim. Sliced from
+    the template, so the audit compares against the generator's definition, not a second."""
+    rendered = _CREATE_TENANT_AUTOFILL_FUNCTION.format(**_tenant_autofill_slots(dimension, column))
+    return rendered.split('$$')[1]
+
+
+# Guards the audit probes when a body does not match, so a finding names the hazard rather than
+# only "differs". Each fragment is a verbatim slice of the template above, asserted by
+# tests/test_enforcement_identity.py: else a probe could describe a guard the kit stopped emitting.
+_TENANT_AUTOFILL_GUARDS: tuple[tuple[str, str], ...] = (
+    (
+        "COALESCE(current_setting('{bypass_guc}', true), '') = 'on'",
+        'has no tenant bypass guard, so an INSERT inside tenancy_bypassed() is stamped with '
+        'whatever scope was published last instead of being left alone',
+    ),
+    (
+        "COALESCE(current_setting('{guc}', true), '') = ''",
+        'has no unscoped guard, so an INSERT outside any tenant frame is stamped from a '
+        'session setting rather than failing on NOT NULL',
+    ),
+    (
+        "position('{separator}' in current_setting('{guc}', true)) > 0",
+        'has no separator guard, so an INSERT under a scope naming several tenants writes the '
+        'joined list into the column, matching no tenant',
+    ),
+    (
+        'NEW."{column}" := current_setting(\'{guc}\', true)',
+        'never assigns the tenant column from the active scope, so it fills nothing',
+    ),
+)
+
+
+def _tenant_autofill_guard_findings(dimension: str, column: str, body: str) -> list[str]:
+    """Which of the guards above *body* is missing, described. Whitespace-insensitive for the
+    reason the body comparison is: the generator re-indents what it writes. Empty when every
+    guard is present -- a body can still differ then, and the caller says so generically."""
+    slots = _tenant_autofill_slots(dimension, column)
+    squeezed = ' '.join(body.split())
+    return [
+        description
+        for fragment, description in _TENANT_AUTOFILL_GUARDS
+        if ' '.join(fragment.format(**slots).split()) not in squeezed
+    ]

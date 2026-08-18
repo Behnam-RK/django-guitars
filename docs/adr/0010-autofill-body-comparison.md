@@ -41,14 +41,25 @@ generator writes migrations with — so there is one definition of a healthy
 body, not two.
 
 On a mismatch, probe `_TENANT_AUTOFILL_GUARDS` — verbatim slices of that same
-template — to name the missing guard and the hazard it lets through, falling
-back to "not the function this kit writes" at both ends of the probe: when every
-guard is present, and when *none* is. A probe is whitespace-insensitive but not
-case- or spacing-insensitive inside a token, so a retyped body (`TRUE` for
-`true`) fails all four while still guarding correctly — likelier than losing all
-four at once, and naming them would be four alarming and probably false claims.
-The finding joins the existing drift bucket: warning by default, fatal under
-`--require-match`, the same severity as predicate drift.
+template, one per hazard the body guards against — to name the missing guard and
+what it lets through, falling back to the generic "not the function this kit
+writes" at both ends of the probe: when every guard is present, and when fewer
+than two are. A probe is whitespace-insensitive but not case- or
+spacing-insensitive *inside* a token, so a body retyped through psql (`TRUE` for
+`true`) fails nearly every probe while guarding exactly as before. Below two
+intact guards, that is the likelier reading, and naming the rest would be
+alarming claims that are all false. The finding joins the existing drift bucket:
+warning by default, fatal under `--require-match`, the same severity as
+predicate drift.
+
+Two things are refused rather than compared. A dimension or column carrying `$$`
+would close the template's dollar quoting early and make the slice a truncated
+prefix — permanent phantom drift on a healthy database — so
+`_tenant_autofill_body` raises instead, the build-time refusal `_identifiers`
+makes for every other unusable identifier. And the catalog query asks only for
+functions whose name starts with `AUTOFILL_FUNCTION_PREFIX`: an application's own
+`BEFORE INSERT` trigger is not this command's business, and its body should not
+be on the wire to establish that.
 
 ## Why
 
@@ -59,14 +70,9 @@ every consuming project to gain that, and only for functions written after the
 upgrade.
 
 Whitespace-collapsed text needs no regeneration and works on the databases that
-exist today. Its accepted weakness is the other direction: it cannot see past
-formatting, so a body reformatted *and* changed inside a string literal would
-have to differ in that literal to be caught — which it does, since every guard
-lives in one.
-
-Against the alternative of probing only for the guard fragments and never
-comparing the whole body: that passes a function with an *added* statement, and
-an autofill trigger is a place where an addition (a second assignment, a
+exist today. Against the alternative of probing only for the guard fragments and
+never comparing the whole body: that passes a function with an *added* statement,
+and an autofill trigger is a place where an addition (a second assignment, a
 `RAISE`) is as damaging as a deletion.
 
 ## Consequences
@@ -80,11 +86,10 @@ substring of the template it came from; a fragment that drifted would otherwise
 be reported missing on every healthy database.
 
 **Reversibility.** Contained: the comparison is one method
-(`Command._autofill_body_drift`) and one helper pair in `sql.triggers`. Nothing
-is written to the database or to a migration, so removing the check costs
-nothing beyond losing it. Adopting a digest later is compatible — it would
-become the exact path for functions generated after it, with this comparison as
-the fallback for the rest.
+(`Command._autofill_body_drift`) and one helper set in `sql.triggers`. Nothing is
+written to the database or to a migration, so removing the check costs nothing
+beyond losing it. Adopting a digest later is compatible — it would become the
+exact path for functions generated after it, with this as the fallback.
 
 ## Related
 

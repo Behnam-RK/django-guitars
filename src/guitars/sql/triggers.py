@@ -291,10 +291,16 @@ def _squeeze(statement: str) -> str:
     return ' '.join(statement.split())
 
 
-def _tenant_autofill_slots(dimension: str, column: str, function: str = '') -> dict[str, str]:
+#: Stands in for the slot only the CREATE/DROP headers use, where a caller wants the body
+#: alone. Never reaches SQL: :func:`_tenant_autofill_body` slices the header away, and no
+#: guard fragment interpolates ``{function}``.
+_BODY_ONLY_FUNCTION = 'body_only'
+
+
+def _tenant_autofill_slots(dimension: str, column: str, function: str) -> dict[str, str]:
     """The slots every ``_*_TENANT_AUTOFILL_FUNCTION`` template takes -- one builder for the
-    generator and for ``audittenancy``, since two copies could disagree about what a healthy
-    body is. Only the CREATE header uses *function*, so a body-only caller omits it."""
+    generator and for ``audittenancy``, since two copies could disagree about a healthy body.
+    *function* stays required: a default would render ``CREATE FUNCTION ""()`` if forgotten."""
     return {
         'function': _safe_ident(function),
         'column': _escape_ident(column),
@@ -308,7 +314,18 @@ def _tenant_autofill_body(dimension: str, column: str) -> str:
     """What PostgreSQL stores in ``pg_proc.prosrc`` for this pair -- the text between the
     template's two ``$$`` delimiters, which a dollar-quoted body keeps verbatim. Sliced from
     the template, so the audit compares against the generator's definition, not a second."""
-    rendered = _CREATE_TENANT_AUTOFILL_FUNCTION.format(**_tenant_autofill_slots(dimension, column))
+    rendered = _CREATE_TENANT_AUTOFILL_FUNCTION.format(
+        **_tenant_autofill_slots(dimension, column, _BODY_ONLY_FUNCTION)
+    )
+    # Checked, not assumed: a dimension or column carrying '$$' closes the dollar quoting early
+    # and the slice below would be a truncated prefix, reported as drift on a healthy database
+    # forever. It breaks the generated migration too, so this refuses where `_bare` would.
+    if (delimiters := rendered.count('$$')) != 2:
+        raise ValueError(
+            f'the tenant autofill function for {column!r} renders {delimiters} "$$" delimiters '
+            f'rather than 2 -- a tenant dimension or column containing "$$" breaks the dollar '
+            f'quoting this template depends on. Set a db_column without it.'
+        )
     return rendered.split('$$')[1]
 
 
@@ -316,6 +333,11 @@ def _tenant_autofill_body(dimension: str, column: str) -> str:
 # only "differs". Each fragment is a verbatim slice of the template above, asserted by
 # tests/test_enforcement_identity.py: else a probe could describe a guard the kit stopped emitting.
 _TENANT_AUTOFILL_GUARDS: tuple[tuple[str, str], ...] = (
+    (
+        'NEW."{column}" IS NOT NULL',
+        'has no explicit-value guard, so it overwrites a tenant the caller supplied with the '
+        'active scope -- a write WITH CHECK would have refused is accepted instead',
+    ),
     (
         "COALESCE(current_setting('{bypass_guc}', true), '') = 'on'",
         'has no tenant bypass guard, so an INSERT inside tenancy_bypassed() is stamped with '
@@ -338,14 +360,18 @@ _TENANT_AUTOFILL_GUARDS: tuple[tuple[str, str], ...] = (
 )
 
 
-def _tenant_autofill_guard_findings(dimension: str, column: str, body: str) -> list[str]:
-    """Which of the guards above *body* is missing, described. Whitespace-insensitive for the
-    reason the body comparison is: the generator re-indents what it writes. Empty when every
-    guard is present -- a body can still differ then, and the caller says so generically."""
-    slots = _tenant_autofill_slots(dimension, column)
+def _tenant_autofill_guard_status(dimension: str, column: str, body: str) -> tuple[list[str], int]:
+    """Which of the guards above *body* is missing, described, and how many it still has.
+    Whitespace-insensitive for the reason the body comparison is: the generator re-indents
+    what it writes. The count is what tells "lost a guard" from "not this shape at all"."""
+    slots = _tenant_autofill_slots(dimension, column, _BODY_ONLY_FUNCTION)
     squeezed = _squeeze(body)
-    return [
+    present = [
         description
         for fragment, description in _TENANT_AUTOFILL_GUARDS
-        if _squeeze(fragment.format(**slots)) not in squeezed
+        if _squeeze(fragment.format(**slots)) in squeezed
     ]
+    return (
+        [description for _, description in _TENANT_AUTOFILL_GUARDS if description not in present],
+        len(present),
+    )

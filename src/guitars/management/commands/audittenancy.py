@@ -45,9 +45,9 @@ class TableState(NamedTuple):
     #: Same, off the WITH CHECK half (governs writes) -- see docs/tenancy.md's "USING
     #: (<tenant match>) WITH CHECK (true)" hazard. Falls back to USING when NULL.
     policy_check_gucs: frozenset[str]
-    #: ``(name, body)`` for every function this table's row-level INSERT triggers call (ADR
-    #: 0005). A table that autofills but calls none is "looks fine, is not", and so is one
-    #: whose body lost a guard -- hence the body travels with the name, never beside it.
+    #: ``(name, body)`` for each of this library's functions the table's row-level INSERT
+    #: triggers call (ADR 0005). A table that autofills but calls none is "looks fine, is not",
+    #: and so is one whose body lost a guard -- so the body travels with the name, not beside.
     autofill_functions: frozenset[tuple[str, str]]
 
     @property
@@ -75,9 +75,9 @@ WHERE c.relkind = 'r' AND n.nspname = ANY(current_schemas(false))
 ORDER BY array_position(current_schemas(false), n.nspname) DESC
 """
 
-#: Which functions each table's own ``BEFORE INSERT ... FOR EACH ROW`` triggers call (ADR
-#: 0005), by ``tgtype`` bits 0/1/2. ``tgenabled <> 'D'`` is load-bearing: a disabled trigger
-#: still has its ``pg_trigger`` row while nothing fires -- "looks fine, is not" exactly.
+#: Which of *this library's* functions each table's row-level ``BEFORE INSERT`` triggers call,
+#: with their bodies (ADR 0005). Both filters are load-bearing: a disabled trigger keeps its
+#: ``pg_trigger`` row while nothing fires, and an app's own trigger -- body and all -- is not ours.
 _AUTOFILL_TRIGGER_SQL = """
 SELECT n.nspname, c.relname, p.proname, p.prosrc
 FROM pg_trigger t
@@ -90,6 +90,7 @@ WHERE NOT t.tgisinternal
   AND (t.tgtype & 2) = 2
   AND (t.tgtype & 4) = 4
   AND c.relkind = 'r'
+  AND starts_with(p.proname, %s)
   AND n.nspname = ANY(current_schemas(false))
 """
 
@@ -128,12 +129,6 @@ def _tenant_gucs(expression: str | None) -> frozenset[str]:
     return frozenset(
         guc for guc in _RE_GUC.findall(expression or '') if guc.startswith(GUC_PREFIX)
     )
-
-
-#: Whitespace-collapse, defined beside the template it tolerates (``sql.triggers``) so the
-#: whole-body compare in :meth:`Command._autofill_body_drift` and the guard probe it falls
-#: back to cannot apply two different tolerances. Re-bound here for the callers below.
-_squeeze = _triggers._squeeze
 
 
 class Command(BaseCommand):
@@ -190,7 +185,7 @@ class Command(BaseCommand):
                 for oid, table, column in cursor.fetchall():
                     columns.setdefault(oid, set()).add((table, column))
 
-            cursor.execute(_AUTOFILL_TRIGGER_SQL)
+            cursor.execute(_AUTOFILL_TRIGGER_SQL, [AUTOFILL_FUNCTION_PREFIX])
             # Keyed by (schema, table), not the bare name: the state rows below resolve to
             # one schema off the search path, so folding every schema's triggers together
             # would let a trigger on tenant_b.orders vouch for public.orders.
@@ -285,19 +280,21 @@ class Command(BaseCommand):
         table: str, function: str, dimension: str, column: str, body: str, where: str
     ) -> str | None:
         """How a live autofill function's body differs from the one the models imply, if it
-        does. Presence was never the guarantee -- the guards inside it are, and a hand-edited
-        or older-kit body keeps the name while losing them. Whitespace-collapsed on both."""
-        if _squeeze(body) == _squeeze(_triggers._tenant_autofill_body(dimension, column)):
+        does -- presence was never the guarantee, the guards inside it are. Collapsed through
+        ``sql.triggers._squeeze``, so this and its guard probe share one tolerance."""
+        squeeze = _triggers._squeeze
+        if squeeze(body) == squeeze(_triggers._tenant_autofill_body(dimension, column)):
             return None
-        problems = _triggers._tenant_autofill_guard_findings(dimension, column, body)
+        problems, recognisable = _triggers._tenant_autofill_guard_status(dimension, column, body)
         if not problems:
             problems = ['is not the function this kit writes, though it still carries every guard']
-        elif len(problems) == len(_triggers._TENANT_AUTOFILL_GUARDS):
+        elif recognisable <= 1:
             # A probe tolerates whitespace but not a changed *token*, so a retyped body ('TRUE'
-            # for 'true') fails every probe while guarding correctly -- likelier than losing all
-            # four at once, and naming them would be four alarming, probably false claims.
+            # for 'true') fails nearly every probe while guarding correctly. Below two intact
+            # guards that is likelier than the loss, and naming them would be alarming and false.
             problems = [
-                'is not the function this kit writes, and none of its guards are recognisable'
+                'is not the function this kit writes, and too little of it is recognisable to '
+                'say which guard is gone'
             ]
         return (
             f"'{table}': the tenant autofill function '{function}'{where} "
@@ -333,13 +330,9 @@ class Command(BaseCommand):
                 f'table. Run `manage.py makeguitarmigrations` + migrate.',
             )
             for table, state in sorted(live.items())
-            if (
-                stray := sorted(
-                    function
-                    for function in state.autofill_function_names - wanted.get(table, set())
-                    if function.startswith(AUTOFILL_FUNCTION_PREFIX)
-                )
-            )
+            # No prefix filter here: _AUTOFILL_TRIGGER_SQL already asked for this library's
+            # functions only, so what is left over is ours and unexpected -- not the app's own.
+            if (stray := sorted(state.autofill_function_names - wanted.get(table, set())))
         ]
 
     @staticmethod

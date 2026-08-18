@@ -421,15 +421,34 @@ class TestAWrongAutofillBody:
 
     def test_a_retyped_body_is_not_accused_of_losing_every_guard(self, _execute, restore):
         """A probe tolerates whitespace but not a changed *token*, so a body someone retyped
-        (`TRUE` for `true`) fails all four while guarding exactly as before. Reporting four
-        hazards there would be four alarming claims that are all false -- so it reports none."""
+        (`TRUE` for `true`) fails nearly every probe while guarding exactly as before. Naming
+        those hazards would be alarming claims that are all false -- so it names none."""
         self._replace(_execute, self._body().replace(', true)', ', TRUE)'))
 
         output = _audit()
 
-        assert 'none of its guards are recognisable' in output
+        assert 'too little of it is recognisable' in output
         assert 'bypass guard' not in output
         assert 'separator guard' not in output
+
+    def test_a_missing_explicit_value_guard_is_reported(self, _execute, restore):
+        """The quietest of the four: without it the trigger overwrites a tenant the caller
+        supplied, so a wrong-tenant write `WITH CHECK` would have refused is accepted under
+        the active scope instead. Four guards still match, so this one is named."""
+        # Neutered, not deleted: the guard *is* the ``IF``'s first condition, so removing the
+        # line would leave PL/pgSQL that does not compile -- which is not this hazard.
+        self._replace(_execute, self._body().replace('NEW."label_id" IS NOT NULL', 'false'))
+
+        output = _audit()
+
+        assert 'no explicit-value guard' in output
+
+    def test_a_body_that_cannot_be_dollar_quoted_is_refused_at_render_time(self):
+        """Not a live-database finding but the reason there can never be one: a column
+        carrying `$$` would close the quoting early and the slice would be a truncated prefix,
+        reported as drift on a healthy database forever."""
+        with pytest.raises(ValueError, match=r'\$\$'):
+            triggers._tenant_autofill_body('label', 'la$$bel_id')
 
     def test_it_is_fatal_under_require_match(self, _execute, restore):
         """Same severity as predicate drift -- both are "matching the models"."""

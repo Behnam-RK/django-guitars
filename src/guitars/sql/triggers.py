@@ -301,13 +301,24 @@ def _tenant_autofill_slots(dimension: str, column: str, function: str) -> dict[s
     """The slots every ``_*_TENANT_AUTOFILL_FUNCTION`` template takes -- one builder for the
     generator and for ``audittenancy``, since two copies could disagree about a healthy body.
     *function* stays required: a default would render ``CREATE FUNCTION ""()`` if forgotten."""
-    return {
+    slots = {
         'function': _safe_ident(function),
         'column': _escape_ident(column),
         'guc': _escape_literal(guc_name(dimension)),
         'bypass_guc': _escape_literal(BYPASS_GUC),
         'separator': _escape_literal(VALUE_SEPARATOR),
     }
+    # Refused in the *shared* builder: `_BARE_IDENTIFIER` admits '$', so a db_column like 'a$$b'
+    # otherwise renders a template whose dollar quoting closes early, and the generator emits a
+    # migration `migrate` rejects with a bare syntax error while only the audit complained.
+    for slot in ('column', 'guc'):
+        if '$$' in slots[slot]:
+            raise ValueError(
+                f'the tenant autofill {slot} {slots[slot]!r} contains "$$", which closes the '
+                f'dollar quoting this function template depends on -- the generated migration '
+                f'would not apply. Set a db_column / tenant dimension without it.'
+            )
+    return slots
 
 
 def _tenant_autofill_body(dimension: str, column: str) -> str:
@@ -317,14 +328,14 @@ def _tenant_autofill_body(dimension: str, column: str) -> str:
     rendered = _CREATE_TENANT_AUTOFILL_FUNCTION.format(
         **_tenant_autofill_slots(dimension, column, _BODY_ONLY_FUNCTION)
     )
-    # Checked, not assumed: a dimension or column carrying '$$' closes the dollar quoting early
-    # and the slice below would be a truncated prefix, reported as drift on a healthy database
-    # forever. It breaks the generated migration too, so this refuses where `_bare` would.
+    # Checked, not assumed: the slice is the body only while the template holds the two
+    # delimiters it was written with -- otherwise a truncated prefix, reported as drift on a
+    # healthy database forever. The slots refuse a '$$' arriving from a column; this, from an edit.
     if (delimiters := rendered.count('$$')) != 2:
         raise ValueError(
             f'the tenant autofill function for {column!r} renders {delimiters} "$$" delimiters '
-            f'rather than 2 -- a tenant dimension or column containing "$$" breaks the dollar '
-            f'quoting this template depends on. Set a db_column without it.'
+            f'rather than 2 -- something in this template broke the dollar quoting the body '
+            f'slice depends on.'
         )
     return rendered.split('$$')[1]
 

@@ -232,9 +232,9 @@ class Command(BaseCommand):
     def _autofill_drift(
         table: str, coverage: TableCoverage, live: Mapping[str, TableState]
     ) -> list[str]:
-        """Report a table whose manager autofills but whose ADR 0005 trigger is absent, or
-        whose function no longer has the body the models imply. Nothing else sees either: the
-        policy is intact, and only an insert omitting the tenant misbehaves."""
+        """Report a table whose manager autofills but whose ADR 0005 trigger is absent (the
+        body of one that is there is :meth:`_autofill_body_findings`, once per function). No
+        other check sees it: the policy is intact, and the INSERT fails on a bare NOT NULL."""
         findings: list[str] = []
         # Takes the whole live map, not one TableState: a relocated trigger sits on the
         # ancestor's table (ADR 0009), so the fix is on a different table than the subject.
@@ -266,18 +266,61 @@ class Command(BaseCommand):
                     f'NULL instead of taking the active scope. Run `manage.py '
                     f'makeguitarmigrations` + migrate.'
                 )
-            for function, body in sorted(host_state.autofill_functions):
-                if (pair := expected.get(function)) is None:
-                    # Not ours to judge: an unexpected guitars-shaped function is the stray
-                    # check's finding, and any other BEFORE INSERT trigger is the app's own.
+        return findings
+
+    @staticmethod
+    def _autofill_bodies(expected: Coverage) -> dict[str, tuple[str, str, set[str], set[str]]]:
+        """``function -> (dimension, column, tables it fills for, tables hosting a trigger)``.
+        Keyed by the function alone: one ``pg_proc`` row serves every model on a ``(dimension,
+        column)`` pair, so its body is one fact however many triggers call it."""
+        wanted: dict[str, tuple[str, str, set[str], set[str]]] = {}
+        for table, coverage in expected.tables.items():
+            for host, columns in (
+                (table, coverage.autofill_columns),
+                (coverage.owner_table, coverage.owner_autofill_columns),
+            ):
+                if not (columns and host):
                     continue
-                if drift := Command._autofill_body_drift(table, function, *pair, body, where):
-                    findings.append(drift)
+                for dimension, column in columns.items():
+                    entry = wanted.setdefault(
+                        autofill_function_name(dimension, column),
+                        (dimension, column, set(), set()),
+                    )
+                    entry[2].add(table)
+                    entry[3].add(host)
+        return wanted
+
+    @classmethod
+    def _autofill_body_findings(
+        cls, expected: Coverage, live: Mapping[str, TableState]
+    ) -> list[tuple[set[str], str]]:
+        """One finding per function whose body is not the one the models imply, paired with the
+        tables it fills for -- they are the ones that stop being enforced. A function the
+        database lacks is :meth:`_autofill_drift`'s finding, not this one."""
+        findings: list[tuple[set[str], str]] = []
+        for function, (dimension, column, tables, hosts) in sorted(
+            cls._autofill_bodies(expected).items()
+        ):
+            # Any host that has it: they all call the same ``pg_proc`` row, so the first body
+            # found is the body. A host the search path hides simply contributes none.
+            bodies = [
+                body
+                for host in sorted(hosts)
+                if (state := live.get(host))
+                for name, body in sorted(state.autofill_functions)
+                if name == function
+            ]
+            if not bodies:
+                continue
+            if drift := cls._autofill_body_drift(
+                function, dimension, column, bodies[0], sorted(tables)
+            ):
+                findings.append((tables, drift))
         return findings
 
     @staticmethod
     def _autofill_body_drift(
-        table: str, function: str, dimension: str, column: str, body: str, where: str
+        function: str, dimension: str, column: str, body: str, tables: list[str]
     ) -> str | None:
         """How a live autofill function's body differs from the one the models imply, if it
         does -- presence was never the guarantee, the guards inside it are. Collapsed through
@@ -297,10 +340,10 @@ class Command(BaseCommand):
                 'say which guard is gone'
             ]
         return (
-            f"'{table}': the tenant autofill function '{function}'{where} "
-            f'{" and ".join(problems)}. Run `manage.py makeguitarmigrations` + migrate to '
-            f'replace it; if that generates nothing, the function was edited in the database '
-            f'and has to be replaced there.'
+            f"'{function}': this tenant autofill function {' and '.join(problems)} -- it fills "
+            f'the tenant column for {tables}, so an INSERT of theirs is stamped wrongly rather '
+            f'than not at all. Run `manage.py makeguitarmigrations` + migrate to replace it; if '
+            f'that generates nothing, it was edited in the database and has to be replaced there.'
         )
 
     @staticmethod
@@ -435,6 +478,13 @@ class Command(BaseCommand):
             if not state.rls_forced:
                 unforced.append(table)
                 unhealthy.add(table)
+
+        # Once per function, not per table: one shared function serves every model on a
+        # (dimension, column) pair, and N copies of one finding would inflate both the heading
+        # and the --require-match failure count for a single edited body.
+        for affected, finding in self._autofill_body_findings(expected, live):
+            drifted.append(finding)
+            unhealthy |= affected
 
         # The other direction: a scoped run can't tell "not mine" from "gone", so only a
         # full-repo audit may claim a policy is unexpected.

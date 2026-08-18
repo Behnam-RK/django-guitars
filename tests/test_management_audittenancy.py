@@ -450,6 +450,29 @@ class TestAWrongAutofillBody:
         with pytest.raises(ValueError, match=r'\$\$'):
             triggers._tenant_autofill_body('label', 'la$$bel_id')
 
+    def test_the_generator_is_refused_the_same_body_the_audit_is(self):
+        """The refusal lives in the *shared* slot builder, so `makeguitarmigrations` cannot
+        emit what the audit would refuse to read: `_BARE_IDENTIFIER` admits `$`, so without
+        this a `db_column` like `a$$b` generated a migration `migrate` rejects outright."""
+        with pytest.raises(ValueError, match=r'\$\$'):
+            triggers._tenant_autofill_slots('label', 'la$$bel_id', 'guitars_fill_x')
+        with pytest.raises(ValueError, match=r'\$\$'):
+            triggers._tenant_autofill_slots('la$$bel', 'label_id', 'guitars_fill_x')
+
+    def test_one_edited_function_is_one_finding_however_many_tables_call_it(
+        self, _execute, restore
+    ):
+        """A function is shared by every model on its `(dimension, column)` pair, so a
+        per-table body check repeated one finding N times and inflated both the heading and
+        the `--require-match` failure count for a single edited body."""
+        self._replace(_execute, self._without(self._body(), self.BYPASS_GUARD))
+
+        output = _audit()
+
+        assert output.count('no tenant bypass guard') == 1
+        # Named, not merely counted once: the tables that stop being enforced are the point.
+        assert Release._meta.db_table in output.split('Run `manage.py')[0]
+
     def test_it_is_fatal_under_require_match(self, _execute, restore):
         """Same severity as predicate drift -- both are "matching the models"."""
         self._replace(_execute, self._without(self._body(), self.BYPASS_GUARD))

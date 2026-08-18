@@ -244,11 +244,10 @@ class Command(BaseCommand):
         ):
             if not (columns and host):
                 continue
-            # Keyed by function name and carrying its (dimension, column) pair: the presence
-            # check needs the names, and the body check needs what the body is rendered from.
+            # Names only: this check asks whether a trigger is there at all. What the body is
+            # rendered from is :meth:`_autofill_bodies`' business, which walks coverage itself.
             expected = {
-                autofill_function_name(dimension, column): (dimension, column)
-                for dimension, column in columns.items()
+                autofill_function_name(dimension, column) for dimension, column in columns.items()
             }
             host_state = live.get(host)
             if host_state is None:
@@ -259,7 +258,7 @@ class Command(BaseCommand):
                 )
                 continue
             where = '' if host == table else f" on its ancestor '{host}'"
-            if missing := sorted(expected.keys() - host_state.autofill_function_names):
+            if missing := sorted(expected - host_state.autofill_function_names):
                 findings.append(
                     f"'{table}': no tenant autofill trigger calling {missing}{where} -- its "
                     f'manager autofills, so an INSERT omitting the tenant will fail on NOT '
@@ -301,19 +300,22 @@ class Command(BaseCommand):
         for function, (dimension, column, tables, hosts) in sorted(
             cls._autofill_bodies(expected).items()
         ):
-            # Any host that has it: they all call the same ``pg_proc`` row, so the first body
-            # found is the body. A host the search path hides simply contributes none.
-            bodies = [
-                body
-                for host in sorted(hosts)
-                if (state := live.get(host))
-                for name, body in sorted(state.autofill_functions)
-                if name == function
-            ]
-            if not bodies:
+            # The first host that has it, and no further: they all call the same ``pg_proc``
+            # row, so one body is the body. A host the search path hides contributes none.
+            body = next(
+                (
+                    found
+                    for host in sorted(hosts)
+                    if (state := live.get(host))
+                    for name, found in state.autofill_functions
+                    if name == function
+                ),
+                None,
+            )
+            if body is None:
                 continue
             if drift := cls._autofill_body_drift(
-                function, dimension, column, bodies[0], sorted(tables)
+                function, dimension, column, body, sorted(tables)
             ):
                 findings.append((tables, drift))
         return findings
@@ -341,9 +343,10 @@ class Command(BaseCommand):
             ]
         return (
             f"'{function}': this tenant autofill function {' and '.join(problems)} -- it fills "
-            f'the tenant column for {tables}, so an INSERT of theirs is stamped wrongly rather '
-            f'than not at all. Run `manage.py makeguitarmigrations` + migrate to replace it; if '
-            f'that generates nothing, it was edited in the database and has to be replaced there.'
+            f'the tenant column for {tables}, so an INSERT of theirs is stamped by a function '
+            f'the models did not describe: wrongly, or not at all. Run `manage.py '
+            f'makeguitarmigrations` + migrate to replace it; if that generates nothing, it was '
+            f'edited in the database and has to be replaced there.'
         )
 
     @staticmethod

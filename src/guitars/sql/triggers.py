@@ -377,12 +377,13 @@ def _tenant_autofill_guard_status(dimension: str, column: str, body: str) -> tup
     what it writes. The count is what tells "lost a guard" from "not this shape at all"."""
     slots = _tenant_autofill_slots(dimension, column, _BODY_ONLY_FUNCTION)
     squeezed = _squeeze(body)
-    present = [
-        description
+    # Probed once per guard and carried as a flag, not re-derived by matching descriptions back:
+    # two guards that ever shared wording would otherwise vouch for each other and go unreported.
+    probed = [
+        (description, _squeeze(fragment.format(**slots)) in squeezed)
         for fragment, description in _TENANT_AUTOFILL_GUARDS
-        if _squeeze(fragment.format(**slots)) in squeezed
     ]
     return (
-        [description for _, description in _TENANT_AUTOFILL_GUARDS if description not in present],
-        len(present),
+        [description for description, intact in probed if not intact],
+        sum(intact for _, intact in probed),
     )

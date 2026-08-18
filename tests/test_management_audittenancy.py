@@ -419,6 +419,18 @@ class TestAWrongAutofillBody:
 
         assert 'still carries every guard' in output
 
+    def test_a_retyped_body_is_not_accused_of_losing_every_guard(self, _execute, restore):
+        """A probe tolerates whitespace but not a changed *token*, so a body someone retyped
+        (`TRUE` for `true`) fails all four while guarding exactly as before. Reporting four
+        hazards there would be four alarming claims that are all false -- so it reports none."""
+        self._replace(_execute, self._body().replace(', true)', ', TRUE)'))
+
+        output = _audit()
+
+        assert 'none of its guards are recognisable' in output
+        assert 'bypass guard' not in output
+        assert 'separator guard' not in output
+
     def test_it_is_fatal_under_require_match(self, _execute, restore):
         """Same severity as predicate drift -- both are "matching the models"."""
         self._replace(_execute, self._without(self._body(), self.BYPASS_GUARD))

@@ -130,11 +130,10 @@ def _tenant_gucs(expression: str | None) -> frozenset[str]:
     )
 
 
-def _squeeze(statement: str) -> str:
-    """Collapse runs of whitespace to one space. PostgreSQL stores a dollar-quoted body
-    verbatim and the generator re-indents what it inlines, so indentation is the one
-    difference a body comparison must never report -- see :meth:`_autofill_body_drift`."""
-    return ' '.join(statement.split())
+#: Whitespace-collapse, defined beside the template it tolerates (``sql.triggers``) so the
+#: whole-body compare in :meth:`Command._autofill_body_drift` and the guard probe it falls
+#: back to cannot apply two different tolerances. Re-bound here for the callers below.
+_squeeze = _triggers._squeeze
 
 
 class Command(BaseCommand):
@@ -290,9 +289,16 @@ class Command(BaseCommand):
         or older-kit body keeps the name while losing them. Whitespace-collapsed on both."""
         if _squeeze(body) == _squeeze(_triggers._tenant_autofill_body(dimension, column)):
             return None
-        problems = _triggers._tenant_autofill_guard_findings(dimension, column, body) or [
-            'is not the function this kit writes, though it still carries every guard'
-        ]
+        problems = _triggers._tenant_autofill_guard_findings(dimension, column, body)
+        if not problems:
+            problems = ['is not the function this kit writes, though it still carries every guard']
+        elif len(problems) == len(_triggers._TENANT_AUTOFILL_GUARDS):
+            # A probe tolerates whitespace but not a changed *token*, so a retyped body ('TRUE'
+            # for 'true') fails every probe while guarding correctly -- likelier than losing all
+            # four at once, and naming them would be four alarming, probably false claims.
+            problems = [
+                'is not the function this kit writes, and none of its guards are recognisable'
+            ]
         return (
             f"'{table}': the tenant autofill function '{function}'{where} "
             f'{" and ".join(problems)}. Run `manage.py makeguitarmigrations` + migrate to '

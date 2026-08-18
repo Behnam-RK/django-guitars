@@ -538,7 +538,10 @@ def test_the_committed_migration_creates_the_body_the_audit_expects():
     be the one this repo's own generated migration creates. Whitespace-collapsed, the same
     tolerance the audit applies, checked against the file that produced the function."""
     migrations = Path(__file__).parent / 'testapp' / 'migrations'
-    generated = next(migrations.glob('*auto_enforcement_guitars_fill_*label_id.py')).read_text()
+    # Listed, not ``next(...)``: an empty glob would otherwise raise StopIteration -- an error
+    # naming nothing, where this says which file the audit's expectation lost its anchor to.
+    written = sorted(migrations.glob('*auto_enforcement_guitars_fill_*label_id.py'))
+    assert len(written) == 1, f'expected exactly one label_id autofill migration, got {written}'
     body = triggers._tenant_autofill_body('label', 'label_id')
 
-    assert ' '.join(body.split()) in ' '.join(generated.split())
+    assert triggers._squeeze(body) in triggers._squeeze(written[0].read_text())

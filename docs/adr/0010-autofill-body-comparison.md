@@ -32,7 +32,9 @@ generation time and compare digests.
 
 Compare the live `prosrc` to the body rendered from the kit's own template,
 with every run of whitespace collapsed to a single space on both sides
-(`audittenancy._squeeze`). The expected body is sliced out of
+(`sql.triggers._squeeze`, beside the template it tolerates so the whole-body
+compare and the guard probe below cannot apply two different tolerances). The
+expected body is sliced out of
 `_CREATE_TENANT_AUTOFILL_FUNCTION` between its two `$$` delimiters
 (`sql.triggers._tenant_autofill_body`), from the same slot builder the
 generator writes migrations with — so there is one definition of a healthy
@@ -40,8 +42,12 @@ body, not two.
 
 On a mismatch, probe `_TENANT_AUTOFILL_GUARDS` — verbatim slices of that same
 template — to name the missing guard and the hazard it lets through, falling
-back to "not the function this kit writes" when every guard is present. The
-finding joins the existing drift bucket: warning by default, fatal under
+back to "not the function this kit writes" at both ends of the probe: when every
+guard is present, and when *none* is. A probe is whitespace-insensitive but not
+case- or spacing-insensitive inside a token, so a retyped body (`TRUE` for
+`true`) fails all four while still guarding correctly — likelier than losing all
+four at once, and naming them would be four alarming and probably false claims.
+The finding joins the existing drift bucket: warning by default, fatal under
 `--require-match`, the same severity as predicate drift.
 
 ## Why

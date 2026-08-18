@@ -284,6 +284,13 @@ _ADOPT_TENANT_AUTOFILL_TRIGGER = (
 )
 
 
+def _squeeze(statement: str) -> str:
+    """Collapse runs of whitespace to one space -- a dollar-quoted body keeps the indentation
+    the generator gave it, the one difference a comparison against a rendered template must
+    never report. Here, so the whole-body compare and the guard probe share one tolerance."""
+    return ' '.join(statement.split())
+
+
 def _tenant_autofill_slots(dimension: str, column: str, function: str = '') -> dict[str, str]:
     """The slots every ``_*_TENANT_AUTOFILL_FUNCTION`` template takes -- one builder for the
     generator and for ``audittenancy``, since two copies could disagree about what a healthy
@@ -336,9 +343,9 @@ def _tenant_autofill_guard_findings(dimension: str, column: str, body: str) -> l
     reason the body comparison is: the generator re-indents what it writes. Empty when every
     guard is present -- a body can still differ then, and the caller says so generically."""
     slots = _tenant_autofill_slots(dimension, column)
-    squeezed = ' '.join(body.split())
+    squeezed = _squeeze(body)
     return [
         description
         for fragment, description in _TENANT_AUTOFILL_GUARDS
-        if ' '.join(fragment.format(**slots).split()) not in squeezed
+        if _squeeze(fragment.format(**slots)) not in squeezed
     ]

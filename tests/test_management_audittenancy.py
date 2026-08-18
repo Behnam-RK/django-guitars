@@ -450,6 +450,19 @@ class TestAWrongAutofillBody:
         with pytest.raises(ValueError, match=r'\$\$'):
             triggers._tenant_autofill_body('label', 'la$$bel_id')
 
+    def test_a_template_that_lost_its_dollar_quoting_is_refused(self, monkeypatch):
+        """The other half of that guarantee: the slice is the body only while the template
+        still holds the two delimiters it was written with. An edit that changed the quoting
+        would otherwise return a truncated prefix -- drift on every healthy database."""
+        monkeypatch.setattr(
+            triggers,
+            '_CREATE_TENANT_AUTOFILL_FUNCTION',
+            triggers._CREATE_TENANT_AUTOFILL_FUNCTION.replace('$$', '$body$'),
+        )
+
+        with pytest.raises(ValueError, match='rather than 2'):
+            triggers._tenant_autofill_body(self.DIMENSION, self.COLUMN)
+
     def test_the_generator_is_refused_the_same_body_the_audit_is(self):
         """The refusal lives in the *shared* slot builder, so `makeguitarmigrations` cannot
         emit what the audit would refuse to read: `_BARE_IDENTIFIER` admits `$`, so without

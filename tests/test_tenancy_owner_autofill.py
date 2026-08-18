@@ -301,3 +301,18 @@ class TestTheAuditFollowsTheTrigger:
 
         assert len(findings) == 1
         assert 'cannot be verified' in findings[0]
+
+    def test_a_function_the_database_lacks_is_not_a_body_finding(self):
+        """The body check reads a body; there is none to read when the function is absent, and
+        the finding for that is ``_autofill_drift``'s. Reporting both would send the operator
+        to the same fix twice -- once naming a guard the missing function cannot be missing."""
+        from guitars.management.commands.audittenancy import Command as Audit
+
+        coverage = app_coverage(_testapp())
+
+        # Off the search path entirely, then present but carrying a different function: the
+        # two ways a live map can hold no body for a function the models expect.
+        assert Audit._autofill_body_findings(coverage, {}) == []
+        other = _state(('guitars_fill_other', 'BEGIN END'))
+        elsewhere = {table: other for table in coverage.tables}
+        assert Audit._autofill_body_findings(coverage, elsewhere) == []

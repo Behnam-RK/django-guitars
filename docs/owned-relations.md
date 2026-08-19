@@ -18,7 +18,9 @@ class Album(SetarModel):
 Soft-deleting the album soft-deletes its press kit. `on_delete=CASCADE` is **refused**
 (`guitars.E001`): it means deleting the press kit deletes the album, the opposite of
 ownership, and would emit the cascade rule backwards. A NULL key matches nothing, so a
-nullable owned relation needs no guard of its own.
+nullable owned relation needs no guard of its own. `to_field` is refused too
+(`guitars.E002`): the rule correlates the key against the target's *primary* key, which is
+also what makes [MTI](#mti) work.
 
 ## The last-owner guard
 
@@ -29,10 +31,24 @@ field, so the rule's `[SQL:…]` identity would not move and `--check` would sta
 while the database kept an unguarded rule. See
 [ADR 0011](adr/0011-owner-side-soft-delete-ownership.md).
 
-`hard_delete()` applies the same test in Python, so both paths spare the same rows, and
-removes an owned row *after* the batch that owned it — the reverse of the child-first
-`CASCADE` order, since the owner still references it. Queryset-level `hard_delete()` walks
-neither reverse-FK children nor owned relations.
+`hard_delete()` applies the same test in Python, and removes an owned row *after* the batch
+that owned it — the reverse of the child-first `CASCADE` order, since the owner still
+references it. Two deliberate narrowings there, because it *removes* the row where the rule
+only stamps a column: the whole batch is spared rather than one row, and an **archived**
+owner still counts as an owner — its foreign key is still on disk, so dropping the target
+would fail the deferred constraint at `COMMIT`. The row stays archived, which is where the
+rule left it anyway. Queryset-level `hard_delete()` walks neither reverse-FK children nor
+owned relations.
+
+Two limits the guard does not cover, both by construction:
+
+- **Per column, not per target.** The `NOT EXISTS` looks only at the rule's own foreign-key
+  column. A second `OwningForeignKey` on the same table pointing at the same row does not
+  spare it.
+- **Per statement.** PostgreSQL runs an `ON UPDATE` rule's action *before* the original
+  update, so every owner soft-deleted by one statement still reads as live to the others'
+  guards. `Album.objects.filter(press_kit=kit).delete()` therefore leaves `kit` alive even
+  though it deleted every owner; deleting them one at a time stamps it as expected.
 
 ## Rule names
 

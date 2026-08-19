@@ -298,8 +298,9 @@ def test_owned_operations_name_one_rule_per_foreign_key_column():
 
 
 def test_owned_rule_carries_the_last_owner_guard():
-    """The guard is unconditional, not derived from a UniqueConstraint: SQL that depended on
-    constraint shape would go silently wrong the day the constraint was dropped."""
+    """Unconditional, not derived from a UniqueConstraint, which would go silently wrong the
+    day one was dropped. The self-exclusion is load-bearing, not tidiness: a rule action runs
+    before the original update, so without it the NOT EXISTS never holds and nothing fires."""
     command = Command()
     command.existing.soft_delete_owned.clear()
 

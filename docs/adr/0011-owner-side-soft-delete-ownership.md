@@ -37,7 +37,7 @@ AND NOT EXISTS (
 )
 ```
 
-`hard_delete()` applies the same predicate in Python before removing an owned row, so the two paths agree on what survives.
+`hard_delete()` applies the same predicate in Python before removing an owned row, narrowed twice because it *removes* the row where the rule only stamps a column: it spares the whole collected batch rather than one row, and it counts an **archived** owner as still owning, since that row's foreign key is still on disk and dropping the target would fail the deferred constraint at `COMMIT`. Sparing there leaves the target archived — where the rule had already put it.
 
 ## Why
 
@@ -59,7 +59,8 @@ The cost of always emitting it is one `NOT EXISTS` on the foreign-key column per
 - Adopting the field on an existing relation emits a state-only `AlterField`.
 - Every owned soft delete pays for the guard subquery, including on relations that are unique by constraint and can never have a second owner.
 - The owner-side MTI case is refused, not solved: a model declaring the foreign key on its own table while inheriting `_deleted_at` from an ancestor gets a warning and no rule, since `old."<column>"` cannot name a column that is not on the table the rule fires on. This mirrors the inbound limitation `_cascade_candidates` already reports.
-- `hard_delete()` re-implements the guard in Python. The two predicates must be changed together; a test asserts the sparing behaviour on both paths.
+- `hard_delete()` re-implements the guard in Python. The two predicates must be changed together; a test asserts the sparing behaviour on both paths. It also has to re-implement the *candidate* test — a relation the generator refused (the owner-side MTI case above, or a target with no `_deleted_at`) has no rule, so following it in Python would destroy exactly what the rule spared.
+- The guard is per foreign-key **column** and per **statement**, not per target row. A second `OwningForeignKey` to the same row does not spare it, and one statement soft-deleting every owner leaves the target alive, since PostgreSQL runs an `ON UPDATE` rule's action before the original update — each guard still sees its siblings as live. Both are documented in [`docs/owned-relations.md`](../owned-relations.md); lifting either means leaving the rule form behind for a statement-level trigger.
 
 **Reversibility.** Low cost to extend, high cost to reverse. Adding a keyword to relax the guard later is additive. Removing the guard from already-generated migrations is not: the SQL is inlined, so an existing database keeps whatever it was migrated with until a regeneration and a `migrate`.
 

@@ -25,7 +25,11 @@ class OwningForeignKey(ForeignKey):
     the opposite -- see ``docs/owned-relations.md``."""
 
     def check(self, **kwargs: Any) -> list[CheckMessage]:
-        return [*super().check(**kwargs), *self._check_on_delete_not_cascade()]
+        return [
+            *super().check(**kwargs),
+            *self._check_on_delete_not_cascade(),
+            *self._check_targets_the_primary_key(),
+        ]
 
     def _check_on_delete_not_cascade(self) -> list[CheckMessage]:
         """``CASCADE`` and ownership are contradictory, not merely redundant -- reported as a
@@ -43,6 +47,29 @@ class OwningForeignKey(ForeignKey):
                 ),
                 obj=self,
                 id='guitars.E001',
+            )
+        ]
+
+    def _check_targets_the_primary_key(self) -> list[CheckMessage]:
+        """The rule correlates ``old."<fk column>"`` against the dependent's *primary key* --
+        also what makes ownership into an MTI child work, a chain sharing one such value.
+        Against any other column it stamps the wrong row, or none."""
+        if isinstance(self.remote_field.model, str):  # pragma: no cover - lazy ref unresolved
+            # super().check() reports the unresolvable reference; nothing here can run yet.
+            return []
+        related_pk = self.related_model._meta.pk
+        if related_pk is None or self.target_field is related_pk:
+            return []
+        return [
+            checks.Error(
+                "OwningForeignKey must point at the target model's primary key.",
+                hint=(
+                    f"to_field='{self.target_field.name}' names a non-primary-key column, "
+                    'but the generated rule correlates the foreign key against the target '
+                    'primary key, so it would stamp the wrong row. Drop to_field.'
+                ),
+                obj=self,
+                id='guitars.E002',
             )
         ]
 

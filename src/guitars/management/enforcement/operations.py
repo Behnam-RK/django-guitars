@@ -64,34 +64,32 @@ class _OperationRow(NamedTuple):
     adopt: str | list[str] | None = None
 
 
-def _related_rule_name(related_table: str, foreign_key: str | None = None) -> str:
-    """The cascade rule's identifier, NAMEDATALEN-truncated before quoting. Schema folded in
+def _rule_name(prefix: str, table: str, foreign_key: str | None) -> str:
+    """A soft-delete rule's identifier, NAMEDATALEN-truncated before quoting. Schema folded in
     **length-prefixed**, not underscore-joined -- plain ``f'{schema}_{table}'`` would let
     ``('tenant_a', 'events')`` and ``('tenant', 'a_events')`` collide on one name."""
-    schema, bare_related_table = _identifiers._split_qualified('table', related_table)
+    schema, bare_table = _identifiers._split_qualified('table', table)
     name = (
-        f'soft_delete_related_{bare_related_table}'
+        f'{prefix}_{bare_table}'
         if schema is None
-        else f'soft_delete_related_{len(schema)}_{schema}_{bare_related_table}'
+        else f'{prefix}_{len(schema)}_{schema}_{bare_table}'
     )
     if foreign_key is not None:
         name = f'{name}_{foreign_key}'
     return _identifiers._safe_ident(name)
 
 
+def _related_rule_name(related_table: str, foreign_key: str | None = None) -> str:
+    """The inbound cascade rule's identifier. One FK per pair keeps the bare, unsuffixed form
+    for backward compatibility, so *foreign_key* is optional here and required for owned."""
+    return _rule_name('soft_delete_related', related_table, foreign_key)
+
+
 def _owned_rule_name(dependent_table: str, foreign_key: str) -> str:
-    """The owned rule's identifier: :func:`_related_rule_name`'s folding and truncation
-    under a distinct prefix. A rule is namespaced by name alone, so one shared with the
-    inbound cascade would silently replace it rather than fail."""
-    schema, bare_dependent_table = _identifiers._split_qualified('table', dependent_table)
-    name = (
-        f'soft_delete_owned_{bare_dependent_table}'
-        if schema is None
-        else f'soft_delete_owned_{len(schema)}_{schema}_{bare_dependent_table}'
-    )
-    # Always suffixed, with no bare sibling: nothing predates 2.3.0 to stay compatible with,
-    # and two owned FKs to one table must not collide.
-    return _identifiers._safe_ident(f'{name}_{foreign_key}')
+    """The owned rule's identifier, always FK-suffixed: nothing predates 2.3.0 to stay
+    compatible with, and two owned FKs to one table must not collide. The prefix differs
+    because a rule is namespaced by name alone -- a shared one would silently replace."""
+    return _rule_name('soft_delete_owned', dependent_table, foreign_key)
 
 
 class OperationsMixin:

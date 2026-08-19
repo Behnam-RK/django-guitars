@@ -5,7 +5,7 @@ from django.db import connections, transaction
 from django.db.models import CASCADE, DateTimeField, Index, Manager, Q, QuerySet, sql
 from django.db.models.base import Model
 
-from guitars.introspection import mti_root
+from guitars.introspection import has_column, mti_root, owns_column
 from guitars.sql import SWITCH_OFF_HARD_DELETION, SWITCH_ON_HARD_DELETION
 
 from .fields import OwningForeignKey
@@ -19,14 +19,21 @@ def _is_mti_model(model: type[Model]) -> bool:
 
 
 def _owned_fields(model: type[Model]) -> list[OwningForeignKey]:
-    """``OwningForeignKey``s whose owned rule actually exists for *model* -- declared on its
-    own table, and only where *model* itself is soft-deletable, since the rule fires on a
-    ``_deleted_at`` transition and a model without that column never has one."""
-    if not hasattr(model, '_deleted_at'):  # pragma: no cover - unreachable
-        # Defensive, like hard_delete's non-soft-deletable branch: a model with no rule was
-        # already really deleted by Phase 1's Collector, so it never reaches this.
+    """``OwningForeignKey``s that actually carry a rule -- the conditions
+    ``_is_owned_candidate``/``_owned_candidates`` apply, and must: a relation the generator
+    refused has no rule, so following it here destroys what the rule spared."""
+    # ``owns_column``, not ``hasattr``: a model with no ``_deleted_at`` at all has no rule to
+    # fire, and one inheriting it from an MTI ancestor is refused with a warning, since the
+    # rule would fire on a table ``old."<column>"`` cannot reach. See docs/owned-relations.md.
+    if not owns_column(model, '_deleted_at'):
         return []
-    return [field for field in model._meta.local_fields if isinstance(field, OwningForeignKey)]
+    return [
+        field
+        for field in model._meta.local_fields
+        # A target with no ``_deleted_at`` has nothing to stamp, so the generator emits no
+        # rule for it either -- ``_is_owned_candidate``'s ``has_column`` check.
+        if isinstance(field, OwningForeignKey) and has_column(field.related_model, '_deleted_at')
+    ]
 
 
 def _rows(model: type[Model], using: str | None) -> QuerySet:
@@ -40,9 +47,9 @@ def _rows(model: type[Model], using: str | None) -> QuerySet:
 def _owned_targets(
     to_delete: dict[type[Model], set], using: str | None
 ) -> list[tuple[type[Model], set]]:
-    """``(model, pks)`` for every owned row *to_delete* is the **last live owner** of -- the
-    Python twin of the rule's ``NOT EXISTS``. ``exclude(pk__in=pks)`` is what makes the two
-    agree: Phase 1 soft-deleted only the instance, so the rest of the batch is still live."""
+    """``(model, pks)`` for every owned row *to_delete* is the last owner of -- the rule's
+    ``NOT EXISTS``, narrowed twice because this *removes* the row where the rule only stamps
+    a column. See ``docs/owned-relations.md``; the two narrowings are commented below."""
     found: dict[type[Model], set] = defaultdict(set)
     for model, pks in to_delete.items():
         for field in _owned_fields(model):
@@ -52,15 +59,18 @@ def _owned_targets(
                 .exclude(**{field.attname: None})
                 .values_list(field.attname, flat=True)
             )
-            for owned_pk in owned_pks:
-                still_owned = (
-                    _rows(model, using)
-                    .exclude(pk__in=pks)
-                    .filter(**{field.attname: owned_pk, '_deleted_at__isnull': True})
-                    .exists()
-                )
-                if not still_owned:
-                    found[field.related_model].add(owned_pk)
+            if not owned_pks:
+                continue
+            # Narrowing 1: `exclude(pk__in=pks)` spares the whole collected batch, not one
+            # row -- all of it is going. Narrowing 2: no `_deleted_at` filter, so an archived
+            # owner still counts; its FK is on disk and would dangle at COMMIT.
+            still_owned = set(
+                _rows(model, using)
+                .exclude(pk__in=pks)
+                .filter(**{f'{field.attname}__in': owned_pks})
+                .values_list(field.attname, flat=True)
+            )
+            found[field.related_model].update(owned_pks - still_owned)
     return list(found.items())
 
 

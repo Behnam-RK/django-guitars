@@ -50,6 +50,36 @@ def test_owning_foreign_key_accepts_a_non_cascade_on_delete():
     assert _owner_field_errors(PROTECT) == []
 
 
+def test_owning_foreign_key_refuses_a_non_primary_key_to_field():
+    """The rule correlates ``old."<fk>"`` against the dependent's *primary* key -- the same
+    thing that makes ownership into an MTI child work -- so any other target stamps the
+    wrong row, or a row of a type the comparison cannot even be made against."""
+
+    @isolate_apps('tests.testapp')
+    def _build() -> list[str]:
+        class Kit(models.Model):
+            slug = models.CharField(max_length=10, unique=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Owner(models.Model):
+            kit = OwningForeignKey(Kit, on_delete=PROTECT, to_field='slug')
+
+            class Meta:
+                app_label = 'testapp'
+
+        return [error.id for error in Owner._meta.get_field('kit').check()]
+
+    assert _build() == ['guitars.E002']
+
+
+def test_owning_foreign_key_accepts_a_target_reached_through_mti():
+    """``Merch.featured_orchestra`` resolves to Orchestra's parent-link primary key, which
+    *is* its primary key -- the E002 guard must not read that as a redirected ``to_field``."""
+    assert Merch._meta.get_field('featured_orchestra').check() == []
+
+
 def test_owning_foreign_key_deconstructs_to_its_public_path():
     """A generated migration records the path literally and is already applied in consuming
     projects, so it names ``guitars.models``, not the module the class happens to live in."""
@@ -156,6 +186,36 @@ def test_the_rule_reaches_an_owned_row_whose_deleted_at_lives_on_an_mti_ancestor
 
 
 @pytest.mark.django_db
+def test_one_statement_deleting_every_owner_leaves_the_shared_row_alive(band):
+    """Per *statement*: a rule action runs before the original update, so each owner still
+    reads as live to its siblings' guards. Pinned because it fails safe, and because lifting
+    it means a statement-level trigger rather than a rule."""
+    kit = PressKit.objects.create(headline='Shared')
+    Album.objects.create(title='Hemispheres', band=band, press_kit=kit)
+    Album.objects.create(title='Permanent Waves', band=band, press_kit=kit)
+
+    Album.objects.filter(press_kit=kit).delete()  # one statement, both owners
+
+    assert not Album.objects.filter(press_kit=kit).exists()  # the owners did go
+    assert PressKit.objects.filter(pk=kit.pk).exists()  # the shared target did not
+
+
+@pytest.mark.django_db
+def test_one_statement_still_stamps_owned_rows_that_are_not_shared(band):
+    """Control for the above: the limit is the shared guard, not multi-row statements. The
+    same single DELETE over two owners of two *distinct* targets stamps both."""
+    first_kit = PressKit.objects.create(headline='One')
+    second_kit = PressKit.objects.create(headline='Two')
+    Album.objects.create(title='Hemispheres', band=band, press_kit=first_kit)
+    Album.objects.create(title='Permanent Waves', band=band, press_kit=second_kit)
+
+    Album.objects.filter(press_kit__in=[first_kit, second_kit]).delete()
+
+    assert PressKit._archives.filter(pk=first_kit.pk).exists()
+    assert PressKit._archives.filter(pk=second_kit.pk).exists()
+
+
+@pytest.mark.django_db
 def test_the_hard_deletion_switch_suppresses_the_owned_rule(band):
     """``hard_delete()`` opts out of every rule the same way, so the owned rule must carry
     the identical ``<> 'on'`` guard -- otherwise it would stamp a row about to be removed."""
@@ -219,3 +279,31 @@ def test_hard_delete_removes_the_whole_chain_of_an_owned_mti_row(band):
 
     assert not Orchestra._all_objects.filter(pk=orchestra.pk).exists()
     assert not Ensemble._all_objects.filter(pk=orchestra.pk).exists()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_hard_delete_spares_a_row_an_archived_owner_still_references(band):
+    """An archived owner's foreign key is still on disk. The rule ignores it -- it only
+    stamps a column -- but removing the row here would leave that key dangling and fail the
+    deferred constraint at ``COMMIT``, so the target is spared and stays archived."""
+    kit = PressKit.objects.create(headline='Shared')
+    first = Album.objects.create(title='Hemispheres', band=band, press_kit=kit)
+    second = Album.objects.create(title='Permanent Waves', band=band, press_kit=kit)
+    second.delete()  # soft: the row survives, still holding press_kit_id
+
+    first.hard_delete()
+
+    assert PressKit._all_objects.filter(pk=kit.pk).exists()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_hard_delete_leaves_alone_what_the_generator_refused_to_own(band):
+    """``Orchestra.programme`` is the refused owner-side MTI case: no rule exists, so
+    soft-deleting the orchestra leaves the press kit alive. hard_delete() must agree --
+    following the relation here would destroy exactly what the other path spared."""
+    kit = PressKit.objects.create(headline='Programme')
+    orchestra = Orchestra.objects.create(name='LSO', conductor='Davis', programme=kit)
+
+    orchestra.hard_delete()
+
+    assert PressKit.objects.filter(pk=kit.pk).exists()

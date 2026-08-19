@@ -1,6 +1,6 @@
 [project]
 name = "django-guitars"
-version = "2.2.0"
+version = "2.2.1"
 description = "A kit of reusable Django utilities: base models, PostgreSQL soft deletion, and more."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -168,7 +168,13 @@ testpaths = ["tests"]
 # workflow this project's own docs recommend (`pytest tests/test_base.py::test_x`).
 # CI and `noxfile.py` pass it explicitly on the full-suite run, where the parallelism
 # pays for itself.
-addopts = "-q --no-header --tb=short -ra --strict-markers --strict-config --junit-xml=.pytest-last.xml"
+# --dist loadgroup IS here, for the mirror-image reason: xdist honours `xdist_group`
+# only in that mode, and its default (`load`) silently ignores every mark. It is inert
+# without -n, so it belongs with the config both -n callers share rather than on each.
+# One cost, paid knowingly: under -n, xdist suffixes a grouped test's reported nodeid with
+# `@<group>`, and pytest will not select that back ("ERROR: not found"). Strip the suffix
+# when re-running one failure from a parallel run's summary.
+addopts = "-q --no-header --tb=short -ra --strict-markers --strict-config --dist loadgroup --junit-xml=.pytest-last.xml"
 xfail_strict = true
 filterwarnings = ["error"]
 

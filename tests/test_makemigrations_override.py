@@ -114,3 +114,26 @@ def test_empty_writes_only_the_scaffold_no_recursion(_scoped_app):
     files = _generated_files(_scoped_app)
     assert len(files) == 1, files
     assert 'operations = [\n    ]' in files.pop().read_text()
+
+
+def test_the_xdist_group_mark_is_actually_honoured(pytestconfig):
+    """``xdist_group`` is a no-op under xdist's default ``--dist load``, and both modules
+    writing to this app's migrations dir rely on it to stay on one worker -- without it a
+    teardown here unlinks a file the other module's ``makemigrations`` is mid-import of."""
+    # Read from the ini, not ``getoption('dist')``: a worker reports ``no`` for that whatever
+    # the controller was given, so the option would assert only in a serial run -- exactly the
+    # run where nothing is distributed and the marks could not have mattered anyway.
+    addopts = pytestconfig.getini('addopts')
+    # Both spellings, since `--junit-xml=...` next door shows the `=` form is in use here; and
+    # a slice, not an index, so a trailing bare `--dist` -- one of the misconfigurations this
+    # test exists to catch -- reaches the assertion below instead of dying on an IndexError.
+    modes = [
+        argument.partition('=')[2] or ''.join(addopts[index + 1 : index + 2])
+        for index, argument in enumerate(addopts)
+        if argument == '--dist' or argument.startswith('--dist=')
+    ]
+    mode = modes[-1] if modes else None
+    assert mode == 'loadgroup', (
+        'pytest --dist must be loadgroup (set in pyproject.toml addopts) or the '
+        'xdist_group marks pinning this module to one worker are silently ignored'
+    )

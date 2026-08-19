@@ -8,7 +8,7 @@ import socket
 import threading
 
 import pytest
-from asgiref.sync import async_to_sync
+from asgiref.sync import SyncToAsync, async_to_sync
 from django.db import close_old_connections, connection, connections
 from django.db.models.signals import pre_save
 
@@ -42,27 +42,36 @@ def _reap_worker_thread_connections():
     could kill another test's still-needed connection. The main thread's own connection
     (kept alive across modules by pytest-django) must be excluded by pid."""
     yield
-    main = connections['default'].settings_dict
-    exclude_pids = []
-    if connection.connection is not None:
-        exclude_pids.append(connection.connection.info.backend_pid)
-    import psycopg
+    try:
+        # asgiref's one persistent thread holds the async ORM's connection past this module:
+        # terminate that backend from outside and a later async test reusing the thread finds
+        # a live connection object on a dead server. Close it from inside the thread instead.
+        SyncToAsync.single_thread_executor.submit(connections.close_all).result(timeout=10)
+    finally:
+        # ``finally``, because the sweep is this fixture's whole point: if the close above
+        # raises or times out, skipping it would leak every worker-thread connection this
+        # module opened into the next one. The close's own error still propagates after.
+        main = connections['default'].settings_dict
+        exclude_pids = []
+        if connection.connection is not None:
+            exclude_pids.append(connection.connection.info.backend_pid)
+        import psycopg
 
-    with psycopg.connect(
-        dbname=main['NAME'],
-        user=main['USER'],
-        password=main['PASSWORD'],
-        host=main['HOST'] or 'localhost',
-        port=main['PORT'] or None,
-        autocommit=True,
-    ) as reaper:
-        exclude_pids.append(reaper.info.backend_pid)
-        with reaper.cursor() as cursor:
-            cursor.execute(
-                'SELECT pg_terminate_backend(pid) FROM pg_stat_activity '
-                'WHERE datname = current_database() AND pid <> ALL(%s)',
-                [exclude_pids],
-            )
+        with psycopg.connect(
+            dbname=main['NAME'],
+            user=main['USER'],
+            password=main['PASSWORD'],
+            host=main['HOST'] or 'localhost',
+            port=main['PORT'] or None,
+            autocommit=True,
+        ) as reaper:
+            exclude_pids.append(reaper.info.backend_pid)
+            with reaper.cursor() as cursor:
+                cursor.execute(
+                    'SELECT pg_terminate_backend(pid) FROM pg_stat_activity '
+                    'WHERE datname = current_database() AND pid <> ALL(%s)',
+                    [exclude_pids],
+                )
 
 
 def test_the_connecting_role_cannot_bypass_rls(db):

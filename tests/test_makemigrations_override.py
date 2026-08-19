@@ -124,11 +124,11 @@ def test_the_xdist_group_mark_is_actually_honoured(pytestconfig):
     # the controller was given, so the option would assert only in a serial run -- exactly the
     # run where nothing is distributed and the marks could not have mattered anyway.
     addopts = pytestconfig.getini('addopts')
-    # Both spellings, since the same string already writes `--junit-xml=...` with an `=`:
-    # matching only the space-separated form would fail claiming loadgroup is unset when a
-    # reformat to `--dist=loadgroup` left it set.
+    # Both spellings, since `--junit-xml=...` next door shows the `=` form is in use here; and
+    # a slice, not an index, so a trailing bare `--dist` -- one of the misconfigurations this
+    # test exists to catch -- reaches the assertion below instead of dying on an IndexError.
     modes = [
-        argument.partition('=')[2] or addopts[index + 1]
+        argument.partition('=')[2] or ''.join(addopts[index + 1 : index + 2])
         for index, argument in enumerate(addopts)
         if argument == '--dist' or argument.startswith('--dist=')
     ]

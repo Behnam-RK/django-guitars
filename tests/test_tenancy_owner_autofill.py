@@ -4,12 +4,12 @@ but only when every model sharing that one trigger agrees it should exist."""
 
 from __future__ import annotations
 
-import types
-
 import pytest
 from django.apps import apps as django_apps
 
+from guitars.management.commands.audittenancy import TableState
 from guitars.management.commands.makeguitarmigrations import Command
+from guitars.sql import triggers
 from guitars.tenancy import discovery, tenancy_bypassed, tenant
 from guitars.tenancy.discovery import (
     app_coverage,
@@ -247,13 +247,32 @@ class TestAgainstTheRealDatabase:
         assert ('testapp_arena',) not in found
 
 
+def _state(*functions: tuple[str, str]) -> TableState:
+    """A live state carrying only the autofill half -- the half ``_autofill_drift`` reads. A
+    real ``TableState``, not a namespace: the check reaches the names through a property on
+    it, and a double would have to restate that property to stay honest."""
+    return TableState(
+        schema='public',
+        has_policy=True,
+        rls_enabled=True,
+        rls_forced=True,
+        policy_gucs=frozenset(),
+        policy_columns=frozenset(),
+        policy_check_gucs=frozenset(),
+        autofill_functions=frozenset(functions),
+    )
+
+
 class TestTheAuditFollowsTheTrigger:
     def test_a_present_relocated_trigger_is_not_drift(self):
         from guitars.management.commands.audittenancy import Command as Audit
 
         coverage = app_coverage(_testapp()).tables['testapp_arena']
-        state = types.SimpleNamespace(
-            autofill_functions=frozenset({autofill_function_name('label', 'label_id')})
+        state = _state(
+            (
+                autofill_function_name('label', 'label_id'),
+                triggers._tenant_autofill_body('label', 'label_id'),
+            )
         )
 
         assert Audit._autofill_drift('testapp_arena', coverage, {'testapp_venue': state}) == []
@@ -264,7 +283,7 @@ class TestTheAuditFollowsTheTrigger:
         from guitars.management.commands.audittenancy import Command as Audit
 
         coverage = app_coverage(_testapp()).tables['testapp_arena']
-        state = types.SimpleNamespace(autofill_functions=frozenset())
+        state = _state()
 
         findings = Audit._autofill_drift('testapp_arena', coverage, {'testapp_venue': state})
 
@@ -282,3 +301,18 @@ class TestTheAuditFollowsTheTrigger:
 
         assert len(findings) == 1
         assert 'cannot be verified' in findings[0]
+
+    def test_a_function_the_database_lacks_is_not_a_body_finding(self):
+        """The body check reads a body; there is none to read when the function is absent, and
+        the finding for that is ``_autofill_drift``'s. Reporting both would send the operator
+        to the same fix twice -- once naming a guard the missing function cannot be missing."""
+        from guitars.management.commands.audittenancy import Command as Audit
+
+        coverage = app_coverage(_testapp())
+
+        # Off the search path entirely, then present but carrying a different function: the
+        # two ways a live map can hold no body for a function the models expect.
+        assert Audit._autofill_body_findings(coverage, {}) == []
+        other = _state(('guitars_fill_other', 'BEGIN END'))
+        elsewhere = {table: other for table in coverage.tables}
+        assert Audit._autofill_body_findings(coverage, elsewhere) == []

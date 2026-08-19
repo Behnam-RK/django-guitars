@@ -13,6 +13,7 @@ from django.db import DEFAULT_DB_ALIAS, connections
 
 from guitars.gucs import GUC_PREFIX
 from guitars.management import _generator
+from guitars.sql import triggers as _triggers
 from guitars.sql.policy import TENANT_POLICY
 from guitars.tenancy import TenantEnforcement
 from guitars.tenancy.discovery import (
@@ -23,7 +24,7 @@ from guitars.tenancy.discovery import (
 
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterator, Mapping
 
     from django.db.backends.base.base import BaseDatabaseWrapper
 
@@ -44,9 +45,15 @@ class TableState(NamedTuple):
     #: Same, off the WITH CHECK half (governs writes) -- see docs/tenancy.md's "USING
     #: (<tenant match>) WITH CHECK (true)" hazard. Falls back to USING when NULL.
     policy_check_gucs: frozenset[str]
-    #: Names of the functions this table's row-level INSERT triggers call (ADR 0005). A
-    #: table that should autofill but calls none is the "looks fine, is not" state.
-    autofill_functions: frozenset[str]
+    #: ``(name, body)`` for each of this library's functions the table's row-level INSERT
+    #: triggers call (ADR 0005). A table that autofills but calls none is "looks fine, is not",
+    #: and so is one whose body lost a guard -- so the body travels with the name, not beside.
+    autofill_functions: frozenset[tuple[str, str]]
+
+    @property
+    def autofill_function_names(self) -> frozenset[str]:
+        """Just the names -- for the two checks that only ask whether a trigger is there."""
+        return frozenset(name for name, _ in self.autofill_functions)
 
 
 #: Live enforcement state for every table in the search path. Ordered search-path-descending
@@ -68,11 +75,11 @@ WHERE c.relkind = 'r' AND n.nspname = ANY(current_schemas(false))
 ORDER BY array_position(current_schemas(false), n.nspname) DESC
 """
 
-#: Which functions each table's own ``BEFORE INSERT ... FOR EACH ROW`` triggers call (ADR
-#: 0005), by ``tgtype`` bits 0/1/2. ``tgenabled <> 'D'`` is load-bearing: a disabled trigger
-#: still has its ``pg_trigger`` row while nothing fires -- "looks fine, is not" exactly.
+#: Which of *this library's* functions each table's row-level ``BEFORE INSERT`` triggers call,
+#: with their bodies (ADR 0005). Both filters are load-bearing: a disabled trigger keeps its
+#: ``pg_trigger`` row while nothing fires, and an app's own trigger -- body and all -- is not ours.
 _AUTOFILL_TRIGGER_SQL = """
-SELECT n.nspname, c.relname, p.proname
+SELECT n.nspname, c.relname, p.proname, p.prosrc
 FROM pg_trigger t
 JOIN pg_class c ON c.oid = t.tgrelid
 JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -83,6 +90,7 @@ WHERE NOT t.tgisinternal
   AND (t.tgtype & 2) = 2
   AND (t.tgtype & 4) = 4
   AND c.relkind = 'r'
+  AND starts_with(p.proname, %s)
   AND n.nspname = ANY(current_schemas(false))
 """
 
@@ -121,6 +129,18 @@ def _tenant_gucs(expression: str | None) -> frozenset[str]:
     return frozenset(
         guc for guc in _RE_GUC.findall(expression or '') if guc.startswith(GUC_PREFIX)
     )
+
+
+def _autofill_hosts(table: str, coverage: TableCoverage) -> Iterator[tuple[str, dict[str, str]]]:
+    """``(table the trigger lives on, {dimension: column} it fills)`` -- its own columns, then
+    any relocated onto an MTI ancestor (ADR 0009). One definition for the three checks below:
+    they must agree, or a change made in two leaves the third auditing a host nobody reads."""
+    for host, columns in (
+        (table, coverage.autofill_columns),
+        (coverage.owner_table, coverage.owner_autofill_columns),
+    ):
+        if columns and host:
+            yield host, columns
 
 
 class Command(BaseCommand):
@@ -177,13 +197,13 @@ class Command(BaseCommand):
                 for oid, table, column in cursor.fetchall():
                     columns.setdefault(oid, set()).add((table, column))
 
-            cursor.execute(_AUTOFILL_TRIGGER_SQL)
+            cursor.execute(_AUTOFILL_TRIGGER_SQL, [AUTOFILL_FUNCTION_PREFIX])
             # Keyed by (schema, table), not the bare name: the state rows below resolve to
             # one schema off the search path, so folding every schema's triggers together
             # would let a trigger on tenant_b.orders vouch for public.orders.
-            triggers: dict[tuple[str, str], set[str]] = {}
-            for schema_name, table, function in cursor.fetchall():
-                triggers.setdefault((schema_name, table), set()).add(function)
+            triggers: dict[tuple[str, str], set[tuple[str, str]]] = {}
+            for schema_name, table, function, body in cursor.fetchall():
+                triggers.setdefault((schema_name, table), set()).add((function, body))
 
             state: dict[str, TableState] = {}
             for name, schema, enabled, forced, oid, qual, with_check in rows:
@@ -224,18 +244,15 @@ class Command(BaseCommand):
     def _autofill_drift(
         table: str, coverage: TableCoverage, live: Mapping[str, TableState]
     ) -> list[str]:
-        """Report a table whose manager autofills but whose ADR 0005 trigger is absent. No
-        other check sees it: the policy is present and correct, reads and cross-tenant writes
-        are refused, and only an insert omitting the tenant fails -- with a bare NOT NULL."""
+        """Report a table whose manager autofills but whose ADR 0005 trigger is absent (the
+        body of one that is there is :meth:`_autofill_body_findings`, once per function). No
+        other check sees it: the policy is intact, and the INSERT fails on a bare NOT NULL."""
         findings: list[str] = []
         # Takes the whole live map, not one TableState: a relocated trigger sits on the
         # ancestor's table (ADR 0009), so the fix is on a different table than the subject.
-        for host, columns in (
-            (table, coverage.autofill_columns),
-            (coverage.owner_table, coverage.owner_autofill_columns),
-        ):
-            if not (columns and host):
-                continue
+        for host, columns in _autofill_hosts(table, coverage):
+            # Names only: this check asks whether a trigger is there at all. Comparing the body
+            # is :meth:`_autofill_body_findings`' business, which walks coverage itself.
             expected = {
                 autofill_function_name(dimension, column) for dimension, column in columns.items()
             }
@@ -247,7 +264,7 @@ class Command(BaseCommand):
                     f'verified.'
                 )
                 continue
-            if missing := sorted(expected - host_state.autofill_functions):
+            if missing := sorted(expected - host_state.autofill_function_names):
                 where = '' if host == table else f" on its ancestor '{host}'"
                 findings.append(
                     f"'{table}': no tenant autofill trigger calling {missing}{where} -- its "
@@ -258,6 +275,86 @@ class Command(BaseCommand):
         return findings
 
     @staticmethod
+    def _autofill_bodies(expected: Coverage) -> dict[str, tuple[str, str, set[str], set[str]]]:
+        """``function -> (dimension, column, tables it fills for, tables hosting a trigger)``.
+        Keyed by the function alone: one ``pg_proc`` row serves every model on a ``(dimension,
+        column)`` pair, so its body is one fact however many triggers call it."""
+        wanted: dict[str, tuple[str, str, set[str], set[str]]] = {}
+        for table, coverage in expected.tables.items():
+            for host, columns in _autofill_hosts(table, coverage):
+                for dimension, column in columns.items():
+                    function = autofill_function_name(dimension, column)
+                    # Not ``setdefault``: the two sets are the accumulators, and building a
+                    # discarded pair of them for every column after the first is the one
+                    # allocation this loop repeats per table rather than per function.
+                    if function not in wanted:
+                        wanted[function] = (dimension, column, set(), set())
+                    _, _, filled_for, hosted_on = wanted[function]
+                    filled_for.add(table)
+                    hosted_on.add(host)
+        return wanted
+
+    @classmethod
+    def _autofill_body_findings(
+        cls, expected: Coverage, live: Mapping[str, TableState]
+    ) -> list[tuple[set[str], str]]:
+        """One finding per function whose body is not the one the models imply, paired with the
+        tables it fills for -- they are the ones that stop being enforced. A function the
+        database lacks is :meth:`_autofill_drift`'s finding, not this one."""
+        findings: list[tuple[set[str], str]] = []
+        for function, (dimension, column, tables, hosts) in sorted(
+            cls._autofill_bodies(expected).items()
+        ):
+            # The first host that has it, and no further: they all call the same ``pg_proc``
+            # row, so one body is the body. A host the search path hides contributes none.
+            body = next(
+                (
+                    found
+                    for host in sorted(hosts)
+                    if (state := live.get(host)) is not None
+                    for name, found in state.autofill_functions
+                    if name == function
+                ),
+                None,
+            )
+            if body is None:
+                continue
+            if drift := cls._autofill_body_drift(
+                function, dimension, column, body, sorted(tables)
+            ):
+                findings.append((tables, drift))
+        return findings
+
+    @staticmethod
+    def _autofill_body_drift(
+        function: str, dimension: str, column: str, body: str, tables: list[str]
+    ) -> str | None:
+        """How a live autofill function's body differs from the one the models imply, if it
+        does -- presence was never the guarantee, the guards inside it are. Collapsed through
+        ``sql.triggers._squeeze``, so this and its guard probe share one tolerance."""
+        squeeze = _triggers._squeeze
+        if squeeze(body) == squeeze(_triggers._tenant_autofill_body(dimension, column)):
+            return None
+        problems, recognisable = _triggers._tenant_autofill_guard_status(dimension, column, body)
+        if not problems:
+            problems = ['is not the function this kit writes, though it still carries every guard']
+        elif recognisable <= 1:
+            # A probe tolerates whitespace but not a changed *token*, so a retyped body ('TRUE'
+            # for 'true') fails nearly every probe while guarding correctly. Below two intact
+            # guards that is likelier than the loss, and naming them would be alarming and false.
+            problems = [
+                'is not the function this kit writes, and too little of it is recognisable to '
+                'say which guard is gone'
+            ]
+        return (
+            f"'{function}': this tenant autofill function {' and '.join(problems)} -- it fills "
+            f'the tenant column for {tables}, so an INSERT of theirs is stamped by a function '
+            f'the models did not describe: wrongly, or not at all. Run `manage.py '
+            f'makeguitarmigrations` + migrate to replace it; if that generates nothing, it was '
+            f'edited in the database and has to be replaced there.'
+        )
+
+    @staticmethod
     def _stray_autofill_findings(
         expected: Coverage, live: Mapping[str, TableState]
     ) -> list[tuple[str, str]]:
@@ -266,15 +363,11 @@ class Command(BaseCommand):
         scoped run cannot tell "not mine" from "gone". Paired with its table -- not "enforced"."""
         wanted: dict[str, set[str]] = {}
         for table, coverage in expected.tables.items():
-            for host, columns in (
-                (table, coverage.autofill_columns),
-                (coverage.owner_table, coverage.owner_autofill_columns),
-            ):
-                if columns and host:
-                    wanted.setdefault(host, set()).update(
-                        autofill_function_name(dimension, column)
-                        for dimension, column in columns.items()
-                    )
+            for host, columns in _autofill_hosts(table, coverage):
+                wanted.setdefault(host, set()).update(
+                    autofill_function_name(dimension, column)
+                    for dimension, column in columns.items()
+                )
         return [
             (
                 table,
@@ -284,13 +377,9 @@ class Command(BaseCommand):
                 f'table. Run `manage.py makeguitarmigrations` + migrate.',
             )
             for table, state in sorted(live.items())
-            if (
-                stray := sorted(
-                    function
-                    for function in state.autofill_functions - wanted.get(table, set())
-                    if function.startswith(AUTOFILL_FUNCTION_PREFIX)
-                )
-            )
+            # No prefix filter here: _AUTOFILL_TRIGGER_SQL already asked for this library's
+            # functions only, so what is left over is ours and unexpected -- not the app's own.
+            if (stray := sorted(state.autofill_function_names - wanted.get(table, set())))
         ]
 
     @staticmethod
@@ -393,6 +482,13 @@ class Command(BaseCommand):
             if not state.rls_forced:
                 unforced.append(table)
                 unhealthy.add(table)
+
+        # Once per function, not per table: one shared function serves every model on a
+        # (dimension, column) pair, and N copies of one finding would inflate both the heading
+        # and the --require-match failure count for a single edited body.
+        for affected, finding in self._autofill_body_findings(expected, live):
+            drifted.append(finding)
+            unhealthy |= affected
 
         # The other direction: a scoped run can't tell "not mine" from "gone", so only a
         # full-repo audit may claim a policy is unexpected.

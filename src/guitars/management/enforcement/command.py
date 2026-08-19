@@ -16,7 +16,6 @@ from django.core.management.base import BaseCommand
 from django.db import models
 
 from guitars import sql
-from guitars.gucs import BYPASS_GUC, VALUE_SEPARATOR, guc_name
 from guitars.introspection import is_mti_child, owns_column
 from guitars.management import _generator
 from guitars.management.enforcement.headers import (
@@ -349,13 +348,9 @@ class Command(OperationsMixin, BaseCommand):
         """Ensure a current migration for one autofill trigger function. Kept off the two
         singletons above for the reason they are kept off each other: re-digesting an
         existing function migration regenerates it, for a function that did not change."""
-        slots = {
-            'function': _identifiers._safe_ident(function),
-            'column': _identifiers._escape_ident(column),
-            'guc': _identifiers._escape_literal(guc_name(dimension)),
-            'bypass_guc': _identifiers._escape_literal(BYPASS_GUC),
-            'separator': _identifiers._escape_literal(VALUE_SEPARATOR),
-        }
+        # Built in sql.triggers, not here: ``audittenancy`` renders the same body to compare
+        # a live function against, and a second copy of these slots would let the two disagree.
+        slots = _triggers._tenant_autofill_slots(dimension, column, function)
         written = self._ensure_function_migration(
             recorded=self.tenant_autofill_dependencies.get(function),
             recorded_digest=self.tenant_autofill_sql.get(function),

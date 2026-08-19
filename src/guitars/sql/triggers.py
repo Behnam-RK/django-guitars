@@ -2,6 +2,12 @@
 shared trigger *functions* plus the per-table *triggers* calling them. Public
 ``CREATE_PARENT_UPDATED_AT_*`` keep their frozen 3-arg call; ``_``-prefixed forms are not."""
 
+from __future__ import annotations
+
+from guitars.gucs import BYPASS_GUC, VALUE_SEPARATOR, guc_name
+from guitars.sql._identifiers import _escape_ident, _escape_literal, _safe_ident
+
+
 # *****************************************************************************************
 # ****************************** Updated At Trigger Function ******************************
 # *****************************************************************************************
@@ -276,3 +282,113 @@ _REPLACE_TENANT_AUTOFILL_TRIGGER = _DROP_TENANT_AUTOFILL_TRIGGER + _CREATE_TENAN
 _ADOPT_TENANT_AUTOFILL_TRIGGER = (
     _ADOPT_DROP_TENANT_AUTOFILL_TRIGGER + _CREATE_TENANT_AUTOFILL_TRIGGER
 )
+
+
+def _squeeze(statement: str) -> str:
+    """Collapse runs of whitespace to one space -- a dollar-quoted body keeps the indentation
+    the generator gave it, the one difference a comparison against a rendered template must
+    never report. Here, so the whole-body compare and the guard probe share one tolerance."""
+    return ' '.join(statement.split())
+
+
+#: Stands in for the slot only the CREATE/DROP headers use, where a caller wants the body
+#: alone. Never reaches SQL: :func:`_tenant_autofill_body` slices the header away, and no
+#: guard fragment interpolates ``{function}``.
+_BODY_ONLY_FUNCTION = 'body_only'
+
+
+def _tenant_autofill_slots(dimension: str, column: str, function: str) -> dict[str, str]:
+    """The slots every ``_*_TENANT_AUTOFILL_FUNCTION`` template takes -- one builder for the
+    generator and for ``audittenancy``, since two copies could disagree about a healthy body.
+    *function* stays required: a default would render ``CREATE FUNCTION ""()`` if forgotten."""
+    slots = {
+        'function': _safe_ident(function),
+        'column': _escape_ident(column),
+        'guc': _escape_literal(guc_name(dimension)),
+        'bypass_guc': _escape_literal(BYPASS_GUC),
+        'separator': _escape_literal(VALUE_SEPARATOR),
+    }
+    # Refused in the *shared* builder: `_BARE_IDENTIFIER` admits '$', so a db_column like 'a$$b'
+    # otherwise renders a template whose dollar quoting closes early, and the generator emits a
+    # migration `migrate` rejects with a bare syntax error while only the audit complained.
+    for slot in ('column', 'guc'):
+        if '$$' in slots[slot]:
+            raise ValueError(
+                f'the tenant autofill {slot} {slots[slot]!r} contains "$$", which closes the '
+                f'dollar quoting this function template depends on -- the generated migration '
+                f'would not apply. Set a db_column / tenant dimension without it.'
+            )
+    return slots
+
+
+def _tenant_autofill_body(dimension: str, column: str) -> str:
+    """What PostgreSQL stores in ``pg_proc.prosrc`` for this pair -- the text between the
+    template's two ``$$`` delimiters, which a dollar-quoted body keeps verbatim. Sliced from
+    the template, so the audit compares against the generator's definition, not a second."""
+    rendered = _CREATE_TENANT_AUTOFILL_FUNCTION.format(
+        **_tenant_autofill_slots(dimension, column, _BODY_ONLY_FUNCTION)
+    )
+    # Checked, not assumed: the slice is the body only while the template holds the two
+    # delimiters it was written with -- otherwise a truncated prefix, reported as drift on a
+    # healthy database forever. The slots refuse a '$$' arriving from a column; this, from an edit.
+    if (delimiters := rendered.count('$$')) != 2:
+        raise ValueError(
+            f'the tenant autofill function for {column!r} renders {delimiters} "$$" delimiters '
+            f'rather than 2 -- something in this template broke the dollar quoting the body '
+            f'slice depends on.'
+        )
+    return rendered.split('$$')[1]
+
+
+# Guards the audit probes when a body does not match, so a finding names the hazard rather than
+# only "differs". Each fragment is a verbatim slice of the template above, asserted by
+# tests/test_enforcement_identity.py: else a probe could describe a guard the kit stopped emitting.
+_TENANT_AUTOFILL_GUARDS: tuple[tuple[str, str], ...] = (
+    (
+        'NEW."{column}" IS NOT NULL',
+        'has no explicit-value guard, so it overwrites a tenant the caller supplied with the '
+        'active scope -- a write WITH CHECK would have refused is accepted instead',
+    ),
+    (
+        "COALESCE(current_setting('{bypass_guc}', true), '') = 'on'",
+        'has no tenant bypass guard, so an INSERT inside tenancy_bypassed() is stamped with '
+        'whatever scope was published last instead of being left alone',
+    ),
+    (
+        "COALESCE(current_setting('{guc}', true), '') = ''",
+        'has no unscoped guard, so an INSERT outside any tenant frame is stamped from a '
+        'session setting rather than failing on NOT NULL',
+    ),
+    (
+        "position('{separator}' in current_setting('{guc}', true)) > 0",
+        'has no separator guard, so an INSERT under a scope naming several tenants writes the '
+        'joined list into the column, matching no tenant',
+    ),
+    (
+        'NEW."{column}" := current_setting(\'{guc}\', true)',
+        'never assigns the tenant column from the active scope, so it fills nothing',
+    ),
+)
+
+
+def _tenant_autofill_guard_status(dimension: str, column: str, body: str) -> tuple[list[str], int]:
+    """Which of the guards above *body* is missing, described, and how many it still has.
+    Whitespace-insensitive for the reason the body comparison is: the generator re-indents
+    what it writes. The count is what tells "lost a guard" from "not this shape at all"."""
+    slots = _tenant_autofill_slots(dimension, column, _BODY_ONLY_FUNCTION)
+    # Comment-only lines dropped before the squeeze, and only here: collapsing newlines puts a
+    # commented-out guard back beside live code, where it still reads as a substring and probes
+    # intact. Whole lines only, so a `--` inside a string literal is never eaten (ADR 0010).
+    squeezed = _squeeze(
+        '\n'.join(line for line in body.splitlines() if not line.lstrip().startswith('--'))
+    )
+    # Probed once per guard and carried as a flag, not re-derived by matching descriptions back:
+    # two guards that ever shared wording would otherwise vouch for each other and go unreported.
+    probed = [
+        (description, _squeeze(fragment.format(**slots)) in squeezed)
+        for fragment, description in _TENANT_AUTOFILL_GUARDS
+    ]
+    return (
+        [description for description, intact in probed if not intact],
+        sum(intact for _, intact in probed),
+    )

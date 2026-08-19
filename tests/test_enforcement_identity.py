@@ -13,6 +13,7 @@ from guitars import sql
 from guitars.management.enforcement import headers as headers_module
 from guitars.management.enforcement import identity as identity_module
 from guitars.management.enforcement.command import Command
+from guitars.sql import triggers
 from guitars.tenancy.discovery import app_coverage
 
 from .test_command import _command_with_scaffold, _unforced_policy_tables
@@ -498,3 +499,52 @@ def test_the_sql_identity_pattern_only_reads_its_own_header_line():
     match = headers_module._RE_SOFT_DELETE.search(content)
 
     assert identity_module._recorded_sql_identity(content, match) is None
+
+
+# ---------------------------------------------------------------------------------------
+# The autofill body the audit compares against
+# ---------------------------------------------------------------------------------------
+
+
+def test_every_guard_fragment_is_a_slice_of_the_template_it_describes():
+    """``audittenancy`` names a missing guard by probing these fragments, so one that stopped
+    being a substring of the template would be reported missing on every healthy database.
+    Same pairing discipline as the header/scanner table above."""
+    slots = triggers._tenant_autofill_slots('shop', 'shop_id', 'guitars_fill_4_shop_shop_id')
+    rendered = triggers._CREATE_TENANT_AUTOFILL_FUNCTION.format(**slots)
+
+    for fragment, description in triggers._TENANT_AUTOFILL_GUARDS:
+        assert fragment.format(**slots) in rendered, (
+            f'{description!r} probes a fragment the template no longer contains'
+        )
+
+
+def test_the_body_is_the_text_between_the_templates_two_dollar_quotes():
+    """What the audit compares to ``pg_proc.prosrc``. Two delimiters exactly: a third would
+    make the slice silently the wrong half of the function."""
+    slots = triggers._tenant_autofill_slots('shop', 'shop_id', 'guitars_fill_4_shop_shop_id')
+    rendered = triggers._CREATE_TENANT_AUTOFILL_FUNCTION.format(**slots)
+    body = triggers._tenant_autofill_body('shop', 'shop_id')
+
+    assert rendered.count('$$') == 2
+    assert body in rendered
+    assert 'CREATE FUNCTION' not in body
+    assert body.strip().startswith('BEGIN')
+    assert body.strip().endswith('END;')
+
+
+def test_the_committed_migration_creates_the_body_the_audit_expects():
+    """The end-to-end half of issue #29's fix: the body ``audittenancy`` expects live has to
+    be the one this repo's own generated migration creates. Whitespace-collapsed, the same
+    tolerance the audit applies, checked against the file that produced the function."""
+    migrations = Path(__file__).parent / 'testapp' / 'migrations'
+    # Listed, not ``next(...)``: an empty glob would otherwise raise StopIteration -- an error
+    # naming nothing, where this says which file the audit's expectation lost its anchor to.
+    written = sorted(migrations.glob('*auto_enforcement_guitars_fill_*label_id.py'))
+    assert written, 'no label_id autofill migration -- the audit expectation has lost its anchor'
+    body = triggers._tenant_autofill_body('label', 'label_id')
+
+    # ``written[-1]`` is the newest, not "the only one": editing the function's SQL legitimately
+    # emits a *second* `NNNN_auto_enforcement_guitars_fill_..._label_id.py` (that is what the
+    # [SQL:...] identity is for), and only the last one applied creates the body audited for.
+    assert triggers._squeeze(body) in triggers._squeeze(written[-1].read_text())

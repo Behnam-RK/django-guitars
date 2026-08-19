@@ -393,6 +393,25 @@ class TestAWrongAutofillBody:
         assert self.function in output
         assert 'no tenant bypass guard' in output
 
+    @staticmethod
+    def _commented_out(body: str, fragment: str) -> str:
+        """*body* with the line carrying *fragment* turned into a SQL comment -- how a guard
+        actually gets disabled by hand, as opposed to deleted."""
+        kept = [f'-- {line}' if fragment in line else line for line in body.splitlines()]
+        assert sum(line.lstrip().startswith('--') for line in kept) == 1
+        return '\n'.join(kept)
+
+    def test_a_commented_out_guard_is_named_not_called_intact(self, _execute, restore):
+        """Whitespace-collapsing puts a commented-out line back beside live code, so the
+        fragment still reads as a substring and the finding said "still carries every guard"
+        while the widest hazard was disabled. Comment-only lines are dropped before probing."""
+        self._replace(_execute, self._commented_out(self._body(), self.BYPASS_GUARD))
+
+        output = _audit()
+
+        assert 'no tenant bypass guard' in output
+        assert 'still carries every guard' not in output
+
     def test_a_missing_separator_guard_is_reported(self, _execute, restore):
         """A collection scope legitimately publishes ``a,b``; without the guard the whole
         list is written into the column, matching no tenant at all."""

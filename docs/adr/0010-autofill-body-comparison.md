@@ -28,25 +28,25 @@ text, or record a digest in the generated function and compare digests.
 
 ## Decision
 
-Compare the live `prosrc` to the body rendered from the kit's own template,
-with every run of whitespace collapsed to a single space on both sides
-(`sql.triggers._squeeze`, beside the template it tolerates so the whole-body
-compare and the guard probe below cannot apply two different tolerances). The
-expected body is sliced out of
+Compare the live `prosrc` to the body rendered from the kit's own template, with
+every run of whitespace collapsed to a single space on both sides
+(`sql.triggers._squeeze`, beside the template it tolerates, so the compare and
+the probe below cannot apply two tolerances). The expected body is sliced out of
 `_CREATE_TENANT_AUTOFILL_FUNCTION` between its two `$$` delimiters
-(`sql.triggers._tenant_autofill_body`), from the same slot builder the
-generator writes migrations with — so there is one definition of a healthy
-body, not two.
+(`sql.triggers._tenant_autofill_body`), from the same slot builder the generator
+writes migrations with — so there is one definition of a healthy body, not two.
 
 On a mismatch, probe `_TENANT_AUTOFILL_GUARDS` — verbatim slices of that same
 template, one per hazard — to name the missing guard and what it lets through,
 falling back to a generic "not the function this kit writes" at both ends of the
 probe: every guard present, and fewer than two present. A probe tolerates
 whitespace but not a changed token, so a body retyped through psql (`TRUE` for
-`true`) fails nearly every probe while guarding exactly as before; below two
-intact guards that is the likelier reading, and naming the rest would be alarming
-claims that are all false. The finding joins the existing drift bucket: warning
-by default, fatal under `--require-match`, as predicate drift is.
+`true`) fails nearly every probe while guarding as before; below two intact
+guards that is the likelier reading, and naming the rest would be alarming
+claims that are all false. The probe alone drops comment-only lines first: the
+squeeze would otherwise put a commented-out guard beside live code, still
+reading as intact. The finding joins the existing drift bucket: warning by
+default, fatal under `--require-match`, as predicate drift is.
 
 The finding is per *function*, not per table: one `pg_proc` row serves every
 model on a `(dimension, column)` pair, so an edited body is one fact, and the
@@ -55,14 +55,14 @@ each — N copies would inflate the heading and the `--require-match` failure co
 for a single root cause.
 
 Two things are refused rather than compared. A dimension or column carrying `$$`
-closes the template's dollar quoting early, and `_tenant_autofill_slots` raises —
-in the *slot builder*, because `_BARE_IDENTIFIER` admits `$`, so a `db_column`
+closes the template's dollar quoting early, and `_tenant_autofill_slots` raises
+— in the *slot builder*, because `_BARE_IDENTIFIER` admits `$`, so a `db_column`
 like `a$$b` would otherwise pass the generator and emit a migration `migrate`
-rejects with a bare syntax error while only the audit complained. Refusing in the
-one builder both paths go through makes it a build-time error for each. And the
-catalog query asks only for functions named with `AUTOFILL_FUNCTION_PREFIX`: an
-application's own `BEFORE INSERT` trigger is not this command's business, and its
-body should not be on the wire to establish that.
+rejects with a bare syntax error while only the audit complained. Refusing in
+the one builder both paths go through makes it a build-time error for each. And
+the catalog query asks only for functions named with `AUTOFILL_FUNCTION_PREFIX`:
+an application's own `BEFORE INSERT` trigger is not this command's business, and
+its body should not be on the wire to establish that.
 
 ## Why
 

@@ -376,7 +376,12 @@ def _tenant_autofill_guard_status(dimension: str, column: str, body: str) -> tup
     Whitespace-insensitive for the reason the body comparison is: the generator re-indents
     what it writes. The count is what tells "lost a guard" from "not this shape at all"."""
     slots = _tenant_autofill_slots(dimension, column, _BODY_ONLY_FUNCTION)
-    squeezed = _squeeze(body)
+    # Comment-only lines dropped before the squeeze, and only here: collapsing newlines puts a
+    # commented-out guard back beside live code, where it still reads as a substring and probes
+    # intact. Whole lines only, so a `--` inside a string literal is never eaten (ADR 0010).
+    squeezed = _squeeze(
+        '\n'.join(line for line in body.splitlines() if not line.lstrip().startswith('--'))
+    )
     # Probed once per guard and carried as a flag, not re-derived by matching descriptions back:
     # two guards that ever shared wording would otherwise vouch for each other and go unreported.
     probed = [

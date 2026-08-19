@@ -542,9 +542,9 @@ def test_the_committed_migration_creates_the_body_the_audit_expects():
     # naming nothing, where this says which file the audit's expectation lost its anchor to.
     written = sorted(migrations.glob('*auto_enforcement_guitars_fill_*label_id.py'))
     assert written, 'no label_id autofill migration -- the audit expectation has lost its anchor'
-    # The newest, not "the only one": editing the function's SQL legitimately emits a *second*
-    # `NNNN_auto_enforcement_guitars_fill_..._label_id.py` (that is what the [SQL:...] identity
-    # is for), and only the last one applied creates the body the audit now expects.
     body = triggers._tenant_autofill_body('label', 'label_id')
 
+    # ``written[-1]`` is the newest, not "the only one": editing the function's SQL legitimately
+    # emits a *second* `NNNN_auto_enforcement_guitars_fill_..._label_id.py` (that is what the
+    # [SQL:...] identity is for), and only the last one applied creates the body audited for.
     assert triggers._squeeze(body) in triggers._squeeze(written[-1].read_text())

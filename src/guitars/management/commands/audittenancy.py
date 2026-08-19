@@ -251,8 +251,8 @@ class Command(BaseCommand):
         # Takes the whole live map, not one TableState: a relocated trigger sits on the
         # ancestor's table (ADR 0009), so the fix is on a different table than the subject.
         for host, columns in _autofill_hosts(table, coverage):
-            # Names only: this check asks whether a trigger is there at all. What the body is
-            # rendered from is :meth:`_autofill_bodies`' business, which walks coverage itself.
+            # Names only: this check asks whether a trigger is there at all. Comparing the body
+            # is :meth:`_autofill_body_findings`' business, which walks coverage itself.
             expected = {
                 autofill_function_name(dimension, column) for dimension, column in columns.items()
             }

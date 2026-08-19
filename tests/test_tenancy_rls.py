@@ -7,7 +7,6 @@ from django.db import ProgrammingError, connection, transaction
 from django.db.utils import IntegrityError
 
 from guitars import sql
-from guitars.gucs import BYPASS_GUC, VALUE_SEPARATOR, guc_name
 from guitars.sql import _identifiers
 from guitars.sql import triggers
 from guitars.tenancy import TenantScopeError, tenancy_bypassed, tenant
@@ -551,13 +550,10 @@ class TestTenantAutofillTrigger:
     def autofill(self, probe_tables):
         """Layer the autofill function and trigger onto the owner probe table."""
         function = autofill_function_name('tenant', 'tenant_id')
-        slots = {
-            'function': _identifiers._safe_ident(function),
-            'column': _identifiers._escape_ident('tenant_id'),
-            'guc': _identifiers._escape_literal(guc_name('tenant')),
-            'bypass_guc': _identifiers._escape_literal(BYPASS_GUC),
-            'separator': _identifiers._escape_literal(VALUE_SEPARATOR),
-        }
+        # The shared builder, not a hand-rolled copy: this fixture creates the *live* function
+        # `audittenancy` renders its expectation from, so a second spelling of these slots is
+        # exactly the disagreement `_tenant_autofill_slots` exists to make impossible.
+        slots = triggers._tenant_autofill_slots('tenant', 'tenant_id', function)
         table_slots = {
             'table': _identifiers._quote_table(_OWNER_TABLE),
             'function': _identifiers._safe_ident(function),

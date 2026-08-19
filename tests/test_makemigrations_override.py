@@ -124,7 +124,15 @@ def test_the_xdist_group_mark_is_actually_honoured(pytestconfig):
     # the controller was given, so the option would assert only in a serial run -- exactly the
     # run where nothing is distributed and the marks could not have mattered anyway.
     addopts = pytestconfig.getini('addopts')
-    mode = addopts[addopts.index('--dist') + 1] if '--dist' in addopts else None
+    # Both spellings, since the same string already writes `--junit-xml=...` with an `=`:
+    # matching only the space-separated form would fail claiming loadgroup is unset when a
+    # reformat to `--dist=loadgroup` left it set.
+    modes = [
+        argument.partition('=')[2] or addopts[index + 1]
+        for index, argument in enumerate(addopts)
+        if argument == '--dist' or argument.startswith('--dist=')
+    ]
+    mode = modes[-1] if modes else None
     assert mode == 'loadgroup', (
         'pytest --dist must be loadgroup (set in pyproject.toml addopts) or the '
         'xdist_group marks pinning this module to one worker are silently ignored'

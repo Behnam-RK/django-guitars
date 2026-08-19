@@ -42,6 +42,13 @@ def _reap_worker_thread_connections():
     could kill another test's still-needed connection. The main thread's own connection
     (kept alive across modules by pytest-django) must be excluded by pid."""
     yield
+    # asgiref's one persistent thread holds the async ORM's connection past this module:
+    # terminate that backend from outside and a later async test reusing the thread finds a
+    # live connection object on a dead server. Close it from inside the thread instead.
+    from asgiref.sync import SyncToAsync
+
+    SyncToAsync.single_thread_executor.submit(connections.close_all).result(timeout=10)
+
     main = connections['default'].settings_dict
     exclude_pids = []
     if connection.connection is not None:

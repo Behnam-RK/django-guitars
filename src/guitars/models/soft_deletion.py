@@ -8,12 +8,60 @@ from django.db.models.base import Model
 from guitars.introspection import mti_root
 from guitars.sql import SWITCH_OFF_HARD_DELETION, SWITCH_ON_HARD_DELETION
 
+from .fields import OwningForeignKey
+
 
 def _is_mti_model(model: type[Model]) -> bool:
     """Whether *model* participates in multi-table inheritance (as a child or a parent)."""
     return bool(model._meta.parents) or any(
         getattr(rel, 'parent_link', False) for rel in model._meta.related_objects
     )
+
+
+def _owned_fields(model: type[Model]) -> list[OwningForeignKey]:
+    """``OwningForeignKey``s whose owned rule actually exists for *model* -- declared on its
+    own table, and only where *model* itself is soft-deletable, since the rule fires on a
+    ``_deleted_at`` transition and a model without that column never has one."""
+    if not hasattr(model, '_deleted_at'):  # pragma: no cover - unreachable
+        # Defensive, like hard_delete's non-soft-deletable branch: a model with no rule was
+        # already really deleted by Phase 1's Collector, so it never reaches this.
+        return []
+    return [field for field in model._meta.local_fields if isinstance(field, OwningForeignKey)]
+
+
+def _rows(model: type[Model], using: str | None) -> QuerySet:
+    """Every row of *model* regardless of ``_deleted_at``, on the *using* connection.
+    ``_all_objects`` is added dynamically by ``SoftDeletableModel`` subclasses, so the
+    hasattr guard's narrowing does not survive into the returned type."""
+    manager = model._all_objects if hasattr(model, '_all_objects') else model._default_manager
+    return manager.using(using)  # ty: ignore[unresolved-attribute]
+
+
+def _owned_targets(
+    to_delete: dict[type[Model], set], using: str | None
+) -> list[tuple[type[Model], set]]:
+    """``(model, pks)`` for every owned row *to_delete* is the **last live owner** of -- the
+    Python twin of the rule's ``NOT EXISTS``. ``exclude(pk__in=pks)`` is what makes the two
+    agree: Phase 1 soft-deleted only the instance, so the rest of the batch is still live."""
+    found: dict[type[Model], set] = defaultdict(set)
+    for model, pks in to_delete.items():
+        for field in _owned_fields(model):
+            owned_pks = set(
+                _rows(model, using)
+                .filter(pk__in=pks)
+                .exclude(**{field.attname: None})
+                .values_list(field.attname, flat=True)
+            )
+            for owned_pk in owned_pks:
+                still_owned = (
+                    _rows(model, using)
+                    .exclude(pk__in=pks)
+                    .filter(**{field.attname: owned_pk, '_deleted_at__isnull': True})
+                    .exists()
+                )
+                if not still_owned:
+                    found[field.related_model].add(owned_pk)
+    return list(found.items())
 
 
 def _mti_table_chain(model: type[Model]) -> list[tuple[str, str]]:
@@ -206,64 +254,74 @@ class SoftDeletableModel(Model):
         return not self.is_deleted
 
     def hard_delete(self):
-        """Soft-delete first, then permanently remove this instance and CASCADE-related
-        rows -- see ``docs/soft-deletion.md``'s "Hard deletion". Django's CASCADE is
-        Python-level, not a DB constraint, so children are deleted before parents."""
+        """Soft-delete first, then permanently remove this instance, its CASCADE-related rows,
+        and whatever it owns -- see ``docs/soft-deletion.md``'s "Hard deletion". Children go
+        before parents (CASCADE is Python-level); an owned row goes after its owner."""
         using = self._state.db
         pk = self.pk  # save before Phase 1 resets self.pk to None
-        to_delete: dict[type[Model], set] = defaultdict(set)
-        model_order: list[type[Model]] = []
+        # One (rows, order) group per ownership hop: the first this row and its
+        # reverse-CASCADE children, each later one an owned row. Run in order, since an
+        # owner still references what it owns.
+        groups: list[tuple[dict[type[Model], set], list[type[Model]]]] = []
+        # Claimed across *all* groups, not per group: the per-group set-difference guard
+        # would otherwise not stop two models that own each other from recurring forever.
+        claimed: dict[type[Model], set] = defaultdict(set)
 
-        def _collect(model: type[Model], pks: set) -> None:
-            new_pks = pks - to_delete[model]
-            if not new_pks:
-                return
-            to_delete[model].update(new_pks)
-            for relation in model._meta.related_objects:
-                if relation.on_delete is not CASCADE:
-                    continue
-                related_model = relation.related_model
-                # `_all_objects` is added dynamically by SoftDeletableModel subclasses, so the
-                # hasattr guard's type narrowing doesn't survive into `mgr`'s inferred type.
-                mgr = (
-                    related_model._all_objects
-                    if hasattr(related_model, '_all_objects')
-                    else related_model._default_manager
-                )
-                child_pks = set(
-                    mgr.using(using)  # ty: ignore[unresolved-attribute]
-                    .filter(**{f'{relation.field.name}__in': new_pks})
-                    .values_list('pk', flat=True)
-                )
-                _collect(related_model, child_pks)
-            if model not in model_order:
-                model_order.append(model)
+        def _collect_group(root: type[Model], seed: set) -> None:
+            to_delete: dict[type[Model], set] = defaultdict(set)
+            model_order: list[type[Model]] = []
+
+            def _collect(model: type[Model], pks: set) -> None:
+                new_pks = pks - claimed[model]
+                if not new_pks:
+                    return
+                claimed[model].update(new_pks)
+                to_delete[model].update(new_pks)
+                for relation in model._meta.related_objects:
+                    if relation.on_delete is not CASCADE:
+                        continue
+                    related_model = relation.related_model
+                    child_pks = set(
+                        _rows(related_model, using)
+                        .filter(**{f'{relation.field.name}__in': new_pks})
+                        .values_list('pk', flat=True)
+                    )
+                    _collect(related_model, child_pks)
+                if model not in model_order:
+                    model_order.append(model)
+
+            _collect(root, seed)
+            groups.append((to_delete, model_order))
+            for owned_model, owned_pks in _owned_targets(to_delete, using):
+                _collect_group(mti_root(owned_model), owned_pks)
 
         # Start the DFS from the MTI root so ancestor tables (reachable only via the parent-link
         # reverse CASCADE relation) are collected too; ``root is self.__class__`` for non-MTI.
         root = mti_root(self.__class__)
 
         with transaction.atomic(using=using):
-            # Phase 1 — soft-delete first (idempotent; PG rules cascade to related objects).
+            # Phase 1 — soft-delete first (idempotent; PG rules cascade to related objects,
+            # and stamp whatever this row was the last owner of).
             self.delete()
 
             # Phase 2 — collect related rows and hard-delete child-first. self.pk is None
             # after Phase 1 (Django clears it post-delete), so use the saved pk.
-            _collect(root, {pk})
+            _collect_group(root, {pk})
 
-            for model in model_order:
-                pks = list(to_delete[model])
-                # `_all_objects` is added dynamically by SoftDeletableModel subclasses, so a
-                # static checker can't see it -- or `_hard_delete_own_table` on its queryset --
-                # through the hasattr guard.
-                if hasattr(model, '_all_objects'):
-                    # Own-table primitive: each MTI table is a separate ``model_order`` entry,
-                    # so this must not reach into ancestor tables (which ``hard_delete`` would).
-                    model._all_objects.using(using).filter(  # ty: ignore[unresolved-attribute]
-                        pk__in=pks
-                    )._hard_delete_own_table()
-                else:  # pragma: no cover - unreachable
-                    # A model with no soft-delete rule is always already gone by this point:
-                    # Django's Collector (Phase 1's plain delete()) already issued a real
-                    # DELETE for it. Kept as a defensive fallback, not a live path.
-                    model._default_manager.using(using).filter(pk__in=pks).delete()
+            for to_delete, model_order in groups:
+                for model in model_order:
+                    pks = list(to_delete[model])
+                    # `_all_objects` is added dynamically by SoftDeletableModel subclasses, so a
+                    # static checker can't see it -- or `_hard_delete_own_table` on its queryset --
+                    # through the hasattr guard.
+                    if hasattr(model, '_all_objects'):
+                        # Own-table primitive: each MTI table is a separate ``model_order`` entry,
+                        # so this must not reach into ancestor tables (which ``hard_delete`` would).
+                        model._all_objects.using(using).filter(  # ty: ignore[unresolved-attribute]
+                            pk__in=pks
+                        )._hard_delete_own_table()
+                    else:  # pragma: no cover - unreachable
+                        # A model with no soft-delete rule is always already gone by this point:
+                        # Django's Collector (Phase 1's plain delete()) already issued a real
+                        # DELETE for it. Kept as a defensive fallback, not a live path.
+                        model._default_manager.using(using).filter(pk__in=pks).delete()

@@ -10,6 +10,13 @@ Full history and diffs: [GitHub releases](https://github.com/Behnam-RK/django-gu
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-08-19
+
+- Added: `guitars.models.OwningForeignKey`, declaring that a row **owns** what its foreign key points at — soft-deleting the owner soft-deletes the target. Cascades were inbound only: the generator walked reverse relations and keyed off `on_delete=CASCADE`, so the one shape it could not express was the key living on the owner. `on_delete` cannot carry it either — it says what happens to *this* row when the target goes, the opposite direction, so declaring the relation `CASCADE` to reach the generator emitted the rule backwards and told Django's `Collector` the same untruth. `on_delete=CASCADE` on an `OwningForeignKey` is now refused as `guitars.E001`. The generated rule is named after its foreign-key column under a `soft_delete_owned_` prefix, so two owned keys to one table cannot collide and neither can ever meet the inbound `soft_delete_related_` namespace — a PostgreSQL rule is namespaced by name alone, so a collision replaces silently rather than failing ([ADR-0011](docs/adr/0011-owner-side-soft-delete-ownership.md), `docs/owned-relations.md`).
+- Added: the owned rule carries a **last-owner guard** — a target another live row still points at survives, and is stamped when the last owner goes. Emitted unconditionally rather than only where a `UniqueConstraint` proves single ownership: constraint-shaped SQL would go silently wrong the day the constraint was dropped, since that changes no model field, so the operation's `[SQL:...]` identity would not move and `--check` would stay green over an unguarded rule. `hard_delete()` applies the same predicate in Python, so both paths spare the same rows.
+- Changed: instance-level `hard_delete()` now follows owned relations, removing each owned row *after* the batch that owned it — the reverse of the child-first `CASCADE` order, since the owner still references what it owns. Without it, `hard_delete()` left the owned row stranded with nothing pointing at it and no cascade able to reach it. Queryset-level `hard_delete()` is unchanged: as with reverse-FK children, it does not walk them.
+- Note: ownership *into* an MTI child is supported — the key holds the primary-key value every table in the chain shares, so the rule correlates against the ancestor owning `_deleted_at`. Ownership declared *on* an MTI child whose `_deleted_at` lives farther up is refused with a warning, the mirror of the existing inbound limitation: the rule fires on the ancestor's table, where `old."<column>"` cannot name a column the child holds.
+
 ## [2.2.1] - 2026-08-19
 
 - Fixed: the test harness only. Both modules writing to `tests/makemigrations_override/migrations/` carry `xdist_group` to stay on one worker, but xdist honours that mark only under `--dist loadgroup`, and its default (`load`) ignored it — so the full suite failed at random with a `ModuleNotFoundError` for a migration one worker unlinked while another was importing it. `--dist loadgroup` now sits in `addopts`, and a test asserts it is set. No change to the shipped package.
@@ -126,6 +133,7 @@ First stable release. **BREAKING:** the instrument ladder shifted down one rung 
 - Added: initial release — `SetarModel`, `GuitarModel`, `SoftDeletableModel`, `DisableSignals`, `makeguitarmigrations`.
 
 [Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.2.1...HEAD
+[2.3.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.3.0
 [2.2.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.2.1
 [2.2.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.2.0
 [2.1.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.1.1

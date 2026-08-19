@@ -8,7 +8,14 @@ from django.db.models import (
 )
 from django.utils.functional import cached_property
 
-from guitars.models import DutarModel, GuitarModel, LiveManager, SetarModel, TarModel
+from guitars.models import (
+    DutarModel,
+    GuitarModel,
+    LiveManager,
+    OwningForeignKey,
+    SetarModel,
+    TarModel,
+)
 from guitars.tenancy import tenanted_manager
 
 
@@ -60,6 +67,16 @@ class Band(WhisperMixin, SetarModel):
         return self.name.upper()
 
 
+class PressKit(SetarModel):
+    """Owned target: the thing an ``Album`` owns rather than merely points at. Soft-deletable,
+    since only a soft-deletable dependent has a ``_deleted_at`` for the rule to stamp."""
+
+    headline = CharField(max_length=100)
+
+    def __str__(self) -> str:
+        return self.headline
+
+
 class Album(SetarModel):
     title = CharField(max_length=100)
     band = ForeignKey(Band, on_delete=CASCADE, related_name='albums')
@@ -67,6 +84,14 @@ class Album(SetarModel):
     # relation" branches in cascade-rule generation and instance hard_delete's DFS collection.
     producer = ForeignKey(
         Band, on_delete=SET_NULL, null=True, blank=True, related_name='produced_albums'
+    )
+    # Two owned FKs to one table: the owned rule is always named after its column, so these
+    # must produce two distinctly-named rules rather than one silently replacing the other.
+    press_kit = OwningForeignKey(
+        PressKit, on_delete=SET_NULL, null=True, blank=True, related_name='albums'
+    )
+    alt_press_kit = OwningForeignKey(
+        PressKit, on_delete=SET_NULL, null=True, blank=True, related_name='alt_albums'
     )
 
     def __str__(self) -> str:
@@ -87,6 +112,11 @@ class Orchestra(Ensemble):
     ``_deleted_at`` index from re-declaring against this table's non-local column (E016)."""
 
     conductor = CharField(max_length=100)
+    # Owned FK on an MTI child's own table while _deleted_at lives on Ensemble: the rule
+    # would fire on the ancestor, where old."programme_id" names nothing. Warns, emits nothing.
+    programme = OwningForeignKey(
+        'PressKit', on_delete=SET_NULL, null=True, blank=True, related_name='orchestras'
+    )
 
     class Meta:
         pass
@@ -113,6 +143,11 @@ class Merch(SetarModel):
     album = ForeignKey(Album, on_delete=CASCADE, null=True, blank=True, related_name='merch')
     bonus_album = ForeignKey(
         Album, on_delete=CASCADE, null=True, blank=True, related_name='bonus_merch'
+    )
+    # Owned dependent reached through MTI: Orchestra's _deleted_at lives on Ensemble, and the
+    # rule must correlate against that table -- an MTI chain shares one primary-key value.
+    featured_orchestra = OwningForeignKey(
+        Orchestra, on_delete=SET_NULL, null=True, blank=True, related_name='featured_by'
     )
 
     def __str__(self) -> str:

@@ -22,7 +22,7 @@ from guitars.management.enforcement import operations as operations_module
 from guitars.management.enforcement.command import Command
 from guitars.sql import _identifiers
 from guitars.tenancy.discovery import app_coverage, autofill_function_name
-from tests.testapp.models import Album, Band, Ensemble, Orchestra
+from tests.testapp.models import Album, Band, Ensemble, Merch, Orchestra
 
 
 def _pretend_function_migrations_are_current(command):
@@ -253,6 +253,126 @@ def test_cascade_operation_warns_when_related_model_is_mti_child_without_own_del
     warning = command._mti_cascade_warnings[0]
     assert 'testapp_orchestra' in warning
     assert 'multi-table-inheritance ancestor' in warning
+
+
+def test_owned_rule_name_folds_a_hostile_schema_qualified_table_like_its_cascade_twin():
+    """Same length-prefixed folding as ``_related_rule_name``, under its own prefix -- a
+    rule is namespaced by name alone, so the two families must not be able to meet."""
+    assert (
+        operations_module._owned_rule_name('analytics.Weird Table', 'kit_id')
+        == '"soft_delete_owned_9_analytics_Weird Table_kit_id"'
+    )
+    assert operations_module._owned_rule_name(
+        'tenant_a.events', 'kit_id'
+    ) != operations_module._owned_rule_name('tenant.a_events', 'kit_id')
+
+
+def test_owned_operations_emit_only_for_owning_foreign_keys():
+    """Album declares two ``OwningForeignKey``s to PressKit and two plain FKs to Band. Only
+    the owning pair gets a rule -- ``on_delete`` never decides this."""
+    command = Command()
+    command.existing.soft_delete_owned.clear()
+
+    ops = command._owned_operations(Album)
+    blob = '\n'.join(ops)
+
+    assert len(ops) == 2
+    assert 'that is owned by "testapp_album"' in blob
+    assert 'testapp_presskit' in blob
+    # `band` (CASCADE) and `producer` (SET_NULL) are plain ForeignKeys: no ownership either way.
+    assert 'testapp_band' not in blob
+
+
+def test_owned_operations_name_one_rule_per_foreign_key_column():
+    """Album's two owned FKs point at the same table, so the FK column is the only thing
+    keeping their rule names apart -- a collision would silently replace, not fail."""
+    command = Command()
+    command.existing.soft_delete_owned.clear()
+
+    blob = '\n'.join(command._owned_operations(Album))
+
+    assert 'RULE "soft_delete_owned_testapp_presskit_press_kit_id"' in blob
+    assert 'RULE "soft_delete_owned_testapp_presskit_alt_press_kit_id"' in blob
+    assert 'via "press_kit_id"!' in blob
+    assert 'via "alt_press_kit_id"!' in blob
+
+
+def test_owned_rule_carries_the_last_owner_guard():
+    """The guard is unconditional, not derived from a UniqueConstraint: SQL that depended on
+    constraint shape would go silently wrong the day the constraint was dropped."""
+    command = Command()
+    command.existing.soft_delete_owned.clear()
+
+    blob = '\n'.join(command._owned_operations(Album))
+
+    assert 'NOT EXISTS' in blob
+    assert 'guitars_owner."press_kit_id" = old."press_kit_id"' in blob
+    assert 'guitars_owner."id" <> old."id"' in blob
+    assert 'guitars_owner._deleted_at IS NULL' in blob
+
+
+def test_owned_operation_correlates_an_mti_dependent_against_its_owner_table():
+    """``Merch.featured_orchestra`` points at an MTI child whose ``_deleted_at`` lives on
+    Ensemble. A chain shares one primary-key value, which is what the FK holds, so the
+    ancestor's table is both correct and the only one carrying a column to stamp."""
+    command = Command()
+    command.existing.soft_delete_owned.clear()
+
+    blob = '\n'.join(command._owned_operations(Merch))
+
+    assert 'that is owned by "testapp_merch" via "featured_orchestra_id"!' in blob
+    assert 'UPDATE "testapp_ensemble"' in blob
+    assert 'UPDATE "testapp_orchestra"' not in blob
+
+
+def test_owned_operation_warns_when_the_owner_inherits_deleted_at_from_an_ancestor():
+    """``Orchestra.programme`` sits on the child's own table while the rule must fire on
+    Ensemble, where ``old."programme_id"`` names nothing. Warn, emit nothing."""
+    command = Command()
+    command._mti_cascade_warnings.clear()
+    command.existing.soft_delete_owned.clear()
+
+    ops = command._owned_operations(Orchestra)
+
+    assert ops == []
+    assert len(command._mti_cascade_warnings) == 1
+    warning = command._mti_cascade_warnings[0]
+    assert 'testapp_orchestra.programme_id' in warning
+    assert 'multi-table-inheritance' in warning
+
+
+def test_owned_operations_are_idempotent_across_two_runs():
+    """A run reading its own output back must emit nothing -- the header, its ``[SQL:...]``
+    identity and the dedupe key all have to agree on the same three-part key."""
+    command = Command()
+    command.existing.soft_delete_owned.clear()
+
+    blob = '\n'.join(command._owned_operations(Album))
+
+    for match in headers_module._RE_SOFT_DELETE_OWNED.finditer(blob):
+        key = (
+            _identifiers._unescape_ident(match.group(1)),
+            _identifiers._unescape_ident(match.group(2)),
+            _identifiers._unescape_ident(match.group(3)),
+        )
+        command.existing.soft_delete_owned[key] = identity_module._recorded_sql_identity(
+            blob, match
+        )
+
+    assert command._owned_operations(Album) == []
+
+
+def test_owned_operations_under_adopt_stay_a_plain_create_or_replace():
+    """Rules carry no adopt form on purpose -- ``CREATE OR REPLACE RULE`` is already correct
+    whether or not the object exists, and a ``DROP ... IF EXISTS`` first would open an
+    instant where a DELETE on that table destroys rows."""
+    command = Command()
+    command.existing.soft_delete_owned.clear()
+
+    blob = '\n'.join(command._owned_operations(Album, adopt=True))
+
+    assert 'CREATE OR REPLACE RULE "soft_delete_owned_testapp_presskit_press_kit_id"' in blob
+    assert 'DROP RULE IF EXISTS' not in blob
 
 
 def test_constructing_the_command_does_not_touch_the_filesystem(monkeypatch):

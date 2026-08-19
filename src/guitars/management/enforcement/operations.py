@@ -20,6 +20,7 @@ from guitars.management.enforcement.headers import (
     HEADER_MTI_SOFT_DELETE,
     HEADER_MTI_UPDATED_AT,
     HEADER_SOFT_DELETE,
+    HEADER_SOFT_DELETE_OWNED,
     HEADER_SOFT_DELETE_RELATED,
     HEADER_SOFT_DELETE_RELATED_VIA,
     HEADER_TENANT_AUTOFILL,
@@ -31,6 +32,7 @@ from guitars.management.enforcement.headers import (
     RE_TENANT_AUTOFILL_FUNCTION,
 )
 from guitars.management.enforcement.identity import _literal, _operation
+from guitars.models.fields import OwningForeignKey
 from guitars.sql import _identifiers
 from guitars.sql import soft_delete as _soft_delete
 from guitars.sql import triggers as _triggers
@@ -75,6 +77,21 @@ def _related_rule_name(related_table: str, foreign_key: str | None = None) -> st
     if foreign_key is not None:
         name = f'{name}_{foreign_key}'
     return _identifiers._safe_ident(name)
+
+
+def _owned_rule_name(dependent_table: str, foreign_key: str) -> str:
+    """The owned rule's identifier: :func:`_related_rule_name`'s folding and truncation
+    under a distinct prefix. A rule is namespaced by name alone, so one shared with the
+    inbound cascade would silently replace it rather than fail."""
+    schema, bare_dependent_table = _identifiers._split_qualified('table', dependent_table)
+    name = (
+        f'soft_delete_owned_{bare_dependent_table}'
+        if schema is None
+        else f'soft_delete_owned_{len(schema)}_{schema}_{bare_dependent_table}'
+    )
+    # Always suffixed, with no bare sibling: nothing predates 2.3.0 to stay compatible with,
+    # and two owned FKs to one table must not collide.
+    return _identifiers._safe_ident(f'{name}_{foreign_key}')
 
 
 class OperationsMixin:
@@ -402,6 +419,10 @@ class OperationsMixin:
             #     always follow the owner's own soft-delete rule) ---
             if has_column(model, '_deleted_at'):
                 deferred.extend(self._cascade_operations(model, adopt=adopt))
+                # Owner-side ownership: same table, opposite predicate. No cross-app gap to
+                # report -- an owned rule fires on the declaring model's own table, so it
+                # always lands in the app this loop is already scanning.
+                deferred.extend(self._owned_operations(model, adopt=adopt))
 
         # Tenant policies last: they are independent of the triggers and rules above (a
         # policy references neither), so they sort to the end where they read as a group.
@@ -756,6 +777,96 @@ class OperationsMixin:
             self._append_if_stale(
                 ops,
                 self.existing.soft_delete_related,
+                key,
+                header,
+                forward,
+                reverse,
+                is_adopt=adopt,
+            )
+        return ops
+
+    @staticmethod
+    def _is_owned_candidate(model: type[models.Model], fk_field: models.Field) -> bool:
+        """Whether this outbound FK gets an owned soft-delete rule -- the mirror of
+        :meth:`_is_cascade_candidate`, read off the declaration rather than ``on_delete``,
+        which describes the opposite direction and cannot express ownership."""
+        return (
+            isinstance(fk_field, OwningForeignKey)
+            # An FK reached through MTI is the same physical column on the ancestor's table,
+            # covered by that ancestor's own pass -- as in _is_cascade_candidate.
+            and fk_field.model is model
+            and has_column(fk_field.related_model, '_deleted_at')
+        )
+
+    def _owned_candidates(
+        self, model: type[models.Model], owner_table: str
+    ) -> list[models.ForeignKey]:
+        """``OwningForeignKey``s declared on *model*, in column order. Skipped with a warning
+        where *model* inherits ``_deleted_at``: the rule fires on the ancestor's table, which
+        ``old."<column>"`` cannot reach -- the twin of ``_cascade_candidates``' limitation."""
+        candidates: list[models.ForeignKey] = []
+        for fk_field in sorted(
+            (
+                field
+                for field in model._meta.local_fields
+                if self._is_owned_candidate(model, field)
+            ),
+            key=lambda field: cast(str, field.column),
+        ):
+            if not owns_column(model, '_deleted_at'):
+                self._mti_cascade_warnings.append(
+                    f"Owned rule for '{model._meta.db_table}.{fk_field.column}' -> "
+                    f"'{owner_table}' skipped: '{model.__name__}' declares this foreign key "
+                    'on its own table but inherits _deleted_at from a multi-table-inheritance '
+                    'ancestor, so the rule would fire on a table the column is not on.'
+                )
+                continue
+            candidates.append(cast('models.ForeignKey', fk_field))
+        return candidates
+
+    def _owned_operations(self, model: type[models.Model], *, adopt: bool = False) -> list[str]:
+        """Owned soft-delete rules for ``OwningForeignKey``s declared on *model*: the row
+        soft-deletes what it owns, unless a sibling owner is still alive. Lives on the same
+        table its cascade rules do -- the one whose ``_deleted_at`` actually flips."""
+        owner = column_owner(model, '_deleted_at')
+        owner_table = owner._meta.db_table
+        # Loop-invariant, for the same reason as in _cascade_operations: fixed for every
+        # candidate, so the quoted/escaped forms are computed once rather than once per FK.
+        ident_owner_table = _identifiers._quote_table(owner_table)
+        ident_owner_pk = _identifiers._escape_ident(cast(str, owner._meta.pk.column))
+        header_owner_table = _identifiers._escape_ident(owner_table)
+
+        ops: list[str] = []
+        for fk_field in self._owned_candidates(model, owner_table):
+            # The dependent's own ``_deleted_at`` may live on an MTI ancestor, and
+            # correlating against that ancestor's table is still right: every table in a
+            # chain shares one primary-key *value*, which is exactly what the FK holds.
+            dependent = column_owner(fk_field.related_model, '_deleted_at')
+            dependent_table = dependent._meta.db_table
+            ident_foreign_key = _identifiers._escape_ident(fk_field.column)
+            key = (dependent_table, owner_table, fk_field.column)
+            header = HEADER_SOFT_DELETE_OWNED.format(
+                dependent_table=_identifiers._escape_ident(dependent_table),
+                table=header_owner_table,
+                foreign_key=ident_foreign_key,
+            )
+            rule_name = _owned_rule_name(dependent_table, fk_field.column)
+            forward = _soft_delete._CREATE_SOFT_DELETE_OWNED_OBJECT_RULE.format(
+                rule_name=rule_name,
+                table=ident_owner_table,
+                dependent_table=_identifiers._quote_table(dependent_table),
+                dependent_primary_key=_identifiers._escape_ident(
+                    cast(str, dependent._meta.pk.column)
+                ),
+                primary_key=ident_owner_pk,
+                foreign_key=ident_foreign_key,
+            )
+            reverse = _soft_delete._DROP_SOFT_DELETE_OWNED_OBJECT_RULE.format(
+                rule_name=rule_name, table=ident_owner_table
+            )
+            self._append_if_stale(
+                ops,
+                self.existing.soft_delete_owned,
                 key,
                 header,
                 forward,

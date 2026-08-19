@@ -1,12 +1,13 @@
 """``OwningForeignKey`` -- the one custom field the kit ships, declaring that a row **owns**
-what its foreign key points at. Imports nothing from ``guitars``, so the generator reading
-it does not drag the tenancy runtime in -- the same discipline as ``guitars.gucs``."""
+what its foreign key points at. Imports nothing from ``guitars`` itself, but reaching it runs
+``guitars.models.__init__`` -- tidiness, not the hard isolation ``guitars.gucs`` holds to."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
 from django.core import checks
+from django.core.exceptions import FieldDoesNotExist
 from django.db.models import CASCADE, ForeignKey
 
 
@@ -57,14 +58,21 @@ class OwningForeignKey(ForeignKey):
         if isinstance(self.remote_field.model, str):  # pragma: no cover - lazy ref unresolved
             # super().check() reports the unresolvable reference; nothing here can run yet.
             return []
+        try:
+            target_field = self.target_field
+        except FieldDoesNotExist:
+            # `to_field` names a column the target does not have. super().check() has already
+            # reported that as fields.E312; resolving it here would raise out of the check
+            # framework, replacing every reported error with a traceback.
+            return []
         related_pk = self.related_model._meta.pk
-        if related_pk is None or self.target_field is related_pk:
+        if related_pk is None or target_field is related_pk:
             return []
         return [
             checks.Error(
                 "OwningForeignKey must point at the target model's primary key.",
                 hint=(
-                    f"to_field='{self.target_field.name}' names a non-primary-key column, "
+                    f"to_field='{target_field.name}' names a non-primary-key column, "
                     'but the generated rule correlates the foreign key against the target '
                     'primary key, so it would stamp the wrong row. Drop to_field.'
                 ),

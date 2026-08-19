@@ -5,7 +5,7 @@ from django.db import connections, transaction
 from django.db.models import CASCADE, DateTimeField, Index, Manager, Q, QuerySet, sql
 from django.db.models.base import Model
 
-from guitars.introspection import has_column, mti_root, owns_column
+from guitars.introspection import column_owner, has_column, mti_root, owns_column
 from guitars.sql import SWITCH_OFF_HARD_DELETION, SWITCH_ON_HARD_DELETION
 
 from .fields import OwningForeignKey
@@ -30,9 +30,12 @@ def _owned_fields(model: type[Model]) -> list[OwningForeignKey]:
     return [
         field
         for field in model._meta.local_fields
-        # A target with no ``_deleted_at`` has nothing to stamp, so the generator emits no
-        # rule for it either -- ``_is_owned_candidate``'s ``has_column`` check.
-        if isinstance(field, OwningForeignKey) and has_column(field.related_model, '_deleted_at')
+        # Mirrors the two refusals in ``_owned_candidates``/``_owned_operations``: nothing
+        # to stamp, and a rule whose action updates the table it fires on (rejected by
+        # PostgreSQL as infinite rule recursion). Neither emits a rule, so neither is followed.
+        if isinstance(field, OwningForeignKey)
+        and has_column(field.related_model, '_deleted_at')
+        and column_owner(field.related_model, '_deleted_at')._meta.db_table != model._meta.db_table
     ]
 
 

@@ -22,6 +22,19 @@ nullable owned relation needs no guard of its own. `to_field` is refused too
 (`guitars.E002`): the rule correlates the key against the target's *primary* key, which is
 also what makes [MTI](#mti) work.
 
+Two more shapes are refused by the generator rather than by a check, warned about the way
+the [MTI](#mti) limitation below is, since both depend on the *other* model:
+
+- **A target with no `_deleted_at`.** There is nothing for the rule to stamp, and unlike a
+  plain `ForeignKey` an `OwningForeignKey` has no other purpose, so this is reported rather
+  than passed over.
+- **A relation whose target's `_deleted_at` lives on the owner's own table** — owning
+  yourself (`OwningForeignKey('self', …)`), or owning an MTI descendant of yourself. The
+  rule's action would update the table it fires on, which PostgreSQL rewrites into itself
+  and then rejects: *every* `UPDATE` on that table, a plain `save()` included, fails with
+  `infinite recursion detected in rules for relation`. `hard_delete()` refuses it too — no
+  rule means nothing was stamped, so nothing may be removed.
+
 ## The last-owner guard
 
 A target another live row still points at **survives**; it is stamped when the last owner

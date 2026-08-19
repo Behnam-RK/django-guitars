@@ -706,6 +706,17 @@ class OperationsMixin:
             if not self._is_cascade_candidate(related_model, fk_field, on_delete):
                 continue
             related_table = related_model._meta.db_table
+            # A rule whose action updates the table it fires on is rewritten into itself, and
+            # PostgreSQL then refuses *every* UPDATE there -- a plain save() included -- at
+            # rewrite time, so the WHERE guard never runs. A self-referential CASCADE FK.
+            if related_table == owner_table:
+                self._mti_cascade_warnings.append(
+                    f"Cascade rule for '{related_table}' -> '{owner_table}' skipped: the rule "
+                    'would update the same table it fires on, which PostgreSQL rejects as '
+                    'infinite rule recursion on every UPDATE to that table. A self-referential '
+                    'CASCADE foreign key has to be cascaded in Python.'
+                )
+                continue
             # The flat rule does UPDATE related_table SET _deleted_at -- only valid when the
             # related child owns that column on the table its FK lives on. An FK whose
             # _deleted_at lives on a farther MTI ancestor needs a join form not emitted yet.
@@ -793,7 +804,6 @@ class OperationsMixin:
             # An FK reached through MTI is the same physical column on the ancestor's table,
             # covered by that ancestor's own pass -- as in _is_cascade_candidate.
             and fk_field.model is model
-            and has_column(fk_field.related_model, '_deleted_at')
         )
 
     def _owned_candidates(
@@ -811,6 +821,18 @@ class OperationsMixin:
             ),
             key=lambda field: cast(str, field.column),
         ):
+            # A target with no ``_deleted_at`` has nothing to stamp. Warned rather than
+            # skipped in silence: unlike a plain CASCADE FK, an OwningForeignKey has no
+            # other purpose, so a declaration that generates nothing is a misconfiguration.
+            related_model = cast('type[models.Model]', fk_field.related_model)
+            if not has_column(related_model, '_deleted_at'):
+                self._mti_cascade_warnings.append(
+                    f"Owned rule for '{model._meta.db_table}.{fk_field.column}' skipped: "
+                    f"'{related_model.__name__}' has no _deleted_at column, so "
+                    'there is nothing for the rule to stamp. Make the target soft-deletable, '
+                    'or declare a plain ForeignKey.'
+                )
+                continue
             if not owns_column(model, '_deleted_at'):
                 self._mti_cascade_warnings.append(
                     f"Owned rule for '{model._meta.db_table}.{fk_field.column}' -> "
@@ -841,6 +863,17 @@ class OperationsMixin:
             # chain shares one primary-key *value*, which is exactly what the FK holds.
             dependent = column_owner(fk_field.related_model, '_deleted_at')
             dependent_table = dependent._meta.db_table
+            # A rule whose action updates the table it fires on is rewritten into itself, and
+            # PostgreSQL then refuses *every* UPDATE there -- a plain save() included -- at
+            # rewrite time, so the WHERE guard never gets to run. See docs/owned-relations.md.
+            if dependent_table == owner_table:
+                self._mti_cascade_warnings.append(
+                    f"Owned rule for '{owner_table}.{fk_field.column}' -> "
+                    f"'{dependent_table}' skipped: the rule would update the same table it "
+                    'fires on, which PostgreSQL rejects as infinite rule recursion on every '
+                    'UPDATE to that table. Handle this ownership in Python.'
+                )
+                continue
             ident_foreign_key = _identifiers._escape_ident(fk_field.column)
             key = (dependent_table, owner_table, fk_field.column)
             header = HEADER_SOFT_DELETE_OWNED.format(

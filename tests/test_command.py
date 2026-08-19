@@ -10,10 +10,13 @@ from django.apps import apps
 from django.apps import apps as django_apps
 from django.conf import settings as django_settings
 from django.core.management import CommandError, call_command
-from django.db.models import CASCADE
+from django.db import models
+from django.db.models import CASCADE, SET_NULL
 from django.test import override_settings
+from django.test.utils import isolate_apps
 
 from guitars import sql
+from guitars.models import OwningForeignKey, SetarModel
 from guitars.management import _generator
 from guitars.management.enforcement import command as command_module
 from guitars.management.enforcement import headers as headers_module
@@ -342,6 +345,55 @@ def test_owned_operation_warns_when_the_owner_inherits_deleted_at_from_an_ancest
     assert 'multi-table-inheritance' in warning
 
 
+def test_owned_operation_warns_when_the_owner_owns_its_own_table():
+    """A rule whose action updates the table it fires on is rewritten into itself, and
+    PostgreSQL then rejects *every* UPDATE on that table -- a plain ``save()`` included --
+    with "infinite recursion detected in rules for relation". Warn, emit nothing."""
+    command = Command()
+    command._mti_cascade_warnings.clear()
+    command.existing.soft_delete_owned.clear()
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class SelfOwner(SetarModel):
+            previous = OwningForeignKey('self', on_delete=SET_NULL, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        return command._owned_operations(SelfOwner)
+
+    assert _build() == []
+    assert len(command._mti_cascade_warnings) == 1
+    assert 'infinite rule recursion' in command._mti_cascade_warnings[0]
+
+
+def test_owned_operation_warns_when_the_target_is_not_soft_deletable():
+    """An ``OwningForeignKey`` has no purpose other than the rule, so a target with no
+    ``_deleted_at`` to stamp is a misconfiguration, not a relation to pass over quietly."""
+    command = Command()
+    command._mti_cascade_warnings.clear()
+    command.existing.soft_delete_owned.clear()
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Plain(models.Model):
+            class Meta:
+                app_label = 'testapp'
+
+        class Owner(SetarModel):
+            plain = OwningForeignKey(Plain, on_delete=SET_NULL, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        return command._owned_operations(Owner)
+
+    assert _build() == []
+    assert len(command._mti_cascade_warnings) == 1
+    assert 'no _deleted_at column' in command._mti_cascade_warnings[0]
+
+
 def test_owned_operations_are_idempotent_across_two_runs():
     """A run reading its own output back must emit nothing -- the header, its ``[SQL:...]``
     identity and the dedupe key all have to agree on the same three-part key."""
@@ -374,6 +426,28 @@ def test_owned_operations_under_adopt_stay_a_plain_create_or_replace():
 
     assert 'CREATE OR REPLACE RULE "soft_delete_owned_testapp_presskit_press_kit_id"' in blob
     assert 'DROP RULE IF EXISTS' not in blob
+
+
+def test_cascade_operation_refuses_a_self_referential_cascade_foreign_key():
+    """A tree (`parent = ForeignKey('self', CASCADE)`). The rule would read ON UPDATE TO t
+    DO ALSO UPDATE t, which PostgreSQL rejects at rewrite time -- bricking *every* UPDATE on
+    the table, a plain ``save()`` included, with `migrate` having reported success."""
+    command = Command()
+    command._mti_cascade_warnings.clear()
+    command.existing.soft_delete_related.clear()
+
+    class _SelfReferentialFKField:
+        column = 'parent_id'
+        model = Band
+        remote_field = types.SimpleNamespace(parent_link=False)
+
+    command.reverse_relations_mapping[Band] = {(Band, _SelfReferentialFKField(), CASCADE)}
+
+    ops = command._cascade_operations(Band)
+
+    assert ops == []
+    assert len(command._mti_cascade_warnings) == 1
+    assert 'infinite rule recursion' in command._mti_cascade_warnings[0]
 
 
 def test_constructing_the_command_does_not_touch_the_filesystem(monkeypatch):

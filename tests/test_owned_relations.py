@@ -4,10 +4,11 @@ archiving something a sibling owner still points at."""
 
 import pytest
 from django.db import models
-from django.db.models import CASCADE, PROTECT
+from django.db.models import CASCADE, PROTECT, SET_NULL
 from django.test.utils import isolate_apps
 
-from guitars.models import OwningForeignKey
+from guitars.models import OwningForeignKey, SetarModel
+from guitars.models.soft_deletion import _owned_fields
 from tests.testapp.models import Album, Band, Ensemble, Merch, Orchestra, PressKit
 
 
@@ -72,6 +73,46 @@ def test_owning_foreign_key_refuses_a_non_primary_key_to_field():
         return [error.id for error in Owner._meta.get_field('kit').check()]
 
     assert _build() == ['guitars.E002']
+
+
+def test_owning_foreign_key_reports_an_unresolvable_to_field_rather_than_raising():
+    """``to_field`` naming nothing is Django's own ``fields.E312``. Resolving the target
+    field to compare it against the primary key raises ``FieldDoesNotExist``, which would
+    escape the check framework and replace every reported error with a traceback."""
+
+    @isolate_apps('tests.testapp')
+    def _build() -> list[str]:
+        class Kit(models.Model):
+            class Meta:
+                app_label = 'testapp'
+
+        class Owner(models.Model):
+            kit = OwningForeignKey(Kit, on_delete=PROTECT, to_field='nope')
+
+            class Meta:
+                app_label = 'testapp'
+
+        return [error.id for error in Owner._meta.get_field('kit').check()]
+
+    assert _build() == ['fields.E312']
+
+
+def test_hard_delete_does_not_follow_an_owned_relation_the_generator_refused():
+    """The Python twin of the generator's candidate test. A self-owning relation carries no
+    rule -- it would be infinite rule recursion -- so following it here would remove exactly
+    what the soft-delete path left alone."""
+
+    @isolate_apps('tests.testapp')
+    def _build() -> list:
+        class SelfOwner(SetarModel):
+            previous = OwningForeignKey('self', on_delete=SET_NULL, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        return _owned_fields(SelfOwner)
+
+    assert _build() == []
 
 
 def test_owning_foreign_key_accepts_a_target_reached_through_mti():

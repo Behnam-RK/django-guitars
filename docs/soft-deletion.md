@@ -33,7 +33,7 @@ Soft-deleting a row also soft-deletes rows related by `on_delete=CASCADE`, via a
 second rule on the parent's table that keys off the `_deleted_at` transition
 (not `.delete()`), so it fires for bulk deletes and raw SQL too. Non-`CASCADE`
 relations get no rule, and the cascade only reaches models that are themselves
-soft-deletable — a plain `Model` is deleted for real.
+soft-deletable — a plain `Model` is deleted for real. A **self-referential** `CASCADE` FK gets no rule either, with a warning: the rule would update the table it fires on, which PostgreSQL rejects as infinite recursion on *every* `UPDATE` to it. Cascade that one in Python.
 
 The reverse case, and how both kinds of rule are named: [Owned relations](owned-relations.md).
 

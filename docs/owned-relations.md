@@ -22,6 +22,8 @@ owners and uncollectable by `hard_delete()`. `DO_NOTHING` (or `PROTECT`/`RESTRIC
 album, the opposite of ownership, and would emit the cascade rule backwards. A NULL key matches
 nothing, so a nullable owned relation needs no guard. `to_field` is refused too (`guitars.E002`):
 the rule correlates the key against the target's *primary* key, which also makes [MTI](#mti) work.
+An `on_delete` that *clears* the key — `SET_NULL`, `SET_DEFAULT`, `SET(…)` — is a **warning**,
+`guitars.W001`: legal and occasionally wanted, but silent otherwise.
 
 Three more shapes are refused by the generator rather than by a check, warned about like the
 [MTI](#mti) limitation below since each depends on the *other* model:
@@ -60,6 +62,13 @@ children nor owned relations. Narrower **per row**, not absolutely: the whole ba
 construction, a target the per-statement limit below left *live* is still removed — never archived,
 straight to gone. The intended end state, but the one direction the Python side goes further.
 
+One thing collection does **not** reach: a `GenericRelation` on an owned target. It carries no
+foreign-key constraint, so it cannot fail at `COMMIT` and rightly does not hold the row back — but
+nothing removes it either. Only Phase 1's `Collector` walks `_meta.private_fields`, and an owned row
+is soft-deleted by a *rule*, never collected, so `hard_delete()` on its **owner** leaves those rows
+pointing at a primary key that no longer exists. Deleting through the target does clean them up,
+that path running the `Collector`. Delete through the target, or clear them by hand.
+
 Three limits the guard does not cover, all by construction:
 
 - **Per column, not per target.** The `NOT EXISTS` reads only the rule's own foreign-key column, so
@@ -84,8 +93,8 @@ ancestor's table, where `old."<column>"` cannot name a column the child holds; s
 
 ## Related
 
-- [Migrations](migrations.md#rule-names) — what the rules are named, and why one family's
-  spelling is frozen while the owned one is unambiguous. Nothing retires a rule: relaxing an
-  `OwningForeignKey` to a plain `ForeignKey` leaves it live, and wants a hand-written `DROP RULE`.
+- [Migrations](migrations.md#rule-names) — what the rules are named, why one family's spelling
+  is frozen and merely watched while the owned one cannot be split at all, and why relaxing an
+  `OwningForeignKey` to a plain one leaves its rule live and wants a hand-written `DROP RULE`.
 - [Soft deletion](soft-deletion.md) · [MTI](mti.md) ·
   [ADR 0011](adr/0011-owner-side-soft-delete-ownership.md) — the two design decisions

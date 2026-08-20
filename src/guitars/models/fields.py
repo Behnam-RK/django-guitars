@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from django.core import checks
 from django.core.exceptions import FieldDoesNotExist
-from django.db.models import CASCADE, ForeignKey
+from django.db.models import CASCADE, SET_DEFAULT, SET_NULL, ForeignKey
 
 
 if TYPE_CHECKING:
@@ -29,6 +29,7 @@ class OwningForeignKey(ForeignKey):
         return [
             *super().check(**kwargs),
             *self._check_on_delete_not_cascade(),
+            *self._check_on_delete_keeps_the_key(),
             *self._check_targets_the_primary_key(),
         ]
 
@@ -44,10 +45,36 @@ class OwningForeignKey(ForeignKey):
                 hint=(
                     'CASCADE means deleting the target deletes this row -- the opposite of '
                     'ownership -- and would also emit the soft-delete cascade rule in the '
-                    'wrong direction. Use SET_NULL, PROTECT, RESTRICT or DO_NOTHING.'
+                    'wrong direction. Use DO_NOTHING, PROTECT or RESTRICT.'
                 ),
                 obj=self,
                 id='guitars.E001',
+            )
+        ]
+
+    def _check_on_delete_keeps_the_key(self) -> list[CheckMessage]:
+        """A warning, not an error: an ``on_delete`` that *clears* this column loses the only
+        route back to the archived target. Legal, occasionally wanted, and silent -- the row is
+        archived on time and simply becomes uncollectable, which no later check can spot."""
+        on_delete = self.remote_field.on_delete
+        # ``SET(value)`` is a closure, so identity alone would miss it -- and it clears the key
+        # exactly as its two named siblings do. Matched by name, the only handle it offers.
+        clears_key = on_delete in {SET_NULL, SET_DEFAULT} or (
+            getattr(on_delete, '__name__', '') == 'set_on_delete'
+        )
+        if not clears_key:
+            return []
+        return [
+            checks.Warning(
+                'OwningForeignKey with an on_delete that clears the key loses the target.',
+                hint=(
+                    "Deleting the *target* runs Django's Collector, which clears this column "
+                    'on every owner before the rule turns the DELETE into an UPDATE. The '
+                    'archived row is then unreachable from its former owners and hard_delete() '
+                    'can no longer collect it. Use DO_NOTHING, PROTECT or RESTRICT.'
+                ),
+                obj=self,
+                id='guitars.W001',
             )
         ]
 

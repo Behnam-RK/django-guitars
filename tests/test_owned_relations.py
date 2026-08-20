@@ -5,7 +5,7 @@ archiving something a sibling owner still points at."""
 import pytest
 from django.apps import apps as django_apps
 from django.db import connection, models
-from django.db.models import CASCADE, DO_NOTHING, PROTECT, SET_NULL
+from django.db.models import CASCADE, DO_NOTHING, PROTECT, SET, SET_DEFAULT, SET_NULL
 from django.test.utils import isolate_apps
 
 from guitars import sql
@@ -33,9 +33,10 @@ def band(db):
 # ─── the field itself ───
 
 
-def _owner_field_errors(on_delete) -> list[str]:
+def _owner_field_errors(on_delete, **field_kwargs) -> list[str]:
     """Check-ids raised by an ``OwningForeignKey`` declared with *on_delete*, in a throwaway
-    app registry so neither model outlives the call."""
+    app registry so neither model outlives the call. *field_kwargs* is for the ones Django has
+    its own prerequisites for -- ``SET_NULL`` wants ``null``, ``SET_DEFAULT`` a ``default``."""
 
     @isolate_apps('tests.testapp')
     def _build() -> list[str]:
@@ -44,7 +45,7 @@ def _owner_field_errors(on_delete) -> list[str]:
                 app_label = 'testapp'
 
         class Owner(models.Model):
-            kit = OwningForeignKey(Kit, on_delete=on_delete)
+            kit = OwningForeignKey(Kit, on_delete=on_delete, **field_kwargs)
 
             class Meta:
                 app_label = 'testapp'
@@ -62,6 +63,14 @@ def test_owning_foreign_key_refuses_on_delete_cascade():
 
 def test_owning_foreign_key_accepts_a_non_cascade_on_delete():
     assert _owner_field_errors(PROTECT) == []
+
+
+@pytest.mark.parametrize('on_delete', [SET_NULL, SET_DEFAULT, SET(None)])
+def test_owning_foreign_key_warns_about_an_on_delete_that_clears_the_key(on_delete):
+    """A warning, not an error: legal, occasionally wanted, and silent. Deleting the *target*
+    has Django's ``Collector`` clear the column before the rule rewrites the ``DELETE``, so the
+    archived row becomes uncollectable -- ``SET()`` is a closure, matched by name."""
+    assert _owner_field_errors(on_delete, null=True, default=None) == ['guitars.W001']
 
 
 def test_owning_foreign_key_refuses_a_non_primary_key_to_field():

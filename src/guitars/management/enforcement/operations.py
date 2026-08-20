@@ -93,14 +93,25 @@ def _related_rule_name(related_table: str, foreign_key: str | None = None) -> st
     return _identifiers._safe_ident(stem if foreign_key is None else f'{stem}_{foreign_key}')
 
 
+def _sized(segment: str) -> str:
+    """One name segment with its length in front of it, so a left-to-right read finds where it
+    ends -- the only way concatenating variable-length identifiers stays reversible."""
+    return f'{len(segment)}_{segment}'
+
+
 def _owned_rule_name(dependent_table: str, foreign_key: str) -> str:
-    """The owned rule's identifier: always FK-suffixed, and length-prefixed like the stem's
-    schema, so no two ``(table, foreign_key)`` pairs can name one rule. Nothing predates 2.3.0,
-    so this form is unambiguous by construction rather than reported after the fact."""
-    # The prefix differs from the cascade family for the same reason: a rule is namespaced per
-    # table by name alone, so a shared name is a silent replacement, never an error.
-    stem = _rule_stem('soft_delete_owned', dependent_table)
-    return _identifiers._safe_ident(f'{stem}_{len(foreign_key)}_{foreign_key}')
+    """The owned rule's identifier: **every** variable segment sized, so no two
+    ``(schema, table, foreign_key)`` triples can name one rule. Nothing predates 2.3.0, so this
+    family was free to be built that way where the frozen cascade one cannot be."""
+    # Sized *each*, not just the last: a length at one end alone rules out only the adjacent
+    # split, so ``('a_5_b', 'c')`` would still have met ``('a', 'b_1_c')``. Reading each length
+    # before its segment leaves no boundary to guess at -- a proof, not a narrowing.
+    schema, bare_table = _identifiers._split_qualified('table', dependent_table)
+    sized_schema = [] if schema is None else [_sized(schema)]
+    # The prefix differs from the cascade family for the same reason both are guarded: a rule
+    # is namespaced per table by name alone, so a shared name replaces rather than collides.
+    parts = ['soft_delete_owned', *sized_schema, _sized(bare_table), _sized(foreign_key)]
+    return _identifiers._safe_ident('_'.join(parts))
 
 
 def _rule_key_label(key: tuple) -> str:

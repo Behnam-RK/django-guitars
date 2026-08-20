@@ -123,8 +123,8 @@ def _referring_relations(model: type[Model]) -> list:
     and :func:`_still_referenced` share, so what is collected and what holds a row back cannot
     disagree. ``include_hidden``: a ``related_name='+'`` key dangles too."""
     # ``ManyToOneRel`` (``OneToOneRel`` and the parent-link with it) is exactly the reverse of a
-    # ForeignKey -- the only rel whose ``attname`` is the key column both callers read. It drops
-    # an m2m reverse, which owns none, and a ``GenericRelation``'s, which spares a row forever.
+    # ForeignKey -- the only rel whose ``attname`` is the key column both callers read. An m2m
+    # reverse owns none; a ``GenericRelation`` neither dangles nor gets collected -- see the doc.
     return [
         relation
         for relation in model._meta.get_fields(include_hidden=True)

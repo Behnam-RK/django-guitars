@@ -264,20 +264,32 @@ def test_owned_rule_name_folds_a_hostile_schema_qualified_table_like_its_cascade
     length-prefixed as well, which the frozen cascade spelling cannot be."""
     assert (
         operations_module._owned_rule_name('analytics.Weird Table', 'kit_id')
-        == '"soft_delete_owned_9_analytics_Weird Table_6_kit_id"'
+        == '"soft_delete_owned_9_analytics_11_Weird Table_6_kit_id"'
     )
     assert operations_module._owned_rule_name(
         'tenant_a.events', 'kit_id'
     ) != operations_module._owned_rule_name('tenant.a_events', 'kit_id')
 
 
-def test_owned_rule_name_separates_a_table_and_column_split_two_ways():
-    """The ambiguity the length prefix exists for: ``('shop_press_kit', 'kit_id')`` and
-    ``('shop_press', 'kit_kit_id')`` concatenate to one string. Two owned rules on one owner
-    table would then share a name, and the second `CREATE OR REPLACE` replaces the first."""
-    assert operations_module._owned_rule_name(
-        'shop_press_kit', 'kit_id'
-    ) != operations_module._owned_rule_name('shop_press', 'kit_kit_id')
+@pytest.mark.parametrize(
+    ('first', 'second'),
+    [
+        # The adjacent split: one string, two ways to cut it into (table, column).
+        (('shop_press_kit', 'kit_id'), ('shop_press', 'kit_kit_id')),
+        # And the one a length prefix at *one* end still admits, which is why both are sized:
+        # `soft_delete_owned_a_5_b_1_c` would have been either of these.
+        (('a_5_b', 'c'), ('a', 'b_1_c')),
+        # A sized schema does not save an unsized table from the same trick.
+        (('s.a_5_b', 'c'), ('s.a', 'b_1_c')),
+    ],
+)
+def test_owned_rule_names_cannot_be_split_two_ways(first, second):
+    """Every variable segment carries its length, so reading left to right leaves no boundary
+    to guess at -- no two ``(schema, table, column)`` triples reach one name. The claim has to
+    hold outright: `_claim_rule_name` reports a clash but nothing stops the rule shipping."""
+    assert operations_module._owned_rule_name(*first) != operations_module._owned_rule_name(
+        *second
+    )
 
 
 def test_owned_operations_emit_only_for_owning_foreign_keys():
@@ -304,8 +316,8 @@ def test_owned_operations_name_one_rule_per_foreign_key_column():
 
     blob = '\n'.join(command._owned_operations(Album))
 
-    assert 'RULE "soft_delete_owned_testapp_presskit_12_press_kit_id"' in blob
-    assert 'RULE "soft_delete_owned_testapp_presskit_16_alt_press_kit_id"' in blob
+    assert 'RULE "soft_delete_owned_16_testapp_presskit_12_press_kit_id"' in blob
+    assert 'RULE "soft_delete_owned_16_testapp_presskit_16_alt_press_kit_id"' in blob
     assert 'via "press_kit_id"!' in blob
     assert 'via "alt_press_kit_id"!' in blob
 
@@ -472,7 +484,7 @@ def test_owned_operations_under_adopt_stay_a_plain_create_or_replace():
 
     blob = '\n'.join(command._owned_operations(Album, adopt=True))
 
-    assert 'CREATE OR REPLACE RULE "soft_delete_owned_testapp_presskit_12_press_kit_id"' in blob
+    assert 'CREATE OR REPLACE RULE "soft_delete_owned_16_testapp_presskit_12_press_kit_id"' in blob
     assert 'DROP RULE IF EXISTS' not in blob
 
 
@@ -1691,3 +1703,16 @@ def test_cascade_operations_report_two_relations_that_would_share_a_rule_name():
     assert 'soft_delete_related_c_a_b_id' in clash
     assert "'c_a' via 'b_id'" in clash and "'c_a_b_id'" in clash
     assert 'the second replaces the first' in clash
+
+
+def test_a_rule_name_clash_fails_a_check_run_but_only_reports_on_a_generating_one():
+    """A clash means one of the two rules does not exist in the database the migration ships
+    to, which is exactly what ``--check`` is for. A generating run has already written the
+    files by the time it is known, so there it stays the report printed just above."""
+    command = Command()
+    command._rule_name_clashes = ['two relations name one rule']
+
+    with pytest.raises(CommandError, match='two relations name one rule'):
+        command._refuse_a_rule_name_clash(check_only=True)
+
+    command._refuse_a_rule_name_clash(check_only=False)

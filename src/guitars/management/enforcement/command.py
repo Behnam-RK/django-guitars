@@ -387,6 +387,15 @@ class Command(OperationsMixin, BaseCommand):
         self.tenant_autofill_dependencies[function], self.tenant_autofill_sql[function] = written
         return True
 
+    def _refuse_a_rule_name_clash(self, *, check_only: bool) -> None:
+        """Fail a ``--check`` run over a shared rule name. One of the two rules does not exist
+        in the database the migration ships to, which is precisely what ``--check`` is for; a
+        generating run has already written the files, so there it stays a report."""
+        if check_only and self._rule_name_clashes:
+            # Bare message, as _ensure_singleton_migration explains: Django re-styles an
+            # uncaught CommandError, and double-wrapping garbles the ANSI codes.
+            raise CommandError(self._rule_name_clashes[0])
+
     def handle(self, *app_labels, **options):
         check_only: bool = options['check_only']
         force_rls: bool = options.get('force_rls', False)
@@ -481,13 +490,14 @@ class Command(OperationsMixin, BaseCommand):
             self.stdout.write(self.style.WARNING(note))
 
         # MTI cascade rules skipped as warnings; two relations sharing a rule name as an error,
-        # that one being *emitted* rather than skipped -- what ships works for one of the pair
-        # and `--check` cannot see the other is gone. One loop, so neither can go unwritten.
+        # that one being *emitted* rather than skipped -- so one of the pair does not exist in
+        # the database it ships to. One loop, so neither kind can go unwritten.
         for paint, note in [
             *((self.style.WARNING, note) for note in self._mti_cascade_warnings),
             *((self.style.ERROR, note) for note in self._rule_name_clashes),
         ]:
             self.stderr.write(paint(note))
+        self._refuse_a_rule_name_clash(check_only=check_only)
 
         # Tables tenancy could not cover, and why. Skips are design, never silent -- so the
         # relocation refusals print here too, not only via `expected_coverage`. Once per run,

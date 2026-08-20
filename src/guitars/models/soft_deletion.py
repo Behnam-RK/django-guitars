@@ -235,9 +235,16 @@ def _owned_targets(
             # Narrowed: (1) the whole claimed batch is spared, not one row -- all of it is
             # going; (2) no `_deleted_at` filter, an archived referrer's key is still on disk;
             # (3) *any* surviving reference holds the row back, not just the owning column.
-            found[field.related_model].update(
-                owned_pks - _still_referenced(field.related_model, owned_pks, claimed, using)
-            )
+            candidates = owned_pks
+            # A *shrinking* fixpoint, not one subtraction: a pk spared here keeps its CASCADE
+            # closure alive, so a referrer inside it survives after all and holds another pk
+            # back. Each round is a strict subset of the last, which is what terminates it.
+            while candidates:
+                referenced = _still_referenced(field.related_model, candidates, claimed, using)
+                if not referenced:
+                    break
+                candidates = candidates - referenced
+            found[field.related_model].update(candidates)
     return list(found.items())
 
 

@@ -11,7 +11,7 @@ from django.test.utils import isolate_apps
 from guitars import sql
 from guitars.introspection import rule_update_cycle_edges
 from guitars.models import OwningForeignKey, SetarModel
-from guitars.models.soft_deletion import _owned_fields, _still_referenced
+from guitars.models.soft_deletion import _owned_fields, _owned_targets, _still_referenced
 from guitars.sql import _identifiers
 from tests.testapp.models import (
     Album,
@@ -769,4 +769,50 @@ def test_hard_delete_collects_a_cascade_child_behind_a_hidden_related_name():
     finally:
         with connection.schema_editor() as schema_editor:
             for model in (Insert, Playbill):
+                schema_editor.delete_model(model)
+
+
+@pytest.mark.django_db(transaction=True)
+@isolate_apps('tests.testapp')
+def test_owned_targets_rechecks_a_target_whose_sibling_was_spared():
+    """The discount covers the whole candidate set at once, so sparing one target keeps its
+    CASCADE closure alive -- and a referrer inside that closure holds the *other* target back
+    after all. One subtraction removed it with a live key on disk; the loop re-asks until stable."""
+
+    class Kit(SetarModel):
+        class Meta:
+            app_label = 'testapp'
+
+    class Sponsor(SetarModel):
+        kit = OwningForeignKey(Kit, on_delete=DO_NOTHING, null=True, related_name='sponsors')
+
+        class Meta:
+            app_label = 'testapp'
+
+    class Flyer(models.Model):
+        kit = models.ForeignKey(Kit, on_delete=CASCADE, related_name='flyers')
+        alt_of = models.ForeignKey(Kit, on_delete=DO_NOTHING, related_name='alts')
+
+        class Meta:
+            app_label = 'testapp'
+
+    with connection.schema_editor() as schema_editor:
+        for model in (Kit, Sponsor, Flyer):
+            schema_editor.create_model(model)
+    try:
+        spared, other = Kit.objects.create(), Kit.objects.create()
+        going = {
+            Sponsor.objects.create(kit=spared).pk,
+            Sponsor.objects.create(kit=other).pk,
+        }
+        Sponsor.objects.create(kit=spared)  # outlives the batch, so *spared* is held back
+        # Goes only if *spared* goes, and its plain key is what then holds *other* back.
+        Flyer.objects.create(kit=spared, alt_of=other)
+
+        owned = dict(_owned_targets({Sponsor: going}, None))
+
+        assert owned.get(Kit, set()) == set()
+    finally:
+        with connection.schema_editor() as schema_editor:
+            for model in (Flyer, Sponsor, Kit):
                 schema_editor.delete_model(model)

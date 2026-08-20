@@ -6,17 +6,17 @@ predicate is reversed. `on_delete` cannot say this — it describes what happens
 the target goes, the opposite direction — so ownership has its own declaration:
 
 ```python
-from django.db.models import SET_NULL
+from django.db.models import DO_NOTHING
 from guitars.models import OwningForeignKey, SetarModel
 
 class Album(SetarModel):
-    press_kit = OwningForeignKey(PressKit, SET_NULL, null=True, related_name='albums')
+    press_kit = OwningForeignKey(PressKit, DO_NOTHING, null=True, related_name='albums')
 ```
 
-Soft-deleting the album soft-deletes its press kit. Mind which way `SET_NULL` points: soft-deleting
-the *press kit* runs Django's `Collector`, which clears `press_kit_id` on every album **before** the
-rule turns the `DELETE` into an `UPDATE`, leaving the archived kit unreachable from its former
-owners and uncollectable by `hard_delete()`. Use `DO_NOTHING` (or `PROTECT`/`RESTRICT`) instead.
+Soft-deleting the album soft-deletes its press kit. Do not reach for `SET_NULL` here: soft-deleting
+the *press kit* then runs Django's `Collector`, which clears `press_kit_id` on every album **before**
+the rule turns the `DELETE` into an `UPDATE`, leaving the archived kit unreachable from its former
+owners and uncollectable by `hard_delete()`. `DO_NOTHING` (or `PROTECT`/`RESTRICT`) keeps the key.
 
 `on_delete=CASCADE` is **refused** (`guitars.E001`): it means deleting the press kit deletes the
 album, the opposite of ownership, and would emit the cascade rule backwards. A NULL key matches

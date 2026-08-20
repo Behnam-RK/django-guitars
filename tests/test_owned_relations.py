@@ -452,6 +452,46 @@ def test_still_referenced_discounts_a_cascade_row_by_row_not_by_relation():
 
 @pytest.mark.django_db(transaction=True)
 @isolate_apps('tests.testapp')
+def test_still_referenced_discounts_a_cascade_row_at_any_depth():
+    """The same discount one hop further out: ``Sticker`` is a CASCADE *grand*child of the kit and
+    holds a plain key to it as well. ``_collect`` follows CASCADE all the way down, so it goes with
+    the kit -- a one-hop discount archives the kit forever, the fixpoint unable to reach it."""
+
+    class Kit(models.Model):
+        class Meta:
+            app_label = 'testapp'
+
+    class Flyer(models.Model):
+        kit = models.ForeignKey(Kit, on_delete=CASCADE, related_name='flyers')
+
+        class Meta:
+            app_label = 'testapp'
+
+    class Sticker(models.Model):
+        flyer = models.ForeignKey(Flyer, on_delete=CASCADE, related_name='stickers')
+        thumbnail_of = models.ForeignKey(
+            Kit, on_delete=DO_NOTHING, null=True, related_name='thumbnails'
+        )
+
+        class Meta:
+            app_label = 'testapp'
+
+    with connection.schema_editor() as schema_editor:
+        for model in (Kit, Flyer, Sticker):
+            schema_editor.create_model(model)
+    try:
+        kit = Kit.objects.create()
+        Sticker.objects.create(flyer=Flyer.objects.create(kit=kit), thumbnail_of=kit)
+
+        assert _still_referenced(Kit, {kit.pk}, {}, None) == set()
+    finally:
+        with connection.schema_editor() as schema_editor:
+            for model in (Sticker, Flyer, Kit):
+                schema_editor.delete_model(model)
+
+
+@pytest.mark.django_db(transaction=True)
+@isolate_apps('tests.testapp')
 def test_still_referenced_reads_a_key_pointed_at_a_non_primary_key_column():
     """A ``to_field`` key holds the target's *other* column, not its primary key. Compared
     against a pk it matches nothing, so a live referrer would read as absent -- and the row

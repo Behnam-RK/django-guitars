@@ -107,14 +107,14 @@ def _rows(model: type[Model], using: str | None) -> QuerySet:
     return manager.using(using)  # ty: ignore[unresolved-attribute]
 
 
-def _key_values(level: type[Model], field: Field, pks: set, using: str | None) -> dict:
-    """``{value a key into *level* holds: the pk it stands for}`` for *pks*. Identity for the
-    usual key, which holds a primary key -- what every table in an MTI chain shares. A
-    ``to_field`` key holds *that* column, matches no pk, and would read as absent."""
+def _key_values(field: Field, pks: set, using: str | None) -> dict:
+    """``{value a key aimed at *field*'s target holds: the pk it stands for}`` for *pks*. Identity
+    for the usual key, holding the primary key every table in an MTI chain shares; a ``to_field``
+    key holds *that* column, read off the one model declaring it, and matches no pk."""
     target = field.target_field if isinstance(field, ForeignKey) else None
     if target is None or target.primary_key:
         return {pk: pk for pk in pks}
-    return dict(_rows(level, using).filter(pk__in=pks).values_list(target.attname, 'pk'))
+    return dict(_rows(target.model, using).filter(pk__in=pks).values_list(target.attname, 'pk'))
 
 
 def _referring_relations(model: type[Model]) -> list:
@@ -131,52 +131,74 @@ def _referring_relations(model: type[Model]) -> list:
     ]
 
 
+def _cascade_closure(root: type[Model], pks: set, using: str | None) -> dict[type[Model], set]:
+    """Every row, by model, that collecting *pks* of *root* takes along through reverse ``CASCADE``
+    -- the walk ``_collect`` performs, to the same depth. One hop is not enough: a *grand*child goes
+    too, and counting its plain key holds the row back forever, not for one fixpoint pass."""
+    taken: dict[type[Model], set] = defaultdict(set)
+    pending: list[tuple[type[Model], set]] = [(root, pks)]
+    while pending:
+        model, model_pks = pending.pop()
+        fresh = model_pks - taken[model]
+        if not fresh:
+            continue
+        taken[model].update(fresh)
+        for relation in _referring_relations(model):
+            if relation.on_delete is not CASCADE:
+                continue
+            field = cast('Field', relation.field)
+            related_model = cast('type[Model]', relation.related_model)
+            child_pks = set(
+                _rows(related_model, using)
+                .filter(**{f'{field.attname}__in': _key_values(field, fresh, using)})
+                .values_list('pk', flat=True)
+            )
+            # From the child's MTI *root*, and a parent-link from the level it names -- the
+            # same two cases ``_collect`` distinguishes, since this has to reach exactly the
+            # rows it will. The declaring level alone would leave its ancestors' rows out.
+            pending.append(
+                (
+                    related_model
+                    if getattr(relation, 'parent_link', False)
+                    else mti_root(related_model),
+                    child_pks,
+                )
+            )
+    return taken
+
+
 def _still_referenced(
     target: type[Model], pks: set, claimed: dict[type[Model], set], using: str | None
 ) -> set:
     """Which of *pks* a row that outlives the collection still points at, through **any**
     foreign key, not only the one that declared ownership: removing a row is not stamping one,
     and a surviving key of any kind dangles at ``COMMIT`` and fails the deferred constraint."""
+    # Rows collecting the chain takes along, by **row**, not relation: one model can hold a
+    # ``CASCADE`` key *and* a plain one to the same target, and discounting the relation alone
+    # held the target back forever. Whole closure, not one hop -- see ``_cascade_closure``.
+    taken = _cascade_closure(mti_root(target), pks, using)
     referenced: set = set()
-    #: Rows collecting the chain takes along, by **row**, not relation -- the point of the
-    #: two-pass split: one model can hold a ``CASCADE`` key *and* a plain one to the same
-    #: target, and discounting the relation alone held the target back forever.
-    taken: dict[type[Model], set] = defaultdict(set)
-    #: ``(model, attname, keys)`` per plain key, deferred to the second pass so every CASCADE
-    #: relation is already in *taken* -- relation order says nothing about which comes first.
-    plain: list[tuple[type[Model], str, dict]] = []
     # Every model in *target*'s MTI tree, not *target* alone: collecting it removes the whole
-    # table chain, so a key into any other level holds the same pk value and dangles just as
-    # hard -- and ``get_fields`` reports only the level it is asked about.
-    for level in _mti_model_chain(target):
-        for relation in _referring_relations(level):
-            # A parent-link is the same object one table down, collected with the chain.
-            if getattr(relation, 'parent_link', False):
-                continue
-            related_model = cast('type[Model]', relation.related_model)
-            field = cast('Field', relation.field)
-            attname = field.attname
-            # No emptiness guard: an ``__in`` over no keys is an empty result either way, and
-            # a level a chain has no row at (a sibling MTI branch, say) can hold no key.
-            keys = _key_values(level, field, pks, using)
-            if getattr(relation, 'on_delete', None) is CASCADE:
-                # A CASCADE referrer `_collect` follows is collected *with* the target, hidden
-                # or not -- it reads this same list, so this is the same read it will do.
-                taken[related_model].update(
-                    _rows(related_model, using)
-                    .filter(**{f'{attname}__in': keys})
-                    .values_list('pk', flat=True)
-                )
-            else:
-                plain.append((related_model, attname, keys))
-
-    for related_model, attname, keys in plain:
-        rows = _rows(related_model, using).filter(**{f'{attname}__in': keys})
+    # chain, so a key into any level holds the same pk value and dangles just as hard. Deduped --
+    # an inherited relation is reported per level, and one read of it answers for them all.
+    relations = dict.fromkeys(
+        relation for level in _mti_model_chain(target) for relation in _referring_relations(level)
+    )
+    for relation in relations:
+        # A parent-link is the same object one table down, collected with the chain; a
+        # ``CASCADE`` referrer goes with the row it points at, and is in ``taken`` above.
+        if getattr(relation, 'parent_link', False) or relation.on_delete is CASCADE:
+            continue
+        related_model = cast('type[Model]', relation.related_model)
+        field = cast('Field', relation.field)
+        # No emptiness guard: an ``__in`` over no keys is an empty result either way.
+        keys = _key_values(field, pks, using)
+        rows = _rows(related_model, using).filter(**{f'{field.attname}__in': keys})
         going = claimed.get(related_model, set()) | taken.get(related_model, set())
         if going:
             rows = rows.exclude(pk__in=going)
-        referenced.update(keys[value] for value in rows.values_list(attname, flat=True))
-        if referenced >= pks:  # nothing left to spare; skip the remaining keys
+        referenced.update(keys[value] for value in rows.values_list(field.attname, flat=True))
+        if referenced >= pks:  # nothing left to spare; skip the remaining relations
             return referenced
     return referenced
 
@@ -430,7 +452,7 @@ class SoftDeletableModel(Model):
                     # Through ``_key_values``, as ``_still_referenced`` reads the same relations:
                     # missing a ``to_field`` child is not a smaller collection but a broken one,
                     # discounted there *because* this collects it. An empty ``__in`` needs no guard.
-                    keys = _key_values(model, field, new_pks, using)
+                    keys = _key_values(field, new_pks, using)
                     child_pks = set(
                         _rows(related_model, using)
                         .filter(**{f'{field.attname}__in': keys})

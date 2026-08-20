@@ -39,11 +39,10 @@ the [MTI](#mti) limitation below is, since each depends on the *other* model:
 
 ## The last-owner guard
 
-A target another live row still points at **survives**; it is stamped when the last owner
-goes. Unconditional, not derived from whether a `UniqueConstraint` proves single ownership:
-dropping such a constraint changes no field, so the rule's `[SQL:…]` identity would not move and
-`--check` would stay green over an unguarded rule. See
-[ADR 0011](adr/0011-owner-side-soft-delete-ownership.md).
+A target another live row still points at **survives**; it is stamped when the last owner goes.
+Unconditional, not derived from whether a `UniqueConstraint` proves single ownership: dropping such
+a constraint changes no field, so the rule's `[SQL:…]` identity would not move and `--check` would
+stay green over an unguarded rule. See [ADR 0011](adr/0011-owner-side-soft-delete-ownership.md).
 
 `hard_delete()` applies the same test in Python, removing an owned row *after* the batch that owned
 it — the reverse of child-first `CASCADE` order, since the owner still references it. Three
@@ -54,9 +53,10 @@ level of an MTI chain, no row of which is collected alone. All three because a s
 fails the deferred constraint at `COMMIT`. Collection runs to a fixpoint, so a row spared by a
 reference *itself* collected later is picked up later; one that stays spared stays archived. A
 `CASCADE` referrer never counts, going *with* the row it points at — discounted by **row**, not
-relation, since one model can hold a `CASCADE` key *and* a plain one to the same target, and sound
-only because collection reads keys as the guard does, `to_field` column and *base* manager alike.
-Queryset `hard_delete()` walks neither reverse-FK children nor owned relations.
+relation, since one model can hold a `CASCADE` key *and* a plain one to the same target, and at any
+*depth*, a grandchild going along too. Sound only because collection reads keys as the guard does,
+`to_field` column and *base* manager alike. Queryset `hard_delete()` walks neither reverse-FK
+children nor owned relations.
 
 Three limits the guard does not cover, all by construction:
 

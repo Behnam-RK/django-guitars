@@ -3,10 +3,12 @@ fires when the *owner* holds the foreign key, and the last-owner guard that keep
 archiving something a sibling owner still points at."""
 
 import pytest
+from django.apps import apps as django_apps
 from django.db import models
 from django.db.models import CASCADE, PROTECT, SET_NULL
 from django.test.utils import isolate_apps
 
+from guitars.introspection import rule_update_cycle_edges
 from guitars.models import OwningForeignKey, SetarModel
 from guitars.models.soft_deletion import _owned_fields
 from tests.testapp.models import Album, Band, Ensemble, Merch, Orchestra, PressKit
@@ -184,14 +186,17 @@ def test_the_last_owner_going_soft_deletes_the_shared_row(band):
 @pytest.mark.django_db
 def test_an_already_archived_owned_row_is_not_restamped(band):
     """``AND _deleted_at IS NULL`` on the dependent: a second owner going must not move an
-    archived row's timestamp forward, which would misreport when it died."""
+    archived row's timestamp forward. Archived through the *other* owning column -- deleting
+    the kit itself would have ``SET_NULL`` clear both keys, leaving the guard untested."""
     kit = PressKit.objects.create(headline='Shared')
     kit_pk = kit.pk  # Model.delete() clears the instance's pk
-    album = Album.objects.create(title='Hemispheres', band=band, press_kit=kit)
-    kit.delete()
+    first = Album.objects.create(title='Hemispheres', band=band, alt_press_kit=kit)
+    second = Album.objects.create(title='Permanent Waves', band=band, press_kit=kit)
+    first.delete()  # the only alt_press_kit owner, so the kit is stamped now
     stamped_at = PressKit._archives.get(pk=kit_pk)._deleted_at
+    assert stamped_at is not None
 
-    album.delete()
+    second.delete()
 
     assert PressKit._archives.get(pk=kit_pk)._deleted_at == stamped_at
 
@@ -348,3 +353,165 @@ def test_hard_delete_leaves_alone_what_the_generator_refused_to_own(band):
     orchestra.hard_delete()
 
     assert PressKit.objects.filter(pk=kit.pk).exists()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_hard_delete_spares_a_row_referenced_through_another_column(band):
+    """The guard is per column for the *rule*, which only stamps. ``hard_delete()`` removes
+    the row, so a surviving key of any kind -- here Album's second owning column -- dangles
+    at ``COMMIT`` and aborts the whole transaction."""
+    kit = PressKit.objects.create(headline='Shared')
+    first = Album.objects.create(title='Hemispheres', band=band, press_kit=kit)
+    Album.objects.create(title='Permanent Waves', band=band, alt_press_kit=kit)
+
+    first.hard_delete()
+
+    assert PressKit._all_objects.filter(pk=kit.pk).exists()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_hard_delete_spares_a_row_a_refused_relation_still_points_at(band):
+    """``Orchestra.programme`` carries no rule, but it does carry a column. Removing the kit
+    would leave it dangling just the same."""
+    kit = PressKit.objects.create(headline='Shared')
+    album = Album.objects.create(title='Hemispheres', band=band, press_kit=kit)
+    Orchestra.objects.create(name='LSO', conductor='Davis', programme=kit)
+
+    album.hard_delete()
+
+    assert PressKit._all_objects.filter(pk=kit.pk).exists()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_hard_delete_returns_for_a_row_a_later_group_stopped_referencing(band):
+    """``Orchestra.programme`` holds the kit back on the first pass; the orchestra is then
+    collected as the merch's owned row, and the second pass comes back for the kit. Order
+    counts too: the kit's group runs last, or the deferred key check fails at ``COMMIT``."""
+    kit = PressKit.objects.create(headline='Shared')
+    album = Album.objects.create(title='Hemispheres', band=band, press_kit=kit)
+    orchestra = Orchestra.objects.create(name='LSO', conductor='Davis', programme=kit)
+    Merch.objects.create(description='Tour shirt', album=album, featured_orchestra=orchestra)
+
+    album.hard_delete()
+
+    assert not Orchestra._all_objects.filter(pk=orchestra.pk).exists()
+    assert not PressKit._all_objects.filter(pk=kit.pk).exists()
+
+
+def test_rule_update_cycle_edges_reports_every_edge_on_a_cycle_and_no_other():
+    """The graph both layers read. Four models form a diamond that closes back on itself,
+    and a fifth points into it without being reachable from it -- the one edge that is not
+    on a cycle, and so the one rule that may still be written."""
+
+    @isolate_apps('tests.testapp')
+    def _build() -> set:
+        class W(SetarModel):
+            back = OwningForeignKey('X', on_delete=SET_NULL, null=True, related_name='+')
+
+            class Meta:
+                app_label = 'testapp'
+
+        class X(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Y(SetarModel):
+            down = OwningForeignKey(W, on_delete=SET_NULL, null=True, related_name='+')
+            up = models.ForeignKey(X, on_delete=CASCADE, related_name='+')
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Z(SetarModel):
+            down = OwningForeignKey(W, on_delete=SET_NULL, null=True, related_name='+')
+            up = models.ForeignKey(X, on_delete=CASCADE, related_name='+')
+
+            class Meta:
+                app_label = 'testapp'
+
+        class P(SetarModel):
+            into = OwningForeignKey(X, on_delete=SET_NULL, null=True, related_name='+')
+
+            class Meta:
+                app_label = 'testapp'
+
+        return rule_update_cycle_edges([W, X, Y, Z, P])
+
+    # X -> {Y, Z} by cascade, Y/Z -> W by ownership, W -> X by ownership: two loops sharing
+    # the X -> ... -> W -> X spine. P -> X points in, and nothing points back out to P.
+    assert _build() == {
+        ('testapp_x', 'testapp_y'),
+        ('testapp_x', 'testapp_z'),
+        ('testapp_y', 'testapp_w'),
+        ('testapp_z', 'testapp_w'),
+        ('testapp_w', 'testapp_x'),
+    }
+
+
+def test_rule_update_cycle_edges_ignores_relations_that_carry_no_rule():
+    """Only what the generator would actually write is in the graph: a target that is not
+    soft-deletable, a non-CASCADE key, and the structural MTI parent-link all drop out."""
+
+    @isolate_apps('tests.testapp')
+    def _build() -> set:
+        class Plain(models.Model):
+            class Meta:
+                app_label = 'testapp'
+
+        class Loose(SetarModel):
+            owned = OwningForeignKey(Plain, on_delete=SET_NULL, null=True, related_name='+')
+            weak = models.ForeignKey('Loose', on_delete=SET_NULL, null=True, related_name='+')
+            tag = models.CharField(max_length=10)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class LooseChild(Loose):
+            class Meta:
+                app_label = 'testapp'
+
+        return rule_update_cycle_edges([Plain, Loose, LooseChild])
+
+    assert _build() == set()
+
+
+def test_hard_delete_does_not_follow_ownership_that_closes_a_two_model_cycle(monkeypatch):
+    """The multi-table twin of the self-owning refusal: neither rule is written, so neither
+    relation may be followed here. ``_owned_fields`` reads the same graph the generator does
+    precisely so the two cannot disagree about which relations carry a rule."""
+
+    @isolate_apps('tests.testapp')
+    def _build() -> list:
+        class Left(SetarModel):
+            partner = OwningForeignKey('Right', on_delete=SET_NULL, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Right(SetarModel):
+            partner = OwningForeignKey('Left', on_delete=SET_NULL, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        # ``isolate_apps`` swaps ``Options.apps``, not the global registry ``_owned_fields``
+        # reads, so neither model would otherwise be in the graph it builds.
+        monkeypatch.setattr(django_apps, 'get_models', lambda: [Left, Right])
+        return _owned_fields(Left) + _owned_fields(Right)
+
+    assert _build() == []
+
+
+def test_a_subclass_of_owning_foreign_key_keeps_its_own_deconstructed_path():
+    """The frozen path is pinned for ``OwningForeignKey`` itself only. A subclass recording
+    the base path would rebuild as the base field, silently dropping whatever it added."""
+
+    class NarrowOwningForeignKey(OwningForeignKey):
+        pass
+
+    assert OwningForeignKey(PressKit, on_delete=SET_NULL).deconstruct()[1] == (
+        'guitars.models.OwningForeignKey'
+    )
+    assert NarrowOwningForeignKey(PressKit, on_delete=SET_NULL).deconstruct()[1].endswith(
+        'NarrowOwningForeignKey'
+    )

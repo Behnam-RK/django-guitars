@@ -8,10 +8,19 @@ from typing import TYPE_CHECKING
 
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from django.db import models
 
 
-__all__ = ['column_owner', 'has_column', 'is_mti_child', 'mti_root', 'owns_column']
+__all__ = [
+    'column_owner',
+    'has_column',
+    'is_mti_child',
+    'mti_root',
+    'owns_column',
+    'rule_update_cycle_edges',
+]
 
 
 def has_column(model: type[models.Model], colname: str) -> bool:
@@ -47,3 +56,60 @@ def mti_root(model: type[models.Model]) -> type[models.Model]:
     while root._meta.parents:
         root = next(iter(root._meta.parents))
     return root
+
+
+def _rule_update_edges(models: Iterable[type[models.Model]]) -> set[tuple[str, str]]:
+    """``(fires_on_table, updates_table)`` for every ON UPDATE soft-delete rule *models*
+    call for -- inbound cascade and owner-side owned alike, each read off the model that
+    declares the foreign key, so a partial *models* can only miss edges, never invent one."""
+    from django.db.models import CASCADE, ForeignKey  # noqa: PLC0415 - see the module docstring
+
+    from guitars.models.fields import OwningForeignKey  # noqa: PLC0415
+
+    edges: set[tuple[str, str]] = set()
+    for model in models:
+        # Both rule kinds live on the table whose ``_deleted_at`` actually flips, so a model
+        # that inherits the column declares no rule of its own -- its ancestor does.
+        if not owns_column(model, '_deleted_at'):
+            continue
+        table = model._meta.db_table
+        for field in model._meta.local_fields:
+            if not isinstance(field, ForeignKey) or not has_column(
+                field.related_model, '_deleted_at'
+            ):
+                continue
+            target_table = column_owner(field.related_model, '_deleted_at')._meta.db_table
+            if isinstance(field, OwningForeignKey):
+                edges.add((table, target_table))  # owned: fires here, updates the target
+            elif field.remote_field.on_delete is CASCADE and not getattr(
+                field.remote_field, 'parent_link', False
+            ):
+                edges.add((target_table, table))  # cascade: fires on the target, updates here
+    return edges
+
+
+def rule_update_cycle_edges(models: Iterable[type[models.Model]]) -> set[tuple[str, str]]:
+    """The edges of ``_rule_update_edges`` lying on a cycle, which may never be written: a
+    rule's action expands *before* the original statement, so a cycle is rewritten into itself
+    and PostgreSQL refuses **every** ``UPDATE`` to every table in it, guard unread."""
+    edges = _rule_update_edges(models)
+    adjacency: dict[str, set[str]] = {}
+    for source, target in edges:
+        adjacency.setdefault(source, set()).add(target)
+
+    def _reaches(start: str, goal: str) -> bool:
+        stack = list(adjacency.get(start, ()))
+        seen: set[str] = set()
+        while stack:
+            node = stack.pop()
+            if node == goal:  # a self-loop falls out of this: goal is its own target
+                return True
+            if node not in seen:
+                seen.add(node)
+                stack.extend(adjacency.get(node, ()))
+        return False
+
+    # *Every* edge on the cycle, not one chosen edge: which one got refused would otherwise
+    # depend on iteration order, and an order-dependent refusal cannot stay stable run to
+    # run -- the generator's `--check` would flap and `hard_delete()` would disagree with it.
+    return {(source, target) for source, target in edges if _reaches(target, source)}

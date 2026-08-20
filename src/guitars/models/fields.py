@@ -82,8 +82,10 @@ class OwningForeignKey(ForeignKey):
         ]
 
     def deconstruct(self) -> tuple[str, str, Sequence[Any], dict[str, Any]]:
-        name, _path, args, kwargs = super().deconstruct()
-        # Pinned to the public path rather than this module's: a generated migration records
-        # the path literally, and is already applied in consuming projects, so moving this
-        # file would break `migrate` on a fresh database there. The string is frozen.
-        return name, 'guitars.models.OwningForeignKey', args, kwargs
+        name, path, args, kwargs = super().deconstruct()
+        # Pinned to the public path rather than this module's: a migration records it
+        # literally, so moving this file would break `migrate` on a fresh database in a
+        # consuming project. Frozen -- and only for *this* class; see the class docstring.
+        if type(self) is OwningForeignKey:
+            return name, 'guitars.models.OwningForeignKey', args, kwargs
+        return name, path, args, kwargs

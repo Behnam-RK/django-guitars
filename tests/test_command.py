@@ -394,6 +394,44 @@ def test_owned_operation_warns_when_the_target_is_not_soft_deletable():
     assert 'no _deleted_at column' in command._mti_cascade_warnings[0]
 
 
+def test_owned_operation_warns_when_the_owner_is_not_soft_deletable():
+    """The rule fires on the owner's own ``_deleted_at`` transition, so an owner that has no
+    such column can never fire it. Silence here is the failure mode ADR 0011 chose a
+    checkable field subclass to avoid: a declaration that quietly generates nothing."""
+    command = Command()
+    command._mti_cascade_warnings.clear()
+    command.existing.soft_delete_owned.clear()
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Kit(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class PlainOwner(models.Model):
+            kit = OwningForeignKey(Kit, on_delete=SET_NULL, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        return command._owned_operations(PlainOwner)
+
+    assert _build() == []
+    assert len(command._mti_cascade_warnings) == 1
+    assert 'has no _deleted_at column' in command._mti_cascade_warnings[0]
+    assert 'never soft-deleted' in command._mti_cascade_warnings[0]
+
+
+def test_owned_operations_are_a_no_op_for_a_model_declaring_none():
+    """Called for every model now, not only soft-deletable ones, so the common case has to
+    cost nothing and warn about nothing."""
+    command = Command()
+    command._mti_cascade_warnings.clear()
+
+    assert command._owned_operations(Band) == []
+    assert command._mti_cascade_warnings == []
+
+
 def test_owned_operations_are_idempotent_across_two_runs():
     """A run reading its own output back must emit nothing -- the header, its ``[SQL:...]``
     identity and the dedupe key all have to agree on the same three-part key."""
@@ -1487,3 +1525,108 @@ def test_the_real_migrations_ship_every_policy_forced():
 
     assert command.existing.tenant_policies
     assert command.existing.unforced_policies == set()
+
+
+def test_owned_operation_warns_when_two_models_own_each_other():
+    """The self-owning case one hop out: A owns B and B owns A, so each rule updates the
+    table the other fires on. PostgreSQL rewrites the pair into each other and refuses every
+    UPDATE to *both* tables, so neither rule may be written."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class OwnerA(SetarModel):
+            partner = OwningForeignKey('OwnerB', on_delete=SET_NULL, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class OwnerB(SetarModel):
+            partner = OwningForeignKey('OwnerA', on_delete=SET_NULL, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        # `all_models` by hand: ``isolate_apps`` swaps ``Options.apps``, not the global
+        # registry ``_setup_models_and_reverse_relations`` reads, so a Command built here
+        # sees neither model. The self-referential cascade test injects the mapping likewise.
+        command = Command()
+        command._mti_cascade_warnings.clear()
+        command.existing.soft_delete_owned.clear()
+        command.all_models = [OwnerA, OwnerB]
+        return command, command._owned_operations(OwnerA) + command._owned_operations(OwnerB)
+
+    command, ops = _build()
+
+    assert ops == []
+    assert len(command._mti_cascade_warnings) == 2
+    for warning in command._mti_cascade_warnings:
+        assert 'infinite rule recursion' in warning
+        assert 'cycle of ON UPDATE rules' in warning
+
+
+def test_owned_operation_still_emits_when_ownership_is_one_way():
+    """The control for the cycle test above: A owns B and B owns nothing back, so there is
+    no cycle and the rule is written. Guards against the graph over-refusing any pair."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class OneWayOwner(SetarModel):
+            owned = OwningForeignKey('OneWayOwned', on_delete=SET_NULL, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class OneWayOwned(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        command = Command()
+        command._mti_cascade_warnings.clear()
+        command.existing.soft_delete_owned.clear()
+        command.all_models = [OneWayOwner, OneWayOwned]
+        return command, command._owned_operations(OneWayOwner)
+
+    command, ops = _build()
+
+    assert command._mti_cascade_warnings == []
+    assert len(ops) == 1
+    assert 'testapp_onewayowned' in ops[0]
+
+
+def test_cascade_operation_warns_when_an_owned_rule_closes_the_cycle():
+    """The mixed cycle, and the one a project reaches by accident: ``Holder`` owns ``Held``
+    through one foreign key and CASCADEs from it through another, so the owned rule updates
+    ``Held`` while the cascade rule updates ``Holder``. Both edges are refused."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Held(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Holder(SetarModel):
+            owned = OwningForeignKey(Held, on_delete=SET_NULL, null=True, related_name='owners')
+            parent = models.ForeignKey(Held, on_delete=CASCADE, related_name='children')
+
+            class Meta:
+                app_label = 'testapp'
+
+        command = Command()
+        command._mti_cascade_warnings.clear()
+        command.existing.soft_delete_owned.clear()
+        command.existing.soft_delete_related.clear()
+        command.all_models = [Held, Holder]
+        command.reverse_relations_mapping[Held] = {
+            (Holder, Holder._meta.get_field('parent'), CASCADE)
+        }
+        # Held's cascade rule (fires on Held, updates Holder) and Holder's owned rule (fires
+        # on Holder, updates Held) are the two halves of the same cycle.
+        return command, command._cascade_operations(Held) + command._owned_operations(Holder)
+
+    command, ops = _build()
+
+    assert ops == []
+    kinds = sorted(warning.split(' rule for ')[0] for warning in command._mti_cascade_warnings)
+    assert kinds == ['Cascade', 'Owned']
+    for warning in command._mti_cascade_warnings:
+        assert 'cycle of ON UPDATE rules' in warning

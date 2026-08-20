@@ -15,64 +15,76 @@ class Album(SetarModel):
     press_kit = OwningForeignKey(PressKit, SET_NULL, null=True, related_name='albums')
 ```
 
-Soft-deleting the album soft-deletes its press kit. `on_delete=CASCADE` is **refused**
-(`guitars.E001`): it means deleting the press kit deletes the album, the opposite of
-ownership, and would emit the cascade rule backwards. A NULL key matches nothing, so a
-nullable owned relation needs no guard of its own. `to_field` is refused too
-(`guitars.E002`): the rule correlates the key against the target's *primary* key, which is
+Soft-deleting the album soft-deletes its press kit. Note which way `SET_NULL` points:
+soft-deleting the *press kit* runs Django's `Collector`, which clears `press_kit_id` on
+every album **before** the rule turns the `DELETE` into an `UPDATE` — the archived kit is
+then unreachable from its former owners, and `hard_delete()` can no longer collect it. Use
+`DO_NOTHING` (or `PROTECT`/`RESTRICT`) where the pointer must survive the target's archival.
+
+`on_delete=CASCADE` is **refused** (`guitars.E001`): it means deleting the press kit deletes
+the album, the opposite of ownership, and would emit the cascade rule backwards. A NULL key
+matches nothing, so a nullable owned relation needs no guard of its own. `to_field` is refused
+too (`guitars.E002`): the rule correlates the key against the target's *primary* key, which is
 also what makes [MTI](#mti) work.
 
-Two more shapes are refused by the generator rather than by a check, warned about the way
-the [MTI](#mti) limitation below is, since both depend on the *other* model:
+Three more shapes are refused by the generator rather than by a check, warned about the way
+the [MTI](#mti) limitation below is, since each depends on the *other* model:
 
-- **A target with no `_deleted_at`.** There is nothing for the rule to stamp, and unlike a
-  plain `ForeignKey` an `OwningForeignKey` has no other purpose, so this is reported rather
-  than passed over.
-- **A relation whose target's `_deleted_at` lives on the owner's own table** — owning
-  yourself (`OwningForeignKey('self', …)`), or owning an MTI descendant of yourself. The
-  rule's action would update the table it fires on, which PostgreSQL rewrites into itself
-  and then rejects: *every* `UPDATE` on that table, a plain `save()` included, fails with
-  `infinite recursion detected in rules for relation`. `hard_delete()` refuses it too — no
-  rule means nothing was stamped, so nothing may be removed.
+- **A target with no `_deleted_at`.** Nothing for the rule to stamp, and unlike a plain
+  `ForeignKey` an `OwningForeignKey` has no other purpose, so this is reported not passed over.
+- **An owner with no `_deleted_at`.** The rule fires on the owner's `_deleted_at` transition,
+  so a model never soft-deleted would never fire it. Reported for the same reason.
+- **A relation closing a cycle of `ON UPDATE` rules** — owning yourself
+  (`OwningForeignKey('self', …)`), owning an MTI descendant of yourself, or a longer loop
+  back through another model's owned or `CASCADE` rules. A rule's action expands *before*
+  the original statement, so a cycle is rewritten into itself and PostgreSQL rejects *every*
+  `UPDATE` to *every* table in it — a plain `save()` included — with `infinite recursion
+  detected in rules for relation`. Every edge on the cycle is refused rather than one
+  chosen edge, which would depend on iteration order. `hard_delete()` refuses these too:
+  no rule means nothing was stamped, so nothing may be removed.
 
 ## The last-owner guard
 
 A target another live row still points at **survives**; it is stamped when the last owner
-goes. This is unconditional, not derived from whether a `UniqueConstraint` proves single
-ownership — dropping such a constraint is an ordinary schema migration that changes no
-field, so the rule's `[SQL:…]` identity would not move and `--check` would stay green
-while the database kept an unguarded rule. See
-[ADR 0011](adr/0011-owner-side-soft-delete-ownership.md).
+goes. Unconditional, not derived from whether a `UniqueConstraint` proves single ownership:
+dropping such a constraint is an ordinary migration that changes no field, so the rule's
+`[SQL:…]` identity would not move and `--check` would stay green while the database kept an
+unguarded rule. See [ADR 0011](adr/0011-owner-side-soft-delete-ownership.md).
 
-`hard_delete()` applies the same test in Python, and removes an owned row *after* the batch
-that owned it — the reverse of the child-first `CASCADE` order, since the owner still
-references it. Two deliberate narrowings there, because it *removes* the row where the rule
-only stamps a column: the whole batch is spared rather than one row, and an **archived**
-owner still counts as an owner — its foreign key is still on disk, so dropping the target
-would fail the deferred constraint at `COMMIT`. The row stays archived, which is where the
-rule left it anyway. Queryset-level `hard_delete()` walks neither reverse-FK children nor
+`hard_delete()` applies the same test in Python, removing an owned row *after* the batch that
+owned it — the reverse of the child-first `CASCADE` order, since the owner still references
+it. Three deliberate narrowings, because it *removes* the row where the rule only
+stamps a column: the whole batch is spared rather than one row; an **archived** referrer
+still counts, its key being on disk; and **any** surviving foreign key holds the row back,
+not only the owning column. All three exist because dropping a still-referenced row fails
+the deferred constraint at `COMMIT`. Collection runs to a fixpoint, so a row spared by a
+reference that is *itself* collected later is picked up on a later pass. A row that stays
+spared stays archived. Queryset-level `hard_delete()` walks neither reverse-FK children nor
 owned relations.
 
 Two limits the guard does not cover, both by construction:
 
 - **Per column, not per target.** The `NOT EXISTS` looks only at the rule's own foreign-key
   column. A second `OwningForeignKey` on the same table pointing at the same row does not
-  spare it.
+  spare it. (`hard_delete()` is the exception — see the narrowings above.)
 - **Per statement.** PostgreSQL runs an `ON UPDATE` rule's action *before* the original
   update, so every owner soft-deleted by one statement still reads as live to the others'
   guards. `Album.objects.filter(press_kit=kit).delete()` therefore leaves `kit` alive even
   though it deleted every owner; deleting them one at a time stamps it as expected.
 
-## Rule names
+## Rule names, and removing one
 
-A rule name is the only thing PostgreSQL dedupes on, not what it references.
+A rule name is the only thing PostgreSQL dedupes on, not what it references. An inbound
+child with two `CASCADE` FKs to one parent gets its second rule suffixed with the FK column
+(`soft_delete_related_<child>_<fk>`), the first keeping the bare name for compatibility.
+Every *owned* rule is suffixed (`soft_delete_owned_<target>_<fk>`) — nothing predates 2.3.0
+to stay compatible with — and the distinct prefix is what keeps the two families from ever
+meeting, a collision being a silent replacement rather than an error.
 
-- **Inbound.** A child with more than one `CASCADE` FK to the same parent gets its second
-  rule suffixed with the FK column (`soft_delete_related_<child>_<fk>`); the first keeps
-  the bare name for backward compatibility.
-- **Owned.** Every rule is suffixed (`soft_delete_owned_<target>_<fk>`) — nothing predates
-  2.3.0 to stay compatible with. The distinct prefix is what keeps the two families from
-  ever meeting: a collision would silently replace the other rule rather than fail.
+No enforcement command retires a rule, cascade rules included. Dropping an
+`OwningForeignKey` therefore fails at `migrate` (the rule depends on the column), and
+converting one back to a plain `ForeignKey` silently leaves it live. Add an explicit
+`DROP RULE "soft_delete_owned_<target>_<fk>" ON "<owner_table>"` to that migration.
 
 ## MTI
 
@@ -85,5 +97,4 @@ column the child holds. See [MTI](mti.md).
 ## Related
 
 - [Soft deletion](soft-deletion.md) · [Migrations](migrations.md) · [MTI](mti.md)
-- [ADR 0011](adr/0011-owner-side-soft-delete-ownership.md) — why a field subclass, and why
-  the guard is unconditional
+- [ADR 0011](adr/0011-owner-side-soft-delete-ownership.md) — the two design decisions

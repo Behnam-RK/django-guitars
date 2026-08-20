@@ -1,11 +1,19 @@
 import contextlib
 from collections import defaultdict
+from typing import cast
 
+from django.apps import apps as django_apps
 from django.db import connections, transaction
 from django.db.models import CASCADE, DateTimeField, Index, Manager, Q, QuerySet, sql
 from django.db.models.base import Model
 
-from guitars.introspection import column_owner, has_column, mti_root, owns_column
+from guitars.introspection import (
+    column_owner,
+    has_column,
+    mti_root,
+    owns_column,
+    rule_update_cycle_edges,
+)
 from guitars.sql import SWITCH_OFF_HARD_DELETION, SWITCH_ON_HARD_DELETION
 
 from .fields import OwningForeignKey
@@ -27,15 +35,20 @@ def _owned_fields(model: type[Model]) -> list[OwningForeignKey]:
     # rule would fire on a table ``old."<column>"`` cannot reach. See docs/owned-relations.md.
     if not owns_column(model, '_deleted_at'):
         return []
+    table = model._meta.db_table
+    # The same graph the generator refuses cycle edges from -- a self-owning relation is the
+    # 1-cycle in it. Shared rather than re-derived, so the two cannot disagree about which
+    # relations carry a rule. *model* is named too: it may not be a registered one.
+    cycles = rule_update_cycle_edges([model, *django_apps.get_models()])
     return [
         field
         for field in model._meta.local_fields
-        # Mirrors the two refusals in ``_owned_candidates``/``_owned_operations``: nothing
-        # to stamp, and a rule whose action updates the table it fires on (rejected by
-        # PostgreSQL as infinite rule recursion). Neither emits a rule, so neither is followed.
+        # Mirrors the refusals in ``_owned_candidates``/``_owned_operations``: nothing to
+        # stamp, and a rule that would close a cycle of ON UPDATE rules. Neither emits a
+        # rule, so neither is followed -- following one destroys what the rule spared.
         if isinstance(field, OwningForeignKey)
         and has_column(field.related_model, '_deleted_at')
-        and column_owner(field.related_model, '_deleted_at')._meta.db_table != model._meta.db_table
+        and (table, column_owner(field.related_model, '_deleted_at')._meta.db_table) not in cycles
     ]
 
 
@@ -47,14 +60,43 @@ def _rows(model: type[Model], using: str | None) -> QuerySet:
     return manager.using(using)  # ty: ignore[unresolved-attribute]
 
 
+def _still_referenced(
+    target: type[Model], pks: set, claimed: dict[type[Model], set], using: str | None
+) -> set:
+    """Which of *pks* a row outside *claimed* still points at, through **any** foreign key
+    rather than only the one that declared ownership: removing a row is not stamping one, and
+    a surviving key of any kind dangles at ``COMMIT`` and fails the deferred constraint."""
+    referenced: set = set()
+    # ``include_hidden``: a ``related_name='+'`` foreign key is left out of
+    # ``related_objects``, and its column dangles exactly like any other.
+    for relation in target._meta.get_fields(include_hidden=True):
+        if not (relation.is_relation and relation.auto_created and not relation.concrete):
+            continue
+        # M2M rows live in a through table with no column on `related_model`, and go with the
+        # through row's own CASCADE. An MTI parent-link is the same object one table down,
+        # collected with the chain -- counting it would spare every owned MTI row forever.
+        if relation.many_to_many or getattr(relation, 'parent_link', False):
+            continue
+        related_model = cast('type[Model]', relation.related_model)
+        attname = relation.field.attname  # ty: ignore[unresolved-attribute]
+        rows = _rows(related_model, using).filter(**{f'{attname}__in': pks})
+        going = claimed.get(related_model, set())
+        if going:
+            rows = rows.exclude(pk__in=going)
+        referenced.update(rows.values_list(attname, flat=True))
+        if referenced >= pks:  # nothing left to spare; skip the remaining relations
+            break
+    return referenced
+
+
 def _owned_targets(
-    to_delete: dict[type[Model], set], using: str | None
+    claimed: dict[type[Model], set], using: str | None
 ) -> list[tuple[type[Model], set]]:
-    """``(model, pks)`` for every owned row *to_delete* is the last owner of -- the rule's
-    ``NOT EXISTS``, narrowed twice because this *removes* the row where the rule only stamps
-    a column. See ``docs/owned-relations.md``; the two narrowings are commented below."""
+    """``(model, pks)`` for every owned row *claimed* is the last owner of -- the rule's
+    ``NOT EXISTS``, narrowed three ways below because this *removes* the row where the rule
+    only stamps a column. *claimed* is every row going away, not one group's; see below."""
     found: dict[type[Model], set] = defaultdict(set)
-    for model, pks in to_delete.items():
+    for model, pks in claimed.items():
         for field in _owned_fields(model):
             owned_pks = set(
                 _rows(model, using)
@@ -64,16 +106,12 @@ def _owned_targets(
             )
             if not owned_pks:
                 continue
-            # Narrowing 1: `exclude(pk__in=pks)` spares the whole collected batch, not one
-            # row -- all of it is going. Narrowing 2: no `_deleted_at` filter, so an archived
-            # owner still counts; its FK is on disk and would dangle at COMMIT.
-            still_owned = set(
-                _rows(model, using)
-                .exclude(pk__in=pks)
-                .filter(**{f'{field.attname}__in': owned_pks})
-                .values_list(field.attname, flat=True)
+            # Narrowed: (1) the whole claimed batch is spared, not one row -- all of it is
+            # going; (2) no `_deleted_at` filter, an archived referrer's key is still on disk;
+            # (3) *any* surviving reference holds the row back, not just the owning column.
+            found[field.related_model].update(
+                owned_pks - _still_referenced(field.related_model, owned_pks, claimed, using)
             )
-            found[field.related_model].update(owned_pks - still_owned)
     return list(found.items())
 
 
@@ -305,8 +343,6 @@ class SoftDeletableModel(Model):
 
             _collect(root, seed)
             groups.append((to_delete, model_order))
-            for owned_model, owned_pks in _owned_targets(to_delete, using):
-                _collect_group(mti_root(owned_model), owned_pks)
 
         # Start the DFS from the MTI root so ancestor tables (reachable only via the parent-link
         # reverse CASCADE relation) are collected too; ``root is self.__class__`` for non-MTI.
@@ -320,6 +356,26 @@ class SoftDeletableModel(Model):
             # Phase 2 — collect related rows and hard-delete child-first. self.pk is None
             # after Phase 1 (Django clears it post-delete), so use the saved pk.
             _collect_group(root, {pk})
+            # A fixpoint, not one pass: `_owned_targets` spares a row something outside the
+            # batch references, and `claimed` grows as rounds run, so a row held back by a
+            # not-yet-collected reference becomes collectable later.
+            dispatched: dict[type[Model], set] = defaultdict(set)
+            while True:
+                fresh: list[tuple[type[Model], set]] = []
+                for owned_model, owned_pks in _owned_targets(claimed, using):
+                    # `dispatched`, not `claimed`: every pk is collected at most once, which
+                    # is what bounds this loop. `claimed` is keyed by the model actually
+                    # collected, which for an MTI target is the root, not `owned_model`.
+                    pending = owned_pks - dispatched[owned_model]
+                    if pending:
+                        dispatched[owned_model].update(pending)
+                        fresh.append((owned_model, pending))
+                if not fresh:
+                    break
+                for owned_model, owned_pks in fresh:
+                    # Appended after every group already collected, which is the order the
+                    # foreign keys need: whatever references an owned row is in an earlier one.
+                    _collect_group(mti_root(owned_model), owned_pks)
 
             for to_delete, model_order in groups:
                 for model in model_order:

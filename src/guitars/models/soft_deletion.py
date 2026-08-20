@@ -138,6 +138,13 @@ def _still_referenced(
     foreign key, not only the one that declared ownership: removing a row is not stamping one,
     and a surviving key of any kind dangles at ``COMMIT`` and fails the deferred constraint."""
     referenced: set = set()
+    #: Rows collecting the chain takes along, by **row**, not relation -- the point of the
+    #: two-pass split: one model can hold a ``CASCADE`` key *and* a plain one to the same
+    #: target, and discounting the relation alone held the target back forever.
+    taken: dict[type[Model], set] = defaultdict(set)
+    #: ``(model, attname, keys)`` per plain key, deferred to the second pass so every CASCADE
+    #: relation is already in *taken* -- relation order says nothing about which comes first.
+    plain: list[tuple[type[Model], str, dict]] = []
     # Every model in *target*'s MTI tree, not *target* alone: collecting it removes the whole
     # table chain, so a key into any other level holds the same pk value and dangles just as
     # hard -- and ``get_fields`` reports only the level it is asked about.
@@ -146,24 +153,31 @@ def _still_referenced(
             # A parent-link is the same object one table down, collected with the chain.
             if getattr(relation, 'parent_link', False):
                 continue
-            # A CASCADE referrer `_collect` follows is collected *with* the target, hidden or
-            # not -- it reads this same list. Discounted here, not left to the fixpoint: it is
-            # collected only as a consequence of collecting the row it would hold back.
-            if getattr(relation, 'on_delete', None) is CASCADE:
-                continue
             related_model = cast('type[Model]', relation.related_model)
             field = cast('Field', relation.field)
             attname = field.attname
+            # No emptiness guard: an ``__in`` over no keys is an empty result either way, and
+            # a level a chain has no row at (a sibling MTI branch, say) can hold no key.
             keys = _key_values(level, field, pks, using)
-            if not keys:
-                continue
-            rows = _rows(related_model, using).filter(**{f'{attname}__in': keys})
-            going = claimed.get(related_model, set())
-            if going:
-                rows = rows.exclude(pk__in=going)
-            referenced.update(keys[value] for value in rows.values_list(attname, flat=True))
-            if referenced >= pks:  # nothing left to spare; skip the remaining relations
-                return referenced
+            if getattr(relation, 'on_delete', None) is CASCADE:
+                # A CASCADE referrer `_collect` follows is collected *with* the target, hidden
+                # or not -- it reads this same list, so this is the same read it will do.
+                taken[related_model].update(
+                    _rows(related_model, using)
+                    .filter(**{f'{attname}__in': keys})
+                    .values_list('pk', flat=True)
+                )
+            else:
+                plain.append((related_model, attname, keys))
+
+    for related_model, attname, keys in plain:
+        rows = _rows(related_model, using).filter(**{f'{attname}__in': keys})
+        going = claimed.get(related_model, set()) | taken.get(related_model, set())
+        if going:
+            rows = rows.exclude(pk__in=going)
+        referenced.update(keys[value] for value in rows.values_list(attname, flat=True))
+        if referenced >= pks:  # nothing left to spare; skip the remaining keys
+            return referenced
     return referenced
 
 
@@ -413,12 +427,10 @@ class SoftDeletableModel(Model):
                         continue
                     related_model = relation.related_model
                     field = cast('Field', relation.field)
-                    # Through ``_key_values``, exactly as ``_still_referenced`` reads the same
-                    # relations: missing a ``to_field`` child here is not a smaller collection
-                    # but a broken one -- it is discounted there *because* this collects it.
+                    # Through ``_key_values``, as ``_still_referenced`` reads the same relations:
+                    # missing a ``to_field`` child is not a smaller collection but a broken one,
+                    # discounted there *because* this collects it. An empty ``__in`` needs no guard.
                     keys = _key_values(model, field, new_pks, using)
-                    if not keys:
-                        continue
                     child_pks = set(
                         _rows(related_model, using)
                         .filter(**{f'{field.attname}__in': keys})
@@ -484,8 +496,9 @@ class SoftDeletableModel(Model):
                         model._all_objects.using(using).filter(  # ty: ignore[unresolved-attribute]
                             pk__in=pks
                         )._hard_delete_own_table()
-                    else:  # pragma: no cover - Phase 1 has normally removed these already
-                        # No rule inside the *seed*'s tree means Phase 1's delete() removed it
-                        # already; an owned group had no Collector, so an m2m through row lands
-                        # here -- read through ``_rows``, which no default manager can filter.
+                    # `no cover` because no *test* model reaches it, not because nothing can: an
+                    # owned group runs no Collector, so an m2m through row of an owned row lands
+                    # here for real -- add one to `tests/testapp` before trusting this path.
+                    else:  # pragma: no cover - no testapp owned model carries an m2m
+                        # Read through ``_rows``, which no default manager can filter.
                         _rows(model, using).filter(pk__in=pks).delete()

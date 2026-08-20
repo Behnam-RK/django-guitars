@@ -110,6 +110,13 @@ def test_owning_foreign_key_reports_an_unresolvable_to_field_rather_than_raising
     assert _build() == ['fields.E312']
 
 
+def test_owned_fields_answers_a_model_declaring_none_without_reading_the_registry():
+    """The cheap half, asked first on purpose: ``hard_delete`` puts this question to every
+    collected model, nearly all of which own nothing, and the answer must not cost the
+    registry-wide cycle sweep. ``Band`` declares no ``OwningForeignKey`` at all."""
+    assert _owned_fields(Band) == []
+
+
 def test_hard_delete_does_not_follow_an_owned_relation_the_generator_refused():
     """The Python twin of the generator's candidate test. A self-owning relation carries no
     rule -- it would be infinite rule recursion -- so following it here would remove exactly
@@ -407,6 +414,40 @@ def test_hard_delete_removes_an_owned_row_a_cascade_child_still_points_at(band):
     assert not Orchestra._all_objects.filter(pk=orchestra.pk).exists()
     assert not Ensemble._all_objects.filter(pk=orchestra.pk).exists()
     assert not Section._all_objects.exists()
+
+
+@pytest.mark.django_db(transaction=True)
+@isolate_apps('tests.testapp')
+def test_still_referenced_discounts_a_cascade_row_by_row_not_by_relation():
+    """A model can hold a CASCADE key *and* a plain one to the same target. The row goes with
+    the target either way, so the plain key must not hold it back -- and the fixpoint cannot
+    rescue this one, the row being collected only as a consequence of collecting that target."""
+
+    class Kit(models.Model):
+        class Meta:
+            app_label = 'testapp'
+
+    class Flyer(models.Model):
+        kit = models.ForeignKey(Kit, on_delete=CASCADE, related_name='flyers')
+        thumbnail_of = models.ForeignKey(
+            Kit, on_delete=DO_NOTHING, null=True, related_name='thumbnails'
+        )
+
+        class Meta:
+            app_label = 'testapp'
+
+    with connection.schema_editor() as schema_editor:
+        schema_editor.create_model(Kit)
+        schema_editor.create_model(Flyer)
+    try:
+        kit = Kit.objects.create()
+        Flyer.objects.create(kit=kit, thumbnail_of=kit)
+
+        assert _still_referenced(Kit, {kit.pk}, {}, None) == set()
+    finally:
+        with connection.schema_editor() as schema_editor:
+            schema_editor.delete_model(Flyer)
+            schema_editor.delete_model(Kit)
 
 
 @pytest.mark.django_db(transaction=True)

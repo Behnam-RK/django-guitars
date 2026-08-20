@@ -58,16 +58,19 @@ def mti_root(model: type[models.Model]) -> type[models.Model]:
     return root
 
 
-def _rule_update_edges(models: Iterable[type[models.Model]]) -> set[tuple[str, str]]:
-    """``(fires_on_table, updates_table)`` for every ON UPDATE soft-delete rule *models*
-    call for -- inbound cascade and owner-side owned alike, each read off the model that
-    declares the foreign key, so a partial *models* can only miss edges, never invent one."""
-    from django.db.models import CASCADE, ForeignKey  # noqa: PLC0415 - see the module docstring
+def _rule_update_edges(candidates: Iterable[type[models.Model]]) -> set[tuple[str, str]]:
+    """``(fires_on_table, updates_table)`` for every ON UPDATE soft-delete rule *candidates* call
+    for -- cascade and owned alike, each read off the model declaring the foreign key, so a partial
+    *candidates* can only miss edges, never invent one. Imports deferred: see below."""
+    # Deferred: every other name in this module comes from ``_meta`` alone, while
+    # ``guitars.models.fields`` reaches ``guitars.models.__init__`` and the tenancy runtime
+    # behind it -- a cost only a caller asking about rules should pay.
+    from django.db.models import CASCADE, ForeignKey  # noqa: PLC0415 - see the comment above
 
-    from guitars.models.fields import OwningForeignKey  # noqa: PLC0415
+    from guitars.models.fields import OwningForeignKey  # noqa: PLC0415 - see the comment above
 
     edges: set[tuple[str, str]] = set()
-    for model in models:
+    for model in candidates:
         # Both rule kinds live on the table whose ``_deleted_at`` actually flips, so a model
         # that inherits the column declares no rule of its own -- its ancestor does.
         if not owns_column(model, '_deleted_at'):
@@ -91,11 +94,11 @@ def _rule_update_edges(models: Iterable[type[models.Model]]) -> set[tuple[str, s
     return edges
 
 
-def rule_update_cycle_edges(models: Iterable[type[models.Model]]) -> set[tuple[str, str]]:
+def rule_update_cycle_edges(candidates: Iterable[type[models.Model]]) -> set[tuple[str, str]]:
     """The edges of ``_rule_update_edges`` lying on a cycle, which may never be written: a
     rule's action expands *before* the original statement, so a cycle is rewritten into itself
     and PostgreSQL refuses **every** ``UPDATE`` to every table in it, guard unread."""
-    edges = _rule_update_edges(models)
+    edges = _rule_update_edges(candidates)
     adjacency: dict[str, set[str]] = {}
     for source, target in edges:
         adjacency.setdefault(source, set()).add(target)

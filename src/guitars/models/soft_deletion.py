@@ -11,6 +11,7 @@ from django.db.models import (
     ForeignKey,
     Index,
     Manager,
+    ManyToOneRel,
     Q,
     QuerySet,
     sql,
@@ -120,14 +121,14 @@ def _key_values(field: Field, pks: set, using: str | None) -> dict:
 def _referring_relations(model: type[Model]) -> list:
     """Every reverse relation with a *column* pointing at *model* -- the one walk ``_collect``
     and :func:`_still_referenced` share, so what is collected and what holds a row back cannot
-    disagree. ``include_hidden``: a ``related_name='+'`` key dangles too. M2M rels own none."""
+    disagree. ``include_hidden``: a ``related_name='+'`` key dangles too."""
+    # ``ManyToOneRel`` (``OneToOneRel`` and the parent-link with it) is exactly the reverse of a
+    # ForeignKey -- the only rel whose ``attname`` is the key column both callers read. It drops
+    # an m2m reverse, which owns none, and a ``GenericRelation``'s, which spares a row forever.
     return [
         relation
         for relation in model._meta.get_fields(include_hidden=True)
-        if relation.is_relation
-        and relation.auto_created
-        and not relation.concrete
-        and not relation.many_to_many
+        if isinstance(relation, ManyToOneRel)
     ]
 
 
@@ -244,7 +245,11 @@ def _owned_targets(
                 if not referenced:
                     break
                 candidates = candidates - referenced
-            found[field.related_model].update(candidates)
+            # Guarded: ``found`` is a defaultdict, so an unguarded ``update`` would mint a
+            # ``(model, set())`` row for a relation that spared everything, and the caller
+            # would enter a fixpoint round over rows that do not exist.
+            if candidates:
+                found[field.related_model].update(candidates)
     return list(found.items())
 
 

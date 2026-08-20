@@ -23,8 +23,8 @@ album, the opposite of ownership, and would emit the cascade rule backwards. A N
 nothing, so a nullable owned relation needs no guard. `to_field` is refused too (`guitars.E002`):
 the rule correlates the key against the target's *primary* key, which also makes [MTI](#mti) work.
 
-Three more shapes are refused by the generator rather than by a check, warned about the way
-the [MTI](#mti) limitation below is, since each depends on the *other* model:
+Three more shapes are refused by the generator rather than by a check, warned about like the
+[MTI](#mti) limitation below since each depends on the *other* model:
 
 - **A target with no `_deleted_at`.** Nothing for the rule to stamp, and unlike a plain
   `ForeignKey` an `OwningForeignKey` has no other purpose, so this is reported not passed over.
@@ -40,9 +40,9 @@ the [MTI](#mti) limitation below is, since each depends on the *other* model:
 ## The last-owner guard
 
 A target another live row still points at **survives**; it is stamped when the last owner goes.
-Unconditional, not derived from whether a `UniqueConstraint` proves single ownership: dropping such
-a constraint changes no field, so the rule's `[SQL:…]` identity would not move and `--check` would
-stay green over an unguarded rule. See [ADR 0011](adr/0011-owner-side-soft-delete-ownership.md).
+Unconditional, not derived from whether a `UniqueConstraint` proves single ownership: dropping one
+changes no field, so the rule's `[SQL:…]` identity would not move and `--check` would stay green
+over an unguarded rule. See [ADR 0011](adr/0011-owner-side-soft-delete-ownership.md).
 
 `hard_delete()` applies the same test in Python, removing an owned row *after* the batch that owned
 it — the reverse of child-first `CASCADE` order, since the owner still references it. Three
@@ -56,7 +56,9 @@ reference *itself* collected later is picked up later; one that stays spared sta
 relation, since one model can hold a `CASCADE` key *and* a plain one to the same target, and at any
 *depth*, a grandchild going along too. Sound only because collection reads keys as the guard does,
 `to_field` column and *base* manager alike. Queryset `hard_delete()` walks neither reverse-FK
-children nor owned relations.
+children nor owned relations. Narrower **per row**, not absolutely: the whole batch being gone by
+construction, a target the per-statement limit below left *live* is still removed — never archived,
+straight to gone. The intended end state, but the one direction the Python side goes further.
 
 Three limits the guard does not cover, all by construction:
 
@@ -65,14 +67,13 @@ Three limits the guard does not cover, all by construction:
 - **Per statement.** PostgreSQL runs an `ON UPDATE` rule's action *before* the original update, so
   every owner soft-deleted by one statement still reads as live to the others' guards:
   `Album.objects.filter(press_kit=kit).delete()` leaves `kit` alive. One at a time stamps it.
-- **Per visible row.** The `NOT EXISTS` is an ordinary `SELECT`, so a [tenant policy](tenancy.md)
-  on the *owner's* table filters it: a live sibling owner in another tenant is invisible, the guard
-  reads "last owner", and a still-owned row is stamped — the one place the kit's guards do not fail
-  safe. `hard_delete()` reads through the same policy and then *removes* the row, which the
-  foreign-key check does not (referential integrity is exempt from RLS), so the transaction aborts
-  at `COMMIT`. It takes a tenanted owner pointing at an **untenanted** target, the one shape where
-  two tenants can legitimately own one row: keep an owned target inside its owner's tenant
-  dimension, or leave both untenanted.
+- **Per visible row.** The `NOT EXISTS` is an ordinary `SELECT`, so a [tenant policy](tenancy.md) on
+  the *owner's* table filters it: a live sibling owner in another tenant is invisible, the guard reads
+  "last owner", and a still-owned row is stamped — the one place the kit's guards do not fail safe.
+  `hard_delete()` reads through the same policy and then *removes* the row, which the foreign-key
+  check does not (integrity is exempt from RLS), so the transaction aborts at `COMMIT`. It takes a
+  tenanted owner pointing at an **untenanted** target: keep an owned target inside its owner's
+  tenant dimension, or leave both untenanted.
 
 ## Rule names, and removing one
 
@@ -82,10 +83,9 @@ two `CASCADE` FKs to one parent gets its second rule suffixed with the FK column
 *owned* rule is suffixed (`soft_delete_owned_<target>_<fk>`) — nothing predates 2.3.0 — and the
 distinct prefix keeps the families apart, a collision being a silent replacement.
 
-No enforcement command retires a rule, cascade rules included. Dropping an `OwningForeignKey`
-therefore fails at `migrate` (the rule depends on the column), and converting one back to a plain
-`ForeignKey` silently leaves it live. Add an explicit
-`DROP RULE "soft_delete_owned_<target>_<fk>" ON "<owner_table>"` to that migration.
+No enforcement command retires a rule, cascade rules included. Dropping an `OwningForeignKey` fails
+at `migrate` (the rule depends on the column), and converting one back to a plain `ForeignKey` leaves
+it live. Add `DROP RULE "soft_delete_owned_<target>_<fk>" ON "<owner_table>"` to that migration.
 
 ## MTI
 

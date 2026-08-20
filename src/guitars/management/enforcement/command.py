@@ -74,8 +74,9 @@ class Command(OperationsMixin, BaseCommand):
         # in-scope app and each sweeps *every* local app's coverage. Safe to cache -- they read
         # only the model registry and GUITARS_TENANT_POLICIES, neither moving mid-`handle()`.
         self._table_app_labels_cache: dict[str, str] | None = None
-        # Lazy, not built here: a caller can register models after construction (the
-        # generation tests do), and the graph has to read the registry as it is when asked.
+        # Lazy, not built here: the graph reads ``self.all_models``, which a caller can *replace*
+        # after construction -- the generation tests do, ``isolate_apps`` swapping ``Options.apps``
+        # rather than the registry this constructor read. Building it here freezes the old answer.
         self._rule_cycle_cache: set[tuple[str, str]] | None = None
         self._required_autofill_cache: dict[tuple[str, str], tuple[str, str]] | None = None
         self._relocated_autofill_cache: dict[tuple[str, str], tuple[str, str]] | None = None

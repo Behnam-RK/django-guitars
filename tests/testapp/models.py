@@ -154,6 +154,20 @@ class Merch(SetarModel):
         return self.description
 
 
+class Patron(SetarModel):
+    """Owns the MTI *root* while ``Merch`` owns its child. Collecting the root removes every
+    table in the chain, so ``Merch.featured_orchestra`` dangles -- and ``get_fields()`` on
+    the root never reports it, only a descendant's does. See ``_still_referenced``."""
+
+    name = CharField(max_length=100)
+    ensemble = OwningForeignKey(
+        Ensemble, on_delete=SET_NULL, null=True, blank=True, related_name='patrons'
+    )
+
+    def __str__(self) -> str:
+        return self.name
+
+
 class Section(SetarModel):
     """Soft-deletable, CASCADE FK to an MTI child -- exercises the cascade rule landing
     on the owner (Ensemble) table, not the child."""

@@ -691,14 +691,15 @@ class OperationsMixin:
 
     @staticmethod
     def _cycle_warning(kind: str, subject: str, fires_on: str, updates: str) -> str:
-        """The shared refusal text for a rule that would close an ON UPDATE cycle. One
-        wording for both rule kinds: the cause and the remedy are identical, and only the
-        subject naming the declaration differs."""
+        """The shared refusal text for a rule that would close an ON UPDATE cycle -- one
+        wording for both kinds, only the subject differing. The two tables are spelled out,
+        not joined by an arrow: a cascade rule's subject *is* the table it updates."""
         return (
-            f"{kind} rule for {subject} -> '{updates}' skipped: it would close a cycle of "
-            f"ON UPDATE rules through '{fires_on}', which PostgreSQL rejects as infinite "
-            'rule recursion on every UPDATE to any table in that cycle -- including a plain '
-            'save(). Break the cycle by cascading one of its steps in Python.'
+            f'{kind} rule for {subject} skipped: it fires on '
+            f"'{fires_on}' and updates '{updates}', closing a cycle of ON UPDATE rules that "
+            'PostgreSQL rejects as infinite rule recursion on every UPDATE to any table in '
+            'that cycle -- including a plain save(). Break the cycle by cascading one of its '
+            'steps in Python.'
         )
 
     @staticmethod

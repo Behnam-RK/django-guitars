@@ -37,7 +37,7 @@ AND NOT EXISTS (
 )
 ```
 
-`hard_delete()` applies the same predicate in Python before removing an owned row, narrowed three ways because it *removes* the row where the rule only stamps a column: it spares the whole collected batch rather than one row; it counts an **archived** referrer as still referring, that row's foreign key being on disk; and it consults **every** foreign key into the target, not just the owning column. All three exist because dropping a still-referenced row fails the deferred constraint at `COMMIT` and takes the transaction with it. Sparing there leaves the target archived — where the rule had already put it.
+`hard_delete()` applies the same predicate in Python before removing an owned row, narrowed three ways because it *removes* the row where the rule only stamps a column: it spares the whole collected batch rather than one row; it counts an **archived** referrer as still referring, that row's foreign key being on disk; and it consults **every** foreign key into the target — not just the owning column, and across every table of an MTI chain, since collecting one row of a chain removes them all. All three exist because dropping a still-referenced row fails the deferred constraint at `COMMIT` and takes the transaction with it. Sparing there leaves the target archived — where the rule had already put it.
 
 ## Why
 

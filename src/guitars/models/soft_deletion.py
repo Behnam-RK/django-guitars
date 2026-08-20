@@ -26,30 +26,61 @@ def _is_mti_model(model: type[Model]) -> bool:
     )
 
 
-def _owned_fields(model: type[Model]) -> list[OwningForeignKey]:
-    """``OwningForeignKey``s that actually carry a rule -- the conditions
-    ``_is_owned_candidate``/``_owned_candidates`` apply, and must: a relation the generator
-    refused has no rule, so following it here destroys what the rule spared."""
+def _owned_fields(
+    model: type[Model], cycles: set[tuple[str, str]] | None = None
+) -> list[OwningForeignKey]:
+    """``OwningForeignKey``s that actually carry a rule: a relation the generator refused has
+    none, so following it here destroys what the rule spared. *cycles* is the graph below,
+    passed in by a caller asking about several models so it is built once."""
     # ``owns_column``, not ``hasattr``: a model with no ``_deleted_at`` at all has no rule to
     # fire, and one inheriting it from an MTI ancestor is refused with a warning, since the
     # rule would fire on a table ``old."<column>"`` cannot reach. See docs/owned-relations.md.
     if not owns_column(model, '_deleted_at'):
         return []
+    # Mirrors the refusals in ``_owned_candidates``/``_owned_operations``: nothing to stamp,
+    # and (below) a rule that would close a cycle of ON UPDATE rules. Neither emits a rule,
+    # so neither is followed -- following one destroys what the rule spared.
+    declared = [
+        field
+        for field in model._meta.local_fields
+        if isinstance(field, OwningForeignKey) and has_column(field.related_model, '_deleted_at')
+    ]
+    # Before the graph, not after: building it sweeps the whole model registry, and most
+    # models declare no ownership at all -- ``hard_delete`` asks this of every collected one.
+    if not declared:
+        return []
     table = model._meta.db_table
     # The same graph the generator refuses cycle edges from -- a self-owning relation is the
     # 1-cycle in it. Shared rather than re-derived, so the two cannot disagree about which
     # relations carry a rule. *model* is named too: it may not be a registered one.
-    cycles = rule_update_cycle_edges([model, *django_apps.get_models()])
+    if cycles is None:
+        cycles = rule_update_cycle_edges([model, *django_apps.get_models()])
     return [
         field
-        for field in model._meta.local_fields
-        # Mirrors the refusals in ``_owned_candidates``/``_owned_operations``: nothing to
-        # stamp, and a rule that would close a cycle of ON UPDATE rules. Neither emits a
-        # rule, so neither is followed -- following one destroys what the rule spared.
-        if isinstance(field, OwningForeignKey)
-        and has_column(field.related_model, '_deleted_at')
-        and (table, column_owner(field.related_model, '_deleted_at')._meta.db_table) not in cycles
+        for field in declared
+        if (table, column_owner(field.related_model, '_deleted_at')._meta.db_table) not in cycles
     ]
+
+
+def _mti_model_chain(model: type[Model]) -> list[type[Model]]:
+    """Every model in *model*'s MTI tree, leaf-first -- the whole tree from the root, not
+    just *model*'s ancestors, since ``hard_delete`` clears the chain from whatever level it
+    was reached at. ``[model]`` for a model with no MTI at all."""
+    root = mti_root(model)
+    chain: list[type[Model]] = []
+    seen: set[type[Model]] = set()
+
+    def _visit(m: type[Model]) -> None:
+        if m in seen:
+            return
+        seen.add(m)
+        for rel in m._meta.related_objects:
+            if getattr(rel, 'parent_link', False):
+                _visit(rel.related_model)  # a more-derived MTI child table
+        chain.append(m)
+
+    _visit(root)  # post-order from the root -> children appended before their parent
+    return chain
 
 
 def _rows(model: type[Model], using: str | None) -> QuerySet:
@@ -67,25 +98,29 @@ def _still_referenced(
     rather than only the one that declared ownership: removing a row is not stamping one, and
     a surviving key of any kind dangles at ``COMMIT`` and fails the deferred constraint."""
     referenced: set = set()
-    # ``include_hidden``: a ``related_name='+'`` foreign key is left out of
-    # ``related_objects``, and its column dangles exactly like any other.
-    for relation in target._meta.get_fields(include_hidden=True):
-        if not (relation.is_relation and relation.auto_created and not relation.concrete):
-            continue
-        # M2M rows live in a through table with no column on `related_model`, and go with the
-        # through row's own CASCADE. An MTI parent-link is the same object one table down,
-        # collected with the chain -- counting it would spare every owned MTI row forever.
-        if relation.many_to_many or getattr(relation, 'parent_link', False):
-            continue
-        related_model = cast('type[Model]', relation.related_model)
-        attname = relation.field.attname  # ty: ignore[unresolved-attribute]
-        rows = _rows(related_model, using).filter(**{f'{attname}__in': pks})
-        going = claimed.get(related_model, set())
-        if going:
-            rows = rows.exclude(pk__in=going)
-        referenced.update(rows.values_list(attname, flat=True))
-        if referenced >= pks:  # nothing left to spare; skip the remaining relations
-            break
+    # Every model in *target*'s MTI tree, not *target* alone: collecting it removes the whole
+    # table chain, so a key into any other level holds the same pk value and dangles just as
+    # hard -- and ``get_fields`` reports only the level it is asked about.
+    for level in _mti_model_chain(target):
+        # ``include_hidden``: a ``related_name='+'`` foreign key is left out of
+        # ``related_objects``, and its column dangles exactly like any other.
+        for relation in level._meta.get_fields(include_hidden=True):
+            if not (relation.is_relation and relation.auto_created and not relation.concrete):
+                continue
+            # M2M rows live in a through table with no column on `related_model`, and go with
+            # the through row's own CASCADE. An MTI parent-link is the same object one table
+            # down, collected with the chain -- counting it would spare every owned MTI row.
+            if relation.many_to_many or getattr(relation, 'parent_link', False):
+                continue
+            related_model = cast('type[Model]', relation.related_model)
+            attname = relation.field.attname  # ty: ignore[unresolved-attribute]
+            rows = _rows(related_model, using).filter(**{f'{attname}__in': pks})
+            going = claimed.get(related_model, set())
+            if going:
+                rows = rows.exclude(pk__in=going)
+            referenced.update(rows.values_list(attname, flat=True))
+            if referenced >= pks:  # nothing left to spare; skip the remaining relations
+                return referenced
     return referenced
 
 
@@ -96,8 +131,12 @@ def _owned_targets(
     ``NOT EXISTS``, narrowed three ways below because this *removes* the row where the rule
     only stamps a column. *claimed* is every row going away, not one group's; see below."""
     found: dict[type[Model], set] = defaultdict(set)
+    # Once per call, not once per claimed model: the graph is registry-wide and identical for
+    # every one of them, and ``hard_delete`` runs this to a fixpoint. The claimed models are
+    # named alongside the registry for the same reason ``_owned_fields`` names its own.
+    cycles = rule_update_cycle_edges([*claimed, *django_apps.get_models()])
     for model, pks in claimed.items():
-        for field in _owned_fields(model):
+        for field in _owned_fields(model, cycles):
             owned_pks = set(
                 _rows(model, using)
                 .filter(pk__in=pks)
@@ -126,22 +165,9 @@ def _mti_table_chain(model: type[Model]) -> list[tuple[str, str]]:
             raise TypeError(f'{m!r} has no primary key column')
         return column
 
-    root = mti_root(model)
-
-    chain: list[tuple[str, str]] = []
-    seen: set[type[Model]] = set()
-
-    def _visit(m: type[Model]) -> None:
-        if m in seen:
-            return
-        seen.add(m)
-        for rel in m._meta.related_objects:
-            if getattr(rel, 'parent_link', False):
-                _visit(rel.related_model)  # a more-derived MTI child table
-        chain.append((m._meta.db_table, _pk_column(m)))
-
-    _visit(root)  # post-order from the root -> children appended before their parent
-    return chain
+    # One traversal, shared with ``_still_referenced``: the set of tables a chain's rows live
+    # in and the set of models whose referrers hold those rows back have to be the same one.
+    return [(m._meta.db_table, _pk_column(m)) for m in _mti_model_chain(model)]
 
 
 class LiveQuerySet(QuerySet):

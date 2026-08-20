@@ -53,14 +53,14 @@ unguarded rule. See [ADR 0011](adr/0011-owner-side-soft-delete-ownership.md).
 
 `hard_delete()` applies the same test in Python, removing an owned row *after* the batch that
 owned it — the reverse of the child-first `CASCADE` order, since the owner still references
-it. Three deliberate narrowings, because it *removes* the row where the rule only
-stamps a column: the whole batch is spared rather than one row; an **archived** referrer
-still counts, its key being on disk; and **any** surviving foreign key holds the row back,
-not only the owning column. All three exist because dropping a still-referenced row fails
-the deferred constraint at `COMMIT`. Collection runs to a fixpoint, so a row spared by a
-reference that is *itself* collected later is picked up on a later pass. A row that stays
-spared stays archived. Queryset-level `hard_delete()` walks neither reverse-FK children nor
-owned relations.
+it. Three deliberate narrowings, because it *removes* the row where the rule only stamps a
+column: the whole batch is spared rather than one row; an **archived** referrer still counts,
+its key being on disk; and **any** surviving foreign key holds the row back — not only the
+owning column, and at *any* level of an MTI chain, one row of which cannot be collected
+without every table in it. All three exist because dropping a still-referenced row fails the
+deferred constraint at `COMMIT`. Collection runs to a fixpoint, so a row spared by a reference
+that is *itself* collected later is picked up on a later pass; a row that stays spared stays
+archived. Queryset `hard_delete()` walks neither reverse-FK children nor owned relations.
 
 Two limits the guard does not cover, both by construction:
 

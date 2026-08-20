@@ -11,7 +11,15 @@ from django.test.utils import isolate_apps
 from guitars.introspection import rule_update_cycle_edges
 from guitars.models import OwningForeignKey, SetarModel
 from guitars.models.soft_deletion import _owned_fields
-from tests.testapp.models import Album, Band, Ensemble, Merch, Orchestra, PressKit
+from tests.testapp.models import (
+    Album,
+    Band,
+    Ensemble,
+    Merch,
+    Orchestra,
+    Patron,
+    PressKit,
+)
 
 
 @pytest.fixture
@@ -515,3 +523,19 @@ def test_a_subclass_of_owning_foreign_key_keeps_its_own_deconstructed_path():
     assert NarrowOwningForeignKey(PressKit, on_delete=SET_NULL).deconstruct()[1].endswith(
         'NarrowOwningForeignKey'
     )
+
+
+@pytest.mark.django_db(transaction=True)
+def test_hard_delete_spares_an_owned_mti_row_referenced_at_another_level(band):
+    """Collecting an owned MTI row removes *every* table in its chain, so a key into any
+    level of it dangles. The patron owns the root while the merch points at the child, and
+    ``get_fields()`` on the root reports only the root's referrers -- never the child's."""
+    album = Album.objects.create(title='Hemispheres', band=band)
+    orchestra = Orchestra.objects.create(name='LSO', conductor='Davis')
+    Merch.objects.create(description='Tour shirt', album=album, featured_orchestra=orchestra)
+    patron = Patron.objects.create(name='Trust', ensemble_id=orchestra.pk)
+
+    patron.hard_delete()
+
+    assert Ensemble._all_objects.filter(pk=orchestra.pk).exists()
+    assert Orchestra._all_objects.filter(pk=orchestra.pk).exists()

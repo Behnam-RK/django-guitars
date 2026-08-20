@@ -63,7 +63,9 @@ class Command(OperationsMixin, BaseCommand):
         self.tenant_autofill_dependencies: dict[str, tuple[str, str]] = {}
         self.tenant_autofill_sql: dict[str, str | None] = {}
 
-        # Cross-app / MTI cascade rules skipped this run, surfaced as warnings (not silent).
+        # Rules skipped this run, surfaced as warnings (not silent): cross-app / MTI cascade
+        # rules, the owned rules whose three shapes the generator refuses, and either kind
+        # refused for closing an ON UPDATE rule cycle. One list, one report loop.
         self._mti_cascade_warnings: list[str] = []
         # Two relations whose rules would share one name on one table. Emitted anyway -- the
         # cascade spelling is frozen -- so the report is the only thing standing between a
@@ -497,7 +499,6 @@ class Command(OperationsMixin, BaseCommand):
             *((self.style.ERROR, note) for note in self._rule_name_clashes),
         ]:
             self.stderr.write(paint(note))
-        self._refuse_a_rule_name_clash(check_only=check_only)
 
         # Tables tenancy could not cover, and why. Skips are design, never silent -- so the
         # relocation refusals print here too, not only via `expected_coverage`. Once per run,
@@ -510,6 +511,11 @@ class Command(OperationsMixin, BaseCommand):
         # an orphaned function is inert, an unmapped table has no app to migrate into.
         for note in self._unmapped_autofill_notes() + self._orphaned_autofill_function_notes():
             self.stdout.write(self.style.WARNING(note))
+
+        # After every note above, for the reason `function_check_messages` is collected rather
+        # than raised in place: a run with two problems must report both, and this one raises.
+        # Before `_report_missing`, which also raises -- a clash is the more fundamental.
+        self._refuse_a_rule_name_clash(check_only=check_only)
 
         if check_missing or function_check_messages:
             self._report_missing(check_missing, function_check_messages)

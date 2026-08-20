@@ -2,6 +2,8 @@
 fires when the *owner* holds the foreign key, and the last-owner guard that keeps it from
 archiving something a sibling owner still points at."""
 
+import re
+
 import pytest
 from django.apps import apps as django_apps
 from django.db import connection, models
@@ -846,3 +848,24 @@ def test_owned_targets_rechecks_a_target_whose_sibling_was_spared():
         with connection.schema_editor() as schema_editor:
             for model in (Flyer, Sponsor, Kit):
                 schema_editor.delete_model(model)
+
+
+def test_hard_delete_follows_exactly_the_relations_the_generator_emits_rules_for():
+    """The invariant CLAUDE.md states in prose, asserted over the whole registry: following in
+    Python what the generator refused destroys what the rule spared, and sparing what it emits
+    strands the row. Only the *cycle* half is structurally shared; this covers the rest."""
+    from guitars.management.enforcement.command import Command
+
+    command = Command()
+    mismatched = {}
+    for model in django_apps.get_models():
+        command.existing.soft_delete_owned.clear()
+        command._mti_cascade_warnings.clear()
+        emitted = set(
+            re.findall(r'via "([^"]+)"!', '\n'.join(command._owned_operations(model)))
+        )
+        followed = {field.column for field in _owned_fields(model)}
+        if emitted != followed:
+            mismatched[model._meta.label] = (sorted(emitted), sorted(followed))
+
+    assert mismatched == {}

@@ -259,15 +259,25 @@ def test_cascade_operation_warns_when_related_model_is_mti_child_without_own_del
 
 
 def test_owned_rule_name_folds_a_hostile_schema_qualified_table_like_its_cascade_twin():
-    """Same length-prefixed folding as ``_related_rule_name``, under its own prefix -- a
-    rule is namespaced by name alone, so the two families must not be able to meet."""
+    """Same length-prefixed folding as ``_related_rule_name``'s stem, under its own prefix -- a
+    rule is namespaced by name alone, so the two families must not be able to meet. The FK is
+    length-prefixed as well, which the frozen cascade spelling cannot be."""
     assert (
         operations_module._owned_rule_name('analytics.Weird Table', 'kit_id')
-        == '"soft_delete_owned_9_analytics_Weird Table_kit_id"'
+        == '"soft_delete_owned_9_analytics_Weird Table_6_kit_id"'
     )
     assert operations_module._owned_rule_name(
         'tenant_a.events', 'kit_id'
     ) != operations_module._owned_rule_name('tenant.a_events', 'kit_id')
+
+
+def test_owned_rule_name_separates_a_table_and_column_split_two_ways():
+    """The ambiguity the length prefix exists for: ``('shop_press_kit', 'kit_id')`` and
+    ``('shop_press', 'kit_kit_id')`` concatenate to one string. Two owned rules on one owner
+    table would then share a name, and the second `CREATE OR REPLACE` replaces the first."""
+    assert operations_module._owned_rule_name(
+        'shop_press_kit', 'kit_id'
+    ) != operations_module._owned_rule_name('shop_press', 'kit_kit_id')
 
 
 def test_owned_operations_emit_only_for_owning_foreign_keys():
@@ -294,8 +304,8 @@ def test_owned_operations_name_one_rule_per_foreign_key_column():
 
     blob = '\n'.join(command._owned_operations(Album))
 
-    assert 'RULE "soft_delete_owned_testapp_presskit_press_kit_id"' in blob
-    assert 'RULE "soft_delete_owned_testapp_presskit_alt_press_kit_id"' in blob
+    assert 'RULE "soft_delete_owned_testapp_presskit_12_press_kit_id"' in blob
+    assert 'RULE "soft_delete_owned_testapp_presskit_16_alt_press_kit_id"' in blob
     assert 'via "press_kit_id"!' in blob
     assert 'via "alt_press_kit_id"!' in blob
 
@@ -462,7 +472,7 @@ def test_owned_operations_under_adopt_stay_a_plain_create_or_replace():
 
     blob = '\n'.join(command._owned_operations(Album, adopt=True))
 
-    assert 'CREATE OR REPLACE RULE "soft_delete_owned_testapp_presskit_press_kit_id"' in blob
+    assert 'CREATE OR REPLACE RULE "soft_delete_owned_testapp_presskit_12_press_kit_id"' in blob
     assert 'DROP RULE IF EXISTS' not in blob
 
 
@@ -1630,3 +1640,54 @@ def test_cascade_operation_warns_when_an_owned_rule_closes_the_cycle():
     assert kinds == ['Cascade', 'Owned']
     for warning in command._mti_cascade_warnings:
         assert 'cycle of ON UPDATE rules' in warning
+
+
+def test_cascade_operations_report_two_relations_that_would_share_a_rule_name():
+    """The frozen cascade spelling joins its FK suffix plainly, so a child table named exactly
+    another child's ``<table>_<column>`` names one rule twice. It cannot be renamed -- 0.x
+    shipped it and no command retires a rule -- so the clash is reported instead of silent."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Parent(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Child(SetarModel):
+            # `a_id` sorts first, so it is the primary FK and keeps the bare form; `b_id`
+            # is the one that gets the suffixed spelling this test is about.
+            a = models.ForeignKey(Parent, on_delete=CASCADE, related_name='firsts')
+            b = models.ForeignKey(Parent, on_delete=CASCADE, related_name='bs')
+
+            class Meta:
+                app_label = 'testapp'
+                db_table = 'c_a'
+
+        class Namesake(SetarModel):
+            parent = models.ForeignKey(Parent, on_delete=CASCADE, related_name='namesakes')
+
+            class Meta:
+                app_label = 'testapp'
+                # `soft_delete_related_c_a` + `_b_id` is this table's own bare name.
+                db_table = 'c_a_b_id'
+
+        command = Command()
+        command._rule_name_clashes.clear()
+        command.existing.soft_delete_related.clear()
+        command.all_models = [Parent, Child, Namesake]
+        command.reverse_relations_mapping[Parent] = {
+            (Child, Child._meta.get_field('a'), CASCADE),
+            (Child, Child._meta.get_field('b'), CASCADE),
+            (Namesake, Namesake._meta.get_field('parent'), CASCADE),
+        }
+        return command, command._cascade_operations(Parent)
+
+    command, ops = _build()
+
+    # Emitted anyway: what ships works for one of the two, which is the whole problem.
+    assert len(ops) == 3
+    assert len(command._rule_name_clashes) == 1
+    clash = command._rule_name_clashes[0]
+    assert 'soft_delete_related_c_a_b_id' in clash
+    assert "'c_a' via 'b_id'" in clash and "'c_a_b_id'" in clash
+    assert 'the second replaces the first' in clash

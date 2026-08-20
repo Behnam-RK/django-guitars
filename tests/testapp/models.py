@@ -1,5 +1,6 @@
 from django.db.models import (
     CASCADE,
+    DO_NOTHING,
     SET_NULL,
     CharField,
     ForeignKey,
@@ -88,10 +89,10 @@ class Album(SetarModel):
     # Two owned FKs to one table: the owned rule is always named after its column, so these
     # must produce two distinctly-named rules rather than one silently replacing the other.
     press_kit = OwningForeignKey(
-        PressKit, on_delete=SET_NULL, null=True, blank=True, related_name='albums'
+        PressKit, on_delete=DO_NOTHING, null=True, blank=True, related_name='albums'
     )
     alt_press_kit = OwningForeignKey(
-        PressKit, on_delete=SET_NULL, null=True, blank=True, related_name='alt_albums'
+        PressKit, on_delete=DO_NOTHING, null=True, blank=True, related_name='alt_albums'
     )
 
     def __str__(self) -> str:
@@ -115,7 +116,7 @@ class Orchestra(Ensemble):
     # Owned FK on an MTI child's own table while _deleted_at lives on Ensemble: the rule
     # would fire on the ancestor, where old."programme_id" names nothing. Warns, emits nothing.
     programme = OwningForeignKey(
-        'PressKit', on_delete=SET_NULL, null=True, blank=True, related_name='orchestras'
+        'PressKit', on_delete=DO_NOTHING, null=True, blank=True, related_name='orchestras'
     )
 
     class Meta:
@@ -147,7 +148,7 @@ class Merch(SetarModel):
     # Owned dependent reached through MTI: Orchestra's _deleted_at lives on Ensemble, and the
     # rule must correlate against that table -- an MTI chain shares one primary-key value.
     featured_orchestra = OwningForeignKey(
-        Orchestra, on_delete=SET_NULL, null=True, blank=True, related_name='featured_by'
+        Orchestra, on_delete=DO_NOTHING, null=True, blank=True, related_name='featured_by'
     )
 
     def __str__(self) -> str:
@@ -161,7 +162,7 @@ class Patron(SetarModel):
 
     name = CharField(max_length=100)
     ensemble = OwningForeignKey(
-        Ensemble, on_delete=SET_NULL, null=True, blank=True, related_name='patrons'
+        Ensemble, on_delete=DO_NOTHING, null=True, blank=True, related_name='patrons'
     )
 
     def __str__(self) -> str:

@@ -70,32 +70,45 @@ class _OperationRow(NamedTuple):
     adopt: str | list[str] | None = None
 
 
-def _rule_name(prefix: str, table: str, foreign_key: str | None) -> str:
-    """A soft-delete rule's identifier, NAMEDATALEN-truncated before quoting. Schema folded in
-    **length-prefixed**, not underscore-joined -- plain ``f'{schema}_{table}'`` would let
-    ``('tenant_a', 'events')`` and ``('tenant', 'a_events')`` collide on one name."""
+def _rule_stem(prefix: str, table: str) -> str:
+    """``<prefix>_<table>``, schema folded in **length-prefixed** rather than underscore-joined:
+    plain ``f'{schema}_{table}'`` lets ``('tenant_a', 'events')`` and ``('tenant', 'a_events')``
+    collide on one name."""
     schema, bare_table = _identifiers._split_qualified('table', table)
-    name = (
+    return (
         f'{prefix}_{bare_table}'
         if schema is None
         else f'{prefix}_{len(schema)}_{schema}_{bare_table}'
     )
-    if foreign_key is not None:
-        name = f'{name}_{foreign_key}'
-    return _identifiers._safe_ident(name)
 
 
 def _related_rule_name(related_table: str, foreign_key: str | None = None) -> str:
-    """The inbound cascade rule's identifier. One FK per pair keeps the bare, unsuffixed form
-    for backward compatibility, so *foreign_key* is optional here and required for owned."""
-    return _rule_name('soft_delete_related', related_table, foreign_key)
+    """The inbound cascade rule's identifier, NAMEDATALEN-truncated before quoting. One FK per
+    pair keeps the bare, unsuffixed form for backward compatibility, so *foreign_key* is
+    optional here and required for owned."""
+    # Plain-joined, ambiguous the way the stem is not -- and frozen: this spelling shipped in
+    # 0.x, and since no command retires a rule, renaming it would leave every migrated project
+    # with the old rule live beside the new. ``_claim_rule_name`` reports a clash instead.
+    stem = _rule_stem('soft_delete_related', related_table)
+    return _identifiers._safe_ident(stem if foreign_key is None else f'{stem}_{foreign_key}')
 
 
 def _owned_rule_name(dependent_table: str, foreign_key: str) -> str:
-    """The owned rule's identifier, always FK-suffixed: nothing predates 2.3.0 to stay
-    compatible with, and two owned FKs to one table must not collide. The prefix differs
-    because a rule is namespaced by name alone -- a shared one would silently replace."""
-    return _rule_name('soft_delete_owned', dependent_table, foreign_key)
+    """The owned rule's identifier: always FK-suffixed, and length-prefixed like the stem's
+    schema, so no two ``(table, foreign_key)`` pairs can name one rule. Nothing predates 2.3.0,
+    so this form is unambiguous by construction rather than reported after the fact."""
+    # The prefix differs from the cascade family for the same reason: a rule is namespaced per
+    # table by name alone, so a shared name is a silent replacement, never an error.
+    stem = _rule_stem('soft_delete_owned', dependent_table)
+    return _identifiers._safe_ident(f'{stem}_{len(foreign_key)}_{foreign_key}')
+
+
+def _rule_key_label(key: tuple) -> str:
+    """An operation key as prose for a clash report, phrased like the headers: the other table
+    and the column, never which of the two holds it -- the cascade family keys the column to
+    the child and the owned family to the owner, and the report names the table separately."""
+    other, _table, foreign_key = key
+    return f"'{other}' via '{foreign_key}'" if foreign_key else f"'{other}'"
 
 
 class OperationsMixin:
@@ -110,6 +123,8 @@ class OperationsMixin:
         style: Style
         _tenancy_notes: list[str]
         _mti_cascade_warnings: list[str]
+        _rule_name_clashes: list[str]
+        _claimed_rule_names: dict[tuple[str, str], tuple]
         trigger_function_dependency: tuple[str, str] | None
         parent_trigger_function_dependency: tuple[str, str] | None
         tenant_autofill_dependencies: dict[str, tuple[str, str]]
@@ -772,6 +787,19 @@ class OperationsMixin:
             candidates.append((related_model, fk_field, is_primary))
         return candidates
 
+    def _claim_rule_name(self, table: str, rule_name: str, key: tuple) -> None:
+        """Record that *key*'s rule is called *rule_name* on *table*, reporting a second, different
+        key that resolves to the same pair. A rule is namespaced per table by name alone, so the
+        second ``CREATE OR REPLACE`` replaces the first -- silently, ``--check`` staying green."""
+        claimed = self._claimed_rule_names.setdefault((table, rule_name), key)
+        if claimed != key:
+            self._rule_name_clashes.append(
+                f"Rule {rule_name} on '{table}' is named by both {_rule_key_label(claimed)} "
+                f'and {_rule_key_label(key)}. PostgreSQL keeps one rule per name per table, so '
+                'the second replaces the first and that relation stops cascading. Rename a '
+                'column or a table so the two names differ.'
+            )
+
     def _cascade_operations(self, model: type[models.Model], *, adopt: bool = False) -> list[str]:
         """Cascade soft-delete rules for CASCADE FKs pointing at *model*. Lives on the table
         whose ``_deleted_at`` actually flips: *model*'s own, or the owning MTI ancestor --
@@ -809,6 +837,7 @@ class OperationsMixin:
                     foreign_key=_identifiers._escape_ident(fk_field.column),
                 )
                 rule_name = _related_rule_name(related_table, fk_field.column)
+            self._claim_rule_name(owner_table, rule_name, key)
             # One template pair for both cases -- see soft_delete.py's private
             # _CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE for why the public, frozen constants
             # of the same name (the old rule_name-less signature) aren't used here.
@@ -954,6 +983,7 @@ class OperationsMixin:
                 foreign_key=ident_foreign_key,
             )
             rule_name = _owned_rule_name(dependent_table, fk_field.column)
+            self._claim_rule_name(owner_table, rule_name, key)
             forward = _soft_delete._CREATE_SOFT_DELETE_OWNED_OBJECT_RULE.format(
                 rule_name=rule_name,
                 table=ident_owner_table,

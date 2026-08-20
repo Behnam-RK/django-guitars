@@ -75,18 +75,6 @@ Three limits the guard does not cover, all by construction:
   tenanted owner pointing at an **untenanted** target: keep an owned target inside its owner's
   tenant dimension, or leave both untenanted.
 
-## Rule names, and removing one
-
-A rule name is the only thing PostgreSQL dedupes on, not what it references. An inbound child with
-two `CASCADE` FKs to one parent gets its second rule suffixed with the FK column
-(`soft_delete_related_<child>_<fk>`), the first keeping the bare name for compatibility. Every
-*owned* rule is suffixed (`soft_delete_owned_<target>_<fk>`) — nothing predates 2.3.0 — and the
-distinct prefix keeps the families apart, a collision being a silent replacement.
-
-No enforcement command retires a rule, cascade rules included. Dropping an `OwningForeignKey` fails
-at `migrate` (the rule depends on the column), and converting one back to a plain `ForeignKey` leaves
-it live. Add `DROP RULE "soft_delete_owned_<target>_<fk>" ON "<owner_table>"` to that migration.
-
 ## MTI
 
 Ownership *into* an MTI child works: the key holds the primary-key value every table in the chain
@@ -96,5 +84,8 @@ ancestor's table, where `old."<column>"` cannot name a column the child holds; s
 
 ## Related
 
-- [Soft deletion](soft-deletion.md) · [Migrations](migrations.md) · [MTI](mti.md) ·
+- [Migrations](migrations.md#rule-names) — what the rules are named, and why one family's
+  spelling is frozen while the owned one is unambiguous. Nothing retires a rule: relaxing an
+  `OwningForeignKey` to a plain `ForeignKey` leaves it live, and wants a hand-written `DROP RULE`.
+- [Soft deletion](soft-deletion.md) · [MTI](mti.md) ·
   [ADR 0011](adr/0011-owner-side-soft-delete-ownership.md) — the two design decisions

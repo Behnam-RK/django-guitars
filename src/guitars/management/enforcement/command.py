@@ -65,6 +65,11 @@ class Command(OperationsMixin, BaseCommand):
 
         # Cross-app / MTI cascade rules skipped this run, surfaced as warnings (not silent).
         self._mti_cascade_warnings: list[str] = []
+        # Two relations whose rules would share one name on one table. Emitted anyway -- the
+        # cascade spelling is frozen -- so the report is the only thing standing between a
+        # silent replacement and the operator. See ``_claim_rule_name``.
+        self._rule_name_clashes: list[str] = []
+        self._claimed_rule_names: dict[tuple[str, str], tuple] = {}
         # Tables tenancy discovery could not cover, with the reason. Also surfaced.
         self._tenancy_notes: list[str] = []
 
@@ -475,9 +480,14 @@ class Command(OperationsMixin, BaseCommand):
         ):
             self.stdout.write(self.style.WARNING(note))
 
-        # Surface MTI cascade rules skipped because cascading INTO an MTI child is unsupported.
-        for note in self._mti_cascade_warnings:
-            self.stderr.write(self.style.WARNING(note))
+        # MTI cascade rules skipped as warnings; two relations sharing a rule name as an error,
+        # that one being *emitted* rather than skipped -- what ships works for one of the pair
+        # and `--check` cannot see the other is gone. One loop, so neither can go unwritten.
+        for paint, note in [
+            *((self.style.WARNING, note) for note in self._mti_cascade_warnings),
+            *((self.style.ERROR, note) for note in self._rule_name_clashes),
+        ]:
+            self.stderr.write(paint(note))
 
         # Tables tenancy could not cover, and why. Skips are design, never silent -- so the
         # relocation refusals print here too, not only via `expected_coverage`. Once per run,

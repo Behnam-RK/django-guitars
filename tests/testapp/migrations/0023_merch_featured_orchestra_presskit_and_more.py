@@ -16,7 +16,7 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name='merch',
             name='featured_orchestra',
-            field=guitars.models.OwningForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='featured_by', to='testapp.orchestra'),
+            field=guitars.models.OwningForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.DO_NOTHING, related_name='featured_by', to='testapp.orchestra'),
         ),
         migrations.CreateModel(
             name='PressKit',
@@ -36,16 +36,16 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name='album',
             name='alt_press_kit',
-            field=guitars.models.OwningForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='alt_albums', to='testapp.presskit'),
+            field=guitars.models.OwningForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.DO_NOTHING, related_name='alt_albums', to='testapp.presskit'),
         ),
         migrations.AddField(
             model_name='album',
             name='press_kit',
-            field=guitars.models.OwningForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='albums', to='testapp.presskit'),
+            field=guitars.models.OwningForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.DO_NOTHING, related_name='albums', to='testapp.presskit'),
         ),
         migrations.AddField(
             model_name='orchestra',
             name='programme',
-            field=guitars.models.OwningForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='orchestras', to='testapp.presskit'),
+            field=guitars.models.OwningForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.DO_NOTHING, related_name='orchestras', to='testapp.presskit'),
         ),
     ]

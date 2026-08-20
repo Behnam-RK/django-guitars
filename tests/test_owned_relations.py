@@ -163,6 +163,27 @@ def test_soft_deleting_the_owner_soft_deletes_what_it_owns(band):
     assert PressKit._archives.filter(pk=kit.pk).exists()
 
 
+@pytest.mark.django_db(transaction=True)
+def test_archiving_the_target_leaves_the_owning_key_on_disk(band):
+    """Why every owned field here declares ``DO_NOTHING`` and the docs say not to reach for
+    ``SET_NULL``: that would have Django's ``Collector`` clear the column before the rule
+    rewrote the ``DELETE``, leaving the archived row unreachable from the owners that held it."""
+    kit = PressKit.objects.create(headline='Hemispheres, reissued')
+    kit_pk = kit.pk
+    album = Album.objects.create(title='Hemispheres', band=band, press_kit=kit)
+
+    kit.delete()  # the *target*, not the owner
+
+    album.refresh_from_db()
+    assert album.press_kit_id == kit_pk
+    assert PressKit._archives.filter(pk=kit_pk).exists()
+
+    # And so the archived row is still collectable, which is the point of keeping the key.
+    album.hard_delete()
+
+    assert not PressKit._all_objects.filter(pk=kit_pk).exists()
+
+
 @pytest.mark.django_db
 def test_a_null_owned_foreign_key_is_a_no_op(band):
     """``WHERE id = old.press_kit_id`` matches nothing when the column is NULL, which is why

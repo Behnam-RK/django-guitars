@@ -9,7 +9,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('testapp', '0024_auto_enforcement'),
+        ('testapp', '0023_merch_featured_orchestra_presskit_and_more'),
     ]
 
     operations = [
@@ -21,7 +21,7 @@ class Migration(migrations.Migration):
                 ('_created_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Created at')),
                 ('_updated_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Updated at')),
                 ('name', models.CharField(max_length=100)),
-                ('ensemble', guitars.models.OwningForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='patrons', to='testapp.ensemble')),
+                ('ensemble', guitars.models.OwningForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.DO_NOTHING, related_name='patrons', to='testapp.ensemble')),
             ],
             options={
                 'abstract': False,

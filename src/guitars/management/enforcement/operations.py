@@ -860,13 +860,13 @@ class OperationsMixin:
         )
 
     def _owned_candidates(
-        self, model: type[models.Model], owner_table: str
+        self, model: type[models.Model], owner_table: str, declared: list[models.ForeignKey]
     ) -> list[models.ForeignKey]:
-        """``OwningForeignKey``s declared on *model*, in column order. Skipped with a warning
-        where *model* inherits ``_deleted_at``: the rule fires on the ancestor's table, which
-        ``old."<column>"`` cannot reach -- the twin of ``_cascade_candidates``' limitation."""
+        """``OwningForeignKey``s declared on *model*, in column order; *declared* is passed in,
+        the caller needing the same list first. Skipped with a warning where *model* inherits
+        ``_deleted_at``: the rule fires on an ancestor's table ``old."<column>"`` cannot reach."""
         candidates: list[models.ForeignKey] = []
-        for fk_field in self._declared_owning_fields(model):
+        for fk_field in declared:
             # A target with no ``_deleted_at`` has nothing to stamp. Warned rather than
             # skipped in silence: unlike a plain CASCADE FK, an OwningForeignKey has no
             # other purpose, so a declaration that generates nothing is a misconfiguration.
@@ -918,7 +918,7 @@ class OperationsMixin:
         header_owner_table = _identifiers._escape_ident(owner_table)
 
         ops: list[str] = []
-        for fk_field in self._owned_candidates(model, owner_table):
+        for fk_field in self._owned_candidates(model, owner_table, declared):
             # The dependent's own ``_deleted_at`` may live on an MTI ancestor, and
             # correlating against that ancestor's table is still right: every table in a
             # chain shares one primary-key *value*, which is exactly what the FK holds.

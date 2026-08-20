@@ -647,3 +647,45 @@ def test_hard_delete_spares_an_owned_mti_row_referenced_at_another_level(band):
 
     assert Ensemble._all_objects.filter(pk=orchestra.pk).exists()
     assert Orchestra._all_objects.filter(pk=orchestra.pk).exists()
+
+
+@pytest.mark.django_db(transaction=True)
+@isolate_apps('tests.testapp')
+def test_hard_delete_collects_a_cascade_child_behind_a_hidden_related_name():
+    """``related_name='+'`` keeps a reverse relation out of ``_meta.related_objects``, not its
+    column out of the table. Left uncollected the child sat there soft-deleted, its key pointing
+    at a removed row -- the guard discounts CASCADE *because* collection follows it, hidden too."""
+
+    class Playbill(SetarModel):
+        class Meta:
+            app_label = 'testapp'
+
+    class Insert(SetarModel):
+        playbill = models.ForeignKey(Playbill, on_delete=CASCADE, related_name='+')
+
+        class Meta:
+            app_label = 'testapp'
+
+    with connection.schema_editor() as schema_editor:
+        for model in (Playbill, Insert):
+            schema_editor.create_model(model)
+    try:
+        with connection.cursor() as cursor:
+            for model in (Playbill, Insert):
+                cursor.execute(
+                    sql.CREATE_SOFT_DELETE_RULE.format(
+                        table=_identifiers._quote_table(model._meta.db_table),
+                        primary_key=_identifiers._escape_ident('id'),
+                    )
+                )
+        playbill = Playbill.objects.create()
+        Insert.objects.create(playbill=playbill)
+
+        playbill.hard_delete()
+
+        assert not Playbill._all_objects.exists()
+        assert not Insert._all_objects.exists()
+    finally:
+        with connection.schema_editor() as schema_editor:
+            for model in (Insert, Playbill):
+                schema_editor.delete_model(model)

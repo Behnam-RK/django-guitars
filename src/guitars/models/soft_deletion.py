@@ -117,6 +117,20 @@ def _key_values(level: type[Model], field: Field, pks: set, using: str | None) -
     return dict(_rows(level, using).filter(pk__in=pks).values_list(target.attname, 'pk'))
 
 
+def _referring_relations(model: type[Model]) -> list:
+    """Every reverse relation with a *column* pointing at *model* -- the one walk ``_collect``
+    and :func:`_still_referenced` share, so what is collected and what holds a row back cannot
+    disagree. ``include_hidden``: a ``related_name='+'`` key dangles too. M2M rels own none."""
+    return [
+        relation
+        for relation in model._meta.get_fields(include_hidden=True)
+        if relation.is_relation
+        and relation.auto_created
+        and not relation.concrete
+        and not relation.many_to_many
+    ]
+
+
 def _still_referenced(
     target: type[Model], pks: set, claimed: dict[type[Model], set], using: str | None
 ) -> set:
@@ -128,23 +142,17 @@ def _still_referenced(
     # table chain, so a key into any other level holds the same pk value and dangles just as
     # hard -- and ``get_fields`` reports only the level it is asked about.
     for level in _mti_model_chain(target):
-        # ``include_hidden``: a ``related_name='+'`` foreign key is left out of
-        # ``related_objects``, and its column dangles exactly like any other.
-        for relation in level._meta.get_fields(include_hidden=True):
-            if not (relation.is_relation and relation.auto_created and not relation.concrete):
+        for relation in _referring_relations(level):
+            # A parent-link is the same object one table down, collected with the chain.
+            if getattr(relation, 'parent_link', False):
                 continue
-            # A ManyToManyRel owns no column; the through table's key arrives as a separate
-            # hidden relation, counted below -- nothing collects a through row for an owned
-            # target. A parent-link is the same object one table down, collected with the chain.
-            if relation.many_to_many or getattr(relation, 'parent_link', False):
-                continue
-            # A CASCADE referrer `_collect` follows is collected *with* the target, so nothing
-            # of it survives to dangle. Discounted here, not left to the fixpoint: it is only
-            # ever collected as a consequence of collecting the row it would hold back.
-            if getattr(relation, 'on_delete', None) is CASCADE and not relation.hidden:
+            # A CASCADE referrer `_collect` follows is collected *with* the target, hidden or
+            # not -- it reads this same list. Discounted here, not left to the fixpoint: it is
+            # collected only as a consequence of collecting the row it would hold back.
+            if getattr(relation, 'on_delete', None) is CASCADE:
                 continue
             related_model = cast('type[Model]', relation.related_model)
-            field = cast('Field', relation.field)  # ty: ignore[unresolved-attribute]
+            field = cast('Field', relation.field)
             attname = field.attname
             keys = _key_values(level, field, pks, using)
             if not keys:
@@ -166,10 +174,12 @@ def _owned_targets(
     ``NOT EXISTS``, narrowed three ways below because this *removes* the row where the rule
     only stamps a column. *claimed* is every row going away, not one group's; see below."""
     found: dict[type[Model], set] = defaultdict(set)
-    # The cheap half of the question first: building the graph below sweeps the whole model
-    # registry, and ``hard_delete`` runs this to a fixpoint on every soft-deletable model,
-    # nearly all of which own nothing. Nothing declared means nothing to ask the graph about.
-    owning = {model: pks for model, pks in claimed.items() if _declared_owning_fields(model)}
+    # The cheap half first: the graph below sweeps the whole registry, and ``hard_delete`` runs
+    # this to a fixpoint over models that nearly all own nothing. ``pks`` too -- ``claimed`` is
+    # a defaultdict, so a model looked at and found empty must not buy that sweep either.
+    owning = {
+        model: pks for model, pks in claimed.items() if pks and _declared_owning_fields(model)
+    }
     if not owning:
         return []
     # Once per call, not once per claimed model: the graph is registry-wide and identical for
@@ -395,7 +405,10 @@ class SoftDeletableModel(Model):
                     return
                 claimed[model].update(new_pks)
                 to_delete[model].update(new_pks)
-                for relation in model._meta.related_objects:
+                # ``_referring_relations``, not ``_meta.related_objects``: that drops a
+                # ``related_name='+'`` key, leaving a hidden CASCADE child behind to dangle.
+                # It is also the list ``_still_referenced`` discounts against.
+                for relation in _referring_relations(model):
                     if relation.on_delete is not CASCADE:
                         continue
                     related_model = relation.related_model
@@ -471,8 +484,8 @@ class SoftDeletableModel(Model):
                         model._all_objects.using(using).filter(  # ty: ignore[unresolved-attribute]
                             pk__in=pks
                         )._hard_delete_own_table()
-                    else:  # pragma: no cover - unreachable
-                        # A model with no soft-delete rule is always already gone by this point:
-                        # Django's Collector (Phase 1's plain delete()) already issued a real
-                        # DELETE for it. Kept as a defensive fallback, not a live path.
-                        model._default_manager.using(using).filter(pk__in=pks).delete()
+                    else:  # pragma: no cover - Phase 1 has normally removed these already
+                        # No rule inside the *seed*'s tree means Phase 1's delete() removed it
+                        # already; an owned group had no Collector, so an m2m through row lands
+                        # here -- read through ``_rows``, which no default manager can filter.
+                        _rows(model, using).filter(pk__in=pks).delete()

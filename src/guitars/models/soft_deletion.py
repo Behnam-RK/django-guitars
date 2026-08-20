@@ -4,7 +4,17 @@ from typing import cast
 
 from django.apps import apps as django_apps
 from django.db import connections, transaction
-from django.db.models import CASCADE, DateTimeField, Index, Manager, Q, QuerySet, sql
+from django.db.models import (
+    CASCADE,
+    DateTimeField,
+    Field,
+    ForeignKey,
+    Index,
+    Manager,
+    Q,
+    QuerySet,
+    sql,
+)
 from django.db.models.base import Model
 
 from guitars.introspection import (
@@ -26,25 +36,31 @@ def _is_mti_model(model: type[Model]) -> bool:
     )
 
 
+def _declared_owning_fields(model: type[Model]) -> list[OwningForeignKey]:
+    """``OwningForeignKey``s *model* declares whose target has a ``_deleted_at`` to stamp --
+    all :func:`_owned_fields` knows before the cycle graph. Split out so a caller can ask the
+    cheap half first: that graph sweeps the registry, and most models own nothing."""
+    # ``owns_column``, not ``hasattr``: a model with no ``_deleted_at`` at all has no rule to
+    # fire, and one inheriting it from an MTI ancestor is refused with a warning, since the
+    # rule would fire on a table ``old."<column>"`` cannot reach. See docs/owned-relations.md.
+    if not owns_column(model, '_deleted_at'):
+        return []
+    # Mirrors ``_owned_candidates``/``_owned_operations``' "nothing to stamp" refusal: no rule
+    # is emitted, so the relation is not followed -- following it destroys what the rule spared.
+    return [
+        field
+        for field in model._meta.local_fields
+        if isinstance(field, OwningForeignKey) and has_column(field.related_model, '_deleted_at')
+    ]
+
+
 def _owned_fields(
     model: type[Model], cycles: set[tuple[str, str]] | None = None
 ) -> list[OwningForeignKey]:
     """``OwningForeignKey``s that actually carry a rule: a relation the generator refused has
     none, so following it here destroys what the rule spared. *cycles* is the graph below,
     passed in by a caller asking about several models so it is built once."""
-    # ``owns_column``, not ``hasattr``: a model with no ``_deleted_at`` at all has no rule to
-    # fire, and one inheriting it from an MTI ancestor is refused with a warning, since the
-    # rule would fire on a table ``old."<column>"`` cannot reach. See docs/owned-relations.md.
-    if not owns_column(model, '_deleted_at'):
-        return []
-    # Mirrors the refusals in ``_owned_candidates``/``_owned_operations``: nothing to stamp,
-    # and (below) a rule that would close a cycle of ON UPDATE rules. Neither emits a rule,
-    # so neither is followed -- following one destroys what the rule spared.
-    declared = [
-        field
-        for field in model._meta.local_fields
-        if isinstance(field, OwningForeignKey) and has_column(field.related_model, '_deleted_at')
-    ]
+    declared = _declared_owning_fields(model)
     # Before the graph, not after: building it sweeps the whole model registry, and most
     # models declare no ownership at all -- ``hard_delete`` asks this of every collected one.
     if not declared:
@@ -84,19 +100,29 @@ def _mti_model_chain(model: type[Model]) -> list[type[Model]]:
 
 
 def _rows(model: type[Model], using: str | None) -> QuerySet:
-    """Every row of *model* regardless of ``_deleted_at``, on the *using* connection.
-    ``_all_objects`` is added dynamically by ``SoftDeletableModel`` subclasses, so the
-    hasattr guard's narrowing does not survive into the returned type."""
-    manager = model._all_objects if hasattr(model, '_all_objects') else model._default_manager
+    """Every row of *model* regardless of ``_deleted_at``, on *using*. ``_all_objects`` is set
+    dynamically, so the hasattr narrowing does not survive; ``_base_manager`` for anything else
+    and never ``_default_manager``, which as in Django's ``Collector`` could hide a referrer."""
+    manager = model._all_objects if hasattr(model, '_all_objects') else model._base_manager
     return manager.using(using)  # ty: ignore[unresolved-attribute]
+
+
+def _key_values(level: type[Model], field: Field, pks: set, using: str | None) -> dict:
+    """``{value a key into *level* holds: the pk it stands for}`` for *pks*. Identity for the
+    usual key, which holds a primary key -- what every table in an MTI chain shares. A
+    ``to_field`` key holds *that* column, matches no pk, and would read as absent."""
+    target = field.target_field if isinstance(field, ForeignKey) else None
+    if target is None or target.primary_key:
+        return {pk: pk for pk in pks}
+    return dict(_rows(level, using).filter(pk__in=pks).values_list(target.attname, 'pk'))
 
 
 def _still_referenced(
     target: type[Model], pks: set, claimed: dict[type[Model], set], using: str | None
 ) -> set:
-    """Which of *pks* a row outside *claimed* still points at, through **any** foreign key
-    rather than only the one that declared ownership: removing a row is not stamping one, and
-    a surviving key of any kind dangles at ``COMMIT`` and fails the deferred constraint."""
+    """Which of *pks* a row that outlives the collection still points at, through **any**
+    foreign key, not only the one that declared ownership: removing a row is not stamping one,
+    and a surviving key of any kind dangles at ``COMMIT`` and fails the deferred constraint."""
     referenced: set = set()
     # Every model in *target*'s MTI tree, not *target* alone: collecting it removes the whole
     # table chain, so a key into any other level holds the same pk value and dangles just as
@@ -107,18 +133,27 @@ def _still_referenced(
         for relation in level._meta.get_fields(include_hidden=True):
             if not (relation.is_relation and relation.auto_created and not relation.concrete):
                 continue
-            # M2M rows live in a through table with no column on `related_model`, and go with
-            # the through row's own CASCADE. An MTI parent-link is the same object one table
-            # down, collected with the chain -- counting it would spare every owned MTI row.
+            # A ManyToManyRel owns no column; the through table's key arrives as a separate
+            # hidden relation, counted below -- nothing collects a through row for an owned
+            # target. A parent-link is the same object one table down, collected with the chain.
             if relation.many_to_many or getattr(relation, 'parent_link', False):
                 continue
+            # A CASCADE referrer `_collect` follows is collected *with* the target, so nothing
+            # of it survives to dangle. Discounted here, not left to the fixpoint: it is only
+            # ever collected as a consequence of collecting the row it would hold back.
+            if getattr(relation, 'on_delete', None) is CASCADE and not relation.hidden:
+                continue
             related_model = cast('type[Model]', relation.related_model)
-            attname = relation.field.attname  # ty: ignore[unresolved-attribute]
-            rows = _rows(related_model, using).filter(**{f'{attname}__in': pks})
+            field = cast('Field', relation.field)  # ty: ignore[unresolved-attribute]
+            attname = field.attname
+            keys = _key_values(level, field, pks, using)
+            if not keys:
+                continue
+            rows = _rows(related_model, using).filter(**{f'{attname}__in': keys})
             going = claimed.get(related_model, set())
             if going:
                 rows = rows.exclude(pk__in=going)
-            referenced.update(rows.values_list(attname, flat=True))
+            referenced.update(keys[value] for value in rows.values_list(attname, flat=True))
             if referenced >= pks:  # nothing left to spare; skip the remaining relations
                 return referenced
     return referenced
@@ -131,11 +166,17 @@ def _owned_targets(
     ``NOT EXISTS``, narrowed three ways below because this *removes* the row where the rule
     only stamps a column. *claimed* is every row going away, not one group's; see below."""
     found: dict[type[Model], set] = defaultdict(set)
+    # The cheap half of the question first: building the graph below sweeps the whole model
+    # registry, and ``hard_delete`` runs this to a fixpoint on every soft-deletable model,
+    # nearly all of which own nothing. Nothing declared means nothing to ask the graph about.
+    owning = {model: pks for model, pks in claimed.items() if _declared_owning_fields(model)}
+    if not owning:
+        return []
     # Once per call, not once per claimed model: the graph is registry-wide and identical for
-    # every one of them, and ``hard_delete`` runs this to a fixpoint. The claimed models are
-    # named alongside the registry for the same reason ``_owned_fields`` names its own.
+    # every one of them. The claimed models are named alongside the registry for the same
+    # reason ``_owned_fields`` names its own -- they may not be registered.
     cycles = rule_update_cycle_edges([*claimed, *django_apps.get_models()])
-    for model, pks in claimed.items():
+    for model, pks in owning.items():
         for field in _owned_fields(model, cycles):
             owned_pks = set(
                 _rows(model, using)
@@ -358,9 +399,16 @@ class SoftDeletableModel(Model):
                     if relation.on_delete is not CASCADE:
                         continue
                     related_model = relation.related_model
+                    field = cast('Field', relation.field)
+                    # Through ``_key_values``, exactly as ``_still_referenced`` reads the same
+                    # relations: missing a ``to_field`` child here is not a smaller collection
+                    # but a broken one -- it is discounted there *because* this collects it.
+                    keys = _key_values(model, field, new_pks, using)
+                    if not keys:
+                        continue
                     child_pks = set(
                         _rows(related_model, using)
-                        .filter(**{f'{relation.field.name}__in': new_pks})
+                        .filter(**{f'{field.attname}__in': keys})
                         .values_list('pk', flat=True)
                     )
                     _collect(related_model, child_pks)

@@ -4,13 +4,15 @@ archiving something a sibling owner still points at."""
 
 import pytest
 from django.apps import apps as django_apps
-from django.db import models
-from django.db.models import CASCADE, PROTECT, SET_NULL
+from django.db import connection, models
+from django.db.models import CASCADE, DO_NOTHING, PROTECT, SET_NULL
 from django.test.utils import isolate_apps
 
+from guitars import sql
 from guitars.introspection import rule_update_cycle_edges
 from guitars.models import OwningForeignKey, SetarModel
-from guitars.models.soft_deletion import _owned_fields
+from guitars.models.soft_deletion import _owned_fields, _still_referenced
+from guitars.sql import _identifiers
 from tests.testapp.models import (
     Album,
     Band,
@@ -19,6 +21,7 @@ from tests.testapp.models import (
     Orchestra,
     Patron,
     PressKit,
+    Section,
 )
 
 
@@ -391,6 +394,109 @@ def test_hard_delete_spares_a_row_a_refused_relation_still_points_at(band):
 
 
 @pytest.mark.django_db(transaction=True)
+def test_hard_delete_removes_an_owned_row_a_cascade_child_still_points_at(band):
+    """A CASCADE child of the owned row is collected *with* it, so its key survives nothing and
+    must not hold it back. The fixpoint cannot rescue this: such a row is collected only as a
+    consequence of collecting the row it would spare, so counting it archives that row forever."""
+    orchestra = Orchestra.objects.create(name='LSO', conductor='Davis')
+    Section.objects.create(name='Strings', orchestra=orchestra)
+    merch = Merch.objects.create(description='Tour shirt', featured_orchestra=orchestra)
+
+    merch.hard_delete()
+
+    assert not Orchestra._all_objects.filter(pk=orchestra.pk).exists()
+    assert not Ensemble._all_objects.filter(pk=orchestra.pk).exists()
+    assert not Section._all_objects.exists()
+
+
+@pytest.mark.django_db(transaction=True)
+@isolate_apps('tests.testapp')
+def test_still_referenced_reads_a_key_pointed_at_a_non_primary_key_column():
+    """A ``to_field`` key holds the target's *other* column, not its primary key. Compared
+    against a pk it matches nothing, so a live referrer would read as absent -- and the row
+    would be removed with that key still on disk, failing the deferred check at ``COMMIT``."""
+
+    class Kit(models.Model):
+        slug = models.CharField(max_length=20, unique=True)
+
+        class Meta:
+            app_label = 'testapp'
+
+    class Flyer(models.Model):
+        kit = models.ForeignKey(Kit, on_delete=PROTECT, to_field='slug', related_name='flyers')
+
+        class Meta:
+            app_label = 'testapp'
+
+    with connection.schema_editor() as schema_editor:
+        schema_editor.create_model(Kit)
+        schema_editor.create_model(Flyer)
+    try:
+        kit = Kit.objects.create(slug='doomed')
+        Flyer.objects.create(kit=kit)
+
+        assert _still_referenced(Kit, {kit.pk}, {}, None) == {kit.pk}
+    finally:
+        with connection.schema_editor() as schema_editor:
+            schema_editor.delete_model(Flyer)
+            schema_editor.delete_model(Kit)
+
+
+@pytest.mark.django_db(transaction=True)
+@isolate_apps('tests.testapp')
+def test_hard_delete_collects_a_cascade_child_keyed_on_a_non_primary_key_column():
+    """The other side of the same mismatch, and the dangerous one: the guard discounts a CASCADE
+    child *because* collection follows it, so a ``to_field`` key read as a pk leaves it
+    uncollected while the row it points at goes -- dangling at ``COMMIT``, transaction and all."""
+
+    class Poster(SetarModel):
+        slug = models.CharField(max_length=20, unique=True)
+
+        class Meta:
+            app_label = 'testapp'
+
+    class Sticker(SetarModel):
+        poster = models.ForeignKey(
+            Poster, on_delete=CASCADE, to_field='slug', related_name='stickers'
+        )
+
+        class Meta:
+            app_label = 'testapp'
+
+    class Sponsor(SetarModel):
+        poster = OwningForeignKey(Poster, on_delete=DO_NOTHING, null=True, related_name='sponsors')
+
+        class Meta:
+            app_label = 'testapp'
+
+    with connection.schema_editor() as schema_editor:
+        for model in (Poster, Sticker, Sponsor):
+            schema_editor.create_model(model)
+    try:
+        with connection.cursor() as cursor:
+            # The owner needs a real soft-delete rule: ``hard_delete`` reads its foreign key
+            # back in Phase 2, and a Phase 1 that truly deleted the row takes the key with it.
+            cursor.execute(
+                sql.CREATE_SOFT_DELETE_RULE.format(
+                    table=_identifiers._quote_table(Sponsor._meta.db_table),
+                    primary_key=_identifiers._escape_ident('id'),
+                )
+            )
+        poster = Poster.objects.create(slug='doomed')
+        Sticker.objects.create(poster=poster)
+        sponsor = Sponsor.objects.create(poster=poster)
+
+        sponsor.hard_delete()
+
+        assert not Poster._all_objects.exists()
+        assert not Sticker._all_objects.exists()
+    finally:
+        with connection.schema_editor() as schema_editor:
+            for model in (Sponsor, Sticker, Poster):
+                schema_editor.delete_model(model)
+
+
+@pytest.mark.django_db(transaction=True)
 def test_hard_delete_returns_for_a_row_a_later_group_stopped_referencing(band):
     """``Orchestra.programme`` holds the kit back on the first pass; the orchestra is then
     collected as the merch's owned row, and the second pass comes back for the kit. Order
@@ -520,8 +626,10 @@ def test_a_subclass_of_owning_foreign_key_keeps_its_own_deconstructed_path():
     assert OwningForeignKey(PressKit, on_delete=SET_NULL).deconstruct()[1] == (
         'guitars.models.OwningForeignKey'
     )
-    assert NarrowOwningForeignKey(PressKit, on_delete=SET_NULL).deconstruct()[1].endswith(
-        'NarrowOwningForeignKey'
+    assert (
+        NarrowOwningForeignKey(PressKit, on_delete=SET_NULL)
+        .deconstruct()[1]
+        .endswith('NarrowOwningForeignKey')
     )
 
 

@@ -21,11 +21,10 @@ every album **before** the rule turns the `DELETE` into an `UPDATE` — the arch
 then unreachable from its former owners, and `hard_delete()` can no longer collect it. Use
 `DO_NOTHING` (or `PROTECT`/`RESTRICT`) where the pointer must survive the target's archival.
 
-`on_delete=CASCADE` is **refused** (`guitars.E001`): it means deleting the press kit deletes
-the album, the opposite of ownership, and would emit the cascade rule backwards. A NULL key
-matches nothing, so a nullable owned relation needs no guard of its own. `to_field` is refused
-too (`guitars.E002`): the rule correlates the key against the target's *primary* key, which is
-also what makes [MTI](#mti) work.
+`on_delete=CASCADE` is **refused** (`guitars.E001`): it means deleting the press kit deletes the
+album, the opposite of ownership, and would emit the cascade rule backwards. A NULL key matches
+nothing, so a nullable owned relation needs no guard. `to_field` is refused too (`guitars.E002`):
+the rule correlates the key against the target's *primary* key, which also makes [MTI](#mti) work.
 
 Three more shapes are refused by the generator rather than by a check, warned about the way
 the [MTI](#mti) limitation below is, since each depends on the *other* model:
@@ -35,13 +34,12 @@ the [MTI](#mti) limitation below is, since each depends on the *other* model:
 - **An owner with no `_deleted_at`.** The rule fires on the owner's `_deleted_at` transition,
   so a model never soft-deleted would never fire it. Reported for the same reason.
 - **A relation closing a cycle of `ON UPDATE` rules** — owning yourself
-  (`OwningForeignKey('self', …)`), owning an MTI descendant of yourself, or a longer loop
-  back through another model's owned or `CASCADE` rules. A rule's action expands *before*
-  the original statement, so a cycle is rewritten into itself and PostgreSQL rejects *every*
-  `UPDATE` to *every* table in it — a plain `save()` included — with `infinite recursion
-  detected in rules for relation`. Every edge on the cycle is refused rather than one
-  chosen edge, which would depend on iteration order. `hard_delete()` refuses these too:
-  no rule means nothing was stamped, so nothing may be removed.
+  (`OwningForeignKey('self', …)`), owning an MTI descendant, or a longer loop back through
+  another model's owned or `CASCADE` rules. A rule's action expands *before* the original
+  statement, so a cycle is rewritten into itself and PostgreSQL rejects *every* `UPDATE` to
+  *every* table in it — a plain `save()` included — with `infinite recursion detected in rules
+  for relation`. Every edge on the cycle is refused, not one chosen edge, which would depend on
+  iteration order. `hard_delete()` refuses these too: no rule means nothing was stamped.
 
 ## The last-owner guard
 
@@ -52,15 +50,18 @@ dropping such a constraint is an ordinary migration that changes no field, so th
 unguarded rule. See [ADR 0011](adr/0011-owner-side-soft-delete-ownership.md).
 
 `hard_delete()` applies the same test in Python, removing an owned row *after* the batch that
-owned it — the reverse of the child-first `CASCADE` order, since the owner still references
-it. Three deliberate narrowings, because it *removes* the row where the rule only stamps a
-column: the whole batch is spared rather than one row; an **archived** referrer still counts,
-its key being on disk; and **any** surviving foreign key holds the row back — not only the
-owning column, and at *any* level of an MTI chain, one row of which cannot be collected
-without every table in it. All three exist because dropping a still-referenced row fails the
-deferred constraint at `COMMIT`. Collection runs to a fixpoint, so a row spared by a reference
-that is *itself* collected later is picked up on a later pass; a row that stays spared stays
-archived. Queryset `hard_delete()` walks neither reverse-FK children nor owned relations.
+owned it — the reverse of child-first `CASCADE` order, since the owner still references it. Three
+deliberate narrowings, because it *removes* the row where the rule only stamps a column: the
+whole batch is spared rather than one row; an **archived** referrer still counts, its key being
+on disk; and **any** surviving foreign key holds the row back — not only the owning column, and
+at *any* level of an MTI chain, no row of which is collected alone. All three exist because
+dropping a still-referenced row fails the deferred constraint at `COMMIT`. Collection runs to a
+fixpoint, so a row spared by a reference that is *itself* collected later is picked up on a
+later pass; one that stays spared stays archived. A `CASCADE` referrer never counts, being
+collected *with* the row it points at; the fixpoint could reach it only by collecting the row it
+would hold back, so it is discounted up front — sound only because collection reads keys as the
+guard does, `to_field` column and *base* manager alike. Queryset `hard_delete()` walks neither
+reverse-FK children nor owned relations.
 
 Two limits the guard does not cover, both by construction:
 
@@ -74,12 +75,11 @@ Two limits the guard does not cover, both by construction:
 
 ## Rule names, and removing one
 
-A rule name is the only thing PostgreSQL dedupes on, not what it references. An inbound
-child with two `CASCADE` FKs to one parent gets its second rule suffixed with the FK column
-(`soft_delete_related_<child>_<fk>`), the first keeping the bare name for compatibility.
-Every *owned* rule is suffixed (`soft_delete_owned_<target>_<fk>`) — nothing predates 2.3.0
-to stay compatible with — and the distinct prefix is what keeps the two families from ever
-meeting, a collision being a silent replacement rather than an error.
+A rule name is the only thing PostgreSQL dedupes on, not what it references. An inbound child
+with two `CASCADE` FKs to one parent gets its second rule suffixed with the FK column
+(`soft_delete_related_<child>_<fk>`), the first keeping the bare name for compatibility. Every
+*owned* rule is suffixed (`soft_delete_owned_<target>_<fk>`) — nothing predates 2.3.0 — and the
+distinct prefix keeps the two families from meeting, a collision being a silent replacement.
 
 No enforcement command retires a rule, cascade rules included. Dropping an
 `OwningForeignKey` therefore fails at `migrate` (the rule depends on the column), and
@@ -88,11 +88,11 @@ converting one back to a plain `ForeignKey` silently leaves it live. Add an expl
 
 ## MTI
 
-Ownership *into* an MTI child works: the key holds the primary-key value every table in
-the chain shares, so the rule correlates against the ancestor owning `_deleted_at`.
-Ownership declared *on* an MTI child whose `_deleted_at` lives farther up is refused with
-a warning — the rule fires on the ancestor's table, where `old."<column>"` cannot name a
-column the child holds. See [MTI](mti.md).
+Ownership *into* an MTI child works: the key holds the primary-key value every table in the
+chain shares, so the rule correlates against the ancestor owning `_deleted_at`. Declared *on* an
+MTI child whose `_deleted_at` lives farther up it is refused with a warning — the rule fires on
+the ancestor's table, where `old."<column>"` cannot name a column the child holds; see
+[MTI](mti.md).
 
 ## Related
 

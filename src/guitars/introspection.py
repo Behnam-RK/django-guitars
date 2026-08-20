@@ -81,7 +81,10 @@ def _rule_update_edges(models: Iterable[type[models.Model]]) -> set[tuple[str, s
             target_table = column_owner(field.related_model, '_deleted_at')._meta.db_table
             if isinstance(field, OwningForeignKey):
                 edges.add((table, target_table))  # owned: fires here, updates the target
-            elif field.remote_field.on_delete is CASCADE and not getattr(
+            # Not ``elif``: one field reaches both generators. ``CASCADE`` on an
+            # OwningForeignKey is ``guitars.E001``, but ``--skip-checks`` still reaches the
+            # generator, and the two rules are each other's cycle -- both edges detect it.
+            if field.remote_field.on_delete is CASCADE and not getattr(
                 field.remote_field, 'parent_link', False
             ):
                 edges.add((target_table, table))  # cascade: fires on the target, updates here

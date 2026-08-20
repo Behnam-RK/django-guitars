@@ -411,7 +411,15 @@ class SoftDeletableModel(Model):
                         .filter(**{f'{field.attname}__in': keys})
                         .values_list('pk', flat=True)
                     )
-                    _collect(related_model, child_pks)
+                    # From the child's MTI *root*, as the seed and the owned hop both are:
+                    # the declaring level alone strands its ancestors' rows. A parent-link
+                    # walks *down* instead, and re-entering at its root collects nothing.
+                    _collect(
+                        related_model
+                        if getattr(relation, 'parent_link', False)
+                        else mti_root(related_model),
+                        child_pks,
+                    )
                 if model not in model_order:
                     model_order.append(model)
 

@@ -1988,12 +1988,12 @@ def test_owned_guard_joins_to_reach_a_co_owner_that_inherits_deleted_at():
 
     blob = '\n'.join(command._owned_operations(Album))
 
-    assert blob.count('NOT EXISTS') == 6  # two rules, three arms each
-    assert 'FROM "testapp_orchestra" AS guitars_owner_2' in blob
-    assert 'JOIN "testapp_ensemble" AS guitars_owner_2_root' in blob
-    assert 'ON guitars_owner_2_root."id" = guitars_owner_2."ensemble_ptr_id"' in blob
+    assert blob.count('NOT EXISTS') == 8  # two rules, four arms each
+    assert 'FROM "testapp_orchestra" AS guitars_owner_3' in blob
+    assert 'JOIN "testapp_ensemble" AS guitars_owner_3_root' in blob
+    assert 'ON guitars_owner_3_root."id" = guitars_owner_3."ensemble_ptr_id"' in blob
     # Liveness read from the ancestor, which is the table the column is on.
-    assert 'AND guitars_owner_2_root._deleted_at IS NULL' in blob
+    assert 'AND guitars_owner_3_root._deleted_at IS NULL' in blob
 
 
 def test_owned_guard_reads_owners_the_kit_does_not_generate_for():

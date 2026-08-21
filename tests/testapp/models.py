@@ -103,6 +103,12 @@ class Ensemble(SetarModel):
     """MTI parent (full kit) — owns _updated_at / _deleted_at on its own table."""
 
     name = CharField(max_length=100)
+    # Owns the same target its MTI child ``Orchestra`` owns, so this rule fires on the very
+    # table that child's joined arm reads liveness from -- the shape where the row going away
+    # satisfies its own arm through its child row unless the exclusion lands on the ancestor.
+    press_kit = OwningForeignKey(
+        'PressKit', on_delete=DO_NOTHING, null=True, blank=True, related_name='ensembles'
+    )
 
     def __str__(self) -> str:
         return self.name

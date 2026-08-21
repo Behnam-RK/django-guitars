@@ -1081,6 +1081,34 @@ def test_another_live_placard_owning_it_still_spares_it():
 
 
 @pytest.mark.django_db
+def test_an_mti_owner_is_not_its_own_co_owner_across_the_join():
+    """One row owning the kit twice -- through ``Ensemble.press_kit`` and through the
+    ``Orchestra.programme`` its own child table holds. The ancestor's rule fires on the table
+    the joined arm reads, so without excluding that row it is its own last live owner."""
+    kit = PressKit.objects.create(headline='Hemispheres, reissued')
+    orchestra = Orchestra.objects.create(
+        name='LSO', conductor='Rattle', press_kit=kit, programme=kit
+    )
+
+    orchestra.delete()
+
+    assert not PressKit.objects.filter(pk=kit.pk).exists()
+
+
+@pytest.mark.django_db
+def test_another_live_mti_owner_across_the_join_still_spares_it():
+    """The control: the exclusion takes out one row, not the arm. A second orchestra owning the
+    kit through its child table is a live owner, and the joined arm has to see it."""
+    kit = PressKit.objects.create(headline='Hemispheres, reissued')
+    orchestra = Orchestra.objects.create(name='LSO', conductor='Rattle', press_kit=kit)
+    Orchestra.objects.create(name='CBSO', conductor='Grazinyte-Tyla', programme=kit)
+
+    orchestra.delete()
+
+    assert PressKit.objects.filter(pk=kit.pk).exists()
+
+
+@pytest.mark.django_db
 def test_a_live_co_owner_that_inherits_deleted_at_spares_the_dependent(band):
     """The joined arm, against the database. ``Orchestra`` holds ``programme`` on its own table
     and ``_deleted_at`` on ``Ensemble``, so the guard has to read across the join -- and until

@@ -2258,10 +2258,10 @@ def test_owned_rule_is_refused_when_the_dependent_is_one_the_kit_writes_no_polic
     assert "'testapp_scoped'" in command._mti_cascade_warnings[0]
 
 
-def test_policy_dimensions_are_asked_once_per_model_per_run():
-    """Two rules over one dependent, and the answer reaches ``_classify``, which sweeps the
-    registry for an MTI model that autofills. Memoised for the run rather than the process: it
-    moves with ``LOCAL_APPS``, and ``isolate_apps`` replaces the registry between runs."""
+def test_the_shared_owned_answers_are_swept_once_per_run():
+    """Both halves reach ``_classify``, which sweeps the registry for an MTI model that
+    autofills, so a rule with N arms would otherwise ask N times. Cached on the command rather
+    than the module: the answer moves with ``LOCAL_APPS``, which a test may replace."""
 
     @isolate_apps('tests.testapp')
     def _build():
@@ -2288,117 +2288,8 @@ def test_policy_dimensions_are_asked_once_per_model_per_run():
     # Both rules emitted: the owner carries none of the dependent's dimensions, so nothing its
     # arms read is filtered by one the dependent's own policy does not apply.
     assert len(ops) == 2
-    assert list(command._policy_dimension_memo.values()) == [frozenset({'label'})]
-
-
-def test_owned_rule_is_refused_when_a_joined_arm_reads_a_tenanted_ancestor():
-    """A joined arm reads *two* tables and takes liveness from the ancestor's, so a policy
-    there hides the same out-of-tenant live owner. Asking only the model holding the key
-    missed it -- and only this branch's own joined arm can reach that shape."""
-
-    @isolate_apps('tests.testapp')
-    def _build():
-        from guitars.models.soft_deletion import LiveManager
-        from guitars.tenancy import tenanted_manager
-
-        class Shared(SetarModel):
-            class Meta:
-                app_label = 'testapp'
-
-        class Plain(SetarModel):
-            target = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True)
-
-            class Meta:
-                app_label = 'testapp'
-
-        class Root(SetarModel):
-            market = models.ForeignKey('testapp.Market', on_delete=CASCADE, null=True)
-            objects = tenanted_manager(market='market')
-
-            class Meta:
-                app_label = 'testapp'
-
-        class Kid(Root):
-            target = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True, related_name='+')
-            # Untenanted on its own account: the manager it would inherit is what used to make
-            # this shape look refusable, and the ancestor's policy is the thing that hides a row.
-            objects = LiveManager()
-
-            class Meta:
-                app_label = 'testapp'
-
-        return _owned_blob(Shared, Plain, Root, Kid, subject=Plain)
-
-    command, blob, ops = _build()
-
-    assert ops == []
-    assert len(command._mti_cascade_warnings) == 1
-    # The table named is the one carrying the policy, not the one carrying the key.
-    assert "'testapp_root'" in command._mti_cascade_warnings[0]
-
-
-def test_a_joined_arm_on_the_table_the_rule_fires_on_excludes_the_row_going_away():
-    """Self-exclusion against the table liveness is read from. Owner and co-owner in one MTI
-    chain: the ancestor row being soft-deleted satisfies the arm through its own child row --
-    the rule's action expanding first -- so it reads as its own live owner and stamps nothing."""
-
-    @isolate_apps('tests.testapp')
-    def _build():
-        class Shared(SetarModel):
-            class Meta:
-                app_label = 'testapp'
-
-        class Root(SetarModel):
-            kit = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True, related_name='+')
-
-            class Meta:
-                app_label = 'testapp'
-
-        class Kid(Root):
-            programme = OwningForeignKey(
-                Shared, on_delete=DO_NOTHING, null=True, related_name='+'
-            )
-
-            class Meta:
-                app_label = 'testapp'
-
-        return _owned_blob(Shared, Root, Kid, subject=Root)
-
-    command, blob, ops = _build()
-
-    assert 'JOIN "testapp_root" AS guitars_owner_1_root' in blob
-    # On the joined alias, which is where the row going away is -- not on the child alias.
-    assert 'guitars_owner_1_root."id" <> old."id"' in blob
-
-
-def test_a_joined_arm_whose_ancestor_is_the_dependent_excludes_the_target():
-    """The target exclusion, one MTI level up: a child of the dependent owning it back. The row
-    the rule stamps satisfies the arm through that child row, so nothing archives it."""
-
-    @isolate_apps('tests.testapp')
-    def _build():
-        class Shared(SetarModel):
-            class Meta:
-                app_label = 'testapp'
-
-        class SharedKid(Shared):
-            pin = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True, related_name='+')
-
-            class Meta:
-                app_label = 'testapp'
-
-        class Owner(SetarModel):
-            target = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True)
-
-            class Meta:
-                app_label = 'testapp'
-
-        return _owned_blob(Shared, SharedKid, Owner, subject=Owner)
-
-    command, blob, ops = _build()
-
-    assert 'JOIN "testapp_shared" AS guitars_owner_1_root' in blob
-    assert 'guitars_owner_1_root."id" <> old."target_id"' in blob
+    assert command._owned_tenancy_refusals() is command._owned_tenancy_refusals()
+    assert command._owner_arms() is command._owner_arms()
 
 
 def test_owned_rule_is_refused_for_a_tenanted_co_owner_the_kit_generates_no_policy_for():

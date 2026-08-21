@@ -87,9 +87,9 @@ exists, reached the other way. See [ADR 0003](adr/0003-mti-owner-join-policy.md)
   parent-link reverse relation is itself `CASCADE`), collecting every table
   in the chain child-first; at the queryset level it deletes the whole chain
   leaf-to-root by shared PK, leaving no orphaned ancestor row.
-- **Known limitation:** an FK on a child's own table while `_deleted_at` lives
-  farther up isn't supported — `makeguitarmigrations` warns instead of emitting
-  broken SQL. Same for an [`OwningForeignKey`](owned-relations.md#mti) there.
+- **Known limitation:** a *cascade* FK on a child's own table while `_deleted_at`
+  lives farther up isn't supported — it warns instead of emitting broken SQL. An
+  [`OwningForeignKey`](owned-relations.md#mti) gets no rule either, but is read.
 
 `tests/testapp/models.py` carries `Ensemble → Orchestra → ChamberOrchestra`
 (untenanted) and `Tour → WorldTour → StadiumTour` (tenanted, owner-join two

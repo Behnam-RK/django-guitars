@@ -84,6 +84,10 @@ _DROP_SOFT_DELETE_RELATED_OBJECTS_RULE = """
 # sides swapped, the FK living on the owner. The NOT EXISTS is the last-owner guard, always
 # emitted -- see ADR 0011 for why it is never derived from a unique constraint. ----
 
+# The declaring column's arm is spelled out rather than composed, so a single-owner dependent
+# renders byte-identically to 2.3.0 and its ``[SQL:...]`` identity does not move on upgrade.
+# Every other owning column adds an arm via ``{co_owner_guards}``, ``''`` here. See ADR 0012.
+
 _CREATE_SOFT_DELETE_OWNED_OBJECT_RULE = """
     CREATE OR REPLACE RULE {rule_name}
         AS ON UPDATE TO {table}
@@ -99,9 +103,45 @@ _CREATE_SOFT_DELETE_OWNED_OBJECT_RULE = """
                   WHERE guitars_owner."{foreign_key}" = old."{foreign_key}"
                     AND guitars_owner."{primary_key}" <> old."{primary_key}"
                     AND guitars_owner._deleted_at IS NULL
-              )
+              ){co_owner_guards}
         );
 """
+
+# One co-owner arm, correlated against the *declaring* rule's column: the target row is named
+# by the rule's own key, not the co-owner's. Leads with a newline and ends without one, so
+# joining zero of them leaves the template above byte-for-byte untouched.
+_SOFT_DELETE_OWNED_CO_OWNER_GUARD = """
+              AND NOT EXISTS (
+                  SELECT 1 FROM {owner_table} AS {alias}
+                  WHERE {alias}."{foreign_key}" = old."{declared_foreign_key}"
+{self_exclusion}                    AND {alias}._deleted_at IS NULL
+              )"""
+
+# The same arm for an owner that keeps ``_deleted_at`` on an MTI ancestor: the foreign key is on
+# its own table and liveness on the ancestor's, so the arm joins the two on the primary-key value
+# every table in the chain shares. Read from the ancestor, which is where the column is.
+_SOFT_DELETE_OWNED_CO_OWNER_JOINED_GUARD = """
+              AND NOT EXISTS (
+                  SELECT 1 FROM {owner_table} AS {alias}
+                  JOIN {root_table} AS {alias}_root
+                      ON {alias}_root."{root_primary_key}" = {alias}."{child_primary_key}"
+                  WHERE {alias}."{foreign_key}" = old."{declared_foreign_key}"
+{self_exclusion}                    AND {alias}_root._deleted_at IS NULL
+              )"""
+
+# Spliced in only where the arm reads liveness *from* the table the rule fires on -- an MTI
+# ancestor's, where it joins. Keyed on the row: one owning the target through two of its own
+# columns would otherwise read as its own last live owner and hold the target alive forever.
+_SOFT_DELETE_OWNED_CO_OWNER_SELF_EXCLUSION = (
+    '                    AND {alias}."{primary_key}" <> old."{primary_key}"\n'
+)
+
+# The other exclusion, on an arm taking liveness from the *dependent's* own table -- a target
+# owning itself, or an MTI child of it owning it back. A row pointing at the target's primary key
+# would read as its own live owner and pin it un-archivable. Excluded by the key, which names it.
+_SOFT_DELETE_OWNED_CO_OWNER_TARGET_EXCLUSION = (
+    '                    AND {alias}."{primary_key}" <> old."{foreign_key}"\n'
+)
 
 _DROP_SOFT_DELETE_OWNED_OBJECT_RULE = """
     DROP RULE {rule_name} ON {table};

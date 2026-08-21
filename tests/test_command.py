@@ -25,7 +25,7 @@ from guitars.management.enforcement import operations as operations_module
 from guitars.management.enforcement.command import Command
 from guitars.sql import _identifiers
 from guitars.tenancy.discovery import app_coverage, autofill_function_name
-from tests.testapp.models import Album, Band, Ensemble, Merch, Orchestra
+from tests.testapp.models import Album, Band, Ensemble, Foyer, Kiosk, Merch, Orchestra
 
 
 def _pretend_function_migrations_are_current(command):
@@ -1794,3 +1794,814 @@ def test_a_rule_name_clash_fails_a_check_run_but_only_reports_on_a_generating_on
         command._refuse_a_rule_name_clash(check_only=True)
 
     command._refuse_a_rule_name_clash(check_only=False)
+
+
+# ---- Cross-owner last-owner guard (ADR 0012) ------------------------------------------
+
+
+def _owned_blob(*models_to_register, subject=None):
+    """Build a Command over exactly *models_to_register* and return its owned operations for
+    *subject* (the first model by default). ``all_models`` by hand for the reason the cycle
+    tests above give: ``isolate_apps`` swaps ``Options.apps``, not the global registry."""
+    command = Command()
+    command._mti_cascade_warnings.clear()
+    command._refusals_over_live_rules.clear()
+    command.existing.soft_delete_owned.clear()
+    command.all_models = list(models_to_register)
+    ops = command._owned_operations(subject or models_to_register[0])
+    return command, '\n'.join(ops), ops
+
+
+def test_owned_guard_carries_an_arm_for_a_co_owner_on_another_table():
+    """The bug 2.4.0 exists for: two owner tables, each rule blind to the other, so the last
+    owner *of one kind* archived a dependent a live owner of the other kind still held."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Shared(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class OwnerLeft(SetarModel):
+            target = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class OwnerRight(SetarModel):
+            other = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        registry = (Shared, OwnerLeft, OwnerRight)
+        return (
+            _owned_blob(*registry, subject=OwnerLeft)[1],
+            _owned_blob(*registry, subject=OwnerRight)[1],
+        )
+
+    left, right = _build()
+
+    # Each rule reads its own table self-excluded, and the other's unqualified: the other
+    # table holds no row being soft-deleted by this statement, so there is none to exclude.
+    assert 'FROM "testapp_ownerleft" AS guitars_owner\n' in left
+    assert 'guitars_owner."target_id" = old."target_id"' in left
+    assert 'FROM "testapp_ownerright" AS guitars_owner_1' in left
+    assert 'guitars_owner_1."other_id" = old."target_id"' in left
+    assert 'guitars_owner_1."id" <> old."id"' not in left
+
+    assert 'FROM "testapp_ownerright" AS guitars_owner\n' in right
+    assert 'FROM "testapp_ownerleft" AS guitars_owner_1' in right
+    assert 'guitars_owner_1."target_id" = old."other_id"' in right
+    assert 'guitars_owner_1."id" <> old."id"' not in right
+
+
+def test_owned_guard_self_excludes_every_arm_on_the_declaring_table():
+    """Two owning columns on one table. Self-exclusion is per *row*, not per column: without
+    it on the second arm, a row owning the target through both columns reads as its own last
+    live owner and holds the target alive forever."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Shared(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Twice(SetarModel):
+            first = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True, related_name='+')
+            second = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True, related_name='+')
+
+            class Meta:
+                app_label = 'testapp'
+
+        return _owned_blob(Shared, Twice, subject=Twice)[1]
+
+    blob = _build()
+
+    assert blob.count('AS guitars_owner_1') == 2  # one arm in each of the two rules
+    assert 'guitars_owner_1."second_id" = old."first_id"' in blob
+    assert 'guitars_owner_1."first_id" = old."second_id"' in blob
+    # Both arms are on the table the rule fires on, so both exclude the row going away.
+    assert blob.count('guitars_owner_1."id" <> old."id"') == 2
+
+
+def test_owned_guard_does_not_count_a_self_owning_target_as_its_own_owner():
+    """A target owning *itself* gets no rule of its own -- that is the 1-cycle -- but still
+    contributes an arm to every other owner's rule. Excluded by the key rather than by pk: the
+    row that must not count is the one the rule stamps, not the one going away."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Shared(SetarModel):
+            parent = OwningForeignKey('self', on_delete=DO_NOTHING, null=True, related_name='+')
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Owner(SetarModel):
+            target = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        return _owned_blob(Shared, Owner, subject=Owner)
+
+    command, blob, ops = _build()
+
+    assert len(ops) == 1  # Shared's own relation is refused; Owner's still carries its arm
+    assert 'FROM "testapp_shared" AS guitars_owner_1' in blob
+    assert 'guitars_owner_1."id" <> old."target_id"' in blob
+
+
+def test_owned_guard_scales_to_three_owners():
+    """N owning columns produce N rules of N arms. Guards the composition, not one shape."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Shared(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        owners = []
+        for name in ('OwnerOne', 'OwnerTwo', 'OwnerThree'):
+            owners.append(
+                type(
+                    name,
+                    (SetarModel,),
+                    {
+                        'target': OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True),
+                        'Meta': type('Meta', (), {'app_label': 'testapp'}),
+                        '__module__': 'tests.testapp.models',
+                    },
+                )
+            )
+        return [_owned_blob(Shared, *owners, subject=owner)[1] for owner in owners]
+
+    blobs = _build()
+
+    assert len(blobs) == 3
+    for blob in blobs:
+        assert blob.count('NOT EXISTS') == 3
+        assert 'AS guitars_owner\n' in blob
+        assert 'AS guitars_owner_1' in blob
+        assert 'AS guitars_owner_2' in blob
+
+
+def test_owned_guard_arm_order_does_not_follow_registry_order():
+    """The arms are sorted, so the rendered guard -- and the ``[SQL:...]`` identity deciding
+    whether a migration is emitted at all -- cannot move with the order models happen to be
+    registered in. An order-dependent digest would make ``--check`` flap."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Shared(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Zulu(SetarModel):
+            target = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Alpha(SetarModel):
+            target = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        forward = _owned_blob(Shared, Zulu, Alpha, subject=Zulu)[1]
+        reversed_ = _owned_blob(Alpha, Zulu, Shared, subject=Zulu)[1]
+        return forward, reversed_
+
+    forward, reversed_ = _build()
+
+    assert forward == reversed_
+
+
+def test_owned_guard_joins_to_reach_a_co_owner_that_inherits_deleted_at():
+    """``Orchestra.programme`` owns PressKit while keeping ``_deleted_at`` on its MTI ancestor.
+    It is refused a rule of its own -- that would fire on a table its key is not on -- but its
+    rows own the kit, so the arm joins the two tables on the pk value the chain shares."""
+    command = Command()
+    command.existing.soft_delete_owned.clear()
+
+    blob = '\n'.join(command._owned_operations(Album))
+
+    assert blob.count('NOT EXISTS') == 8  # two rules, four arms each
+    assert 'FROM "testapp_orchestra" AS guitars_owner_3' in blob
+    assert 'JOIN "testapp_ensemble" AS guitars_owner_3_root' in blob
+    assert 'ON guitars_owner_3_root."id" = guitars_owner_3."ensemble_ptr_id"' in blob
+    # Liveness read from the ancestor, which is the table the column is on.
+    assert 'AND guitars_owner_3_root._deleted_at IS NULL' in blob
+
+
+def test_owned_guard_reads_owners_the_kit_does_not_generate_for():
+    """A live owner is live whether or not its app is in ``LOCAL_APPS``. Excluding a non-local
+    co-owner would re-create the very bug this guard closes, for third-party models."""
+
+    # 'legacy_migrations' is installed but deliberately outside LOCAL_APPS, so the kit
+    # generates no enforcement for it -- exactly the asymmetry CHANGELOG 2.3.0 records.
+    @isolate_apps('tests.testapp', 'tests.legacy_migrations')
+    def _build():
+        class Shared(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Local(SetarModel):
+            target = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Vendor(SetarModel):
+            target = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True)
+
+            class Meta:
+                app_label = 'legacy_migrations'
+
+        assert 'tests.legacy_migrations' not in django_settings.LOCAL_APPS
+        return _owned_blob(Shared, Local, Vendor, subject=Local)[1]
+
+    blob = _build()
+
+    assert 'FROM "legacy_migrations_vendor" AS guitars_owner_1' in blob
+
+
+def test_owned_rule_is_refused_when_a_co_owner_is_tenanted_and_the_dependent_is_not():
+    """The guard's NOT EXISTS is an ordinary SELECT, so a policy on the co-owner's table hides
+    an out-of-tenant live owner and the rule stamps a still-owned row. 2.3.0 could only reach
+    that through the table you declared the key on; an arm reaches tables you never named."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        from guitars.tenancy import tenanted_manager
+
+        class Shared(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Plain(SetarModel):
+            target = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Scoped(SetarModel):
+            target = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True)
+            label = models.ForeignKey('testapp.Label', on_delete=CASCADE, null=True)
+            objects = tenanted_manager(label='label')
+
+            class Meta:
+                app_label = 'testapp'
+
+        return _owned_blob(Shared, Plain, Scoped, subject=Plain)
+
+    command, blob, ops = _build()
+
+    assert ops == []
+    assert len(command._mti_cascade_warnings) == 1
+    warning = command._mti_cascade_warnings[0]
+    assert "'testapp_scoped'" in warning
+    assert 'tenanted' in warning
+    assert 'another tenant' in warning
+
+
+def test_owned_rule_is_refused_when_a_co_owner_carries_a_dimension_the_dependent_does_not():
+    """A tenanted *dependent* is not enough. The co-owner's policy filters on `tenant.market`,
+    a dimension reaching the dependent's row never constrained, so a live owner in another
+    market is still invisible -- the same stamp-a-still-owned-row hole, one shape further in."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        from guitars.tenancy import tenanted_manager
+
+        class Shared(SetarModel):
+            label = models.ForeignKey('testapp.Label', on_delete=CASCADE, null=True)
+            objects = tenanted_manager(label='label')
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Plain(SetarModel):
+            target = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Scoped(SetarModel):
+            target = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True)
+            label = models.ForeignKey('testapp.Label', on_delete=CASCADE, null=True)
+            objects = tenanted_manager(market='label')
+
+            class Meta:
+                app_label = 'testapp'
+
+        return _owned_blob(Shared, Plain, Scoped, subject=Plain)
+
+    command, blob, ops = _build()
+
+    assert ops == []
+    assert len(command._mti_cascade_warnings) == 1
+    assert "'testapp_scoped'" in command._mti_cascade_warnings[0]
+
+
+def test_owned_rule_survives_a_co_owner_tenanted_on_the_dependent_s_own_dimension():
+    """The control, and why the refusal is per dimension rather than per tenanted-ness:
+    reaching the dependent's row already put the session inside `tenant.label`, so the
+    co-owner's policy on that same dimension cannot hide one of its owners."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        from guitars.tenancy import tenanted_manager
+
+        class Shared(SetarModel):
+            label = models.ForeignKey('testapp.Label', on_delete=CASCADE, null=True)
+            objects = tenanted_manager(label='label')
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Plain(SetarModel):
+            target = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Scoped(SetarModel):
+            target = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True)
+            label = models.ForeignKey('testapp.Label', on_delete=CASCADE, null=True)
+            objects = tenanted_manager(label='label')
+
+            class Meta:
+                app_label = 'testapp'
+
+        return _owned_blob(Shared, Plain, Scoped, subject=Plain)
+
+    command, blob, ops = _build()
+
+    assert command._mti_cascade_warnings == []
+    assert 'FROM "testapp_scoped" AS guitars_owner_1' in blob
+
+
+def test_owned_rule_survives_a_co_owner_whose_dimension_no_policy_can_filter_on():
+    """A dimension traversing a relation is left to Python scoping, so no policy filters the
+    co-owner's table and no read of it hides anything. Refusing on the *manager* withheld a
+    correct rule -- and failed ``--check`` over one recorded, told to drop what was working."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        from guitars.tenancy import tenanted_manager
+
+        class Shared(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Plain(SetarModel):
+            target = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Hop(SetarModel):
+            target = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True)
+            release = models.ForeignKey('testapp.Release', on_delete=CASCADE, null=True)
+            # Two hops from this table, so ``_classify`` emits no policy for it at all.
+            objects = tenanted_manager(label='release__label')
+
+            class Meta:
+                app_label = 'testapp'
+
+        return _owned_blob(Shared, Plain, Hop, subject=Plain)
+
+    command, blob, ops = _build()
+
+    assert command._mti_cascade_warnings == []
+    assert 'FROM "testapp_hop" AS guitars_owner_1' in blob
+
+
+def test_owned_rule_is_refused_when_the_dependent_s_own_dimension_predicates_nothing():
+    """The mirror: the dependent *declares* the co-owner's dimension but its policy cannot
+    filter on it, so reaching its row put the session inside nothing and the co-owner's policy
+    hides a live owner anyway. Read off the spec, the two dimension sets cancelled."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        from guitars.tenancy import tenanted_manager
+
+        class Shared(SetarModel):
+            release = models.ForeignKey('testapp.Release', on_delete=CASCADE, null=True)
+            objects = tenanted_manager(label='release__label')
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Plain(SetarModel):
+            target = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Scoped(SetarModel):
+            target = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True)
+            label = models.ForeignKey('testapp.Label', on_delete=CASCADE, null=True)
+            objects = tenanted_manager(label='label')
+
+            class Meta:
+                app_label = 'testapp'
+
+        return _owned_blob(Shared, Plain, Scoped, subject=Plain)
+
+    command, blob, ops = _build()
+
+    assert ops == []
+    assert len(command._mti_cascade_warnings) == 1
+    assert "'testapp_scoped'" in command._mti_cascade_warnings[0]
+
+
+def test_owned_rule_is_refused_when_the_dependent_is_one_the_kit_writes_no_policy_for():
+    """The other side of that fallback, and why it cannot be the same one: the dependent's
+    dimensions are *subtracted*, so reading an unknown table's manager as enforced would cancel
+    the co-owner's and suppress the refusal. Unknown means unfiltered on this side."""
+
+    @isolate_apps('tests.testapp', 'tests.legacy_migrations')
+    def _build():
+        from guitars.tenancy import tenanted_manager
+
+        class Shared(SetarModel):
+            release = models.ForeignKey('testapp.Release', on_delete=CASCADE, null=True)
+            objects = tenanted_manager(label='release__label')
+
+            class Meta:
+                app_label = 'legacy_migrations'
+
+        class Plain(SetarModel):
+            target = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Scoped(SetarModel):
+            target = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True)
+            label = models.ForeignKey('testapp.Label', on_delete=CASCADE, null=True)
+            objects = tenanted_manager(label='label')
+
+            class Meta:
+                app_label = 'testapp'
+
+        return _owned_blob(Shared, Plain, Scoped, subject=Plain)
+
+    command, blob, ops = _build()
+
+    assert ops == []
+    assert len(command._mti_cascade_warnings) == 1
+    assert "'testapp_scoped'" in command._mti_cascade_warnings[0]
+
+
+def test_policy_dimensions_are_asked_once_per_model_per_run():
+    """Two rules over one dependent, and the answer reaches ``_classify``, which sweeps the
+    registry for an MTI model that autofills. Memoised for the run rather than the process: it
+    moves with ``LOCAL_APPS``, and ``isolate_apps`` replaces the registry between runs."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        from guitars.tenancy import tenanted_manager
+
+        class Shared(SetarModel):
+            label = models.ForeignKey('testapp.Label', on_delete=CASCADE, null=True)
+            objects = tenanted_manager(label='label')
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Twice(SetarModel):
+            first = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True, related_name='+')
+            second = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True, related_name='+')
+
+            class Meta:
+                app_label = 'testapp'
+
+        return _owned_blob(Shared, Twice, subject=Twice)
+
+    command, blob, ops = _build()
+
+    # Both rules emitted: the owner carries none of the dependent's dimensions, so nothing its
+    # arms read is filtered by one the dependent's own policy does not apply.
+    assert len(ops) == 2
+    assert list(command._policy_dimension_memo.values()) == [frozenset({'label'})]
+
+
+def test_owned_rule_is_refused_when_a_joined_arm_reads_a_tenanted_ancestor():
+    """A joined arm reads *two* tables and takes liveness from the ancestor's, so a policy
+    there hides the same out-of-tenant live owner. Asking only the model holding the key
+    missed it -- and only this branch's own joined arm can reach that shape."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        from guitars.models.soft_deletion import LiveManager
+        from guitars.tenancy import tenanted_manager
+
+        class Shared(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Plain(SetarModel):
+            target = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Root(SetarModel):
+            market = models.ForeignKey('testapp.Market', on_delete=CASCADE, null=True)
+            objects = tenanted_manager(market='market')
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Kid(Root):
+            target = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True, related_name='+')
+            # Untenanted on its own account: the manager it would inherit is what used to make
+            # this shape look refusable, and the ancestor's policy is the thing that hides a row.
+            objects = LiveManager()
+
+            class Meta:
+                app_label = 'testapp'
+
+        return _owned_blob(Shared, Plain, Root, Kid, subject=Plain)
+
+    command, blob, ops = _build()
+
+    assert ops == []
+    assert len(command._mti_cascade_warnings) == 1
+    # The table named is the one carrying the policy, not the one carrying the key.
+    assert "'testapp_root'" in command._mti_cascade_warnings[0]
+
+
+def test_a_joined_arm_on_the_table_the_rule_fires_on_excludes_the_row_going_away():
+    """Self-exclusion against the table liveness is read from. Owner and co-owner in one MTI
+    chain: the ancestor row being soft-deleted satisfies the arm through its own child row --
+    the rule's action expanding first -- so it reads as its own live owner and stamps nothing."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Shared(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Root(SetarModel):
+            kit = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True, related_name='+')
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Kid(Root):
+            programme = OwningForeignKey(
+                Shared, on_delete=DO_NOTHING, null=True, related_name='+'
+            )
+
+            class Meta:
+                app_label = 'testapp'
+
+        return _owned_blob(Shared, Root, Kid, subject=Root)
+
+    command, blob, ops = _build()
+
+    assert 'JOIN "testapp_root" AS guitars_owner_1_root' in blob
+    # On the joined alias, which is where the row going away is -- not on the child alias.
+    assert 'guitars_owner_1_root."id" <> old."id"' in blob
+
+
+def test_a_joined_arm_whose_ancestor_is_the_dependent_excludes_the_target():
+    """The target exclusion, one MTI level up: a child of the dependent owning it back. The row
+    the rule stamps satisfies the arm through that child row, so nothing archives it."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Shared(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class SharedKid(Shared):
+            pin = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True, related_name='+')
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Owner(SetarModel):
+            target = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        return _owned_blob(Shared, SharedKid, Owner, subject=Owner)
+
+    command, blob, ops = _build()
+
+    assert 'JOIN "testapp_shared" AS guitars_owner_1_root' in blob
+    assert 'guitars_owner_1_root."id" <> old."target_id"' in blob
+
+
+def test_owned_rule_is_refused_for_a_tenanted_co_owner_the_kit_generates_no_policy_for():
+    """A model outside ``LOCAL_APPS`` gets no policy from this kit, but its own package may
+    carry one -- unknowable from here, so its manager is read as enforced. The fail-safe half
+    of asking what a policy filters on rather than what a manager declares."""
+
+    @isolate_apps('tests.testapp', 'tests.legacy_migrations')
+    def _build():
+        from guitars.tenancy import tenanted_manager
+
+        class Shared(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Plain(SetarModel):
+            target = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Vendor(SetarModel):
+            target = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True)
+            market = models.ForeignKey('testapp.Market', on_delete=CASCADE, null=True)
+            objects = tenanted_manager(market='market')
+
+            class Meta:
+                app_label = 'legacy_migrations'
+
+        assert 'tests.legacy_migrations' not in django_settings.LOCAL_APPS
+        return _owned_blob(Shared, Plain, Vendor, subject=Plain)
+
+    command, blob, ops = _build()
+
+    assert ops == []
+    assert len(command._mti_cascade_warnings) == 1
+    assert "'legacy_migrations_vendor'" in command._mti_cascade_warnings[0]
+
+
+@override_settings(LOCAL_APPS=['fake.kioska', 'fake.loopb'])
+def test_a_scoped_run_says_nothing_about_a_rule_that_will_never_exist(monkeypatch):
+    """The note asks for an unscoped run, so it has to be about a rule that run would emit.
+    A relation refused *after* the candidate test -- self-update here -- has none, and the
+    unscoped run it asked for would print the same note again."""
+    command = Command()
+    command._mti_cascade_warnings.clear()
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Loop(SetarModel):
+            parent = OwningForeignKey('self', on_delete=DO_NOTHING, null=True, related_name='+')
+
+            class Meta:
+                app_label = 'testapp'
+
+        command.all_models = [Loop, Kiosk]
+        monkeypatch.setattr(
+            operations_module.django_apps,
+            'get_app_configs',
+            lambda: [
+                _fake_app_config('fake.kioska', 'kioska', [Kiosk]),
+                _fake_app_config('fake.loopb', 'loopb', [Loop]),
+            ],
+        )
+        return command._scoped_owned_gap_notes({'kioska'})
+
+    assert _build() == []
+
+
+@override_settings(LOCAL_APPS=['fake.kioska', 'fake.loose'])
+def test_a_scoped_run_does_not_report_an_out_of_scope_app_s_own_misconfiguration(monkeypatch):
+    """The gap-note pass re-runs the owned candidate test over apps this run was never asked
+    about, taking its verdict without its reporting: otherwise a scoped run prints another app's
+    misconfiguration, and where that app recorded the rule, raises over it."""
+    command = Command()
+    command._mti_cascade_warnings.clear()
+    command._refusals_over_live_rules.clear()
+    command.existing.soft_delete_owned.clear()
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Kit(SetarModel):
+            legacy_id = models.IntegerField(unique=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Loose(SetarModel):
+            # Refused for its redirected key, the one refusal reachable here: the pass skips a
+            # model that does not own ``_deleted_at`` before it ever asks about its fields.
+            kit = OwningForeignKey(
+                Kit, on_delete=DO_NOTHING, to_field='legacy_id', null=True, blank=True
+            )
+
+            class Meta:
+                app_label = 'testapp'
+
+        # Recorded, so reporting the refusal would escalate rather than merely warn.
+        command.existing.soft_delete_owned[
+            (Kit._meta.db_table, Loose._meta.db_table, 'kit_id')
+        ] = None
+        monkeypatch.setattr(
+            operations_module.django_apps,
+            'get_app_configs',
+            lambda: [
+                _fake_app_config('fake.kioska', 'kioska', [Kiosk]),
+                _fake_app_config('fake.loose', 'loose', [Loose]),
+            ],
+        )
+        return command._scoped_owned_gap_notes({'kioska'})
+
+    assert _build() == []
+    assert command._mti_cascade_warnings == []
+    assert command._refusals_over_live_rules == []
+
+
+def test_a_refused_owned_rule_that_already_exists_fails_check():
+    """Refusing emits nothing, so the rule 2.3.0 recorded stays live and wrong with nothing
+    else to notice -- unlike every other refusal, which only ever fires where no rule was
+    written. The escalation is the only thing between that and a green ``--check``."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Shared(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Cyclic(SetarModel):
+            target = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        # Shared owns Cyclic back, so both rules close an ON UPDATE cycle and are refused.
+        Shared.add_to_class(
+            'back', OwningForeignKey(Cyclic, on_delete=DO_NOTHING, null=True, related_name='+')
+        )
+
+        command = Command()
+        command._mti_cascade_warnings.clear()
+        command._refusals_over_live_rules.clear()
+        command.all_models = [Shared, Cyclic]
+        # Pretend the project already migrated this rule, which 2.3.0 would have written.
+        command.existing.soft_delete_owned.clear()
+        command.existing.soft_delete_owned[('testapp_shared', 'testapp_cyclic', 'target_id')] = (
+            'deadbeefcafe'
+        )
+        return command, command._owned_operations(Cyclic)
+
+    command, ops = _build()
+
+    assert ops == []
+    assert len(command._refusals_over_live_rules) == 1
+    assert 'DROP RULE' in command._refusals_over_live_rules[0]
+    with pytest.raises(CommandError, match='already exists'):
+        command._refuse_a_stale_owned_rule(check_only=True)
+    # A generating run reports it and carries on -- there is nothing it could emit instead.
+    command._refuse_a_stale_owned_rule(check_only=False)
+
+
+def test_a_single_owner_rule_is_byte_identical_to_2_3_0(snapshot):
+    """A dependent owned from one place renders exactly as 2.3.0 rendered it, so its
+    ``[SQL:...]`` identity does not move. Pinned byte for byte: a substring assertion cannot
+    catch a whitespace change, and whitespace is what the digest hashes."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Alone(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class OnlyOwner(SetarModel):
+            target = OwningForeignKey(Alone, on_delete=DO_NOTHING, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        return _owned_blob(Alone, OnlyOwner, subject=OnlyOwner)[1]
+
+    assert _build() == snapshot
+
+
+@override_settings(LOCAL_APPS=['fake.kioska', 'fake.foyerb'])
+def test_scoped_run_warns_that_an_out_of_scope_owned_rule_may_be_stale(monkeypatch):
+    """Arms are registry-wide, so generating for one app moves the rule text of an owner in an
+    app the same run never re-derives. Warned rather than escalated, per ADR 0012: an unscoped
+    run -- what CI runs -- re-derives every rule."""
+    command = Command()
+    kiosk_app = _fake_app_config('fake.kioska', 'kioska', [Kiosk])
+    foyer_app = _fake_app_config('fake.foyerb', 'foyerb', [Foyer])
+    monkeypatch.setattr(
+        operations_module.django_apps,
+        'get_app_configs',
+        lambda: [kiosk_app, foyer_app],
+    )
+
+    notes = command._scoped_owned_gap_notes({'kioska'})
+
+    assert len(notes) == 1
+    assert (
+        "Owned rule on 'testapp_placard' owned by 'testapp_foyer' via 'placard_id' may be stale"
+        in notes[0]
+    )
+    # The in-scope table whose arm moved the out-of-scope rule's text, and the app that holds
+    # the rule this run leaves alone.
+    assert "reads 'testapp_kiosk', in this run's scope, but app 'foyerb' is not" in notes[0]

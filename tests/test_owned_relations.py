@@ -25,13 +25,17 @@ from tests.testapp.models import (
     Album,
     Band,
     Ensemble,
+    Foyer,
+    Kiosk,
     Merch,
     Orchestra,
     Patron,
+    Placard,
     PressKit,
     Residency,
     Rider,
     Section,
+    SpotlitPlacard,
     Stagehand,
 )
 
@@ -244,18 +248,22 @@ def test_the_last_owner_going_soft_deletes_the_shared_row(band):
 
 @pytest.mark.django_db
 def test_an_already_archived_owned_row_is_not_restamped(band):
-    """``AND _deleted_at IS NULL`` on the dependent: a second owner going must not move an
-    archived row's timestamp forward. Archived through the *other* owning column -- deleting
-    the kit itself would have ``SET_NULL`` clear both keys, leaving the guard untested."""
+    """``AND _deleted_at IS NULL`` on the dependent: an owner going after the row is archived
+    must not move its timestamp forward. Both of Album's columns have to go first -- since
+    2.4.0 each is the other's arm -- so it takes a *third* album to reach the guard."""
     kit = PressKit.objects.create(headline='Shared')
     kit_pk = kit.pk  # Model.delete() clears the instance's pk
     first = Album.objects.create(title='Hemispheres', band=band, alt_press_kit=kit)
     second = Album.objects.create(title='Permanent Waves', band=band, press_kit=kit)
-    first.delete()  # the only alt_press_kit owner, so the kit is stamped now
+    first.delete()
+    assert PressKit.objects.filter(pk=kit_pk).exists(), 'second still owns it'
+    second.delete()
     stamped_at = PressKit._archives.get(pk=kit_pk)._deleted_at
     assert stamped_at is not None
 
-    second.delete()
+    # By pk, not by instance: the archived kit is invisible to the default manager, and the
+    # key is what the rule reads either way.
+    Album.objects.create(title='Signals', band=band, press_kit_id=kit_pk).delete()
 
     assert PressKit._archives.get(pk=kit_pk)._deleted_at == stamped_at
 
@@ -1027,3 +1035,229 @@ def test_hard_delete_follows_exactly_the_relations_the_generator_emits_rules_for
             mismatched[model._meta.label] = (sorted(emitted), sorted(followed))
 
     assert mismatched == {}
+
+
+# ---- Cross-owner last-owner guard: two owner *tables*, ADR 0012 ------------------------
+# ``Placard`` is owned by ``Kiosk.placard`` and ``Foyer.placard`` -- the shape ``PressKit``
+# cannot cover, its columns both on ``testapp_album``. Before 2.4.0 each rule saw only its own.
+
+
+@pytest.mark.django_db
+def test_a_live_co_owner_on_another_table_spares_the_dependent():
+    """The bug this release exists for, from the kiosk side."""
+    placard = Placard.objects.create(caption='Now Showing')
+    kiosk = Kiosk.objects.create(label='Lobby', placard=placard)
+    Foyer.objects.create(label='Mezzanine', placard=placard)
+
+    kiosk.delete()  # the only kiosk owning it -- but the foyer is still live
+
+    assert Placard.objects.filter(pk=placard.pk).exists()
+
+
+@pytest.mark.django_db
+def test_a_placard_owning_itself_is_not_its_own_live_owner():
+    """The target exclusion, against the database. ``Placard.parent`` is refused a rule -- a
+    one-node cycle -- but arms the kiosk's, reading the placard table. A row pointing at its own
+    key would match its own arm and no owner's rule could ever archive it."""
+    placard = Placard.objects.create(caption='Now Showing')
+    placard.update(parent=placard)
+    kiosk = Kiosk.objects.create(label='Lobby', placard=placard)
+
+    kiosk.delete()
+
+    assert not Placard.objects.filter(pk=placard.pk).exists()
+
+
+@pytest.mark.django_db
+def test_an_mti_child_of_the_target_pinning_it_is_not_its_own_live_owner():
+    """The joined target exclusion. ``SpotlitPlacard`` holds ``pin`` on its own table and
+    liveness on ``testapp_placard``, so its arm matches the very row the kiosk's rule stamps
+    unless that row is excluded on the ancestor's side."""
+    spotlit = SpotlitPlacard.objects.create(caption='Now Showing', lumens='800')
+    spotlit.update(pin=spotlit.placard_ptr)
+    kiosk = Kiosk.objects.create(label='Lobby', placard=spotlit.placard_ptr)
+
+    kiosk.delete()
+
+    assert not Placard.objects.filter(pk=spotlit.pk).exists()
+
+
+@pytest.mark.django_db
+def test_a_distinct_spotlit_placard_pinning_it_still_spares_it():
+    """The control: excluded by the *target's* key, so a different spotlit placard pinning it
+    is a live owner the same arm has to see."""
+    placard = Placard.objects.create(caption='Now Showing')
+    SpotlitPlacard.objects.create(caption='Foyer board', lumens='400', pin=placard)
+    kiosk = Kiosk.objects.create(label='Lobby', placard=placard)
+
+    kiosk.delete()
+
+    assert Placard.objects.filter(pk=placard.pk).exists()
+
+
+@pytest.mark.django_db
+def test_another_live_placard_owning_it_still_spares_it():
+    """The control: the exclusion must take out the target row only. A *different* placard
+    pointing at it is a live owner like any other, and the same arm has to see it."""
+    placard = Placard.objects.create(caption='Now Showing')
+    Placard.objects.create(caption='Foyer board', parent=placard)
+    kiosk = Kiosk.objects.create(label='Lobby', placard=placard)
+
+    kiosk.delete()
+
+    assert Placard.objects.filter(pk=placard.pk).exists()
+
+
+@pytest.mark.django_db
+def test_one_row_owning_the_target_twice_is_not_its_own_owner(band):
+    """The plain self exclusion, per *row* rather than per column: one album holding the kit
+    through both of its owning columns satisfies its own sibling arm without it, and no owner
+    is ever left to archive the kit."""
+    kit = PressKit.objects.create(headline='Hemispheres, reissued')
+    album = Album.objects.create(
+        title='Hemispheres', band=band, press_kit=kit, alt_press_kit=kit
+    )
+
+    album.delete()
+
+    assert not PressKit.objects.filter(pk=kit.pk).exists()
+    assert PressKit._archives.filter(pk=kit.pk).exists()
+
+
+@pytest.mark.django_db
+def test_an_mti_owner_is_not_its_own_co_owner_across_the_join():
+    """One row owning the kit twice -- through ``Ensemble.press_kit`` and through the
+    ``Orchestra.programme`` its own child table holds. The ancestor's rule fires on the table
+    the joined arm reads, so without excluding that row it is its own last live owner."""
+    kit = PressKit.objects.create(headline='Hemispheres, reissued')
+    orchestra = Orchestra.objects.create(
+        name='LSO', conductor='Rattle', press_kit=kit, programme=kit
+    )
+
+    orchestra.delete()
+
+    assert not PressKit.objects.filter(pk=kit.pk).exists()
+
+
+@pytest.mark.django_db
+def test_another_live_mti_owner_across_the_join_still_spares_it():
+    """The control: the exclusion takes out one row, not the arm. A second orchestra owning the
+    kit through its child table is a live owner, and the joined arm has to see it."""
+    kit = PressKit.objects.create(headline='Hemispheres, reissued')
+    orchestra = Orchestra.objects.create(name='LSO', conductor='Rattle', press_kit=kit)
+    Orchestra.objects.create(name='CBSO', conductor='Grazinyte-Tyla', programme=kit)
+
+    orchestra.delete()
+
+    assert PressKit.objects.filter(pk=kit.pk).exists()
+
+
+@pytest.mark.django_db
+def test_a_live_co_owner_that_inherits_deleted_at_spares_the_dependent(band):
+    """The joined arm, against the database. ``Orchestra`` holds ``programme`` on its own table
+    and ``_deleted_at`` on ``Ensemble``, so the guard has to read across the join -- and until
+    it did, this archived the kit out from under a live orchestra."""
+    kit = PressKit.objects.create(headline='Hemispheres, reissued')
+    orchestra = Orchestra.objects.create(name='LSO', conductor='Rattle', programme=kit)
+    album = Album.objects.create(title='Hemispheres', band=band, press_kit=kit)
+
+    album.delete()  # the only album owning the kit -- but the orchestra is still live
+
+    assert PressKit.objects.filter(pk=kit.pk).exists()
+
+    # Still live once the orchestra goes too: the arm makes the *guard* see that owner, it does
+    # not give the orchestra a rule of its own -- refused, having to fire on ``testapp_ensemble``
+    # where ``old."programme_id"`` names nothing. Left un-archived, not archived early.
+    orchestra.delete()
+
+    assert PressKit.objects.filter(pk=kit.pk).exists()
+
+
+@pytest.mark.django_db
+def test_an_archived_co_owner_that_inherits_deleted_at_does_not_count_as_live(band):
+    """Liveness read from the ancestor's ``_deleted_at``, not merely "a row on the child table
+    points here": an archived orchestra leaves its child row in place, so an arm that joined
+    without reading the ancestor's column would hold the kit alive for ever."""
+    kit = PressKit.objects.create(headline='Hemispheres, reissued')
+    Orchestra.objects.create(name='LSO', conductor='Rattle', programme=kit).delete()
+    album = Album.objects.create(title='Hemispheres', band=band, press_kit=kit)
+
+    album.delete()
+
+    assert not PressKit.objects.filter(pk=kit.pk).exists()
+
+
+@pytest.mark.django_db
+def test_a_live_co_owner_spares_the_dependent_from_the_other_side_too():
+    """The mirror. Each of the N rules carries all N arms, so neither direction is the
+    special case -- a fix that only armed one rule would pass the test above alone."""
+    placard = Placard.objects.create(caption='Coming Soon')
+    Kiosk.objects.create(label='Lobby', placard=placard)
+    foyer = Foyer.objects.create(label='Mezzanine', placard=placard)
+
+    foyer.delete()
+
+    assert Placard.objects.filter(pk=placard.pk).exists()
+
+
+@pytest.mark.django_db
+def test_the_dependent_is_archived_once_every_owner_of_every_kind_is_gone():
+    """The control: the arms must not spare a placard nothing owns any more, or the guard
+    would have traded a data-loss bug for one that never archives anything."""
+    placard = Placard.objects.create(caption='Closed Run')
+    placard_pk = placard.pk
+    kiosk = Kiosk.objects.create(label='Lobby', placard=placard)
+    foyer = Foyer.objects.create(label='Mezzanine', placard=placard)
+
+    kiosk.delete()
+    foyer.delete()  # one at a time: the per-statement limit is unchanged, see ADR 0011
+
+    assert not Placard.objects.filter(pk=placard_pk).exists()
+    assert Placard._archives.get(pk=placard_pk)._deleted_at is not None
+
+
+@pytest.mark.django_db
+def test_a_soft_deleted_co_owner_does_not_count_as_live():
+    """``AND {alias}._deleted_at IS NULL`` on every arm, not only on the declaring one: an
+    archived co-owner keeps its key on disk, so an arm without the filter would read it as
+    live and hold the placard alive forever."""
+    placard = Placard.objects.create(caption='Retired')
+    placard_pk = placard.pk
+    kiosk = Kiosk.objects.create(label='Lobby', placard=placard)
+    foyer = Foyer.objects.create(label='Mezzanine', placard=placard)
+
+    foyer.delete()  # spared: the kiosk is live
+    assert Placard.objects.filter(pk=placard_pk).exists()
+    kiosk.delete()  # the foyer is archived now, so this is genuinely the last owner
+
+    assert Placard._archives.get(pk=placard_pk)._deleted_at is not None
+
+
+@pytest.mark.django_db
+def test_hard_delete_does_not_collect_a_dependent_a_co_owner_still_holds():
+    """The rule and the collector must agree. ``hard_delete()`` was already right here --
+    ``_still_referenced`` walks every relation into the target, not the declaring column --
+    so this pins the agreement rather than a change: the SQL guard has converged on it."""
+    placard = Placard.objects.create(caption='Held')
+    placard_pk = placard.pk
+    kiosk = Kiosk.objects.create(label='Lobby', placard=placard)
+    Foyer.objects.create(label='Mezzanine', placard=placard)
+
+    kiosk.hard_delete()
+
+    assert Placard.objects.filter(pk=placard_pk).exists()
+    assert not Kiosk._all_objects.filter(pk=kiosk.pk).exists()
+
+
+@pytest.mark.django_db
+def test_hard_delete_collects_a_dependent_once_no_co_owner_holds_it():
+    """The control for the above, and the case where ``hard_delete()`` is deliberately
+    narrower than the rule: the whole batch is gone by construction, so it removes what the
+    per-statement rule would have spared."""
+    placard = Placard.objects.create(caption='Unheld')
+    placard_pk = placard.pk
+    kiosk = Kiosk.objects.create(label='Lobby', placard=placard)
+
+    kiosk.hard_delete()
+
+    assert not Placard._all_objects.filter(pk=placard_pk).exists()

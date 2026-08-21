@@ -109,7 +109,10 @@ class TestIdentifierValidation:
 class TestUpdateFlagCombinatorics:
     """The 16-way cross product of ``update()``'s four flags, pinned against a real save."""
 
-    @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
+    # ``deadline=None``: each example writes to a real Postgres under ``-n auto``, so its wall
+    # clock measures worker contention. Serially the whole cross product takes 0.3s; under load
+    # one example alone passes 200ms and fails the run. Nothing here asserts performance.
+    @settings(suppress_health_check=[HealthCheck.function_scoped_fixture], deadline=None)
     @given(
         save=st.booleans(),
         save_all_fields=st.booleans(),

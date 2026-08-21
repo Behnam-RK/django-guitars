@@ -24,7 +24,7 @@ from guitars.management.enforcement.headers import (
     HEADER_TRIGGER_FUNCTION,
 )
 from guitars.management.enforcement.identity import _operation
-from guitars.management.enforcement.operations import OperationsMixin
+from guitars.management.enforcement.operations import OperationsMixin, _OwnerArm
 from guitars.management.enforcement.scanning import ExistingOperations, scan_existing_operations
 from guitars.sql import _identifiers
 from guitars.sql import triggers as _triggers
@@ -33,6 +33,8 @@ from guitars.tenancy.discovery import owner_autofill_notes
 
 if TYPE_CHECKING:
     from django.apps import AppConfig
+
+    from guitars.tenancy.discovery import _PolicyDimensionMemo
 
 
 class Command(OperationsMixin, BaseCommand):
@@ -71,6 +73,10 @@ class Command(OperationsMixin, BaseCommand):
         # cascade spelling is frozen -- so the report is the only thing standing between a
         # silent replacement and the operator. See ``_claim_rule_name``.
         self._rule_name_clashes: list[str] = []
+        # Owned rules refused this run that the project *already* recorded, so the stale one is
+        # live in every migrated database. Errors, and they fail ``--check``: refusing emits
+        # nothing, so nothing else would notice. See ``_refuse_owned``.
+        self._refusals_over_live_rules: list[str] = []
         self._claimed_rule_names: dict[tuple[str, str], tuple] = {}
         # Tables tenancy discovery could not cover, with the reason. Also surfaced.
         self._tenancy_notes: list[str] = []
@@ -85,6 +91,12 @@ class Command(OperationsMixin, BaseCommand):
         # after construction -- the generation tests do, ``isolate_apps`` swapping ``Options.apps``
         # rather than the registry this constructor read. Building it here freezes the old answer.
         self._rule_cycle_cache: set[tuple[str, str]] | None = None
+        # Lazy for the same reason, and registry-wide for the reason ``_owner_arms`` gives.
+        self._owner_arms_cache: dict[str, list[_OwnerArm]] | None = None
+        # Not lazy, and not module-level: ``policy_dimensions`` reaches a registry sweep for an
+        # MTI model that autofills, a rule with N arms asks about N models, and the answer moves
+        # with ``LOCAL_APPS`` -- so one run's worth of memo, thrown away with the command.
+        self._policy_dimension_memo: _PolicyDimensionMemo = {}
         self._required_autofill_cache: dict[tuple[str, str], tuple[str, str]] | None = None
         self._relocated_autofill_cache: dict[tuple[str, str], tuple[str, str]] | None = None
 
@@ -398,6 +410,13 @@ class Command(OperationsMixin, BaseCommand):
             # uncaught CommandError, and double-wrapping garbles the ANSI codes.
             raise CommandError(self._rule_name_clashes[0])
 
+    def _refuse_a_stale_owned_rule(self, *, check_only: bool) -> None:
+        """Fail a ``--check`` run over an owned rule that is refused but already recorded.
+        Unlike a name clash this one is not emitted at all, so a generating run leaves the
+        database exactly as wrong as it found it -- the report is all either run can do."""
+        if check_only and self._refusals_over_live_rules:
+            raise CommandError(self._refusals_over_live_rules[0])
+
     def handle(self, *app_labels, **options):
         check_only: bool = options['check_only']
         force_rls: bool = options.get('force_rls', False)
@@ -486,8 +505,10 @@ class Command(OperationsMixin, BaseCommand):
 
         # Step 3: surface cross-app cascade rules this scoped run intentionally
         # did not create, so the "pragmatic scope" tradeoff is never silent.
-        for note in self._scoped_cascade_gap_notes(requested) + self._scoped_autofill_gap_notes(
-            requested
+        for note in (
+            self._scoped_cascade_gap_notes(requested)
+            + self._scoped_owned_gap_notes(requested)
+            + self._scoped_autofill_gap_notes(requested)
         ):
             self.stdout.write(self.style.WARNING(note))
 
@@ -497,6 +518,7 @@ class Command(OperationsMixin, BaseCommand):
         for paint, note in [
             *((self.style.WARNING, note) for note in self._mti_cascade_warnings),
             *((self.style.ERROR, note) for note in self._rule_name_clashes),
+            *((self.style.ERROR, note) for note in self._refusals_over_live_rules),
         ]:
             self.stderr.write(paint(note))
 
@@ -516,6 +538,7 @@ class Command(OperationsMixin, BaseCommand):
         # than raised in place: a run with two problems must report both, and this one raises.
         # Before `_report_missing`, which also raises -- a clash is the more fundamental.
         self._refuse_a_rule_name_clash(check_only=check_only)
+        self._refuse_a_stale_owned_rule(check_only=check_only)
 
         if check_missing or function_check_messages:
             self._report_missing(check_missing, function_check_messages)

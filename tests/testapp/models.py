@@ -103,6 +103,12 @@ class Ensemble(SetarModel):
     """MTI parent (full kit) — owns _updated_at / _deleted_at on its own table."""
 
     name = CharField(max_length=100)
+    # Owns the same target its MTI child ``Orchestra`` owns, so this rule fires on the very
+    # table that child's joined arm reads liveness from -- the shape where the row going away
+    # satisfies its own arm through its child row unless the exclusion lands on the ancestor.
+    press_kit = OwningForeignKey(
+        'PressKit', on_delete=DO_NOTHING, null=True, blank=True, related_name='ensembles'
+    )
 
     def __str__(self) -> str:
         return self.name
@@ -434,3 +440,63 @@ class SquashCourt(Court):
 
     class Meta:
         pass
+
+
+class Placard(SetarModel):
+    """Owned target reachable from two *different* owner tables -- the shape ``PressKit`` does
+    not cover, its owning columns both living on ``testapp_album``. Each owner's rule must
+    carry an arm for the other, or one kind's last owner archives what the other holds."""
+
+    caption = CharField(max_length=100)
+    # Owns another placard: refused a rule of its own, that being a one-node ON UPDATE cycle,
+    # but it still contributes an arm to the kiosk's and foyer's rules -- an arm reading the
+    # dependent's *own* table, the one shape needing the target itself excluded.
+    parent = OwningForeignKey(
+        'self', on_delete=DO_NOTHING, null=True, blank=True, related_name='children'
+    )
+
+    def __str__(self) -> str:
+        return self.caption
+
+
+class SpotlitPlacard(Placard):
+    """MTI child of an owned target, owning that target back: the arm it contributes to the
+    kiosk's and foyer's rules takes liveness from ``testapp_placard`` itself, so the row the
+    rule stamps has to be excluded there rather than on the table holding the key."""
+
+    lumens = CharField(max_length=100)
+    pin = OwningForeignKey(
+        Placard, on_delete=DO_NOTHING, null=True, blank=True, related_name='pinned_by'
+    )
+
+    class Meta:
+        pass
+
+    def __str__(self) -> str:
+        return self.lumens
+
+
+class Kiosk(SetarModel):
+    """One of ``Placard``'s two owner tables."""
+
+    label = CharField(max_length=100)
+    placard = OwningForeignKey(
+        Placard, on_delete=DO_NOTHING, null=True, blank=True, related_name='kiosks'
+    )
+
+    def __str__(self) -> str:
+        return self.label
+
+
+class Foyer(SetarModel):
+    """The other. Deliberately a distinct table rather than a second column on ``Kiosk``:
+    a co-owner arm against another table carries no self-exclusion, which is the half
+    ``Album``'s same-table pair cannot exercise."""
+
+    label = CharField(max_length=100)
+    placard = OwningForeignKey(
+        Placard, on_delete=DO_NOTHING, null=True, blank=True, related_name='foyers'
+    )
+
+    def __str__(self) -> str:
+        return self.label

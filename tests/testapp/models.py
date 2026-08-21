@@ -442,6 +442,12 @@ class Placard(SetarModel):
     carry an arm for the other, or one kind's last owner archives what the other holds."""
 
     caption = CharField(max_length=100)
+    # Owns another placard: refused a rule of its own, that being a one-node ON UPDATE cycle,
+    # but it still contributes an arm to the kiosk's and foyer's rules -- an arm reading the
+    # dependent's *own* table, the one shape needing the target itself excluded.
+    parent = OwningForeignKey(
+        'self', on_delete=DO_NOTHING, null=True, blank=True, related_name='children'
+    )
 
     def __str__(self) -> str:
         return self.caption

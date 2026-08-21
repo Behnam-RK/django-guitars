@@ -1054,6 +1054,33 @@ def test_a_live_co_owner_on_another_table_spares_the_dependent():
 
 
 @pytest.mark.django_db
+def test_a_placard_owning_itself_is_not_its_own_live_owner():
+    """The target exclusion, against the database. ``Placard.parent`` is refused a rule -- a
+    one-node cycle -- but arms the kiosk's, reading the placard table. A row pointing at its own
+    key would match its own arm and no owner's rule could ever archive it."""
+    placard = Placard.objects.create(caption='Now Showing')
+    placard.update(parent=placard)
+    kiosk = Kiosk.objects.create(label='Lobby', placard=placard)
+
+    kiosk.delete()
+
+    assert not Placard.objects.filter(pk=placard.pk).exists()
+
+
+@pytest.mark.django_db
+def test_another_live_placard_owning_it_still_spares_it():
+    """The control: the exclusion must take out the target row only. A *different* placard
+    pointing at it is a live owner like any other, and the same arm has to see it."""
+    placard = Placard.objects.create(caption='Now Showing')
+    Placard.objects.create(caption='Foyer board', parent=placard)
+    kiosk = Kiosk.objects.create(label='Lobby', placard=placard)
+
+    kiosk.delete()
+
+    assert Placard.objects.filter(pk=placard.pk).exists()
+
+
+@pytest.mark.django_db
 def test_a_live_co_owner_that_inherits_deleted_at_spares_the_dependent(band):
     """The joined arm, against the database. ``Orchestra`` holds ``programme`` on its own table
     and ``_deleted_at`` on ``Ensemble``, so the guard has to read across the join -- and until

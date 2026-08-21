@@ -25,7 +25,7 @@ from guitars.management.enforcement import operations as operations_module
 from guitars.management.enforcement.command import Command
 from guitars.sql import _identifiers
 from guitars.tenancy.discovery import app_coverage, autofill_function_name
-from tests.testapp.models import Album, Band, Ensemble, Merch, Orchestra
+from tests.testapp.models import Album, Band, Ensemble, Foyer, Kiosk, Merch, Orchestra
 
 
 def _pretend_function_migrations_are_current(command):
@@ -2100,3 +2100,29 @@ def test_a_single_owner_rule_is_byte_identical_to_2_3_0(snapshot):
         return _owned_blob(Alone, OnlyOwner, subject=OnlyOwner)[1]
 
     assert _build() == snapshot
+
+
+@override_settings(LOCAL_APPS=['fake.kioska', 'fake.foyerb'])
+def test_scoped_run_warns_that_an_out_of_scope_owned_rule_may_be_stale(monkeypatch):
+    """Arms are registry-wide, so generating for one app moves the rule text of an owner in an
+    app the same run never re-derives. Warned rather than escalated, per ADR 0012: an unscoped
+    run -- what CI runs -- re-derives every rule."""
+    command = Command()
+    kiosk_app = _fake_app_config('fake.kioska', 'kioska', [Kiosk])
+    foyer_app = _fake_app_config('fake.foyerb', 'foyerb', [Foyer])
+    monkeypatch.setattr(
+        operations_module.django_apps,
+        'get_app_configs',
+        lambda: [kiosk_app, foyer_app],
+    )
+
+    notes = command._scoped_owned_gap_notes({'kioska'})
+
+    assert len(notes) == 1
+    assert (
+        "Owned rule on 'testapp_placard' owned by 'testapp_foyer' via 'placard_id' may be stale"
+        in notes[0]
+    )
+    # The in-scope table whose arm moved the out-of-scope rule's text, and the app that holds
+    # the rule this run leaves alone.
+    assert "reads 'testapp_kiosk', in this run's scope, but app 'foyerb' is not" in notes[0]

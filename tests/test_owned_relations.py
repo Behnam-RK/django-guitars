@@ -23,7 +23,10 @@ from tests.testapp.models import (
     Orchestra,
     Patron,
     PressKit,
+    Residency,
+    Rider,
     Section,
+    Stagehand,
 )
 
 
@@ -323,7 +326,68 @@ def test_the_hard_deletion_switch_suppresses_the_owned_rule(band):
     assert PressKit.objects.filter(pk=kit.pk).exists()  # untouched: the rule did not fire
 
 
+@pytest.mark.django_db
+def test_soft_deleting_the_owner_stamps_two_hops_down_the_chain():
+    """An owned rule stamps by ``UPDATE``, and that ``UPDATE`` is itself what fires the next
+    rule down -- so ownership is transitive without the generator emitting anything for the
+    far hop. Every other owned relation here is one hop deep."""
+    hand = Stagehand.objects.create(name='Neil')
+    rider = Rider.objects.create(clause='No brown M&Ms', stagehand=hand)
+    residency = Residency.objects.create(venue_name='Massey Hall', rider=rider)
+
+    residency.delete()
+
+    assert Rider._archives.filter(pk=rider.pk).exists()
+    assert Stagehand._archives.filter(pk=hand.pk).exists()
+
+
+@pytest.mark.django_db
+def test_a_live_owner_two_hops_up_still_spares_the_leaf():
+    """The last-owner guard applies per hop, so a spared middle row spares the leaf with it
+    -- the chain stops where the guard says no, rather than running to the end."""
+    hand = Stagehand.objects.create(name='Neil')
+    rider = Rider.objects.create(clause='No brown M&Ms', stagehand=hand)
+    Residency.objects.create(venue_name='Massey Hall', rider=rider)
+    other = Residency.objects.create(venue_name='Hammersmith', rider=rider)
+
+    other.delete()
+
+    assert Rider.objects.filter(pk=rider.pk).exists()
+    assert Stagehand.objects.filter(pk=hand.pk).exists()
+
+
 # ─── hard_delete ───
+
+@pytest.mark.django_db(transaction=True)
+def test_hard_delete_removes_a_two_hop_ownership_chain_in_dependency_order():
+    """``_owned_targets``'s fixpoint has to reach the leaf through the middle row it only
+    just claimed, and the delete groups have to run leaf-last -- the middle row's key still
+    points at the leaf while it is on disk."""
+    hand = Stagehand.objects.create(name='Neil')
+    rider = Rider.objects.create(clause='No brown M&Ms', stagehand=hand)
+    residency = Residency.objects.create(venue_name='Massey Hall', rider=rider)
+
+    residency.hard_delete()
+
+    assert not Rider._all_objects.filter(pk=rider.pk).exists()
+    assert not Stagehand._all_objects.filter(pk=hand.pk).exists()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_hard_delete_spares_a_whole_chain_below_a_row_another_owner_keeps():
+    """The Python twin of the guard applies per hop too: sparing the middle row must spare
+    the leaf, or ``hard_delete()`` destroys what the rule path leaves alive."""
+    hand = Stagehand.objects.create(name='Neil')
+    rider = Rider.objects.create(clause='No brown M&Ms', stagehand=hand)
+    residency = Residency.objects.create(venue_name='Massey Hall', rider=rider)
+    Residency.objects.create(venue_name='Hammersmith', rider=rider)
+
+    residency.hard_delete()
+
+    assert Rider.objects.filter(pk=rider.pk).exists()
+    assert Stagehand.objects.filter(pk=hand.pk).exists()
+
+
 
 
 @pytest.mark.django_db(transaction=True)

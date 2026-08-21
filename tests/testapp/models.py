@@ -169,6 +169,43 @@ class Patron(SetarModel):
         return self.name
 
 
+class Stagehand(SetarModel):
+    """Leaf of a two-deep ownership chain: owned by ``Rider``, which is itself owned by
+    ``Residency``. Every other owned relation in this app is one hop, so nothing else
+    exercises a rule whose own ``UPDATE`` fires a second rule."""
+
+    name = CharField(max_length=100)
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class Rider(SetarModel):
+    """Middle of the chain: an owned target that is itself an owner. Soft-deleting a
+    ``Residency`` stamps this row by rule, and *that* stamp must fire the rule stamping
+    its ``Stagehand``; ``hard_delete()`` must remove the three in dependency order."""
+
+    clause = CharField(max_length=100)
+    stagehand = OwningForeignKey(
+        Stagehand, on_delete=DO_NOTHING, null=True, blank=True, related_name='riders'
+    )
+
+    def __str__(self) -> str:
+        return self.clause
+
+
+class Residency(SetarModel):
+    """Top of the chain."""
+
+    venue_name = CharField(max_length=100)
+    rider = OwningForeignKey(
+        Rider, on_delete=DO_NOTHING, null=True, blank=True, related_name='residencies'
+    )
+
+    def __str__(self) -> str:
+        return self.venue_name
+
+
 class Section(SetarModel):
     """Soft-deletable, CASCADE FK to an MTI child -- exercises the cascade rule landing
     on the owner (Ensemble) table, not the child."""

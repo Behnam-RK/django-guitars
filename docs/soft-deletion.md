@@ -33,17 +33,14 @@ Soft-deleting a row also soft-deletes rows related by `on_delete=CASCADE`, via a
 second rule on the parent's table that keys off the `_deleted_at` transition
 (not `.delete()`), so it fires for bulk deletes and raw SQL too. Non-`CASCADE`
 relations get no rule, and the cascade only reaches models that are themselves
-soft-deletable — a plain `Model` is deleted for real.
+soft-deletable — a plain `Model` is deleted for real. A `CASCADE` FK that would close a **cycle** of `ON UPDATE` rules — self-referential, or a loop through another model's cascade or [owned](owned-relations.md) rules — gets no rule either, with a warning: PostgreSQL rewrites such a cycle into itself and rejects *every* `UPDATE` to *every* table in it. Cascade that step in Python.
 
-A rule name is the only thing PostgreSQL dedupes on, not what it references, so
-a child with more than one `CASCADE` FK to the same parent gets its second
-rule suffixed with the FK column name (`soft_delete_related_<child>_<fk>`);
-the first keeps the bare name for backward compatibility.
+The reverse case, and how both kinds of rule are named: [Owned relations](owned-relations.md).
 
 ## Hard deletion
 
 ```python
-article.hard_delete()                            # this row + CASCADE children
+article.hard_delete()                            # this row, CASCADE children, owned rows
 Article._all_objects.filter(...).hard_delete()   # in bulk
 ```
 
@@ -66,10 +63,12 @@ The blast radius is the *connection*: with any pool, one rolled-back
 **Instance-level `hard_delete()` is two-phase:** soft-delete first (so cascade
 rules fire), then DFS-collect `CASCADE` children through `_all_objects` and
 hard-delete child-first — Django's `CASCADE` is Python-level (`Collector`),
-not `ON DELETE CASCADE`, so a raw parent `DELETE` would fail the FK check.
+not `ON DELETE CASCADE`, so a raw parent `DELETE` would fail the FK check. An
+owned row goes the other way — *after* its owner, which still references it.
 
 Queryset-level `hard_delete()` is blunter: it deletes matched rows (and, for
-MTI, the whole table chain) but does **not** walk reverse-FK children.
+MTI, the whole table chain) but does **not** walk reverse-FK children or owned
+relations.
 
 ## Managers and the base manager
 
@@ -95,6 +94,7 @@ model — and why an MTI child must declare its own `Meta`; see [MTI](mti.md).
 
 ## Related
 
+- [Owned relations](owned-relations.md) — soft deletion in the other direction
 - [Migrations](migrations.md) — how the rules get into the database
 - [MTI](mti.md) — soft deletion across an inheritance chain
 - [Tenancy](tenancy.md) — soft deletion under RLS

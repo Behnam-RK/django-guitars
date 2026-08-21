@@ -143,6 +143,29 @@ def test_every_rule_is_created_or_replace():
     )
 
 
+def test_every_private_rule_template_is_created_or_replace():
+    """The generator writes the *private* templates, not the frozen public constants above,
+    so the same guarantee has to hold over them -- an owned or cascade rule dropped and
+    re-created leaves an instant where a DELETE on that table destroys rows."""
+    from guitars.sql import soft_delete as soft_delete_module
+
+    private_rules = sorted(
+        name
+        for name, value in vars(soft_delete_module).items()
+        if name.startswith('_CREATE_') and isinstance(value, str) and ' RULE ' in value
+    )
+
+    assert private_rules, 'found no private rule templates -- has a name changed?'
+    plain = [
+        name
+        for name in private_rules
+        if 'CREATE OR REPLACE RULE' not in getattr(soft_delete_module, name)
+    ]
+    assert not plain, (
+        f'these create a rule without OR REPLACE, so replacing one is unsafe: {plain}'
+    )
+
+
 def test_every_frozen_callable_is_callable():
     """Migrations *call* these, so a constant shadowing one fails at migrate time."""
     for name in sorted(FROZEN_SQL_CALLABLES):

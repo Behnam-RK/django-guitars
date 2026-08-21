@@ -63,8 +63,15 @@ class Command(OperationsMixin, BaseCommand):
         self.tenant_autofill_dependencies: dict[str, tuple[str, str]] = {}
         self.tenant_autofill_sql: dict[str, str | None] = {}
 
-        # Cross-app / MTI cascade rules skipped this run, surfaced as warnings (not silent).
+        # Rules skipped this run, surfaced as warnings (not silent): cross-app / MTI cascade
+        # rules, the owned rules whose three shapes the generator refuses, and either kind
+        # refused for closing an ON UPDATE rule cycle. One list, one report loop.
         self._mti_cascade_warnings: list[str] = []
+        # Two relations whose rules would share one name on one table. Emitted anyway -- the
+        # cascade spelling is frozen -- so the report is the only thing standing between a
+        # silent replacement and the operator. See ``_claim_rule_name``.
+        self._rule_name_clashes: list[str] = []
+        self._claimed_rule_names: dict[tuple[str, str], tuple] = {}
         # Tables tenancy discovery could not cover, with the reason. Also surfaced.
         self._tenancy_notes: list[str] = []
 
@@ -74,6 +81,10 @@ class Command(OperationsMixin, BaseCommand):
         # in-scope app and each sweeps *every* local app's coverage. Safe to cache -- they read
         # only the model registry and GUITARS_TENANT_POLICIES, neither moving mid-`handle()`.
         self._table_app_labels_cache: dict[str, str] | None = None
+        # Lazy, not built here: the graph reads ``self.all_models``, which a caller can *replace*
+        # after construction -- the generation tests do, ``isolate_apps`` swapping ``Options.apps``
+        # rather than the registry this constructor read. Building it here freezes the old answer.
+        self._rule_cycle_cache: set[tuple[str, str]] | None = None
         self._required_autofill_cache: dict[tuple[str, str], tuple[str, str]] | None = None
         self._relocated_autofill_cache: dict[tuple[str, str], tuple[str, str]] | None = None
 
@@ -378,6 +389,15 @@ class Command(OperationsMixin, BaseCommand):
         self.tenant_autofill_dependencies[function], self.tenant_autofill_sql[function] = written
         return True
 
+    def _refuse_a_rule_name_clash(self, *, check_only: bool) -> None:
+        """Fail a ``--check`` run over a shared rule name. One of the two rules does not exist
+        in the database the migration ships to, which is precisely what ``--check`` is for; a
+        generating run has already written the files, so there it stays a report."""
+        if check_only and self._rule_name_clashes:
+            # Bare message, as _ensure_singleton_migration explains: Django re-styles an
+            # uncaught CommandError, and double-wrapping garbles the ANSI codes.
+            raise CommandError(self._rule_name_clashes[0])
+
     def handle(self, *app_labels, **options):
         check_only: bool = options['check_only']
         force_rls: bool = options.get('force_rls', False)
@@ -471,9 +491,14 @@ class Command(OperationsMixin, BaseCommand):
         ):
             self.stdout.write(self.style.WARNING(note))
 
-        # Surface MTI cascade rules skipped because cascading INTO an MTI child is unsupported.
-        for note in self._mti_cascade_warnings:
-            self.stderr.write(self.style.WARNING(note))
+        # MTI cascade rules skipped as warnings; two relations sharing a rule name as an error,
+        # that one being *emitted* rather than skipped -- so one of the pair does not exist in
+        # the database it ships to. One loop, so neither kind can go unwritten.
+        for paint, note in [
+            *((self.style.WARNING, note) for note in self._mti_cascade_warnings),
+            *((self.style.ERROR, note) for note in self._rule_name_clashes),
+        ]:
+            self.stderr.write(paint(note))
 
         # Tables tenancy could not cover, and why. Skips are design, never silent -- so the
         # relocation refusals print here too, not only via `expected_coverage`. Once per run,
@@ -486,6 +511,11 @@ class Command(OperationsMixin, BaseCommand):
         # an orphaned function is inert, an unmapped table has no app to migrate into.
         for note in self._unmapped_autofill_notes() + self._orphaned_autofill_function_notes():
             self.stdout.write(self.style.WARNING(note))
+
+        # After every note above, for the reason `function_check_messages` is collected rather
+        # than raised in place: a run with two problems must report both, and this one raises.
+        # Before `_report_missing`, which also raises -- a clash is the more fundamental.
+        self._refuse_a_rule_name_clash(check_only=check_only)
 
         if check_missing or function_check_messages:
             self._report_missing(check_missing, function_check_messages)

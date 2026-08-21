@@ -22,6 +22,15 @@ The instrument ladder, each rung adding capability:
 Each capability is also a standalone mixin: `UpdatableModel`,
 `HasCachedPropertyModel`, `DatedModel`, `SoftDeletableModel`.
 
+### `OwningForeignKey`
+
+A `ForeignKey` whose row **owns** its target: soft-deleting the declaring row
+soft-deletes the target too, unless another live row still points at it. Refuses
+`on_delete=CASCADE` (`guitars.E001`), which means the opposite. `deconstruct()` records
+the path `guitars.models.OwningForeignKey`, which is frozen — see
+[`owned-relations.md`](owned-relations.md) and
+[ADR 0011](adr/0011-owner-side-soft-delete-ownership.md).
+
 ### `.update()` / `.aupdate()` parameters (`UpdatableModel`)
 
 | Param | Effect |

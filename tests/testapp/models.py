@@ -1,5 +1,6 @@
 from django.db.models import (
     CASCADE,
+    DO_NOTHING,
     SET_NULL,
     CharField,
     ForeignKey,
@@ -8,7 +9,14 @@ from django.db.models import (
 )
 from django.utils.functional import cached_property
 
-from guitars.models import DutarModel, GuitarModel, LiveManager, SetarModel, TarModel
+from guitars.models import (
+    DutarModel,
+    GuitarModel,
+    LiveManager,
+    OwningForeignKey,
+    SetarModel,
+    TarModel,
+)
 from guitars.tenancy import tenanted_manager
 
 
@@ -60,6 +68,16 @@ class Band(WhisperMixin, SetarModel):
         return self.name.upper()
 
 
+class PressKit(SetarModel):
+    """Owned target: the thing an ``Album`` owns rather than merely points at. Soft-deletable,
+    since only a soft-deletable dependent has a ``_deleted_at`` for the rule to stamp."""
+
+    headline = CharField(max_length=100)
+
+    def __str__(self) -> str:
+        return self.headline
+
+
 class Album(SetarModel):
     title = CharField(max_length=100)
     band = ForeignKey(Band, on_delete=CASCADE, related_name='albums')
@@ -67,6 +85,14 @@ class Album(SetarModel):
     # relation" branches in cascade-rule generation and instance hard_delete's DFS collection.
     producer = ForeignKey(
         Band, on_delete=SET_NULL, null=True, blank=True, related_name='produced_albums'
+    )
+    # Two owned FKs to one table: the owned rule is always named after its column, so these
+    # must produce two distinctly-named rules rather than one silently replacing the other.
+    press_kit = OwningForeignKey(
+        PressKit, on_delete=DO_NOTHING, null=True, blank=True, related_name='albums'
+    )
+    alt_press_kit = OwningForeignKey(
+        PressKit, on_delete=DO_NOTHING, null=True, blank=True, related_name='alt_albums'
     )
 
     def __str__(self) -> str:
@@ -87,6 +113,11 @@ class Orchestra(Ensemble):
     ``_deleted_at`` index from re-declaring against this table's non-local column (E016)."""
 
     conductor = CharField(max_length=100)
+    # Owned FK on an MTI child's own table while _deleted_at lives on Ensemble: the rule
+    # would fire on the ancestor, where old."programme_id" names nothing. Warns, emits nothing.
+    programme = OwningForeignKey(
+        'PressKit', on_delete=DO_NOTHING, null=True, blank=True, related_name='orchestras'
+    )
 
     class Meta:
         pass
@@ -114,9 +145,65 @@ class Merch(SetarModel):
     bonus_album = ForeignKey(
         Album, on_delete=CASCADE, null=True, blank=True, related_name='bonus_merch'
     )
+    # Owned dependent reached through MTI: Orchestra's _deleted_at lives on Ensemble, and the
+    # rule must correlate against that table -- an MTI chain shares one primary-key value.
+    featured_orchestra = OwningForeignKey(
+        Orchestra, on_delete=DO_NOTHING, null=True, blank=True, related_name='featured_by'
+    )
 
     def __str__(self) -> str:
         return self.description
+
+
+class Patron(SetarModel):
+    """Owns the MTI *root* while ``Merch`` owns its child. Collecting the root removes every
+    table in the chain, so ``Merch.featured_orchestra`` dangles -- and ``get_fields()`` on
+    the root never reports it, only a descendant's does. See ``_still_referenced``."""
+
+    name = CharField(max_length=100)
+    ensemble = OwningForeignKey(
+        Ensemble, on_delete=DO_NOTHING, null=True, blank=True, related_name='patrons'
+    )
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class Stagehand(SetarModel):
+    """Leaf of a two-deep ownership chain: owned by ``Rider``, which is itself owned by
+    ``Residency``. Every other owned relation in this app is one hop, so nothing else
+    exercises a rule whose own ``UPDATE`` fires a second rule."""
+
+    name = CharField(max_length=100)
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class Rider(SetarModel):
+    """Middle of the chain: an owned target that is itself an owner. Soft-deleting a
+    ``Residency`` stamps this row by rule, and *that* stamp must fire the rule stamping
+    its ``Stagehand``; ``hard_delete()`` must remove the three in dependency order."""
+
+    clause = CharField(max_length=100)
+    stagehand = OwningForeignKey(
+        Stagehand, on_delete=DO_NOTHING, null=True, blank=True, related_name='riders'
+    )
+
+    def __str__(self) -> str:
+        return self.clause
+
+
+class Residency(SetarModel):
+    """Top of the chain."""
+
+    venue_name = CharField(max_length=100)
+    rider = OwningForeignKey(
+        Rider, on_delete=DO_NOTHING, null=True, blank=True, related_name='residencies'
+    )
+
+    def __str__(self) -> str:
+        return self.venue_name
 
 
 class Section(SetarModel):

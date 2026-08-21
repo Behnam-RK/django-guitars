@@ -80,6 +80,33 @@ _DROP_SOFT_DELETE_RELATED_OBJECTS_RULE = """
     DROP RULE {rule_name} ON {table};
 """
 
+# ---- Private, non-frozen owned-rule templates: the cascade pair above with the predicate
+# sides swapped, the FK living on the owner. The NOT EXISTS is the last-owner guard, always
+# emitted -- see ADR 0011 for why it is never derived from a unique constraint. ----
+
+_CREATE_SOFT_DELETE_OWNED_OBJECT_RULE = """
+    CREATE OR REPLACE RULE {rule_name}
+        AS ON UPDATE TO {table}
+        WHERE old._deleted_at IS NULL AND new._deleted_at IS NOT NULL AND
+              COALESCE(current_setting('rules.hard_deletion', true), '') <> 'on'
+        DO ALSO (
+            UPDATE {dependent_table}
+            SET _deleted_at = NOW()
+            WHERE "{dependent_primary_key}" = old."{foreign_key}"
+              AND _deleted_at IS NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM {table} AS guitars_owner
+                  WHERE guitars_owner."{foreign_key}" = old."{foreign_key}"
+                    AND guitars_owner."{primary_key}" <> old."{primary_key}"
+                    AND guitars_owner._deleted_at IS NULL
+              )
+        );
+"""
+
+_DROP_SOFT_DELETE_OWNED_OBJECT_RULE = """
+    DROP RULE {rule_name} ON {table};
+"""
+
 # ---- MTI soft-delete rule: preserves the child row, marks the owning ancestor instead.
 # ``_deleted_at IS NULL`` makes it idempotent across the per-table DELETEs Django issues
 # for an MTI chain, so the owner's cascade rules fire exactly once. ----

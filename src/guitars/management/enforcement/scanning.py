@@ -16,6 +16,7 @@ from guitars.management.enforcement.headers import (
     _RE_MTI_UPDATED_AT,
     _RE_PARENT_TRIGGER_FUNCTION,
     _RE_SOFT_DELETE,
+    _RE_SOFT_DELETE_OWNED,
     _RE_SOFT_DELETE_RELATED,
     _RE_TENANT_AUTOFILL,
     _RE_TENANT_AUTOFILL_FUNCTION,
@@ -49,6 +50,10 @@ class ExistingOperations(NamedTuple):
     #: Keyed on (related_table, table, foreign_key) -- the third element is ``None`` for the
     #: one FK per pair keeping the plain historical header, or the column for any other.
     soft_delete_related: dict[tuple[str, str, str | None], str | None]
+    #: Keyed on (dependent_table, table, foreign_key) -- the owner-side mirror of the above.
+    #: The FK is never ``None`` here: an owned rule is always named after its column, there
+    #: being no pre-2.3.0 plain form to stay compatible with.
+    soft_delete_owned: dict[tuple[str, str, str], str | None]
     mti_triggers: dict[str, str | None]
     mti_soft_deletes: dict[str, str | None]
     tenant_policies: set[str]
@@ -97,6 +102,7 @@ def scan_existing_operations() -> ExistingOperations:
     existing_triggers: dict[str, str | None] = {}
     existing_soft_deletes: dict[str, str | None] = {}
     existing_soft_delete_related: dict[tuple[str, str, str | None], str | None] = {}
+    existing_soft_delete_owned: dict[tuple[str, str, str], str | None] = {}
     existing_mti_triggers: dict[str, str | None] = {}
     existing_mti_soft_deletes: dict[str, str | None] = {}
     existing_tenant_autofill: dict[tuple[str, str], str | None] = {}
@@ -120,6 +126,15 @@ def scan_existing_operations() -> ExistingOperations:
                 _identifiers._unescape_ident(m.group('foreign_key'))
                 if m.group('foreign_key') is not None
                 else None,
+            ),
+        ),
+        (
+            _RE_SOFT_DELETE_OWNED,
+            existing_soft_delete_owned,
+            lambda m: (
+                _identifiers._unescape_ident(m.group(1)),
+                _identifiers._unescape_ident(m.group(2)),
+                _identifiers._unescape_ident(m.group(3)),
             ),
         ),
         (
@@ -228,6 +243,7 @@ def scan_existing_operations() -> ExistingOperations:
         triggers=existing_triggers,
         soft_deletes=existing_soft_deletes,
         soft_delete_related=existing_soft_delete_related,
+        soft_delete_owned=existing_soft_delete_owned,
         mti_triggers=existing_mti_triggers,
         mti_soft_deletes=existing_mti_soft_deletes,
         tenant_policies=existing_tenant_policies,

@@ -25,6 +25,14 @@ HEADER_SOFT_DELETE_RELATED_VIA = (
     'via "{foreign_key}"!'
 )
 
+# The mirror of the two above, the FK living on the owner. Its own header and rule-name
+# prefix, since a rule is namespaced by name alone and a collision replaces rather than
+# fails. Always carries the FK, so there is no plain sibling and its scanner is derived.
+HEADER_SOFT_DELETE_OWNED = (
+    '# Soft Delete Owned Rule on "{dependent_table}" that is owned by "{table}" '
+    'via "{foreign_key}"!'
+)
+
 # --- Multi-table inheritance (MTI) operations ---
 
 HEADER_PARENT_TRIGGER_FUNCTION = '# Define function for MTI parent updated at triggers!'
@@ -81,6 +89,9 @@ _RE_TRIGGER_FUNCTION = _derive_scanner(HEADER_TRIGGER_FUNCTION)
 _RE_PARENT_TRIGGER_FUNCTION = _derive_scanner(HEADER_PARENT_TRIGGER_FUNCTION)
 _RE_UPDATED_AT = _derive_scanner(HEADER_UPDATED_AT)
 _RE_SOFT_DELETE = _derive_scanner(HEADER_SOFT_DELETE)
+# Derivable where its cascade siblings are not: the owned header has one form, always
+# carrying the FK, so there is nothing to fuse an optional group around.
+_RE_SOFT_DELETE_OWNED = _derive_scanner(HEADER_SOFT_DELETE_OWNED)
 _RE_TENANT_FORCE = _derive_scanner(HEADER_TENANT_FORCE)
 _RE_TENANT_AUTOFILL_FUNCTION = _derive_scanner(HEADER_TENANT_AUTOFILL_FUNCTION)
 # Derived, and deliberately NOT fused with _RE_TENANT_AUTOFILL the way _RE_TENANT_POLICY

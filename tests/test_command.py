@@ -10,10 +10,13 @@ from django.apps import apps
 from django.apps import apps as django_apps
 from django.conf import settings as django_settings
 from django.core.management import CommandError, call_command
-from django.db.models import CASCADE
+from django.db import models
+from django.db.models import CASCADE, DO_NOTHING, SET_NULL
 from django.test import override_settings
+from django.test.utils import isolate_apps
 
 from guitars import sql
+from guitars.models import OwningForeignKey, SetarModel
 from guitars.management import _generator
 from guitars.management.enforcement import command as command_module
 from guitars.management.enforcement import headers as headers_module
@@ -22,7 +25,7 @@ from guitars.management.enforcement import operations as operations_module
 from guitars.management.enforcement.command import Command
 from guitars.sql import _identifiers
 from guitars.tenancy.discovery import app_coverage, autofill_function_name
-from tests.testapp.models import Album, Band, Ensemble, Orchestra
+from tests.testapp.models import Album, Band, Ensemble, Merch, Orchestra
 
 
 def _pretend_function_migrations_are_current(command):
@@ -253,6 +256,290 @@ def test_cascade_operation_warns_when_related_model_is_mti_child_without_own_del
     warning = command._mti_cascade_warnings[0]
     assert 'testapp_orchestra' in warning
     assert 'multi-table-inheritance ancestor' in warning
+
+
+def test_owned_rule_name_folds_a_hostile_schema_qualified_table_like_its_cascade_twin():
+    """Same length-prefixed folding as ``_related_rule_name``'s stem, under its own prefix -- a
+    rule is namespaced by name alone, so the two families must not be able to meet. The FK is
+    length-prefixed as well, which the frozen cascade spelling cannot be."""
+    assert (
+        operations_module._owned_rule_name('analytics.Weird Table', 'kit_id')
+        == '"soft_delete_owned_9_analytics_11_Weird Table_6_kit_id"'
+    )
+    assert operations_module._owned_rule_name(
+        'tenant_a.events', 'kit_id'
+    ) != operations_module._owned_rule_name('tenant.a_events', 'kit_id')
+
+
+@pytest.mark.parametrize(
+    ('first', 'second'),
+    [
+        # The adjacent split: one string, two ways to cut it into (table, column).
+        (('shop_press_kit', 'kit_id'), ('shop_press', 'kit_kit_id')),
+        # And the one a length prefix at *one* end still admits, which is why both are sized:
+        # `soft_delete_owned_a_5_b_1_c` would have been either of these.
+        (('a_5_b', 'c'), ('a', 'b_1_c')),
+        # A sized schema does not save an unsized table from the same trick.
+        (('s.a_5_b', 'c'), ('s.a', 'b_1_c')),
+    ],
+)
+def test_owned_rule_names_cannot_be_split_two_ways(first, second):
+    """Every variable segment carries its length, so reading left to right leaves no boundary
+    to guess at -- no two ``(schema, table, column)`` triples reach one name. The claim has to
+    hold outright: `_claim_rule_name` reports a clash but nothing stops the rule shipping."""
+    assert operations_module._owned_rule_name(*first) != operations_module._owned_rule_name(
+        *second
+    )
+
+
+def test_owned_operations_emit_only_for_owning_foreign_keys():
+    """Album declares two ``OwningForeignKey``s to PressKit and two plain FKs to Band. Only
+    the owning pair gets a rule -- ``on_delete`` never decides this."""
+    command = Command()
+    command.existing.soft_delete_owned.clear()
+
+    ops = command._owned_operations(Album)
+    blob = '\n'.join(ops)
+
+    assert len(ops) == 2
+    assert 'that is owned by "testapp_album"' in blob
+    assert 'testapp_presskit' in blob
+    # `band` (CASCADE) and `producer` (SET_NULL) are plain ForeignKeys: no ownership either way.
+    assert 'testapp_band' not in blob
+
+
+def test_owned_operations_name_one_rule_per_foreign_key_column():
+    """Album's two owned FKs point at the same table, so the FK column is the only thing
+    keeping their rule names apart -- a collision would silently replace, not fail."""
+    command = Command()
+    command.existing.soft_delete_owned.clear()
+
+    blob = '\n'.join(command._owned_operations(Album))
+
+    assert 'RULE "soft_delete_owned_16_testapp_presskit_12_press_kit_id"' in blob
+    assert 'RULE "soft_delete_owned_16_testapp_presskit_16_alt_press_kit_id"' in blob
+    assert 'via "press_kit_id"!' in blob
+    assert 'via "alt_press_kit_id"!' in blob
+
+
+def test_owned_rule_carries_the_last_owner_guard():
+    """Unconditional, not derived from a UniqueConstraint, which would go silently wrong the
+    day one was dropped. The self-exclusion is load-bearing, not tidiness: a rule action runs
+    before the original update, so without it the NOT EXISTS never holds and nothing fires."""
+    command = Command()
+    command.existing.soft_delete_owned.clear()
+
+    blob = '\n'.join(command._owned_operations(Album))
+
+    assert 'NOT EXISTS' in blob
+    assert 'guitars_owner."press_kit_id" = old."press_kit_id"' in blob
+    assert 'guitars_owner."id" <> old."id"' in blob
+    assert 'guitars_owner._deleted_at IS NULL' in blob
+
+
+def test_owned_operation_correlates_an_mti_dependent_against_its_owner_table():
+    """``Merch.featured_orchestra`` points at an MTI child whose ``_deleted_at`` lives on
+    Ensemble. A chain shares one primary-key value, which is what the FK holds, so the
+    ancestor's table is both correct and the only one carrying a column to stamp."""
+    command = Command()
+    command.existing.soft_delete_owned.clear()
+
+    blob = '\n'.join(command._owned_operations(Merch))
+
+    assert 'that is owned by "testapp_merch" via "featured_orchestra_id"!' in blob
+    assert 'UPDATE "testapp_ensemble"' in blob
+    assert 'UPDATE "testapp_orchestra"' not in blob
+
+
+def test_owned_operation_warns_when_the_owner_inherits_deleted_at_from_an_ancestor():
+    """``Orchestra.programme`` sits on the child's own table while the rule must fire on
+    Ensemble, where ``old."programme_id"`` names nothing. Warn, emit nothing."""
+    command = Command()
+    command._mti_cascade_warnings.clear()
+    command.existing.soft_delete_owned.clear()
+
+    ops = command._owned_operations(Orchestra)
+
+    assert ops == []
+    assert len(command._mti_cascade_warnings) == 1
+    warning = command._mti_cascade_warnings[0]
+    assert 'testapp_orchestra.programme_id' in warning
+    assert 'multi-table-inheritance' in warning
+
+
+def test_owned_operation_warns_when_the_owner_owns_its_own_table():
+    """A rule whose action updates the table it fires on is rewritten into itself, and
+    PostgreSQL then rejects *every* UPDATE on that table -- a plain ``save()`` included --
+    with "infinite recursion detected in rules for relation". Warn, emit nothing."""
+    command = Command()
+    command._mti_cascade_warnings.clear()
+    command.existing.soft_delete_owned.clear()
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class SelfOwner(SetarModel):
+            previous = OwningForeignKey('self', on_delete=SET_NULL, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        return command._owned_operations(SelfOwner)
+
+    assert _build() == []
+    assert len(command._mti_cascade_warnings) == 1
+    assert 'infinite rule recursion' in command._mti_cascade_warnings[0]
+
+
+def test_owned_operation_warns_when_the_target_is_not_soft_deletable():
+    """An ``OwningForeignKey`` has no purpose other than the rule, so a target with no
+    ``_deleted_at`` to stamp is a misconfiguration, not a relation to pass over quietly."""
+    command = Command()
+    command._mti_cascade_warnings.clear()
+    command.existing.soft_delete_owned.clear()
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Plain(models.Model):
+            class Meta:
+                app_label = 'testapp'
+
+        class Owner(SetarModel):
+            plain = OwningForeignKey(Plain, on_delete=SET_NULL, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        return command._owned_operations(Owner)
+
+    assert _build() == []
+    assert len(command._mti_cascade_warnings) == 1
+    assert 'no _deleted_at column' in command._mti_cascade_warnings[0]
+
+
+def test_owned_operation_warns_when_the_owner_is_not_soft_deletable():
+    """The rule fires on the owner's own ``_deleted_at`` transition, so an owner that has no
+    such column can never fire it. Silence here is the failure mode ADR 0011 chose a
+    checkable field subclass to avoid: a declaration that quietly generates nothing."""
+    command = Command()
+    command._mti_cascade_warnings.clear()
+    command.existing.soft_delete_owned.clear()
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Kit(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class PlainOwner(models.Model):
+            kit = OwningForeignKey(Kit, on_delete=SET_NULL, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        return command._owned_operations(PlainOwner)
+
+    assert _build() == []
+    assert len(command._mti_cascade_warnings) == 1
+    assert 'has no _deleted_at column' in command._mti_cascade_warnings[0]
+    assert 'never soft-deleted' in command._mti_cascade_warnings[0]
+
+
+def test_owned_operation_warns_when_the_key_is_redirected_off_the_primary_key():
+    """``guitars.E002``'s twin, as the cycle refusal is ``E001``'s: ``--skip-checks`` reaches
+    the generator, and the rule would correlate the key against a primary key it never held --
+    stamping whichever row happens to carry that value as its pk."""
+    command = Command()
+    command._mti_cascade_warnings.clear()
+    command.existing.soft_delete_owned.clear()
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Kit(SetarModel):
+            legacy_id = models.IntegerField(unique=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Owner(SetarModel):
+            kit = OwningForeignKey(
+                Kit, on_delete=DO_NOTHING, to_field='legacy_id', null=True, blank=True
+            )
+
+            class Meta:
+                app_label = 'testapp'
+
+        return command._owned_operations(Owner)
+
+    assert _build() == []
+    assert len(command._mti_cascade_warnings) == 1
+    assert "to_field='legacy_id'" in command._mti_cascade_warnings[0]
+    assert 'would stamp the wrong row' in command._mti_cascade_warnings[0]
+
+
+def test_owned_operations_are_a_no_op_for_a_model_declaring_none():
+    """Called for every model now, not only soft-deletable ones, so the common case has to
+    cost nothing and warn about nothing."""
+    command = Command()
+    command._mti_cascade_warnings.clear()
+
+    assert command._owned_operations(Band) == []
+    assert command._mti_cascade_warnings == []
+
+
+def test_owned_operations_are_idempotent_across_two_runs():
+    """A run reading its own output back must emit nothing -- the header, its ``[SQL:...]``
+    identity and the dedupe key all have to agree on the same three-part key."""
+    command = Command()
+    command.existing.soft_delete_owned.clear()
+
+    blob = '\n'.join(command._owned_operations(Album))
+
+    for match in headers_module._RE_SOFT_DELETE_OWNED.finditer(blob):
+        key = (
+            _identifiers._unescape_ident(match.group(1)),
+            _identifiers._unescape_ident(match.group(2)),
+            _identifiers._unescape_ident(match.group(3)),
+        )
+        command.existing.soft_delete_owned[key] = identity_module._recorded_sql_identity(
+            blob, match
+        )
+
+    assert command._owned_operations(Album) == []
+
+
+def test_owned_operations_under_adopt_stay_a_plain_create_or_replace():
+    """Rules carry no adopt form on purpose -- ``CREATE OR REPLACE RULE`` is already correct
+    whether or not the object exists, and a ``DROP ... IF EXISTS`` first would open an
+    instant where a DELETE on that table destroys rows."""
+    command = Command()
+    command.existing.soft_delete_owned.clear()
+
+    blob = '\n'.join(command._owned_operations(Album, adopt=True))
+
+    assert 'CREATE OR REPLACE RULE "soft_delete_owned_16_testapp_presskit_12_press_kit_id"' in blob
+    assert 'DROP RULE IF EXISTS' not in blob
+
+
+def test_cascade_operation_refuses_a_self_referential_cascade_foreign_key():
+    """A tree (`parent = ForeignKey('self', CASCADE)`). The rule would read ON UPDATE TO t
+    DO ALSO UPDATE t, which PostgreSQL rejects at rewrite time -- bricking *every* UPDATE on
+    the table, a plain ``save()`` included, with `migrate` having reported success."""
+    command = Command()
+    command._mti_cascade_warnings.clear()
+    command.existing.soft_delete_related.clear()
+
+    class _SelfReferentialFKField:
+        column = 'parent_id'
+        model = Band
+        remote_field = types.SimpleNamespace(parent_link=False)
+
+    command.reverse_relations_mapping[Band] = {(Band, _SelfReferentialFKField(), CASCADE)}
+
+    ops = command._cascade_operations(Band)
+
+    assert ops == []
+    assert len(command._mti_cascade_warnings) == 1
+    assert 'infinite rule recursion' in command._mti_cascade_warnings[0]
 
 
 def test_constructing_the_command_does_not_touch_the_filesystem(monkeypatch):
@@ -1292,3 +1579,218 @@ def test_the_real_migrations_ship_every_policy_forced():
 
     assert command.existing.tenant_policies
     assert command.existing.unforced_policies == set()
+
+
+def test_owned_operation_warns_when_two_models_own_each_other():
+    """The self-owning case one hop out: A owns B and B owns A, so each rule updates the
+    table the other fires on. PostgreSQL rewrites the pair into each other and refuses every
+    UPDATE to *both* tables, so neither rule may be written."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class OwnerA(SetarModel):
+            partner = OwningForeignKey('OwnerB', on_delete=SET_NULL, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class OwnerB(SetarModel):
+            partner = OwningForeignKey('OwnerA', on_delete=SET_NULL, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        # `all_models` by hand: ``isolate_apps`` swaps ``Options.apps``, not the global
+        # registry ``_setup_models_and_reverse_relations`` reads, so a Command built here
+        # sees neither model. The self-referential cascade test injects the mapping likewise.
+        command = Command()
+        command._mti_cascade_warnings.clear()
+        command.existing.soft_delete_owned.clear()
+        command.all_models = [OwnerA, OwnerB]
+        return command, command._owned_operations(OwnerA) + command._owned_operations(OwnerB)
+
+    command, ops = _build()
+
+    assert ops == []
+    assert len(command._mti_cascade_warnings) == 2
+    for warning in command._mti_cascade_warnings:
+        assert 'infinite rule recursion' in warning
+        assert 'cycle of ON UPDATE rules' in warning
+
+
+def test_owned_operation_still_emits_when_ownership_is_one_way():
+    """The control for the cycle test above: A owns B and B owns nothing back, so there is
+    no cycle and the rule is written. Guards against the graph over-refusing any pair."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class OneWayOwner(SetarModel):
+            owned = OwningForeignKey('OneWayOwned', on_delete=SET_NULL, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class OneWayOwned(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        command = Command()
+        command._mti_cascade_warnings.clear()
+        command.existing.soft_delete_owned.clear()
+        command.all_models = [OneWayOwner, OneWayOwned]
+        return command, command._owned_operations(OneWayOwner)
+
+    command, ops = _build()
+
+    assert command._mti_cascade_warnings == []
+    assert len(ops) == 1
+    assert 'testapp_onewayowned' in ops[0]
+
+
+def test_cascade_operation_warns_when_an_owned_rule_closes_the_cycle():
+    """The mixed cycle, and the one a project reaches by accident: ``Holder`` owns ``Held``
+    through one foreign key and CASCADEs from it through another, so the owned rule updates
+    ``Held`` while the cascade rule updates ``Holder``. Both edges are refused."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Held(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Holder(SetarModel):
+            owned = OwningForeignKey(Held, on_delete=SET_NULL, null=True, related_name='owners')
+            parent = models.ForeignKey(Held, on_delete=CASCADE, related_name='children')
+
+            class Meta:
+                app_label = 'testapp'
+
+        command = Command()
+        command._mti_cascade_warnings.clear()
+        command.existing.soft_delete_owned.clear()
+        command.existing.soft_delete_related.clear()
+        command.all_models = [Held, Holder]
+        command.reverse_relations_mapping[Held] = {
+            (Holder, Holder._meta.get_field('parent'), CASCADE)
+        }
+        # Held's cascade rule (fires on Held, updates Holder) and Holder's owned rule (fires
+        # on Holder, updates Held) are the two halves of the same cycle.
+        return command, command._cascade_operations(Held) + command._owned_operations(Holder)
+
+    command, ops = _build()
+
+    assert ops == []
+    kinds = sorted(warning.split(' rule for ')[0] for warning in command._mti_cascade_warnings)
+    assert kinds == ['Cascade', 'Owned']
+    for warning in command._mti_cascade_warnings:
+        assert 'cycle of ON UPDATE rules' in warning
+
+
+def test_cascade_operations_report_two_relations_that_would_share_a_rule_name():
+    """The frozen cascade spelling joins its FK suffix plainly, so a child table named exactly
+    another child's ``<table>_<column>`` names one rule twice. It cannot be renamed -- 0.x
+    shipped it and no command retires a rule -- so the clash is reported instead of silent."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Parent(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Child(SetarModel):
+            # `a_id` sorts first, so it is the primary FK and keeps the bare form; `b_id`
+            # is the one that gets the suffixed spelling this test is about.
+            a = models.ForeignKey(Parent, on_delete=CASCADE, related_name='firsts')
+            b = models.ForeignKey(Parent, on_delete=CASCADE, related_name='bs')
+
+            class Meta:
+                app_label = 'testapp'
+                db_table = 'c_a'
+
+        class Namesake(SetarModel):
+            parent = models.ForeignKey(Parent, on_delete=CASCADE, related_name='namesakes')
+
+            class Meta:
+                app_label = 'testapp'
+                # `soft_delete_related_c_a` + `_b_id` is this table's own bare name.
+                db_table = 'c_a_b_id'
+
+        command = Command()
+        command._rule_name_clashes.clear()
+        command.existing.soft_delete_related.clear()
+        command.all_models = [Parent, Child, Namesake]
+        command.reverse_relations_mapping[Parent] = {
+            (Child, Child._meta.get_field('a'), CASCADE),
+            (Child, Child._meta.get_field('b'), CASCADE),
+            (Namesake, Namesake._meta.get_field('parent'), CASCADE),
+        }
+        return command, command._cascade_operations(Parent)
+
+    command, ops = _build()
+
+    # Emitted anyway: what ships works for one of the two, which is the whole problem.
+    assert len(ops) == 3
+    assert len(command._rule_name_clashes) == 1
+    clash = command._rule_name_clashes[0]
+    assert 'soft_delete_related_c_a_b_id' in clash
+    assert "'c_a' via 'b_id'" in clash and "'c_a_b_id'" in clash
+    assert 'the second replaces the first' in clash
+
+
+def test_cascade_operations_report_an_mti_parent_and_child_sharing_a_rule_name():
+    """Regression: an MTI parent and its child share one ``owner_table`` and
+    ``seen_related_tables`` is per call, so both bare names -- and both operation *keys* --
+    matched. Claiming on the key read the two as one and reported nothing."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Parent(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Child(Parent):
+            class Meta:
+                app_label = 'testapp'
+
+        class Referrer(SetarModel):
+            p = models.ForeignKey(Parent, on_delete=CASCADE, related_name='ps')
+            c = models.ForeignKey(Child, on_delete=CASCADE, related_name='cs')
+
+            class Meta:
+                app_label = 'testapp'
+
+        command = Command()
+        command._rule_name_clashes.clear()
+        command.existing.soft_delete_related.clear()
+        command.all_models = [Parent, Child, Referrer]
+        command.reverse_relations_mapping[Parent] = {
+            (Referrer, Referrer._meta.get_field('p'), CASCADE),
+        }
+        command.reverse_relations_mapping[Child] = {
+            (Referrer, Referrer._meta.get_field('c'), CASCADE),
+        }
+        # Both land on the parent's table: it is where ``_deleted_at`` actually flips.
+        return command, [*command._cascade_operations(Parent), *command._cascade_operations(Child)]
+
+    command, ops = _build()
+
+    assert len(ops) == 2
+    assert len(command._rule_name_clashes) == 1
+    clash = command._rule_name_clashes[0]
+    assert "via 'p_id'" in clash and "via 'c_id'" in clash
+    assert 'the second replaces the first' in clash
+    # The bare name carries no column, so the plain "rename a column" remedy cannot apply.
+    assert 'renaming cannot help' in clash
+
+
+def test_a_rule_name_clash_fails_a_check_run_but_only_reports_on_a_generating_one():
+    """A clash means one of the two rules does not exist in the database the migration ships
+    to, which is exactly what ``--check`` is for. A generating run has already written the
+    files by the time it is known, so there it stays the report printed just above."""
+    command = Command()
+    command._rule_name_clashes = ['two relations name one rule']
+
+    with pytest.raises(CommandError, match='two relations name one rule'):
+        command._refuse_a_rule_name_clash(check_only=True)
+
+    command._refuse_a_rule_name_clash(check_only=False)

@@ -10,7 +10,13 @@ from django.apps import apps as django_apps
 from django.db import models
 
 from guitars import sql
-from guitars.introspection import column_owner, has_column, is_mti_child, owns_column
+from guitars.introspection import (
+    column_owner,
+    has_column,
+    is_mti_child,
+    owns_column,
+    rule_update_cycle_edges,
+)
 from guitars.management import _generator
 from guitars.management.enforcement.headers import (
     _RE_MTI_UPDATED_AT,
@@ -20,6 +26,7 @@ from guitars.management.enforcement.headers import (
     HEADER_MTI_SOFT_DELETE,
     HEADER_MTI_UPDATED_AT,
     HEADER_SOFT_DELETE,
+    HEADER_SOFT_DELETE_OWNED,
     HEADER_SOFT_DELETE_RELATED,
     HEADER_SOFT_DELETE_RELATED_VIA,
     HEADER_TENANT_AUTOFILL,
@@ -31,6 +38,7 @@ from guitars.management.enforcement.headers import (
     RE_TENANT_AUTOFILL_FUNCTION,
 )
 from guitars.management.enforcement.identity import _literal, _operation
+from guitars.models.fields import OwningForeignKey, _targets_primary_key
 from guitars.sql import _identifiers
 from guitars.sql import soft_delete as _soft_delete
 from guitars.sql import triggers as _triggers
@@ -62,19 +70,56 @@ class _OperationRow(NamedTuple):
     adopt: str | list[str] | None = None
 
 
-def _related_rule_name(related_table: str, foreign_key: str | None = None) -> str:
-    """The cascade rule's identifier, NAMEDATALEN-truncated before quoting. Schema folded in
-    **length-prefixed**, not underscore-joined -- plain ``f'{schema}_{table}'`` would let
-    ``('tenant_a', 'events')`` and ``('tenant', 'a_events')`` collide on one name."""
-    schema, bare_related_table = _identifiers._split_qualified('table', related_table)
-    name = (
-        f'soft_delete_related_{bare_related_table}'
+def _rule_stem(prefix: str, table: str) -> str:
+    """``<prefix>_<table>``, schema folded in **length-prefixed** rather than underscore-joined:
+    plain ``f'{schema}_{table}'`` lets ``('tenant_a', 'events')`` and ``('tenant', 'a_events')``
+    collide on one name."""
+    schema, bare_table = _identifiers._split_qualified('table', table)
+    return (
+        f'{prefix}_{bare_table}'
         if schema is None
-        else f'soft_delete_related_{len(schema)}_{schema}_{bare_related_table}'
+        else f'{prefix}_{len(schema)}_{schema}_{bare_table}'
     )
-    if foreign_key is not None:
-        name = f'{name}_{foreign_key}'
-    return _identifiers._safe_ident(name)
+
+
+def _related_rule_name(related_table: str, foreign_key: str | None = None) -> str:
+    """The inbound cascade rule's identifier, NAMEDATALEN-truncated before quoting. One FK per
+    pair keeps the bare, unsuffixed form for backward compatibility, so *foreign_key* is
+    optional here and required for owned."""
+    # Plain-joined, ambiguous the way the stem is not -- and frozen: this spelling shipped in
+    # 0.x, and since no command retires a rule, renaming it would leave every migrated project
+    # with the old rule live beside the new. ``_claim_rule_name`` reports a clash instead.
+    stem = _rule_stem('soft_delete_related', related_table)
+    return _identifiers._safe_ident(stem if foreign_key is None else f'{stem}_{foreign_key}')
+
+
+def _sized(segment: str) -> str:
+    """One name segment with its length in front of it, so a left-to-right read finds where it
+    ends -- the only way concatenating variable-length identifiers stays reversible."""
+    return f'{len(segment)}_{segment}'
+
+
+def _owned_rule_name(dependent_table: str, foreign_key: str) -> str:
+    """The owned rule's identifier: **every** variable segment sized, so no two
+    ``(schema, table, foreign_key)`` triples can name one rule. Nothing predates 2.3.0, so this
+    family was free to be built that way where the frozen cascade one cannot be."""
+    # Sized *each*, not just the last: a length at one end alone rules out only the adjacent
+    # split, so ``('a_5_b', 'c')`` would still have met ``('a', 'b_1_c')``. Reading each length
+    # before its segment leaves no boundary to guess at -- a proof, not a narrowing.
+    schema, bare_table = _identifiers._split_qualified('table', dependent_table)
+    sized_schema = [] if schema is None else [_sized(schema)]
+    # The prefix differs from the cascade family for the same reason both are guarded: a rule
+    # is namespaced per table by name alone, so a shared name replaces rather than collides.
+    parts = ['soft_delete_owned', *sized_schema, _sized(bare_table), _sized(foreign_key)]
+    return _identifiers._safe_ident('_'.join(parts))
+
+
+def _rule_relation_label(relation: tuple) -> str:
+    """A relation as prose for a clash report, phrased like the headers: the other table and
+    the column, never which of the two holds it -- the cascade family reads the column off the
+    child and the owned family off the owner, and the report names the table separately."""
+    other, _table, foreign_key = relation
+    return f"'{other}' via '{foreign_key}'"
 
 
 class OperationsMixin:
@@ -89,10 +134,14 @@ class OperationsMixin:
         style: Style
         _tenancy_notes: list[str]
         _mti_cascade_warnings: list[str]
+        _rule_name_clashes: list[str]
+        _claimed_rule_names: dict[tuple[str, str], tuple]
         trigger_function_dependency: tuple[str, str] | None
         parent_trigger_function_dependency: tuple[str, str] | None
         tenant_autofill_dependencies: dict[str, tuple[str, str]]
         reverse_relations_mapping: dict[type[models.Model], set]
+        all_models: list[type[models.Model]]
+        _rule_cycle_cache: set[tuple[str, str]] | None
         _table_app_labels_cache: dict[str, str] | None
         _required_autofill_cache: dict[tuple[str, str], tuple[str, str]] | None
         _relocated_autofill_cache: dict[tuple[str, str], tuple[str, str]] | None
@@ -402,6 +451,10 @@ class OperationsMixin:
             #     always follow the owner's own soft-delete rule) ---
             if has_column(model, '_deleted_at'):
                 deferred.extend(self._cascade_operations(model, adopt=adopt))
+            # Owner-side ownership: same table, opposite predicate, and always in the app
+            # this loop is already scanning. Outside the guard above so an OwningForeignKey
+            # on a model with no `_deleted_at` warns rather than generating nothing.
+            deferred.extend(self._owned_operations(model, adopt=adopt))
 
         # Tenant policies last: they are independent of the triggers and rules above (a
         # policy references neither), so they sort to the end where they read as a group.
@@ -654,6 +707,27 @@ class OperationsMixin:
             )
         ]
 
+    def _rule_cycle_edges(self) -> set[tuple[str, str]]:
+        """ON UPDATE rule edges this command may not write, because they lie on a cycle --
+        see ``introspection.rule_update_cycle_edges``. Read over the whole registry, not the
+        app in scope: scoping narrows what gets written, never which rules exist."""
+        if self._rule_cycle_cache is None:
+            self._rule_cycle_cache = rule_update_cycle_edges(self.all_models)
+        return self._rule_cycle_cache
+
+    @staticmethod
+    def _cycle_warning(kind: str, subject: str, fires_on: str, updates: str) -> str:
+        """The shared refusal text for a rule that would close an ON UPDATE cycle -- one
+        wording for both kinds, only the subject differing. The two tables are spelled out,
+        not joined by an arrow: a cascade rule's subject *is* the table it updates."""
+        return (
+            f'{kind} rule for {subject} skipped: it fires on '
+            f"'{fires_on}' and updates '{updates}', closing a cycle of ON UPDATE rules that "
+            'PostgreSQL rejects as infinite rule recursion on every UPDATE to any table in '
+            'that cycle -- including a plain save(). Break the cycle by cascading one of its '
+            'steps in Python.'
+        )
+
     @staticmethod
     def _is_cascade_candidate(related_model, fk_field, on_delete) -> bool:
         """Whether this reverse relation gets a cascade soft-delete rule. Shared by
@@ -687,6 +761,27 @@ class OperationsMixin:
             if not self._is_cascade_candidate(related_model, fk_field, on_delete):
                 continue
             related_table = related_model._meta.db_table
+            # A rule whose action updates the table it fires on is rewritten into itself, and
+            # PostgreSQL then refuses *every* UPDATE there -- a plain save() included -- at
+            # rewrite time, so the WHERE guard never runs. A self-referential CASCADE FK.
+            if related_table == owner_table:
+                self._mti_cascade_warnings.append(
+                    f"Cascade rule for '{related_table}' -> '{owner_table}' skipped: the rule "
+                    'would update the same table it fires on, which PostgreSQL rejects as '
+                    'infinite rule recursion on every UPDATE to that table. A self-referential '
+                    'CASCADE foreign key has to be cascaded in Python.'
+                )
+                continue
+            # The same rejection one hop further out: two tables whose rules update each
+            # other are rewritten into each other. Checked against the whole-registry graph,
+            # so a cycle closed through another app's model is still caught.
+            if (owner_table, related_table) in self._rule_cycle_edges():
+                self._mti_cascade_warnings.append(
+                    self._cycle_warning(
+                        'Cascade', f"'{related_table}'", owner_table, related_table
+                    )
+                )
+                continue
             # The flat rule does UPDATE related_table SET _deleted_at -- only valid when the
             # related child owns that column on the table its FK lives on. An FK whose
             # _deleted_at lives on a farther MTI ancestor needs a join form not emitted yet.
@@ -702,6 +797,23 @@ class OperationsMixin:
             seen_related_tables.add(related_table)
             candidates.append((related_model, fk_field, is_primary))
         return candidates
+
+    def _claim_rule_name(self, table: str, rule_name: str, relation: tuple) -> None:
+        """Record that *relation* -- ``(other_table, table, foreign_key)``, the column **always**
+        filled in and never the operation's dedupe key -- names *rule_name* on *table*, reporting
+        a second one resolving to the same pair. See ``docs/migrations.md``'s "Rule names"."""
+        claimed = self._claimed_rule_names.setdefault((table, rule_name), relation)
+        if claimed != relation:
+            self._rule_name_clashes.append(
+                f"Rule {rule_name} on '{table}' is named by both "
+                f'{_rule_relation_label(claimed)} and {_rule_relation_label(relation)}. '
+                'PostgreSQL keeps one rule per name per table, so '
+                'the second replaces the first and that relation stops cascading. Rename a '
+                'column or a table so the two names differ. Where the shared name carries no '
+                'column at all -- one model holding a key to both an MTI parent and its child, '
+                'which resolve to one owner table -- renaming cannot help: point both keys at '
+                'one level of the chain, or cascade one of the two in Python.'
+            )
 
     def _cascade_operations(self, model: type[models.Model], *, adopt: bool = False) -> list[str]:
         """Cascade soft-delete rules for CASCADE FKs pointing at *model*. Lives on the table
@@ -740,6 +852,11 @@ class OperationsMixin:
                     foreign_key=_identifiers._escape_ident(fk_field.column),
                 )
                 rule_name = _related_rule_name(related_table, fk_field.column)
+            # The relation, not `key`: `key` drops the column on the plain form, and two
+            # relations can then share one key -- see `_claim_rule_name`'s docstring.
+            self._claim_rule_name(
+                owner_table, rule_name, (related_table, owner_table, fk_field.column)
+            )
             # One template pair for both cases -- see soft_delete.py's private
             # _CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE for why the public, frozen constants
             # of the same name (the old rule_name-less signature) aren't used here.
@@ -756,6 +873,172 @@ class OperationsMixin:
             self._append_if_stale(
                 ops,
                 self.existing.soft_delete_related,
+                key,
+                header,
+                forward,
+                reverse,
+                is_adopt=adopt,
+            )
+        return ops
+
+    @staticmethod
+    def _is_owned_candidate(model: type[models.Model], fk_field: models.Field) -> bool:
+        """Whether this outbound FK gets an owned soft-delete rule -- the mirror of
+        :meth:`_is_cascade_candidate`, read off the declaration rather than ``on_delete``,
+        which describes the opposite direction and cannot express ownership."""
+        return (
+            isinstance(fk_field, OwningForeignKey)
+            # An FK reached through MTI is the same physical column on the ancestor's table,
+            # covered by that ancestor's own pass -- as in _is_cascade_candidate.
+            and fk_field.model is model
+        )
+
+    @staticmethod
+    def _declared_owning_fields(model: type[models.Model]) -> list[models.ForeignKey]:
+        """Every ``OwningForeignKey`` *model* declares on its own table, in column order --
+        read before any of the refusals below, so a declaration that ends up generating
+        nothing can still be named in the warning that says why."""
+        return sorted(
+            (
+                cast('models.ForeignKey', field)
+                for field in model._meta.local_fields
+                if OperationsMixin._is_owned_candidate(model, field)
+            ),
+            key=lambda field: cast(str, field.column),
+        )
+
+    def _owned_candidates(
+        self, model: type[models.Model], owner_table: str, declared: list[models.ForeignKey]
+    ) -> list[models.ForeignKey]:
+        """``OwningForeignKey``s declared on *model*, in column order; *declared* is passed in,
+        the caller needing the same list first. Skipped with a warning where *model* inherits
+        ``_deleted_at``: the rule fires on an ancestor's table ``old."<column>"`` cannot reach."""
+        candidates: list[models.ForeignKey] = []
+        for fk_field in declared:
+            # A target with no ``_deleted_at`` has nothing to stamp. Warned rather than
+            # skipped in silence: unlike a plain CASCADE FK, an OwningForeignKey has no
+            # other purpose, so a declaration that generates nothing is a misconfiguration.
+            related_model = fk_field.related_model
+            if not has_column(related_model, '_deleted_at'):
+                self._mti_cascade_warnings.append(
+                    f"Owned rule for '{model._meta.db_table}.{fk_field.column}' skipped: "
+                    f"'{related_model.__name__}' has no _deleted_at column, so "
+                    'there is nothing for the rule to stamp. Make the target soft-deletable, '
+                    'or declare a plain ForeignKey.'
+                )
+                continue
+            if not owns_column(model, '_deleted_at'):
+                # The arrow names the table the rule would *update*, as the cascade warnings'
+                # does -- never ``owner_table``, which is where it would fire and has nothing
+                # to do with this relation's target. The body names that one instead.
+                dependent_table = column_owner(related_model, '_deleted_at')._meta.db_table
+                self._mti_cascade_warnings.append(
+                    f"Owned rule for '{model._meta.db_table}.{fk_field.column}' -> "
+                    f"'{dependent_table}' skipped: '{model.__name__}' declares this foreign key "
+                    'on its own table but inherits _deleted_at from a multi-table-inheritance '
+                    f"ancestor, so the rule would fire on '{owner_table}', a table the column "
+                    'is not on.'
+                )
+                continue
+            # ``guitars.E002``'s twin, as ``_rule_update_edges`` is ``E001``'s: the check
+            # reports a redirected key, but ``--skip-checks`` still reaches here and the rule
+            # would correlate the key against a primary key it never held.
+            if not _targets_primary_key(fk_field):
+                self._mti_cascade_warnings.append(
+                    f"Owned rule for '{model._meta.db_table}.{fk_field.column}' skipped: "
+                    # ``remote_field.field_name``, not ``target_field.name``: the latter raises
+                    # where ``to_field`` names nothing, which is one of the cases refused here.
+                    f"to_field='{fk_field.remote_field.field_name}' is not the target's "
+                    'primary key, which is what the rule correlates the key against, so it '
+                    'would stamp the wrong row. Drop to_field (guitars.E002).'
+                )
+                continue
+            candidates.append(fk_field)
+        return candidates
+
+    def _owned_operations(self, model: type[models.Model], *, adopt: bool = False) -> list[str]:
+        """Owned soft-delete rules for ``OwningForeignKey``s declared on *model*: the row
+        soft-deletes what it owns, unless a sibling owner is still alive. Lives on the same
+        table its cascade rules do -- the one whose ``_deleted_at`` actually flips."""
+        declared = self._declared_owning_fields(model)
+        if not declared:
+            return []
+        # An owner with no ``_deleted_at`` at all is never soft-deleted, so nothing ever
+        # flips to fire the rule. Warned, not passed over: it is the same misconfiguration
+        # as a target with none, and the reason ADR 0011 chose a checkable field subclass.
+        if not has_column(model, '_deleted_at'):
+            for fk_field in declared:
+                self._mti_cascade_warnings.append(
+                    f"Owned rule for '{model._meta.db_table}.{fk_field.column}' skipped: "
+                    f"'{model.__name__}' has no _deleted_at column, so it is never "
+                    'soft-deleted and nothing would ever fire the rule. Make the owner '
+                    'soft-deletable, or declare a plain ForeignKey.'
+                )
+            return []
+        owner = column_owner(model, '_deleted_at')
+        owner_table = owner._meta.db_table
+        # Loop-invariant, for the same reason as in _cascade_operations: fixed for every
+        # candidate, so the quoted/escaped forms are computed once rather than once per FK.
+        ident_owner_table = _identifiers._quote_table(owner_table)
+        ident_owner_pk = _identifiers._escape_ident(cast(str, owner._meta.pk.column))
+        header_owner_table = _identifiers._escape_ident(owner_table)
+
+        ops: list[str] = []
+        for fk_field in self._owned_candidates(model, owner_table, declared):
+            # The dependent's own ``_deleted_at`` may live on an MTI ancestor, and
+            # correlating against that ancestor's table is still right: every table in a
+            # chain shares one primary-key *value*, which is exactly what the FK holds.
+            dependent = column_owner(fk_field.related_model, '_deleted_at')
+            dependent_table = dependent._meta.db_table
+            # A rule whose action updates the table it fires on is rewritten into itself, and
+            # PostgreSQL then refuses *every* UPDATE there -- a plain save() included -- at
+            # rewrite time, so the WHERE guard never gets to run. See docs/owned-relations.md.
+            if dependent_table == owner_table:
+                self._mti_cascade_warnings.append(
+                    f"Owned rule for '{owner_table}.{fk_field.column}' -> "
+                    f"'{dependent_table}' skipped: the rule would update the same table it "
+                    'fires on, which PostgreSQL rejects as infinite rule recursion on every '
+                    'UPDATE to that table. Handle this ownership in Python.'
+                )
+                continue
+            # The multi-table form of the same rejection -- see _rule_cycle_edges.
+            if (owner_table, dependent_table) in self._rule_cycle_edges():
+                self._mti_cascade_warnings.append(
+                    self._cycle_warning(
+                        'Owned',
+                        f"'{owner_table}.{fk_field.column}'",
+                        owner_table,
+                        dependent_table,
+                    )
+                )
+                continue
+            ident_foreign_key = _identifiers._escape_ident(fk_field.column)
+            key = (dependent_table, owner_table, fk_field.column)
+            header = HEADER_SOFT_DELETE_OWNED.format(
+                dependent_table=_identifiers._escape_ident(dependent_table),
+                table=header_owner_table,
+                foreign_key=ident_foreign_key,
+            )
+            rule_name = _owned_rule_name(dependent_table, fk_field.column)
+            # ``key`` *is* the relation here: an owned key always carries its column, so
+            # unlike the cascade family above the two cannot come apart.
+            self._claim_rule_name(owner_table, rule_name, key)
+            forward = _soft_delete._CREATE_SOFT_DELETE_OWNED_OBJECT_RULE.format(
+                rule_name=rule_name,
+                table=ident_owner_table,
+                dependent_table=_identifiers._quote_table(dependent_table),
+                dependent_primary_key=_identifiers._escape_ident(
+                    cast(str, dependent._meta.pk.column)
+                ),
+                primary_key=ident_owner_pk,
+                foreign_key=ident_foreign_key,
+            )
+            reverse = _soft_delete._DROP_SOFT_DELETE_OWNED_OBJECT_RULE.format(
+                rule_name=rule_name, table=ident_owner_table
+            )
+            self._append_if_stale(
+                ops,
+                self.existing.soft_delete_owned,
                 key,
                 header,
                 forward,

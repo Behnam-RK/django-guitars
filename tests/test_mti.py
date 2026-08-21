@@ -5,8 +5,14 @@ physically live on an ancestor table. See ``tests/testapp/models.py`` for the ch
 import types
 
 import pytest
+from django.db import connection, models
+from django.db.models import CASCADE
+from django.test.utils import isolate_apps
 
+from guitars import sql
+from guitars.models import SetarModel
 from guitars.models.soft_deletion import _mti_table_chain
+from guitars.sql import _identifiers
 from tests.conftest import scalar as _scalar
 from tests.testapp.models import ChamberOrchestra, Ensemble, Orchestra, Section
 
@@ -174,3 +180,59 @@ def test_queryset_hard_delete_from_parent_removes_descendant_rows():
     assert not _row_exists(Orchestra, pk)
     assert not _row_exists(Ensemble, pk)
     assert not _row_exists(Ensemble, plain_pk)
+
+
+@pytest.mark.django_db(transaction=True)
+@isolate_apps('tests.testapp')
+def test_instance_hard_delete_of_a_referrer_clears_an_mti_cascade_child_whole_chain():
+    """A CASCADE foreign key declared on an MTI *child*'s own table, no ancestor FK to the same
+    target shadowing it. Collecting only the declaring level removes that table's row and
+    strands its ancestor's -- unreachable by any query, still pointed at by the parent link."""
+
+    class Sponsor(SetarModel):
+        class Meta:
+            app_label = 'testapp'
+
+    class Programme(SetarModel):
+        class Meta:
+            app_label = 'testapp'
+
+    class SponsoredProgramme(Programme):
+        sponsor = models.ForeignKey(Sponsor, on_delete=CASCADE, related_name='programmes')
+
+        class Meta:
+            app_label = 'testapp'
+
+    with connection.schema_editor() as schema_editor:
+        for model in (Sponsor, Programme, SponsoredProgramme):
+            schema_editor.create_model(model)
+    try:
+        with connection.cursor() as cursor:
+            for model in (Sponsor, Programme):
+                cursor.execute(
+                    sql.CREATE_SOFT_DELETE_RULE.format(
+                        table=_identifiers._quote_table(model._meta.db_table),
+                        primary_key=_identifiers._escape_ident(model._meta.pk.column),
+                    )
+                )
+            # The MTI redirect rule the generator emits for the child table.
+            cursor.execute(
+                sql.CREATE_MTI_SOFT_DELETE_RULE.format(
+                    child_table=_identifiers._quote_table(SponsoredProgramme._meta.db_table),
+                    parent_table=_identifiers._quote_table(Programme._meta.db_table),
+                    child_pk=_identifiers._escape_ident(SponsoredProgramme._meta.pk.column),
+                    parent_pk=_identifiers._escape_ident(Programme._meta.pk.column),
+                )
+            )
+        sponsor = Sponsor.objects.create()
+        programme = SponsoredProgramme.objects.create(sponsor=sponsor)
+        pk = programme.pk
+
+        sponsor.hard_delete()
+
+        assert not _row_exists(SponsoredProgramme, pk)
+        assert not _row_exists(Programme, pk)
+    finally:
+        with connection.schema_editor() as schema_editor:
+            for model in (SponsoredProgramme, Programme, Sponsor):
+                schema_editor.delete_model(model)

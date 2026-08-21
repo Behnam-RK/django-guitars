@@ -26,6 +26,11 @@ _BASELINE = {
         r'# Soft Delete Related Rule on "([^"]+)" that is related to "([^"]+)"'
         r'(?: via "(?P<foreign_key>[^"]+)")?'
     ),
+    # Born derived in 2.3.0 -- baselined in the naive spelling for the same reason as the
+    # two 2.1.0 scanners below: it pins the escaped-quote behaviour against the corpus.
+    '_RE_SOFT_DELETE_OWNED': re.compile(
+        r'# Soft Delete Owned Rule on "([^"]+)" that is owned by "([^"]+)" via "([^"]+)"!'
+    ),
     '_RE_MTI_UPDATED_AT': re.compile(r'# MTI Updated at Trigger on "([^"]+)" table'),
     '_RE_MTI_SOFT_DELETE': re.compile(r'# MTI Soft Delete Rule on "([^"]+)" table'),
     '_RE_TENANT_POLICY': re.compile(

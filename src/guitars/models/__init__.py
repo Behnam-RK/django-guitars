@@ -7,6 +7,7 @@ from .base import (
     TarModel,
     UpdatableModel,
 )
+from .fields import OwningForeignKey
 from .soft_deletion import (
     AllObjectsManager,
     ArchiveManager,
@@ -27,6 +28,7 @@ __all__ = [
     'HasCachedPropertyModel',
     'LiveManager',
     'LiveQuerySet',
+    'OwningForeignKey',
     'SetarModel',
     'SoftDeletableModel',
     'TarModel',

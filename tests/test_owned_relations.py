@@ -1109,6 +1109,22 @@ def test_another_live_placard_owning_it_still_spares_it():
 
 
 @pytest.mark.django_db
+def test_one_row_owning_the_target_twice_is_not_its_own_owner(band):
+    """The plain self exclusion, per *row* rather than per column: one album holding the kit
+    through both of its owning columns satisfies its own sibling arm without it, and no owner
+    is ever left to archive the kit."""
+    kit = PressKit.objects.create(headline='Hemispheres, reissued')
+    album = Album.objects.create(
+        title='Hemispheres', band=band, press_kit=kit, alt_press_kit=kit
+    )
+
+    album.delete()
+
+    assert not PressKit.objects.filter(pk=kit.pk).exists()
+    assert PressKit._archives.filter(pk=kit.pk).exists()
+
+
+@pytest.mark.django_db
 def test_an_mti_owner_is_not_its_own_co_owner_across_the_join():
     """One row owning the kit twice -- through ``Ensemble.press_kit`` and through the
     ``Orchestra.programme`` its own child table holds. The ancestor's rule fires on the table

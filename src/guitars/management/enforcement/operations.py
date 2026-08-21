@@ -1285,9 +1285,9 @@ class OperationsMixin:
                     alias=excluded_alias, primary_key=ident_owner_pk
                 )
             elif excluded == dependent_table:
-                # An arm reading the dependent's own table -- a target owning itself. The row
-                # the rule stamps must not count as its own live owner, or nothing ever
-                # archives it. Named by the key, which holds exactly that row's primary key.
+                # An arm taking liveness from the dependent's own table -- a target owning
+                # itself, or an MTI child of it owning it back. The row the rule stamps must not
+                # count as its own live owner, or nothing archives it. Named by the key.
                 self_exclusion = _soft_delete._SOFT_DELETE_OWNED_CO_OWNER_TARGET_EXCLUSION.format(
                     alias=excluded_alias,
                     primary_key=ident_dependent_pk,

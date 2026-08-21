@@ -1885,6 +1885,34 @@ def test_owned_guard_self_excludes_every_arm_on_the_declaring_table():
     assert blob.count('guitars_owner_1."id" <> old."id"') == 2
 
 
+def test_owned_guard_does_not_count_a_self_owning_target_as_its_own_owner():
+    """A target owning *itself* gets no rule of its own -- that is the 1-cycle -- but still
+    contributes an arm to every other owner's rule. Excluded by the key rather than by pk: the
+    row that must not count is the one the rule stamps, not the one going away."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Shared(SetarModel):
+            parent = OwningForeignKey('self', on_delete=DO_NOTHING, null=True, related_name='+')
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Owner(SetarModel):
+            target = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        return _owned_blob(Shared, Owner, subject=Owner)
+
+    command, blob, ops = _build()
+
+    assert len(ops) == 1  # Shared's own relation is refused; Owner's still carries its arm
+    assert 'FROM "testapp_shared" AS guitars_owner_1' in blob
+    assert 'guitars_owner_1."id" <> old."target_id"' in blob
+
+
 def test_owned_guard_scales_to_three_owners():
     """N owning columns produce N rules of N arms. Guards the composition, not one shape."""
 

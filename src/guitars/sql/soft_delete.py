@@ -124,6 +124,13 @@ _SOFT_DELETE_OWNED_CO_OWNER_SELF_EXCLUSION = (
     '                    AND {alias}."{primary_key}" <> old."{primary_key}"\n'
 )
 
+# The other exclusion, on an arm reading the *dependent's* own table -- an ``OwningForeignKey``
+# a target declares to itself. A row of it pointing at its own primary key would read as its own
+# live owner and pin the target un-archivable. Excluded by the key, which names the target row.
+_SOFT_DELETE_OWNED_CO_OWNER_TARGET_EXCLUSION = (
+    '                    AND {alias}."{primary_key}" <> old."{foreign_key}"\n'
+)
+
 _DROP_SOFT_DELETE_OWNED_OBJECT_RULE = """
     DROP RULE {rule_name} ON {table};
 """

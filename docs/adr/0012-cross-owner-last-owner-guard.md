@@ -27,9 +27,10 @@ Each rule carries one `NOT EXISTS` arm **per owning (table, column) pair** targe
 N owning columns produce N rules of N arms.
 
 - **Self-exclusion is keyed on the row, not the column.** Arms on the table the rule fires on carry
-  `<alias>."{pk}" <> old."{pk}"`; arms on other tables carry none, no row of theirs going away in
-  this statement. Excluding only the declaring column's arm would let a row owning the target through
-  two of its own columns read as its own last live owner and hold it alive forever.
+  `<alias>."{pk}" <> old."{pk}"` — excluding only the declaring column's arm would let a row owning
+  the target through two of its own columns read as its own last live owner and hold it alive
+  forever. An arm on the *dependent's* table excludes `old."{fk}"` instead, a target owning itself
+  otherwise reading as its own live owner; any other table has no row going away here to exclude.
 - **Arms come from the whole model registry**, not `LOCAL_APPS` — matching
   `introspection.rule_update_cycle_edges`, which sweeps it so the generator and `hard_delete()`
   cannot disagree. A live owner is live whether or not the kit generates for its app; excluding
@@ -66,14 +67,13 @@ scanning container, name family, corpus entry); rule-retirement machinery that d
 2.3.0 rule left live beside a trigger stamping exactly where the trigger spares; and owned edges
 leaving `introspection._rule_update_edges`, silently changing both which cascade relations get
 refused *and* what `hard_delete()` follows. All for a hole that **fails safe**, in a release blocking
-a consumer. The per-statement limit stays open — 0011:64's surviving half.
+a consumer — the limit stays open, 0011:64's surviving half.
 
 **Widening the guard to every inbound foreign key**, converging on `_still_referenced`'s breadth.
 Rejected on a defect that does not survive contact: a referrer table without `_deleted_at` has no
-column to read liveness from, so one such table would pin the dependent un-archivable forever,
-silently. The asymmetry is principled — the Python guard omits the `_deleted_at` filter because it
-*removes* rows and must survive the foreign-key check at `COMMIT`. The rule asks "is this still
-**owned**"; `hard_delete()` asks "can this be **removed**".
+column to read liveness from, so one such table would pin the dependent un-archivable forever. The
+Python guard omits that filter on purpose — it *removes* rows and must survive the foreign-key check
+at `COMMIT`. The rule asks "is this still **owned**"; `hard_delete()`, "can this be **removed**".
 
 **Cross-app migration dependency edges.** An arm makes a rule reference another app's table, and
 PostgreSQL resolves table references when it parses a rule action. Not added: the cascade family has

@@ -1135,7 +1135,12 @@ class OperationsMixin:
                 primary_key=ident_owner_pk,
                 foreign_key=ident_foreign_key,
                 co_owner_guards=self._owned_co_owner_guards(
-                    co_owners, owner_table, ident_owner_pk, ident_foreign_key
+                    co_owners,
+                    owner_table,
+                    ident_owner_pk,
+                    ident_foreign_key,
+                    dependent_table,
+                    _identifiers._escape_ident(cast(str, dependent._meta.pk.column)),
                 ),
             )
             reverse = _soft_delete._DROP_SOFT_DELETE_OWNED_OBJECT_RULE.format(
@@ -1197,6 +1202,8 @@ class OperationsMixin:
         owner_table: str,
         ident_owner_pk: str,
         ident_declared_foreign_key: str,
+        dependent_table: str,
+        ident_dependent_pk: str,
     ) -> str:
         """The rendered co-owner arms, or ``''`` where the dependent is owned from exactly one
         place -- which is what makes that case byte-identical to 2.3.0. Aliases are numbered
@@ -1204,16 +1211,25 @@ class OperationsMixin:
         arms: list[str] = []
         for position, arm in enumerate(co_owners, start=1):
             alias = f'guitars_owner_{position}'
-            # Per *row*, not per column: the row being soft-deleted must not count as its own
-            # live co-owner, or one owning the target through two of its columns holds it alive
-            # forever. On any other table there is no such row to exclude.
-            self_exclusion = (
-                _soft_delete._SOFT_DELETE_OWNED_CO_OWNER_SELF_EXCLUSION.format(
+            if arm.owner_table == owner_table:
+                # Per *row*, not per column: the row being soft-deleted must not count as its
+                # own live co-owner, or one owning the target through two of its columns holds
+                # the target alive forever.
+                self_exclusion = _soft_delete._SOFT_DELETE_OWNED_CO_OWNER_SELF_EXCLUSION.format(
                     alias=alias, primary_key=ident_owner_pk
                 )
-                if arm.owner_table == owner_table
-                else ''
-            )
+            elif arm.owner_table == dependent_table:
+                # An arm reading the dependent's own table -- a target owning itself. The row
+                # the rule stamps must not count as its own live owner, or nothing ever
+                # archives it. Named by the key, which holds exactly that row's primary key.
+                self_exclusion = _soft_delete._SOFT_DELETE_OWNED_CO_OWNER_TARGET_EXCLUSION.format(
+                    alias=alias,
+                    primary_key=ident_dependent_pk,
+                    foreign_key=ident_declared_foreign_key,
+                )
+            else:
+                # No row on any other table is going away in this statement.
+                self_exclusion = ''
             arms.append(
                 _soft_delete._SOFT_DELETE_OWNED_CO_OWNER_GUARD.format(
                     owner_table=_identifiers._quote_table(arm.owner_table),

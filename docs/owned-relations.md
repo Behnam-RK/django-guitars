@@ -45,17 +45,17 @@ Unconditional, not derived from whether a `UniqueConstraint` proves single owner
 changes no field, so the rule's `[SQL:…]` identity would not move and `--check` would stay green
 over an unguarded rule. "Last owner" is the last across **every** `OwningForeignKey` into the
 target, not the last through the rule's own column: one `NOT EXISTS` arm per owning column, read
-over the whole registry rather than `LOCAL_APPS`, each arm on the declaring table excluding the row
-going away by **pk** so a row owning through two of its own columns is not its own last owner.
-**Index every owning column.** See [ADR 0011](adr/0011-owner-side-soft-delete-ownership.md) and
+over the whole registry rather than `LOCAL_APPS`. An arm on the declaring table excludes the row
+going away, so a row owning through two of its own columns is not its own last owner; one on the
+target's own table excludes the target, so a target owning itself is not either. **Index every
+owning column.** See [ADR 0011](adr/0011-owner-side-soft-delete-ownership.md) and
 [ADR 0012](adr/0012-cross-owner-last-owner-guard.md).
 
 `hard_delete()` applies the same test in Python, removing an owned row *after* the batch that owned
 it — the reverse of child-first `CASCADE` order, since the owner still references it. Three
 narrowings, because it *removes* the row where the rule only stamps a column: the whole batch is
-spared rather than one row; an **archived** referrer still counts, its key being on disk; and
-**any** surviving foreign key holds the row back, at *any* level of an MTI chain, no row of which
-is collected alone. All three because a still-referenced row fails the deferred constraint at
+spared rather than one row; an **archived** referrer still counts, its key being on disk; and **any**
+surviving foreign key holds the row back, at *any* level of an MTI chain, none collected alone. All three because a still-referenced row fails the deferred constraint at
 `COMMIT`. Collection runs to a fixpoint, so a row spared by a reference *itself* collected later is
 picked up later. A `CASCADE` referrer never counts, going *with* the row it points at — discounted
 by **row**, not relation (one model can hold a `CASCADE` key *and* a plain one to the same target)

@@ -1132,14 +1132,7 @@ class OperationsMixin:
                 )
                 continue
             ident_foreign_key = _identifiers._escape_ident(fk_field.column)
-            # Every *other* owning column pointing at this dependent. Arm 0 -- this rule's own
-            # column -- is spelled out in the template, which is what keeps a single-owner
-            # dependent byte-identical to 2.3.0.
-            co_owners = [
-                arm
-                for arm in self._owner_arms().get(dependent_table, ())
-                if (arm.owner_table, arm.fk_column) != (owner_table, fk_field.column)
-            ]
+            co_owners = self._co_owner_arms(dependent_table, owner_table, fk_field.column)
             if self._refuse_owned_tenancy_mismatch(key, dependent, co_owners):
                 continue
             header = HEADER_SOFT_DELETE_OWNED.format(
@@ -1183,18 +1176,27 @@ class OperationsMixin:
             )
         return ops
 
-    def _refuse_owned_tenancy_mismatch(
-        self,
-        key: tuple[str, str, str],
-        dependent: type[models.Model],
-        co_owners: list[_OwnerArm],
-    ) -> bool:
-        """Refuse a rule whose guard would read a co-owner through a tenant policy the
-        dependent does not share -- an ordinary ``SELECT`` cannot see an out-of-tenant live
-        owner, so it would stamp a still-owned row. Why only co-owners: ADR 0012."""
+    def _co_owner_arms(
+        self, dependent_table: str, owner_table: str, fk_column: str
+    ) -> list[_OwnerArm]:
+        """Every *other* owning column pointing at this dependent. Arm 0 -- the rule's own
+        column -- is spelled out in the template, which is what keeps a single-owner dependent
+        byte-identical to 2.3.0."""
+        return [
+            arm
+            for arm in self._owner_arms().get(dependent_table, ())
+            if (arm.owner_table, arm.fk_column) != (owner_table, fk_column)
+        ]
+
+    def _owned_tenancy_mismatch(
+        self, dependent: type[models.Model], co_owners: list[_OwnerArm]
+    ) -> list[str]:
+        """Co-owner tables a tenant policy filters on a dimension the dependent's does not --
+        an ordinary ``SELECT`` cannot see an out-of-tenant live owner there, so a guard reading
+        them would stamp a still-owned row. Why only co-owners: ADR 0012."""
         # Nothing to hide behind where no policy is generated at all.
         if not self._tenant_policies_enabled():
-            return False
+            return []
         # Per *dimension*, and per what a policy predicates rather than what a manager
         # declares: reaching the dependent's row put the session inside the dimensions its own
         # policy filters on, so only one a co-owner's policy has and it does not can hide a row.
@@ -1203,13 +1205,23 @@ class OperationsMixin:
         # subtracting and one adding: assume the dependent's read is unfiltered, and the arm's
         # filtered. Both readings refuse rather than emit a guard that cannot see an owner.
         dependent_dimensions = policy_dimensions(dependent, memo)
-        tenanted = sorted(
+        return sorted(
             {
                 arm.owner_table
                 for arm in co_owners
                 if assumed_policy_dimensions(arm.owner_model, memo) - dependent_dimensions
             }
         )
+
+    def _refuse_owned_tenancy_mismatch(
+        self,
+        key: tuple[str, str, str],
+        dependent: type[models.Model],
+        co_owners: list[_OwnerArm],
+    ) -> bool:
+        """:meth:`_owned_tenancy_mismatch`, reported. Split so the scoped gap notes can ask
+        which relations carry a rule without reporting an app the run never named."""
+        tenanted = self._owned_tenancy_mismatch(dependent, co_owners)
         if not tenanted:
             return False
         dependent_table, owner_table, foreign_key = key
@@ -1307,15 +1319,23 @@ class OperationsMixin:
                 for fk_field in self._owned_candidates(
                     model, owner_table, self._declared_owning_fields(model), report=False
                 ):
-                    dependent_table = column_owner(
-                        fk_field.related_model, '_deleted_at'
-                    )._meta.db_table
+                    dependent = column_owner(fk_field.related_model, '_deleted_at')
+                    dependent_table = dependent._meta.db_table
+                    co_owners = self._co_owner_arms(dependent_table, owner_table, fk_field.column)
+                    # The refusals ``_owned_operations`` applies after the candidate test. A
+                    # relation refused there has no rule for an arm to make stale, so a note
+                    # about it would ask for an unscoped run that emits the same note again.
+                    if (
+                        dependent_table == owner_table
+                        or (owner_table, dependent_table) in self._rule_cycle_edges()
+                        or self._owned_tenancy_mismatch(dependent, co_owners)
+                    ):
+                        continue
                     touching = sorted(
                         {
                             arm.owner_table
-                            for arm in self._owner_arms().get(dependent_table, ())
+                            for arm in co_owners
                             if arm.owner_table in in_scope_tables
-                            and (arm.owner_table, arm.fk_column) != (owner_table, fk_field.column)
                         }
                     )
                     if not touching:

@@ -2328,6 +2328,36 @@ def test_owned_rule_is_refused_for_a_tenanted_co_owner_the_kit_generates_no_poli
     assert "'legacy_migrations_vendor'" in command._mti_cascade_warnings[0]
 
 
+@override_settings(LOCAL_APPS=['fake.kioska', 'fake.loopb'])
+def test_a_scoped_run_says_nothing_about_a_rule_that_will_never_exist(monkeypatch):
+    """The note asks for an unscoped run, so it has to be about a rule that run would emit.
+    A relation refused *after* the candidate test -- self-update here -- has none, and the
+    unscoped run it asked for would print the same note again."""
+    command = Command()
+    command._mti_cascade_warnings.clear()
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Loop(SetarModel):
+            parent = OwningForeignKey('self', on_delete=DO_NOTHING, null=True, related_name='+')
+
+            class Meta:
+                app_label = 'testapp'
+
+        command.all_models = [Loop, Kiosk]
+        monkeypatch.setattr(
+            operations_module.django_apps,
+            'get_app_configs',
+            lambda: [
+                _fake_app_config('fake.kioska', 'kioska', [Kiosk]),
+                _fake_app_config('fake.loopb', 'loopb', [Loop]),
+            ],
+        )
+        return command._scoped_owned_gap_notes({'kioska'})
+
+    assert _build() == []
+
+
 @override_settings(LOCAL_APPS=['fake.kioska', 'fake.loose'])
 def test_a_scoped_run_does_not_report_an_out_of_scope_app_s_own_misconfiguration(monkeypatch):
     """The gap-note pass re-runs the owned candidate test over apps this run was never asked

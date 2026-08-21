@@ -35,6 +35,7 @@ from tests.testapp.models import (
     Residency,
     Rider,
     Section,
+    SpotlitPlacard,
     Stagehand,
 )
 
@@ -1065,6 +1066,33 @@ def test_a_placard_owning_itself_is_not_its_own_live_owner():
     kiosk.delete()
 
     assert not Placard.objects.filter(pk=placard.pk).exists()
+
+
+@pytest.mark.django_db
+def test_an_mti_child_of_the_target_pinning_it_is_not_its_own_live_owner():
+    """The joined target exclusion. ``SpotlitPlacard`` holds ``pin`` on its own table and
+    liveness on ``testapp_placard``, so its arm matches the very row the kiosk's rule stamps
+    unless that row is excluded on the ancestor's side."""
+    spotlit = SpotlitPlacard.objects.create(caption='Now Showing', lumens='800')
+    spotlit.update(pin=spotlit.placard_ptr)
+    kiosk = Kiosk.objects.create(label='Lobby', placard=spotlit.placard_ptr)
+
+    kiosk.delete()
+
+    assert not Placard.objects.filter(pk=spotlit.pk).exists()
+
+
+@pytest.mark.django_db
+def test_a_distinct_spotlit_placard_pinning_it_still_spares_it():
+    """The control: excluded by the *target's* key, so a different spotlit placard pinning it
+    is a live owner the same arm has to see."""
+    placard = Placard.objects.create(caption='Now Showing')
+    SpotlitPlacard.objects.create(caption='Foyer board', lumens='400', pin=placard)
+    kiosk = Kiosk.objects.create(label='Lobby', placard=placard)
+
+    kiosk.delete()
+
+    assert Placard.objects.filter(pk=placard.pk).exists()
 
 
 @pytest.mark.django_db

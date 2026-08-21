@@ -129,16 +129,16 @@ _SOFT_DELETE_OWNED_CO_OWNER_JOINED_GUARD = """
 {self_exclusion}                    AND {alias}_root._deleted_at IS NULL
               )"""
 
-# Spliced in only where the co-owner sits on the table the rule fires on. Keyed on the *row*:
-# a row owning the target through two of its own columns would otherwise read as its own last
-# live owner and hold the target alive forever.
+# Spliced in only where the arm reads liveness *from* the table the rule fires on -- an MTI
+# ancestor's, where it joins. Keyed on the row: one owning the target through two of its own
+# columns would otherwise read as its own last live owner and hold the target alive forever.
 _SOFT_DELETE_OWNED_CO_OWNER_SELF_EXCLUSION = (
     '                    AND {alias}."{primary_key}" <> old."{primary_key}"\n'
 )
 
-# The other exclusion, on an arm reading the *dependent's* own table -- an ``OwningForeignKey``
-# a target declares to itself. A row of it pointing at its own primary key would read as its own
-# live owner and pin the target un-archivable. Excluded by the key, which names the target row.
+# The other exclusion, on an arm taking liveness from the *dependent's* own table -- a target
+# owning itself, or an MTI child of it owning it back. A row pointing at the target's primary key
+# would read as its own live owner and pin it un-archivable. Excluded by the key, which names it.
 _SOFT_DELETE_OWNED_CO_OWNER_TARGET_EXCLUSION = (
     '                    AND {alias}."{primary_key}" <> old."{foreign_key}"\n'
 )

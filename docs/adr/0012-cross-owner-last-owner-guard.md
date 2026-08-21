@@ -62,12 +62,11 @@ N owning columns produce N rules of N arms.
 **A statement-level trigger** — the obvious reading of ADR 0011:64, chosen and then reversed during
 planning. It closes the per-**statement** limit, but a transition table carries rows from one
 statement on one table, so it does **not** subsume the arms: cross-owner is always two statements on
-two tables. Additive, not a replacement — and against it: a whole new operation family (header,
-scanner, scanning container, name family, corpus entry); rule-retirement machinery that does not
-exist, a 2.3.0 rule left live beside a trigger stamping exactly where the trigger spares; and owned
-edges leaving `introspection._rule_update_edges`, silently changing both which cascade relations get
-refused *and* what `hard_delete()` follows. All for a hole that **fails safe**, in a release blocking
-a consumer — the limit stays open, 0011:64's surviving half.
+two tables. Additive, not a replacement — and against it: a whole new operation family (header, scanner,
+container, name family, corpus entry); rule-retirement machinery that does not exist, a 2.3.0 rule
+left live beside a trigger stamping exactly where the trigger spares; and owned edges leaving
+`introspection._rule_update_edges`, silently changing which cascade relations get refused *and* what
+`hard_delete()` follows. All for a hole that **fails safe** — the limit stays open, 0011:64's half.
 
 **Widening the guard to every inbound foreign key**, converging on `_still_referenced`'s breadth.
 Rejected on a defect that does not survive contact: a referrer table without `_deleted_at` has no
@@ -87,6 +86,7 @@ migration graph and brick `migrate` outright — worse than what it prevents. Se
 - A rule's text now depends on models in packages the kit does not generate for, so upgrading such a package can move its `[SQL:…]` identity. Intended, not drift.
 - A scoped `makeguitarmigrations B --check` can exit green over a stale rule in app A, arms being registry-wide while A is never re-derived. Warned by `_scoped_owned_gap_notes`, the twin of `_scoped_cascade_gap_notes`, and not escalated: an unscoped run — what CI runs — re-derives every rule.
 - An owner that inherits `_deleted_at` is *seen* by every other rule's guard but still **stamps** nothing when it is soft-deleted, its own rule being refused. So a dependent whose last owner is one of those is left live rather than archived — the fail-safe half of that refusal, and the reason the joined arm is worth having without the rule.
+- An owner with **no** `_deleted_at` at all contributes no arm either, there being no column to read liveness from — so a target it holds can be archived while it stays permanently live. That relation is already reported as a misconfiguration and `hard_delete()` still spares the row, its guard counting any referrer; it predates the arms.
 - Every arm is a lookup on that owner's foreign-key column; an unindexed one makes each soft delete a sequential scan of that table.
 - One shape goes green-to-red on upgrade: two owners where a policy on a co-owner's table filters on a dimension the dependent's does not. That is the tenancy refusal working.
 - `hard_delete()`'s candidate test (`models.soft_deletion._owned_fields`) mirrors the *other* refusals but **not** this one, so it still follows a relation the generator now refuses — and, reading the co-owner through the same policy, removes a row that co-owner still references. The foreign-key check is exempt from RLS, so that aborts the transaction at `COMMIT` rather than destroying anything: loud, and the same outcome `docs/owned-relations.md` already records for the per-visible-row limit. That guarantee is the *constraint*, not the guard, so an `OwningForeignKey(db_constraint=False)` gives it up and the removal goes through — not refused, being a legal Django option, but the one shape where this gap is silent. Known gap, not a decision: the shared answer belongs in `guitars.introspection` alongside `rule_update_cycle_edges`.

@@ -79,9 +79,9 @@ Two limits the guard does not cover, both by construction:
   the kit's guards do not fail safe. `hard_delete()` reads through the same policy and then *removes*
   the row, which the foreign-key check does not (integrity is exempt from RLS), so that aborts at
   `COMMIT`. Keep an owned target inside its owners' tenant dimension. Since 2.4.0 the *co-owner*
-  case is **refused** instead, where a policy on the co-owner's table filters on a dimension the
-  dependent's does not — and refusing emits nothing, so one over a rule already recorded fails
-  `--check`. Drop that rule by hand.
+  case is **refused** instead, where a policy on either table its arm reads — the co-owner's, or the
+  MTI ancestor it takes liveness from — filters on a dimension the dependent's does not. Refusing
+  emits nothing, so one over a rule already recorded fails `--check`. Drop that rule by hand.
 
 ## MTI
 

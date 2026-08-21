@@ -459,6 +459,23 @@ class Placard(SetarModel):
         return self.caption
 
 
+class SpotlitPlacard(Placard):
+    """MTI child of an owned target, owning that target back: the arm it contributes to the
+    kiosk's and foyer's rules takes liveness from ``testapp_placard`` itself, so the row the
+    rule stamps has to be excluded there rather than on the table holding the key."""
+
+    lumens = CharField(max_length=100)
+    pin = OwningForeignKey(
+        Placard, on_delete=DO_NOTHING, null=True, blank=True, related_name='pinned_by'
+    )
+
+    class Meta:
+        pass
+
+    def __str__(self) -> str:
+        return self.lumens
+
+
 class Kiosk(SetarModel):
     """One of ``Placard``'s two owner tables."""
 

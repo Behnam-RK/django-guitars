@@ -117,6 +117,18 @@ _SOFT_DELETE_OWNED_CO_OWNER_GUARD = """
 {self_exclusion}                    AND {alias}._deleted_at IS NULL
               )"""
 
+# The same arm for an owner that keeps ``_deleted_at`` on an MTI ancestor: the foreign key is on
+# its own table and liveness on the ancestor's, so the arm joins the two on the primary-key value
+# every table in the chain shares. Read from the ancestor, which is where the column is.
+_SOFT_DELETE_OWNED_CO_OWNER_JOINED_GUARD = """
+              AND NOT EXISTS (
+                  SELECT 1 FROM {owner_table} AS {alias}
+                  JOIN {root_table} AS {alias}_root
+                      ON {alias}_root."{root_primary_key}" = {alias}."{child_primary_key}"
+                  WHERE {alias}."{foreign_key}" = old."{declared_foreign_key}"
+{self_exclusion}                    AND {alias}_root._deleted_at IS NULL
+              )"""
+
 # Spliced in only where the co-owner sits on the table the rule fires on. Keyed on the *row*:
 # a row owning the target through two of its own columns would otherwise read as its own last
 # live owner and hold the target alive forever.

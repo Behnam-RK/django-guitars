@@ -128,6 +128,12 @@ class _OwnerArm(NamedTuple):
     owner_table: str
     fk_column: str
     owner_model: type[models.Model]
+    #: Set only where the owner keeps ``_deleted_at`` on an MTI ancestor: that ancestor's table
+    #: and primary key, and this table's parent-link primary key. The arm joins the two, the
+    #: foreign key being on one table and liveness on the other. ``None`` for the plain form.
+    root_table: str | None = None
+    root_pk: str | None = None
+    child_pk: str | None = None
 
 
 def _rule_relation_label(relation: tuple) -> str:
@@ -748,7 +754,7 @@ class OperationsMixin:
                     # cycle -- say nothing about whether its rows still own the target.
                     if (
                         not self._is_owned_candidate(model, declared)
-                        or not owns_column(model, '_deleted_at')
+                        or not has_column(model, '_deleted_at')
                         or not has_column(fk_field.related_model, '_deleted_at')
                         or not _targets_primary_key(fk_field)
                     ):
@@ -756,9 +762,7 @@ class OperationsMixin:
                     dependent_table = column_owner(
                         fk_field.related_model, '_deleted_at'
                     )._meta.db_table
-                    arms.setdefault(dependent_table, []).append(
-                        _OwnerArm(model._meta.db_table, fk_field.column, model)
-                    )
+                    arms.setdefault(dependent_table, []).append(self._owner_arm(model, fk_field))
             # Sorted, so the rendered guard -- and therefore the ``[SQL:...]`` identity that
             # decides whether a migration is emitted -- does not move with registry order.
             self._owner_arms_cache = {
@@ -766,6 +770,26 @@ class OperationsMixin:
                 for table, found in arms.items()
             }
         return self._owner_arms_cache
+
+    @staticmethod
+    def _owner_arm(model: type[models.Model], fk_field: models.ForeignKey) -> _OwnerArm:
+        """One arm, in whichever of the two forms the owner's own shape calls for. An owner
+        that inherits ``_deleted_at`` is refused a rule of its *own* -- the rule would fire on
+        a table its key is not on -- but its rows own the target all the same. See ADR 0012."""
+        table = model._meta.db_table
+        if owns_column(model, '_deleted_at'):
+            return _OwnerArm(table, fk_field.column, model)
+        root = column_owner(model, '_deleted_at')
+        # Joined on the primary key, which every table in an MTI chain shares one *value* of --
+        # the same soundness the owned rule's own correlation rests on.
+        return _OwnerArm(
+            table,
+            fk_field.column,
+            model,
+            root_table=root._meta.db_table,
+            root_pk=cast(str, root._meta.pk.column),
+            child_pk=cast(str, model._meta.pk.column),
+        )
 
     def _refuse_owned(self, key: tuple[str, str, str] | None, message: str) -> None:
         """Record an owned-rule refusal, escalating where a rule for *key* is already recorded:
@@ -1236,13 +1260,22 @@ class OperationsMixin:
             else:
                 # No row on any other table is going away in this statement.
                 self_exclusion = ''
+            shared = {
+                'owner_table': _identifiers._quote_table(arm.owner_table),
+                'alias': alias,
+                'foreign_key': _identifiers._escape_ident(arm.fk_column),
+                'declared_foreign_key': ident_declared_foreign_key,
+                'self_exclusion': self_exclusion,
+            }
+            if arm.root_table is None:
+                arms.append(_soft_delete._SOFT_DELETE_OWNED_CO_OWNER_GUARD.format(**shared))
+                continue
             arms.append(
-                _soft_delete._SOFT_DELETE_OWNED_CO_OWNER_GUARD.format(
-                    owner_table=_identifiers._quote_table(arm.owner_table),
-                    alias=alias,
-                    foreign_key=_identifiers._escape_ident(arm.fk_column),
-                    declared_foreign_key=ident_declared_foreign_key,
-                    self_exclusion=self_exclusion,
+                _soft_delete._SOFT_DELETE_OWNED_CO_OWNER_JOINED_GUARD.format(
+                    root_table=_identifiers._quote_table(arm.root_table),
+                    root_primary_key=_identifiers._escape_ident(cast(str, arm.root_pk)),
+                    child_primary_key=_identifiers._escape_ident(cast(str, arm.child_pk)),
+                    **shared,
                 )
             )
         return ''.join(arms)

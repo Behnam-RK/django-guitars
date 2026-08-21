@@ -1054,6 +1054,41 @@ def test_a_live_co_owner_on_another_table_spares_the_dependent():
 
 
 @pytest.mark.django_db
+def test_a_live_co_owner_that_inherits_deleted_at_spares_the_dependent(band):
+    """The joined arm, against the database. ``Orchestra`` holds ``programme`` on its own table
+    and ``_deleted_at`` on ``Ensemble``, so the guard has to read across the join -- and until
+    it did, this archived the kit out from under a live orchestra."""
+    kit = PressKit.objects.create(headline='Hemispheres, reissued')
+    orchestra = Orchestra.objects.create(name='LSO', conductor='Rattle', programme=kit)
+    album = Album.objects.create(title='Hemispheres', band=band, press_kit=kit)
+
+    album.delete()  # the only album owning the kit -- but the orchestra is still live
+
+    assert PressKit.objects.filter(pk=kit.pk).exists()
+
+    # Still live once the orchestra goes too: the arm makes the *guard* see that owner, it does
+    # not give the orchestra a rule of its own -- refused, having to fire on ``testapp_ensemble``
+    # where ``old."programme_id"`` names nothing. Left un-archived, not archived early.
+    orchestra.delete()
+
+    assert PressKit.objects.filter(pk=kit.pk).exists()
+
+
+@pytest.mark.django_db
+def test_an_archived_co_owner_that_inherits_deleted_at_does_not_count_as_live(band):
+    """Liveness read from the ancestor's ``_deleted_at``, not merely "a row on the child table
+    points here": an archived orchestra leaves its child row in place, so an arm that joined
+    without reading the ancestor's column would hold the kit alive for ever."""
+    kit = PressKit.objects.create(headline='Hemispheres, reissued')
+    Orchestra.objects.create(name='LSO', conductor='Rattle', programme=kit).delete()
+    album = Album.objects.create(title='Hemispheres', band=band, press_kit=kit)
+
+    album.delete()
+
+    assert not PressKit.objects.filter(pk=kit.pk).exists()
+
+
+@pytest.mark.django_db
 def test_a_live_co_owner_spares_the_dependent_from_the_other_side_too():
     """The mirror. Each of the N rules carries all N arms, so neither direction is the
     special case -- a fix that only armed one rule would pass the test above alone."""

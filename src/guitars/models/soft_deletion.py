@@ -27,7 +27,7 @@ from guitars.introspection import (
 )
 from guitars.sql import SWITCH_OFF_HARD_DELETION, SWITCH_ON_HARD_DELETION
 
-from .fields import OwningForeignKey
+from .fields import OwningForeignKey, _targets_primary_key
 
 
 def _is_mti_model(model: type[Model]) -> bool:
@@ -46,12 +46,15 @@ def _declared_owning_fields(model: type[Model]) -> list[OwningForeignKey]:
     # rule would fire on a table ``old."<column>"`` cannot reach. See docs/owned-relations.md.
     if not owns_column(model, '_deleted_at'):
         return []
-    # Mirrors ``_owned_candidates``/``_owned_operations``' "nothing to stamp" refusal: no rule
-    # is emitted, so the relation is not followed -- following it destroys what the rule spared.
+    # Mirrors ``_owned_candidates``/``_owned_operations``' "nothing to stamp" and non-primary-key
+    # refusals: no rule is emitted, so the relation is not followed -- following it destroys what
+    # the rule spared, and under a redirected key destroys a row nothing ever owned.
     return [
         field
         for field in model._meta.local_fields
-        if isinstance(field, OwningForeignKey) and has_column(field.related_model, '_deleted_at')
+        if isinstance(field, OwningForeignKey)
+        and has_column(field.related_model, '_deleted_at')
+        and _targets_primary_key(field)
     ]
 
 

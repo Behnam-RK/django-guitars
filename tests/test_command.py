@@ -11,7 +11,7 @@ from django.apps import apps as django_apps
 from django.conf import settings as django_settings
 from django.core.management import CommandError, call_command
 from django.db import models
-from django.db.models import CASCADE, SET_NULL
+from django.db.models import CASCADE, DO_NOTHING, SET_NULL
 from django.test import override_settings
 from django.test.utils import isolate_apps
 
@@ -442,6 +442,38 @@ def test_owned_operation_warns_when_the_owner_is_not_soft_deletable():
     assert len(command._mti_cascade_warnings) == 1
     assert 'has no _deleted_at column' in command._mti_cascade_warnings[0]
     assert 'never soft-deleted' in command._mti_cascade_warnings[0]
+
+
+def test_owned_operation_warns_when_the_key_is_redirected_off_the_primary_key():
+    """``guitars.E002``'s twin, as the cycle refusal is ``E001``'s: ``--skip-checks`` reaches
+    the generator, and the rule would correlate the key against a primary key it never held --
+    stamping whichever row happens to carry that value as its pk."""
+    command = Command()
+    command._mti_cascade_warnings.clear()
+    command.existing.soft_delete_owned.clear()
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Kit(SetarModel):
+            legacy_id = models.IntegerField(unique=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Owner(SetarModel):
+            kit = OwningForeignKey(
+                Kit, on_delete=DO_NOTHING, to_field='legacy_id', null=True, blank=True
+            )
+
+            class Meta:
+                app_label = 'testapp'
+
+        return command._owned_operations(Owner)
+
+    assert _build() == []
+    assert len(command._mti_cascade_warnings) == 1
+    assert "to_field='legacy_id'" in command._mti_cascade_warnings[0]
+    assert 'would stamp the wrong row' in command._mti_cascade_warnings[0]
 
 
 def test_owned_operations_are_a_no_op_for_a_model_declaring_none():

@@ -13,17 +13,19 @@ class Album(SetarModel):
     press_kit = OwningForeignKey(PressKit, DO_NOTHING, null=True, related_name='albums')
 ```
 
-Soft-deleting the album soft-deletes its press kit. Do not reach for `SET_NULL` here: soft-deleting
-the *press kit* then runs Django's `Collector`, which clears `press_kit_id` on every album **before**
-the rule turns the `DELETE` into an `UPDATE`, leaving the archived kit unreachable from its former
-owners and uncollectable by `hard_delete()`. `DO_NOTHING` (or `PROTECT`/`RESTRICT`) keeps the key.
+Soft-deleting the album soft-deletes its press kit. An `on_delete` that *clears* the key —
+`SET_NULL`, `SET_DEFAULT`, `SET(…)` — warns (`guitars.W001`): deleting the *press kit* runs Django's
+`Collector`, which clears `press_kit_id` on every album **before** the rule turns the `DELETE` into
+an `UPDATE`, leaving the archived kit uncollectable by `hard_delete()`. Legal, occasionally wanted,
+silent otherwise. `DO_NOTHING`/`PROTECT`/`RESTRICT` keep the key — and make `kit.hard_delete()` fail
+rather than orphan it: go through the owner.
 
 `on_delete=CASCADE` is **refused** (`guitars.E001`): it means deleting the press kit deletes the
 album, the opposite of ownership, and would emit the cascade rule backwards. A NULL key matches
-nothing, so a nullable owned relation needs no guard. `to_field` is refused too (`guitars.E002`):
-the rule correlates the key against the target's *primary* key, which also makes [MTI](#mti) work.
-An `on_delete` that *clears* the key — `SET_NULL`, `SET_DEFAULT`, `SET(…)` — is a **warning**,
-`guitars.W001`: legal and occasionally wanted, but silent otherwise.
+nothing, so a nullable owned relation needs no guard. `to_field` is refused too (`guitars.E002`): the
+rule correlates the key against the target's *primary* key, which also makes [MTI](#mti) work —
+re-asked by the generator and `hard_delete()`, not trusted from the check, since `--skip-checks`
+reaches one, the other runs no checks at all, and a redirected key stamps then *removes* a wrong row.
 
 Three more shapes are refused by the generator rather than by a check, warned about like the
 [MTI](#mti) limitation below since each depends on the *other* model:
@@ -93,8 +95,6 @@ ancestor's table, where `old."<column>"` cannot name a column the child holds; s
 
 ## Related
 
-- [Migrations](migrations.md#rule-names) — what the rules are named, why one family's spelling
-  is frozen and merely watched while the owned one cannot be split at all, and why relaxing an
-  `OwningForeignKey` to a plain one leaves its rule live and wants a hand-written `DROP RULE`.
-- [Soft deletion](soft-deletion.md) · [MTI](mti.md) ·
-  [ADR 0011](adr/0011-owner-side-soft-delete-ownership.md) — the two design decisions
+- [Migrations](migrations.md#rule-names) — rule names, which family's spelling is frozen, and why
+  relaxing an `OwningForeignKey` leaves its rule live and wants a hand-written `DROP RULE`.
+- [Soft deletion](soft-deletion.md) · [MTI](mti.md) · [ADR 0011](adr/0011-owner-side-soft-delete-ownership.md) — the guard's shape.

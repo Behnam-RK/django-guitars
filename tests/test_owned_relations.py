@@ -13,7 +13,13 @@ from django.test.utils import isolate_apps
 from guitars import sql
 from guitars.introspection import rule_update_cycle_edges
 from guitars.models import OwningForeignKey, SetarModel
-from guitars.models.soft_deletion import _owned_fields, _owned_targets, _still_referenced
+from guitars.models.fields import _targets_primary_key
+from guitars.models.soft_deletion import (
+    _declared_owning_fields,
+    _owned_fields,
+    _owned_targets,
+    _still_referenced,
+)
 from guitars.sql import _identifiers
 from tests.testapp.models import (
     Album,
@@ -358,6 +364,7 @@ def test_a_live_owner_two_hops_up_still_spares_the_leaf():
 
 # ─── hard_delete ───
 
+
 @pytest.mark.django_db(transaction=True)
 def test_hard_delete_removes_a_two_hop_ownership_chain_in_dependency_order():
     """``_owned_targets``'s fixpoint has to reach the leaf through the middle row it only
@@ -386,8 +393,6 @@ def test_hard_delete_spares_a_whole_chain_below_a_row_another_owner_keeps():
 
     assert Rider.objects.filter(pk=rider.pk).exists()
     assert Stagehand.objects.filter(pk=hand.pk).exists()
-
-
 
 
 @pytest.mark.django_db(transaction=True)
@@ -793,6 +798,58 @@ def test_hard_delete_does_not_follow_ownership_that_closes_a_two_model_cycle(mon
     assert _build() == []
 
 
+def test_a_redirected_key_carries_no_rule_and_is_not_followed():
+    """``guitars.E002`` reports it, but ``hard_delete()`` runs no system checks at all, and
+    ``_owned_targets`` would hand the ``to_field`` values on to ``_collect_group`` as primary
+    keys -- removing whichever rows happen to carry those values as *their* pk."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Kit(SetarModel):
+            legacy_id = models.IntegerField(unique=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Owner(SetarModel):
+            kit = OwningForeignKey(
+                Kit, on_delete=DO_NOTHING, to_field='legacy_id', null=True, blank=True
+            )
+
+            class Meta:
+                app_label = 'testapp'
+
+        return _declared_owning_fields(Owner), _owned_fields(Owner)
+
+    declared, owned = _build()
+
+    assert declared == []
+    assert owned == []
+
+
+def test_a_key_naming_a_column_the_target_does_not_have_carries_no_rule():
+    """``fields.E312``'s shape: the model is unusable either way, but the predicate has to
+    answer without resolving the field, or every caller raises out of its own error path."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Kit(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Owner(SetarModel):
+            kit = OwningForeignKey(
+                Kit, on_delete=DO_NOTHING, to_field='nope', null=True, blank=True
+            )
+
+            class Meta:
+                app_label = 'testapp'
+
+        return _targets_primary_key(Owner._meta.get_field('kit'))
+
+    assert _build() is False
+
+
 def test_a_subclass_of_owning_foreign_key_keeps_its_own_deconstructed_path():
     """The frozen path is pinned for ``OwningForeignKey`` itself only. A subclass recording
     the base path would rebuild as the base field, silently dropping whatever it added."""
@@ -929,9 +986,7 @@ def test_hard_delete_follows_exactly_the_relations_the_generator_emits_rules_for
     for model in django_apps.get_models():
         command.existing.soft_delete_owned.clear()
         command._mti_cascade_warnings.clear()
-        emitted = set(
-            re.findall(r'via "([^"]+)"!', '\n'.join(command._owned_operations(model)))
-        )
+        emitted = set(re.findall(r'via "([^"]+)"!', '\n'.join(command._owned_operations(model))))
         followed = {field.column for field in _owned_fields(model)}
         if emitted != followed:
             mismatched[model._meta.label] = (sorted(emitted), sorted(followed))

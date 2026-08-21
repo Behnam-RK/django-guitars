@@ -38,7 +38,7 @@ from guitars.management.enforcement.headers import (
     RE_TENANT_AUTOFILL_FUNCTION,
 )
 from guitars.management.enforcement.identity import _literal, _operation
-from guitars.models.fields import OwningForeignKey
+from guitars.models.fields import OwningForeignKey, _targets_primary_key
 from guitars.sql import _identifiers
 from guitars.sql import soft_delete as _soft_delete
 from guitars.sql import triggers as _triggers
@@ -935,6 +935,19 @@ class OperationsMixin:
                     'on its own table but inherits _deleted_at from a multi-table-inheritance '
                     f"ancestor, so the rule would fire on '{owner_table}', a table the column "
                     'is not on.'
+                )
+                continue
+            # ``guitars.E002``'s twin, as ``_rule_update_edges`` is ``E001``'s: the check
+            # reports a redirected key, but ``--skip-checks`` still reaches here and the rule
+            # would correlate the key against a primary key it never held.
+            if not _targets_primary_key(fk_field):
+                self._mti_cascade_warnings.append(
+                    f"Owned rule for '{model._meta.db_table}.{fk_field.column}' skipped: "
+                    # ``remote_field.field_name``, not ``target_field.name``: the latter raises
+                    # where ``to_field`` names nothing, which is one of the cases refused here.
+                    f"to_field='{fk_field.remote_field.field_name}' is not the target's "
+                    'primary key, which is what the rule correlates the key against, so it '
+                    'would stamp the wrong row. Drop to_field (guitars.E002).'
                 )
                 continue
             candidates.append(cast('models.ForeignKey', fk_field))

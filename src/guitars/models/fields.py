@@ -20,6 +20,21 @@ if TYPE_CHECKING:
 __all__ = ['OwningForeignKey']
 
 
+def _targets_primary_key(field: ForeignKey) -> bool:
+    """Whether *field* correlates against its target's primary key, which every owned rule
+    assumes. ``guitars.E002`` reports otherwise, but ``--skip-checks`` still reaches the
+    generator and ``hard_delete()`` runs no checks at all, so both re-ask this."""
+    try:
+        target_field = field.target_field
+    except FieldDoesNotExist:
+        # `to_field` names a column the target does not have. Reported as fields.E312, and
+        # the model is unusable either way; resolving it here would raise out of the check
+        # framework, replacing every reported error with a traceback.
+        return False
+    related_pk = field.related_model._meta.pk
+    return related_pk is None or target_field is related_pk
+
+
 class OwningForeignKey(ForeignKey):
     """A ``ForeignKey`` whose row owns what it points at: soft-deleting the declaring row
     soft-deletes the target too, unless another live row still owns it. ``on_delete`` says
@@ -88,12 +103,11 @@ class OwningForeignKey(ForeignKey):
         try:
             target_field = self.target_field
         except FieldDoesNotExist:
-            # `to_field` names a column the target does not have. super().check() has already
-            # reported that as fields.E312; resolving it here would raise out of the check
-            # framework, replacing every reported error with a traceback.
+            # `to_field` names a column the target does not have -- reported as fields.E312.
+            # Resolved here rather than left to the helper so naming it in the message below
+            # cannot raise out of the check framework and replace every error with a traceback.
             return []
-        related_pk = self.related_model._meta.pk
-        if related_pk is None or target_field is related_pk:
+        if _targets_primary_key(self):
             return []
         return [
             checks.Error(

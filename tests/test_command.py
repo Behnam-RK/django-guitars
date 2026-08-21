@@ -2216,6 +2216,78 @@ def test_owned_rule_is_refused_when_the_dependent_s_own_dimension_predicates_not
     assert "'testapp_scoped'" in command._mti_cascade_warnings[0]
 
 
+def test_owned_rule_is_refused_when_the_dependent_is_one_the_kit_writes_no_policy_for():
+    """The other side of that fallback, and why it cannot be the same one: the dependent's
+    dimensions are *subtracted*, so reading an unknown table's manager as enforced would cancel
+    the co-owner's and suppress the refusal. Unknown means unfiltered on this side."""
+
+    @isolate_apps('tests.testapp', 'tests.legacy_migrations')
+    def _build():
+        from guitars.tenancy import tenanted_manager
+
+        class Shared(SetarModel):
+            release = models.ForeignKey('testapp.Release', on_delete=CASCADE, null=True)
+            objects = tenanted_manager(label='release__label')
+
+            class Meta:
+                app_label = 'legacy_migrations'
+
+        class Plain(SetarModel):
+            target = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Scoped(SetarModel):
+            target = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True)
+            label = models.ForeignKey('testapp.Label', on_delete=CASCADE, null=True)
+            objects = tenanted_manager(label='label')
+
+            class Meta:
+                app_label = 'testapp'
+
+        return _owned_blob(Shared, Plain, Scoped, subject=Plain)
+
+    command, blob, ops = _build()
+
+    assert ops == []
+    assert len(command._mti_cascade_warnings) == 1
+    assert "'testapp_scoped'" in command._mti_cascade_warnings[0]
+
+
+def test_policy_dimensions_are_asked_once_per_model_per_run():
+    """Two rules over one dependent, and the answer reaches ``_classify``, which sweeps the
+    registry for an MTI model that autofills. Memoised for the run rather than the process: it
+    moves with ``LOCAL_APPS``, and ``isolate_apps`` replaces the registry between runs."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        from guitars.tenancy import tenanted_manager
+
+        class Shared(SetarModel):
+            label = models.ForeignKey('testapp.Label', on_delete=CASCADE, null=True)
+            objects = tenanted_manager(label='label')
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Twice(SetarModel):
+            first = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True, related_name='+')
+            second = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True, related_name='+')
+
+            class Meta:
+                app_label = 'testapp'
+
+        return _owned_blob(Shared, Twice, subject=Twice)
+
+    command, blob, ops = _build()
+
+    # Both rules emitted: the owner carries none of the dependent's dimensions, so nothing its
+    # arms read is filtered by one the dependent's own policy does not apply.
+    assert len(ops) == 2
+    assert list(command._policy_dimension_memo.values()) == [frozenset({'label'})]
+
+
 def test_owned_rule_is_refused_for_a_tenanted_co_owner_the_kit_generates_no_policy_for():
     """A model outside ``LOCAL_APPS`` gets no policy from this kit, but its own package may
     carry one -- unknowable from here, so its manager is read as enforced. The fail-safe half

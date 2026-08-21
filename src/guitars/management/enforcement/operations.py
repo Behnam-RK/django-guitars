@@ -44,6 +44,7 @@ from guitars.sql import soft_delete as _soft_delete
 from guitars.sql import triggers as _triggers
 from guitars.tenancy.discovery import (
     app_coverage,
+    assumed_policy_dimensions,
     autofill_function_name,
     autofill_trigger_name,
     policy_dimensions,
@@ -58,7 +59,7 @@ if TYPE_CHECKING:
     from django.core.management.color import Style
 
     from guitars.management.enforcement.scanning import ExistingOperations
-    from guitars.tenancy.discovery import TableCoverage
+    from guitars.tenancy.discovery import TableCoverage, _PolicyDimensionMemo
 
 
 class _OperationRow(NamedTuple):
@@ -158,6 +159,7 @@ class OperationsMixin:
         all_models: list[type[models.Model]]
         _rule_cycle_cache: set[tuple[str, str]] | None
         _owner_arms_cache: dict[str, list[_OwnerArm]] | None
+        _policy_dimension_memo: _PolicyDimensionMemo
         _refusals_over_live_rules: list[str]
         _table_app_labels_cache: dict[str, str] | None
         _required_autofill_cache: dict[tuple[str, str], tuple[str, str]] | None
@@ -1172,12 +1174,16 @@ class OperationsMixin:
         # Per *dimension*, and per what a policy predicates rather than what a manager
         # declares: reaching the dependent's row put the session inside the dimensions its own
         # policy filters on, so only one a co-owner's policy has and it does not can hide a row.
-        dependent_dimensions = policy_dimensions(dependent)
+        memo = self._policy_dimension_memo
+        # The two sides take opposite defaults for a model this kit writes no policy for, one
+        # subtracting and one adding: assume the dependent's read is unfiltered, and the arm's
+        # filtered. Both readings refuse rather than emit a guard that cannot see an owner.
+        dependent_dimensions = policy_dimensions(dependent, memo)
         tenanted = sorted(
             {
                 arm.owner_table
                 for arm in co_owners
-                if policy_dimensions(arm.owner_model) - dependent_dimensions
+                if assumed_policy_dimensions(arm.owner_model, memo) - dependent_dimensions
             }
         )
         if not tenanted:

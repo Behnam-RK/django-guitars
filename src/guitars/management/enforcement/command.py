@@ -34,6 +34,8 @@ from guitars.tenancy.discovery import owner_autofill_notes
 if TYPE_CHECKING:
     from django.apps import AppConfig
 
+    from guitars.tenancy.discovery import _PolicyDimensionMemo
+
 
 class Command(OperationsMixin, BaseCommand):
     """Generates enforcement migrations, driven by the shape of the model
@@ -91,6 +93,10 @@ class Command(OperationsMixin, BaseCommand):
         self._rule_cycle_cache: set[tuple[str, str]] | None = None
         # Lazy for the same reason, and registry-wide for the reason ``_owner_arms`` gives.
         self._owner_arms_cache: dict[str, list[_OwnerArm]] | None = None
+        # Not lazy, and not module-level: ``policy_dimensions`` reaches a registry sweep for an
+        # MTI model that autofills, a rule with N arms asks about N models, and the answer moves
+        # with ``LOCAL_APPS`` -- so one run's worth of memo, thrown away with the command.
+        self._policy_dimension_memo: _PolicyDimensionMemo = {}
         self._required_autofill_cache: dict[tuple[str, str], tuple[str, str]] | None = None
         self._relocated_autofill_cache: dict[tuple[str, str], tuple[str, str]] | None = None
 

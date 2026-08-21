@@ -8,13 +8,21 @@ import pytest
 from django.apps import apps as django_apps
 
 from guitars.tenancy import tenanted_manager
-from guitars.tenancy.discovery import TableCoverage, app_coverage, expected_coverage, is_local
+from guitars.tenancy.spec import tenant_spec
+from guitars.tenancy.discovery import (
+    TableCoverage,
+    app_coverage,
+    expected_coverage,
+    is_local,
+    policy_dimensions,
+)
 from tests.testapp.models import (
     Booking,
     HeadlineFestival,
     Label,
     Release,
     Review,
+    SquashCourt,
     StadiumTour,
     Tour,
     Venue,
@@ -257,3 +265,32 @@ class TestScoping:
     def test_a_label_outside_local_apps_yields_nothing(self):
         """``guitars`` is installed but is not a local app, so it is never scanned."""
         assert expected_coverage({'guitars'}).tables == {}
+
+
+class TestPolicyDimensions:
+    """What a table's policy actually filters on -- the question a reader of that table has to
+    ask, and not the same question as what its manager declares. Called with no memo here: a
+    caller asking about one model pays nothing for the cache the generator's sweep needs."""
+
+    def test_a_covered_dimension_is_reported(self):
+        assert policy_dimensions(Release) == frozenset({'label'})
+
+    def test_a_dimension_no_policy_can_predicate_is_not(self):
+        """``Review`` is tenanted on ``release__label``, two hops from its own table, so
+        ``_classify`` emits no policy at all -- a read of it is unfiltered, spec or no spec."""
+        assert tenant_spec(Review)
+        assert policy_dimensions(Review) == frozenset()
+
+    def test_a_dimension_held_on_an_mti_ancestor_counts(self):
+        """``SquashCourt`` predicates through the join to ``Court``, so the dimension is
+        enforced even though the column is not on this table. Read off ``owner_columns``."""
+        assert policy_dimensions(SquashCourt) == frozenset({'market'})
+
+    def test_only_the_dimensions_left_after_the_multi_ancestor_drop(self):
+        """``HeadlineFestival`` declares three and its policy enforces one, the other two
+        living on two ancestors and being left to Python scoping (ADR 0003)."""
+        assert set(tenant_spec(HeadlineFestival)) == {'market', 'promoter', 'sponsor'}
+        assert policy_dimensions(HeadlineFestival) == frozenset({'sponsor'})
+
+    def test_an_untenanted_model_is_empty(self):
+        assert policy_dimensions(Label) == frozenset()

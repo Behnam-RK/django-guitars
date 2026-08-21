@@ -25,6 +25,11 @@ if TYPE_CHECKING:
     #: per descendant, so N children of one ancestor otherwise ask it N times over.
     _RelocationMemo = dict[tuple[type[models.Model], str], tuple[str | None, str | None]]
 
+    #: Caller-owned cache for :func:`policy_dimensions` and its assuming twin, keyed by the
+    #: model *and* which of the two asked -- they disagree only outside ``LOCAL_APPS``, but
+    #: they do disagree, so one key per model would answer whichever asked first.
+    _PolicyDimensionMemo = dict[tuple[type[models.Model], bool], frozenset[str]]
+
 
 __all__ = [
     'AUTOFILL_FUNCTION_PREFIX',
@@ -32,6 +37,7 @@ __all__ = [
     'PolicyKwargs',
     'TableCoverage',
     'app_coverage',
+    'assumed_policy_dimensions',
     'autofill_function_name',
     'autofill_trigger_name',
     'expected_coverage',
@@ -377,23 +383,54 @@ def _proxy_note(model: type[models.Model]) -> str:
     )
 
 
-def policy_dimensions(model: type[models.Model]) -> frozenset[str]:
-    """Tenant dimensions a generated policy actually predicates *model*'s table on -- not
+def policy_dimensions(
+    model: type[models.Model], memo: _PolicyDimensionMemo | None = None
+) -> frozenset[str]:
+    """Tenant dimensions a policy *this kit generates* predicates *model*'s table on -- not
     ``tenant_spec``, whose dimension traversing a relation or living on two ancestors is left to
     Python scoping and filters nothing, so the spec reports a filter no ``SELECT`` ever meets."""
+    return _dimensions(model, memo, outside_local_apps=frozenset())
+
+
+def assumed_policy_dimensions(
+    model: type[models.Model], memo: _PolicyDimensionMemo | None = None
+) -> frozenset[str]:
+    """:func:`policy_dimensions`, but a model outside ``LOCAL_APPS`` has its manager read as
+    enforced rather than as absent: this kit writes no policy there, and that model's own
+    package may. For a caller whose safe answer is "assume this read can be filtered"."""
+    return _dimensions(model, memo, outside_local_apps=None)
+
+
+def _dimensions(
+    model: type[models.Model],
+    memo: _PolicyDimensionMemo | None,
+    *,
+    outside_local_apps: frozenset[str] | None,
+) -> frozenset[str]:
+    """The two above, which differ only in what a model outside ``LOCAL_APPS`` answers --
+    ``outside_local_apps`` is that answer, ``None`` meaning "its declared spec". Splitting the
+    default is the point: subtracted one way and added the other, one default cannot be safe."""
     concrete = _meta(model).concrete_model
     spec = tenant_spec(concrete)
     if not spec:
         return frozenset()
-    # Outside ``LOCAL_APPS`` the kit emits no policy, so the manager is the only signal. Read as
-    # enforced: a caller asks this to learn whether a read of the table *can* be filtered, and
-    # that model's own package may carry the policy this one would never write.
     if not is_local(django_apps.get_app_config(_meta(concrete).app_label)):
-        return frozenset(spec)
+        return frozenset(spec) if outside_local_apps is None else outside_local_apps
+    key = (concrete, outside_local_apps is None)
+    if memo is not None and key in memo:
+        return memo[key]
+    # Memoised by the caller, not here: ``_classify`` reaches ``_relocatable``'s registry sweep
+    # for an MTI model that autofills, and a rule with N arms asks about N models -- while a
+    # module-level cache would answer from a registry, and a ``LOCAL_APPS``, since replaced.
     coverage, _ = _classify(concrete)
-    if coverage is None:
-        return frozenset()
-    return frozenset(coverage.columns) | frozenset(coverage.owner_columns or {})
+    dimensions = (
+        frozenset()
+        if coverage is None
+        else frozenset(coverage.columns) | frozenset(coverage.owner_columns or {})
+    )
+    if memo is not None:
+        memo[key] = dimensions
+    return dimensions
 
 
 def app_coverage(app: AppConfig) -> Coverage:

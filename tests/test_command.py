@@ -1705,6 +1705,50 @@ def test_cascade_operations_report_two_relations_that_would_share_a_rule_name():
     assert 'the second replaces the first' in clash
 
 
+def test_cascade_operations_report_an_mti_parent_and_child_sharing_a_rule_name():
+    """Regression: an MTI parent and its child share one ``owner_table`` and
+    ``seen_related_tables`` is per call, so both bare names -- and both operation *keys* --
+    matched. Claiming on the key read the two as one and reported nothing."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Parent(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Child(Parent):
+            class Meta:
+                app_label = 'testapp'
+
+        class Referrer(SetarModel):
+            p = models.ForeignKey(Parent, on_delete=CASCADE, related_name='ps')
+            c = models.ForeignKey(Child, on_delete=CASCADE, related_name='cs')
+
+            class Meta:
+                app_label = 'testapp'
+
+        command = Command()
+        command._rule_name_clashes.clear()
+        command.existing.soft_delete_related.clear()
+        command.all_models = [Parent, Child, Referrer]
+        command.reverse_relations_mapping[Parent] = {
+            (Referrer, Referrer._meta.get_field('p'), CASCADE),
+        }
+        command.reverse_relations_mapping[Child] = {
+            (Referrer, Referrer._meta.get_field('c'), CASCADE),
+        }
+        # Both land on the parent's table: it is where ``_deleted_at`` actually flips.
+        return command, [*command._cascade_operations(Parent), *command._cascade_operations(Child)]
+
+    command, ops = _build()
+
+    assert len(ops) == 2
+    assert len(command._rule_name_clashes) == 1
+    clash = command._rule_name_clashes[0]
+    assert "via 'p_id'" in clash and "via 'c_id'" in clash
+    assert 'the second replaces the first' in clash
+
+
 def test_a_rule_name_clash_fails_a_check_run_but_only_reports_on_a_generating_one():
     """A clash means one of the two rules does not exist in the database the migration ships
     to, which is exactly what ``--check`` is for. A generating run has already written the

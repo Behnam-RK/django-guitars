@@ -114,12 +114,12 @@ def _owned_rule_name(dependent_table: str, foreign_key: str) -> str:
     return _identifiers._safe_ident('_'.join(parts))
 
 
-def _rule_key_label(key: tuple) -> str:
-    """An operation key as prose for a clash report, phrased like the headers: the other table
-    and the column, never which of the two holds it -- the cascade family keys the column to
-    the child and the owned family to the owner, and the report names the table separately."""
-    other, _table, foreign_key = key
-    return f"'{other}' via '{foreign_key}'" if foreign_key else f"'{other}'"
+def _rule_relation_label(relation: tuple) -> str:
+    """A relation as prose for a clash report, phrased like the headers: the other table and
+    the column, never which of the two holds it -- the cascade family reads the column off the
+    child and the owned family off the owner, and the report names the table separately."""
+    other, _table, foreign_key = relation
+    return f"'{other}' via '{foreign_key}'"
 
 
 class OperationsMixin:
@@ -798,15 +798,16 @@ class OperationsMixin:
             candidates.append((related_model, fk_field, is_primary))
         return candidates
 
-    def _claim_rule_name(self, table: str, rule_name: str, key: tuple) -> None:
-        """Record that *key*'s rule is called *rule_name* on *table*, reporting a second, different
-        key that resolves to the same pair. A rule is namespaced per table by name alone, so the
-        second ``CREATE OR REPLACE`` replaces the first -- silently, ``--check`` staying green."""
-        claimed = self._claimed_rule_names.setdefault((table, rule_name), key)
-        if claimed != key:
+    def _claim_rule_name(self, table: str, rule_name: str, relation: tuple) -> None:
+        """Record that *relation* -- ``(other_table, table, foreign_key)``, the column **always**
+        filled in and never the operation's dedupe key -- names *rule_name* on *table*, reporting
+        a second one resolving to the same pair. See ``docs/migrations.md``'s "Rule names"."""
+        claimed = self._claimed_rule_names.setdefault((table, rule_name), relation)
+        if claimed != relation:
             self._rule_name_clashes.append(
-                f"Rule {rule_name} on '{table}' is named by both {_rule_key_label(claimed)} "
-                f'and {_rule_key_label(key)}. PostgreSQL keeps one rule per name per table, so '
+                f"Rule {rule_name} on '{table}' is named by both "
+                f'{_rule_relation_label(claimed)} and {_rule_relation_label(relation)}. '
+                'PostgreSQL keeps one rule per name per table, so '
                 'the second replaces the first and that relation stops cascading. Rename a '
                 'column or a table so the two names differ.'
             )
@@ -848,7 +849,11 @@ class OperationsMixin:
                     foreign_key=_identifiers._escape_ident(fk_field.column),
                 )
                 rule_name = _related_rule_name(related_table, fk_field.column)
-            self._claim_rule_name(owner_table, rule_name, key)
+            # The relation, not `key`: `key` drops the column on the plain form, and two
+            # relations can then share one key -- see `_claim_rule_name`'s docstring.
+            self._claim_rule_name(
+                owner_table, rule_name, (related_table, owner_table, fk_field.column)
+            )
             # One template pair for both cases -- see soft_delete.py's private
             # _CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE for why the public, frozen constants
             # of the same name (the old rule_name-less signature) aren't used here.
@@ -920,11 +925,16 @@ class OperationsMixin:
                 )
                 continue
             if not owns_column(model, '_deleted_at'):
+                # The arrow names the table the rule would *update*, as the cascade warnings'
+                # does -- never ``owner_table``, which is where it would fire and has nothing
+                # to do with this relation's target. The body names that one instead.
+                dependent_table = column_owner(related_model, '_deleted_at')._meta.db_table
                 self._mti_cascade_warnings.append(
                     f"Owned rule for '{model._meta.db_table}.{fk_field.column}' -> "
-                    f"'{owner_table}' skipped: '{model.__name__}' declares this foreign key "
+                    f"'{dependent_table}' skipped: '{model.__name__}' declares this foreign key "
                     'on its own table but inherits _deleted_at from a multi-table-inheritance '
-                    'ancestor, so the rule would fire on a table the column is not on.'
+                    f"ancestor, so the rule would fire on '{owner_table}', a table the column "
+                    'is not on.'
                 )
                 continue
             candidates.append(cast('models.ForeignKey', fk_field))
@@ -994,6 +1004,8 @@ class OperationsMixin:
                 foreign_key=ident_foreign_key,
             )
             rule_name = _owned_rule_name(dependent_table, fk_field.column)
+            # ``key`` *is* the relation here: an owned key always carries its column, so
+            # unlike the cascade family above the two cannot come apart.
             self._claim_rule_name(owner_table, rule_name, key)
             forward = _soft_delete._CREATE_SOFT_DELETE_OWNED_OBJECT_RULE.format(
                 rule_name=rule_name,

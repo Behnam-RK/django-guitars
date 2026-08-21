@@ -25,11 +25,11 @@ is a plain `self.delete()`, which fires the rule, so the display was archived al
 Each rule carries one `NOT EXISTS` arm **per owning (table, column) pair** targeting the dependent.
 N owning columns produce N rules of N arms.
 
-- **Self-exclusion is keyed on the row, not the column.** Arms on the table the rule fires on carry
-  `<alias>."{pk}" <> old."{pk}"` — excluding only the declaring column's arm would let a row owning
-  the target through two of its own columns read as its own last live owner and hold it alive
-  forever. An arm on the *dependent's* table excludes `old."{fk}"` instead, a target owning itself
-  otherwise reading as its own live owner; any other table has no row going away here to exclude.
+- **Self-exclusion is keyed on the row, and on the table liveness is read from.** An arm reading the
+  table the rule fires on carries `<alias>."{pk}" <> old."{pk}"`; one reading the dependent's carries
+  `<alias>."{pk}" <> old."{fk}"` — a row owning the target through two of its own columns, or a
+  target owning itself, would otherwise be its own last live owner and hold it alive for ever. For a
+  joined arm that table and alias are the *ancestor's*, which is what it matches one row per.
 - **An owner that inherits `_deleted_at` contributes a *joined* arm.** Its key is on its own table
   and its liveness on an MTI ancestor's, so the arm joins the two on the primary-key value the chain
   shares — the correlation the rule itself rests on. Reading such an owner as contributing nothing
@@ -49,9 +49,9 @@ N owning columns produce N rules of N arms.
   do not fail safe. An arm reaches tables the declaring model never names, which is what makes
   documenting it insufficient. Per **dimension**, the session already being inside the ones the
   dependent's own policy filters on, and per what a policy **predicates** rather than what a manager
-  declares, a dimension traversing a relation filtering nothing — `policy_dimensions`, whose two
-  callers take opposite defaults outside `LOCAL_APPS`, one adding and one subtracting. The declaring
-  owner's own tenancy is **not** re-examined: that shape shipped in 2.3.0.
+  declares, a dimension traversing a relation filtering nothing — `policy_dimensions`, asked of
+  *both* tables a joined arm reads and with opposite defaults outside `LOCAL_APPS` on its adding and
+  subtracting sides. The declaring owner's own tenancy is **not** re-examined: it shipped in 2.3.0.
 - **A refusal over a rule that already exists fails `--check`.** The other refusals only ever fire
   on relations that never had a rule; this one can fire on one that does, and refusing emits
   nothing, so the stale rule would stay live and wrong under a green `--check`. Escalated to a

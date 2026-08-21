@@ -45,9 +45,9 @@ changes no field, so the rule's `[SQL:…]` identity would not move and `--check
 over an unguarded rule. A NULL key matches nothing, so a nullable owned relation needs no guard.
 "Last owner" is the last across **every** `OwningForeignKey` into the target, not the last through
 the rule's own column: one `NOT EXISTS` arm per owning column, read over the whole registry rather
-than `LOCAL_APPS`. An arm on the declaring table excludes the row going away, so a row owning
-through two of its own columns is not its own last owner; one on the target's own table excludes the
-target, so a target owning itself is not either. **Index every owning column.** See
+than `LOCAL_APPS`. An arm excludes, on the table it reads liveness from, the row going away or the
+target itself — so a row owning through two of its own columns, and a target owning itself, are not
+their own last owners. **Index every owning column.** See
 [ADR 0011](adr/0011-owner-side-soft-delete-ownership.md) and
 [ADR 0012](adr/0012-cross-owner-last-owner-guard.md).
 

@@ -128,12 +128,27 @@ class _OwnerArm(NamedTuple):
     owner_table: str
     fk_column: str
     owner_model: type[models.Model]
-    #: Set only where the owner keeps ``_deleted_at`` on an MTI ancestor: that ancestor's table
-    #: and primary key, and this table's parent-link primary key. The arm joins the two, the
-    #: foreign key being on one table and liveness on the other. ``None`` for the plain form.
+    #: Set only where the owner keeps ``_deleted_at`` on an MTI ancestor: that ancestor's table,
+    #: model and primary key, and this table's parent-link primary key. The arm joins the two,
+    #: the foreign key being on one table and liveness on the other. ``None`` for the plain form.
     root_table: str | None = None
     root_pk: str | None = None
     child_pk: str | None = None
+    root_model: type[models.Model] | None = None
+
+    def reads(self) -> tuple[tuple[str, type[models.Model]], ...]:
+        """``(table, model)`` for every table this arm's ``SELECT`` touches -- two for a joined
+        arm. A tenant policy on *either* filters the read, so both have to be asked about."""
+        own = (self.owner_table, self.owner_model)
+        if self.root_model is None:
+            return (own,)
+        return (own, (cast('str', self.root_table), self.root_model))
+
+    def liveness_table(self) -> str:
+        """The table whose ``_deleted_at`` this arm reads -- the ancestor's where it joins.
+        Which row the arm must not count as an owner is decided against this one, the arm
+        matching a row per *liveness* row, not per row holding the key."""
+        return self.owner_table if self.root_table is None else self.root_table
 
 
 def _rule_relation_label(relation: tuple) -> str:
@@ -789,6 +804,7 @@ class OperationsMixin:
             root_table=root._meta.db_table,
             root_pk=cast(str, root._meta.pk.column),
             child_pk=cast(str, model._meta.pk.column),
+            root_model=root,
         )
 
     def _refuse_owned(self, key: tuple[str, str, str] | None, message: str) -> None:
@@ -1205,11 +1221,14 @@ class OperationsMixin:
         # subtracting and one adding: assume the dependent's read is unfiltered, and the arm's
         # filtered. Both readings refuse rather than emit a guard that cannot see an owner.
         dependent_dimensions = policy_dimensions(dependent, memo)
+        # Every table the arm reads, not just the one holding the key: a joined arm takes
+        # liveness from an MTI ancestor, and a policy there hides the same live owner.
         return sorted(
             {
-                arm.owner_table
+                table
                 for arm in co_owners
-                if assumed_policy_dimensions(arm.owner_model, memo) - dependent_dimensions
+                for table, model in arm.reads()
+                if assumed_policy_dimensions(model, memo) - dependent_dimensions
             }
         )
 
@@ -1253,19 +1272,24 @@ class OperationsMixin:
         arms: list[str] = []
         for position, arm in enumerate(co_owners, start=1):
             alias = f'guitars_owner_{position}'
-            if arm.owner_table == owner_table:
+            # Against the table liveness is read from, and its alias: a joined arm matches one
+            # row per *ancestor* row, so excluding on the table holding the key would leave the
+            # row the statement is about counting as an owner of what it owns.
+            excluded = arm.liveness_table()
+            excluded_alias = alias if arm.root_table is None else f'{alias}_root'
+            if excluded == owner_table:
                 # Per *row*, not per column: the row being soft-deleted must not count as its
                 # own live co-owner, or one owning the target through two of its columns holds
                 # the target alive forever.
                 self_exclusion = _soft_delete._SOFT_DELETE_OWNED_CO_OWNER_SELF_EXCLUSION.format(
-                    alias=alias, primary_key=ident_owner_pk
+                    alias=excluded_alias, primary_key=ident_owner_pk
                 )
-            elif arm.owner_table == dependent_table:
+            elif excluded == dependent_table:
                 # An arm reading the dependent's own table -- a target owning itself. The row
                 # the rule stamps must not count as its own live owner, or nothing ever
                 # archives it. Named by the key, which holds exactly that row's primary key.
                 self_exclusion = _soft_delete._SOFT_DELETE_OWNED_CO_OWNER_TARGET_EXCLUSION.format(
-                    alias=alias,
+                    alias=excluded_alias,
                     primary_key=ident_dependent_pk,
                     foreign_key=ident_declared_foreign_key,
                 )
@@ -1331,11 +1355,14 @@ class OperationsMixin:
                         or self._owned_tenancy_mismatch(dependent, co_owners)
                     ):
                         continue
+                    # Every table the arm names, a joined one naming two: either moving puts
+                    # this rule's text out of date, and neither is re-derived by this run.
                     touching = sorted(
                         {
-                            arm.owner_table
+                            table
                             for arm in co_owners
-                            if arm.owner_table in in_scope_tables
+                            for table, _model in arm.reads()
+                            if table in in_scope_tables
                         }
                     )
                     if not touching:

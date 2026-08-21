@@ -953,7 +953,7 @@ class OperationsMixin:
                     'would stamp the wrong row. Drop to_field (guitars.E002).'
                 )
                 continue
-            candidates.append(cast('models.ForeignKey', fk_field))
+            candidates.append(fk_field)
         return candidates
 
     def _owned_operations(self, model: type[models.Model], *, adopt: bool = False) -> list[str]:

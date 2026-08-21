@@ -42,8 +42,12 @@ from guitars.models.fields import OwningForeignKey, _targets_primary_key
 from guitars.sql import _identifiers
 from guitars.sql import soft_delete as _soft_delete
 from guitars.sql import triggers as _triggers
-from guitars.tenancy.discovery import app_coverage, autofill_function_name, autofill_trigger_name
-from guitars.tenancy.spec import tenant_spec
+from guitars.tenancy.discovery import (
+    app_coverage,
+    autofill_function_name,
+    autofill_trigger_name,
+    policy_dimensions,
+)
 
 
 if TYPE_CHECKING:
@@ -969,11 +973,24 @@ class OperationsMixin:
         )
 
     def _owned_candidates(
-        self, model: type[models.Model], owner_table: str, declared: list[models.ForeignKey]
+        self,
+        model: type[models.Model],
+        owner_table: str,
+        declared: list[models.ForeignKey],
+        *,
+        report: bool = True,
     ) -> list[models.ForeignKey]:
         """``OwningForeignKey``s declared on *model*, in column order; *declared* is passed in,
         the caller needing the same list first. Skipped with a warning where *model* inherits
         ``_deleted_at``: the rule fires on an ancestor's table ``old."<column>"`` cannot reach."""
+
+        def refuse(key: tuple[str, str, str] | None, message: str) -> None:
+            """``report=False`` where the caller asks only *which* relations carry a rule:
+            ``_scoped_owned_gap_notes`` re-runs this over apps the run was never asked about,
+            whose misconfigurations are not its to report, still less to fail ``--check`` over."""
+            if report:
+                self._refuse_owned(key, message)
+
         candidates: list[models.ForeignKey] = []
         for fk_field in declared:
             # A target with no ``_deleted_at`` has nothing to stamp. Warned rather than
@@ -983,7 +1000,7 @@ class OperationsMixin:
             if not has_column(related_model, '_deleted_at'):
                 # No key to escalate on: the rule's dedupe key names the table holding the
                 # target's ``_deleted_at``, and there is none, so no recorded rule can match.
-                self._refuse_owned(
+                refuse(
                     None,
                     f"Owned rule for '{model._meta.db_table}.{fk_field.column}' skipped: "
                     f"'{related_model.__name__}' has no _deleted_at column, so "
@@ -996,7 +1013,7 @@ class OperationsMixin:
                 # does -- never ``owner_table``, which is where it would fire and has nothing
                 # to do with this relation's target. The body names that one instead.
                 dependent_table = column_owner(related_model, '_deleted_at')._meta.db_table
-                self._refuse_owned(
+                refuse(
                     (dependent_table, owner_table, fk_field.column),
                     f"Owned rule for '{model._meta.db_table}.{fk_field.column}' -> "
                     f"'{dependent_table}' skipped: '{model.__name__}' declares this foreign key "
@@ -1009,7 +1026,7 @@ class OperationsMixin:
             # reports a redirected key, but ``--skip-checks`` still reaches here and the rule
             # would correlate the key against a primary key it never held.
             if not _targets_primary_key(fk_field):
-                self._refuse_owned(
+                refuse(
                     (
                         column_owner(related_model, '_deleted_at')._meta.db_table,
                         owner_table,
@@ -1145,9 +1162,19 @@ class OperationsMixin:
         dependent does not share -- an ordinary ``SELECT`` cannot see an out-of-tenant live
         owner, so it would stamp a still-owned row. Why only co-owners: ADR 0012."""
         # Nothing to hide behind where no policy is generated at all.
-        if not self._tenant_policies_enabled() or tenant_spec(dependent):
+        if not self._tenant_policies_enabled():
             return False
-        tenanted = sorted({arm.owner_table for arm in co_owners if tenant_spec(arm.owner_model)})
+        # Per *dimension*, and per what a policy predicates rather than what a manager
+        # declares: reaching the dependent's row put the session inside the dimensions its own
+        # policy filters on, so only one a co-owner's policy has and it does not can hide a row.
+        dependent_dimensions = policy_dimensions(dependent)
+        tenanted = sorted(
+            {
+                arm.owner_table
+                for arm in co_owners
+                if policy_dimensions(arm.owner_model) - dependent_dimensions
+            }
+        )
         if not tenanted:
             return False
         dependent_table, owner_table, foreign_key = key
@@ -1156,11 +1183,11 @@ class OperationsMixin:
             f"Owned rule for '{owner_table}.{foreign_key}' -> '{dependent_table}' skipped: "
             f'co-owner {"table" if len(tenanted) == 1 else "tables"} '
             f'{", ".join(repr(table) for table in tenanted)} '
-            f"{'is' if len(tenanted) == 1 else 'are'} tenanted while '{dependent_table}' is "
-            'not, so the last-owner guard reads those tables through a tenant policy and '
-            'cannot see a live owner in another tenant -- it would stamp a still-owned row. '
-            "Keep an owned target inside its owners' tenant dimension, or leave them all "
-            'untenanted. See docs/owned-relations.md.',
+            f'{"is" if len(tenanted) == 1 else "are"} tenanted on a dimension the policy on '
+            f"'{dependent_table}' does not filter on, so the last-owner guard reads those tables "
+            'through a tenant policy and cannot see a live owner in another tenant -- it would '
+            "stamp a still-owned row. Keep an owned target inside its owners' tenant "
+            'dimension, or leave them all untenanted. See docs/owned-relations.md.',
         )
         return True
 
@@ -1223,7 +1250,7 @@ class OperationsMixin:
                     continue
                 owner_table = model._meta.db_table
                 for fk_field in self._owned_candidates(
-                    model, owner_table, self._declared_owning_fields(model)
+                    model, owner_table, self._declared_owning_fields(model), report=False
                 ):
                     dependent_table = column_owner(
                         fk_field.related_model, '_deleted_at'

@@ -66,10 +66,9 @@ per-statement limit below left *live* is still removed — straight to gone, nev
 
 One thing collection does **not** reach: a `GenericRelation` on an owned target. It carries no
 foreign-key constraint, so it cannot fail at `COMMIT` and rightly does not hold the row back — but
-nothing removes it either. Only Phase 1's `Collector` walks `_meta.private_fields`, and an owned
-row is soft-deleted by a *rule*, never collected, so `hard_delete()` on its **owner** leaves those
-rows pointing at a gone primary key. Delete through the target, which does run the `Collector`, or
-clear them by hand.
+nothing removes it either. Only Phase 1's `Collector` walks `_meta.private_fields`, and an owned row
+is soft-deleted by a *rule*, never collected, so `hard_delete()` on its **owner** leaves those rows
+pointing at a gone primary key. Delete through the target, which runs the `Collector`, or by hand.
 
 Two limits the guard does not cover, both by construction:
 
@@ -82,9 +81,10 @@ Two limits the guard does not cover, both by construction:
   the kit's guards do not fail safe. `hard_delete()` reads through the same policy and then *removes*
   the row, which the foreign-key check does not (integrity is exempt from RLS), so the transaction
   aborts at `COMMIT`. Keep an owned target inside its owners' tenant dimension, or leave them all
-  untenanted. Since 2.4.0 the *co-owner* case is **refused** instead, an arm reaching a table its
-  author never named being poisonable by an app they have never read; and since refusing emits
-  nothing, a refusal over a rule already recorded fails `--check`. Drop the stale rule by hand.
+  untenanted. Since 2.4.0 the *co-owner* case is **refused** instead — where a policy on the
+  co-owner's table filters on a dimension the dependent's does not, an arm reaching a table its
+  author never named being poisonable by an app they have never read. Refusing emits nothing, so a
+  refusal over a rule already recorded fails `--check`. Drop the stale rule by hand.
 
 ## MTI
 

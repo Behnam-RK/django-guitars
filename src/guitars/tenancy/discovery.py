@@ -37,6 +37,7 @@ __all__ = [
     'expected_coverage',
     'is_local',
     'owner_autofill_notes',
+    'policy_dimensions',
 ]
 
 
@@ -374,6 +375,25 @@ def _proxy_note(model: type[models.Model]) -> str:
         f'autofill trigger. Declare tenanted_manager() on '
         f"'{_meta(model).concrete_model.__name__}' instead. Python scoping still applies."
     )
+
+
+def policy_dimensions(model: type[models.Model]) -> frozenset[str]:
+    """Tenant dimensions a generated policy actually predicates *model*'s table on -- not
+    ``tenant_spec``, whose dimension traversing a relation or living on two ancestors is left to
+    Python scoping and filters nothing, so the spec reports a filter no ``SELECT`` ever meets."""
+    concrete = _meta(model).concrete_model
+    spec = tenant_spec(concrete)
+    if not spec:
+        return frozenset()
+    # Outside ``LOCAL_APPS`` the kit emits no policy, so the manager is the only signal. Read as
+    # enforced: a caller asks this to learn whether a read of the table *can* be filtered, and
+    # that model's own package may carry the policy this one would never write.
+    if not is_local(django_apps.get_app_config(_meta(concrete).app_label)):
+        return frozenset(spec)
+    coverage, _ = _classify(concrete)
+    if coverage is None:
+        return frozenset()
+    return frozenset(coverage.columns) | frozenset(coverage.owner_columns or {})
 
 
 def app_coverage(app: AppConfig) -> Coverage:

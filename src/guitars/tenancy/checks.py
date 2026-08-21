@@ -8,6 +8,7 @@ from django.apps import apps as django_apps
 from django.conf import settings
 from django.core.checks import Error, Warning, register
 
+from .discovery import tenant_policies_enabled
 from .enforcement import TenantEnforcement
 from .spec import tenant_spec
 
@@ -108,7 +109,7 @@ def check_migrate_bypasses_tenancy(app_configs, **kwargs) -> list[Warning]:
 
     from guitars.management.commands.migrate import Command as GuitarsMigrate  # noqa: PLC0415
 
-    if not getattr(settings, 'GUITARS_TENANT_POLICIES', True):
+    if not tenant_policies_enabled():
         return []
     if not any(tenant_spec(model) for model in _candidate_models(app_configs)):
         return []
@@ -137,7 +138,7 @@ def check_pooling_leaks_tenant_gucs(app_configs, **kwargs) -> list[Warning]:
     """Warn when ``DISABLE_SERVER_SIDE_CURSORS`` suggests an external transaction-pooling
     pooler -- see ``docs/tenancy.md``'s "Connection pooling" for the fails-open mechanism
     this check can't detect directly. A nudge, gated like :func:`check_migrate_bypasses_tenancy`."""
-    if not getattr(settings, 'GUITARS_TENANT_POLICIES', True):
+    if not tenant_policies_enabled():
         return []
     if not any(tenant_spec(model) for model in _candidate_models(app_configs)):
         return []

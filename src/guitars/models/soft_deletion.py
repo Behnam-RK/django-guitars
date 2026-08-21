@@ -234,11 +234,12 @@ def _owned_targets(
     # Once per call, not once per claimed model: the graph is registry-wide and identical for
     # every one of them. The claimed models are named alongside the registry for the same
     # reason ``_owned_fields`` names its own -- they may not be registered.
-    candidates = [*claimed, *django_apps.get_models()]
-    cycles = rule_update_cycle_edges(candidates)
-    # The tenancy half of the same shared answer. Free where no model is tenanted at all, since
-    # it asks ``tenant_spec`` first, and skipped outright where policies are switched off.
-    tenancy_refusals = owned_tenancy_refusals(candidates)
+    swept = [*claimed, *django_apps.get_models()]
+    cycles = rule_update_cycle_edges(swept)
+    # The tenancy half of the same shared answer, and a second sweep of the registry -- paid per
+    # round like the graph above, ``claimed`` growing as rounds run. Skipped outright where
+    # ``GUITARS_TENANT_POLICIES`` is off; otherwise cheapest where no model is tenanted.
+    tenancy_refusals = owned_tenancy_refusals(swept)
     for model, pks in owning.items():
         for field in _owned_fields(model, cycles, tenancy_refusals):
             owned_pks = set(

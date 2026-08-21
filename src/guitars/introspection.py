@@ -12,6 +12,8 @@ if TYPE_CHECKING:
 
     from django.db import models
 
+    from guitars.tenancy.discovery import _PolicyDimensionMemo
+
 
 __all__ = [
     'OwnerArm',
@@ -228,7 +230,10 @@ def owned_tenancy_refusals(
     such a policy hides a live owner: the rule is refused, and not followed in Python either."""
     # Deferred for the reason ``owner_arms`` gives, and because ``guitars.tenancy`` imports this
     # module -- at module level the two would close a cycle.
-    from guitars.models.fields import OwningForeignKey  # noqa: PLC0415 - see the comment above
+    from guitars.models.fields import (  # noqa: PLC0415 - see the comment above
+        OwningForeignKey,
+        _targets_primary_key,
+    )
     from guitars.tenancy.discovery import (  # noqa: PLC0415 - see the comment above
         assumed_policy_dimensions,
         policy_dimensions,
@@ -237,23 +242,33 @@ def owned_tenancy_refusals(
 
     if not tenant_policies_enabled():
         return {}
-    models_by_table = list(candidates)
-    arms = owner_arms(models_by_table)
-    memo: dict = {}
+    swept = list(candidates)
+    arms = owner_arms(swept)
+    memo: _PolicyDimensionMemo = {}
     refused: dict[tuple[str, str, str], list[str]] = {}
-    for model in models_by_table:
+    for model in swept:
         # An owner that does not own the column is refused a rule anyway, on the MTI ground;
         # asking here would name a table the rule could never fire on.
         if not owns_column(model, '_deleted_at'):
             continue
         owner_table = model._meta.db_table
         for field in model._meta.local_fields:
-            if not isinstance(field, OwningForeignKey) or field.model is not model:
-                continue
-            if not has_column(field.related_model, '_deleted_at'):
+            # Every refusal that comes *before* this one, so a key here means "refused for
+            # tenancy" and nothing else: a caller reading the dict as the reason a relation
+            # carries no rule would otherwise be handed the wrong remediation.
+            if (
+                not isinstance(field, OwningForeignKey)
+                or field.model is not model
+                or not has_column(field.related_model, '_deleted_at')
+                or not _targets_primary_key(field)
+            ):
                 continue
             dependent = column_owner(field.related_model, '_deleted_at')
             dependent_table = dependent._meta.db_table
+            # A rule updating the table it fires on is refused for infinite rule recursion. The
+            # cycle graph itself stays the caller's, being needed on its own account.
+            if dependent_table == owner_table:
+                continue
             dimensions = policy_dimensions(dependent, memo)
             # Every table each arm reads, not just the one holding the key: a joined arm takes
             # liveness from an MTI ancestor, and a policy there hides the same live owner.

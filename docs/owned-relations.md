@@ -77,11 +77,11 @@ Two limits the guard does not cover, both by construction:
   tenant is invisible, the guard reads "last owner", and a still-owned row is stamped — the one place
   the kit's guards do not fail safe. `hard_delete()` reads through that policy and then *removes* the
   row, which the foreign-key check does not (integrity is exempt from RLS), so that aborts at
-  `COMMIT`. That is the *declaring* owner's own tenancy, which is not re-examined. Since 2.4.0 the
-  *co-owner* case is **refused** instead, where a policy on either table its arm reads — the
-  co-owner's, or the MTI ancestor it takes liveness from — filters on a dimension the dependent's
-  does not; `hard_delete()` reads the same verdict since 2.4.1, so it follows no relation the
-  generator refused. Refusing emits nothing, so one over a rule already recorded fails `--check`.
+  `COMMIT` — the *declaring* owner's own tenancy, not re-examined: keep an owned target inside its
+  owners' tenant dimension. The *co-owner* case is **refused** instead since 2.4.0, where a policy
+  on either table its arm reads — the co-owner's, or the MTI ancestor it takes liveness from —
+  filters on a dimension the dependent's does not, and since 2.4.1 `hard_delete()` reads that same
+  verdict. Refusing emits nothing, so one over a recorded rule fails `--check`: drop it by hand.
 
 ## MTI
 

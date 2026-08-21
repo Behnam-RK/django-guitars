@@ -857,6 +857,10 @@ def test_hard_delete_follows_exactly_the_relations_the_generator_emits_rules_for
     from guitars.management.enforcement.command import Command
 
     command = Command()
+    # `handle()` fills this; left empty, `_rule_cycle_edges()` reads a registry of nothing --
+    # the generator side of the compare with its cycle refusal off, so a cycle added to
+    # `testapp` would read as a divergence rather than the agreement it actually is.
+    command.all_models = list(django_apps.get_models())
     mismatched = {}
     for model in django_apps.get_models():
         command.existing.soft_delete_owned.clear()

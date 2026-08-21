@@ -67,7 +67,10 @@ def _rule_update_edges(candidates: Iterable[type[models.Model]]) -> set[tuple[st
     # behind it -- a cost only a caller asking about rules should pay.
     from django.db.models import CASCADE, ForeignKey  # noqa: PLC0415 - see the comment above
 
-    from guitars.models.fields import OwningForeignKey  # noqa: PLC0415 - see the comment above
+    from guitars.models.fields import (  # noqa: PLC0415 - see the comment above
+        OwningForeignKey,
+        _targets_primary_key,
+    )
 
     edges: set[tuple[str, str]] = set()
     for model in candidates:
@@ -82,7 +85,10 @@ def _rule_update_edges(candidates: Iterable[type[models.Model]]) -> set[tuple[st
             ):
                 continue
             target_table = column_owner(field.related_model, '_deleted_at')._meta.db_table
-            if isinstance(field, OwningForeignKey):
+            # ``_targets_primary_key`` too: a redirected ``to_field`` gets no rule from either
+            # side, and an invented edge is worse than a missing one -- it closes a cycle that
+            # cannot form and takes the legitimate rule pointing back down with it.
+            if isinstance(field, OwningForeignKey) and _targets_primary_key(field):
                 edges.add((table, target_table))  # owned: fires here, updates the target
             # Not ``elif``: one field reaches both generators. ``CASCADE`` on an
             # OwningForeignKey is ``guitars.E001``, but ``--skip-checks`` still reaches the

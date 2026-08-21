@@ -771,6 +771,41 @@ def test_rule_update_cycle_edges_ignores_relations_that_carry_no_rule():
     assert _build() == set()
 
 
+def test_a_redirected_key_invents_no_cycle_for_the_relation_pointing_back():
+    """A ``to_field`` relation carries no rule, so it must contribute no *edge* either. Counted,
+    it closed a cycle that does not exist and took the legitimate ownership in the other
+    direction down with it -- soft-deleting the owner silently stopped archiving its target."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Target(SetarModel):
+            code = models.CharField(max_length=10, unique=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Owner(SetarModel):
+            # Refused as ``guitars.E002``: no rule is written for this relation.
+            redirected = OwningForeignKey(
+                Target, on_delete=DO_NOTHING, to_field='code', null=True, related_name='+'
+            )
+
+            class Meta:
+                app_label = 'testapp'
+
+        # The legitimate half, pointing the other way -- its rule must still be written.
+        Target.add_to_class(
+            'owner', OwningForeignKey(Owner, on_delete=DO_NOTHING, null=True, related_name='+')
+        )
+        cycles = rule_update_cycle_edges([Target, Owner])
+        return cycles, [field.column for field in _owned_fields(Target, cycles)]
+
+    cycles, followed = _build()
+
+    assert cycles == set()
+    assert followed == ['owner_id']
+
+
 def test_hard_delete_does_not_follow_ownership_that_closes_a_two_model_cycle(monkeypatch):
     """The multi-table twin of the self-owning refusal: neither rule is written, so neither
     relation may be followed here. ``_owned_fields`` reads the same graph the generator does

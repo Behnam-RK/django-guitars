@@ -1779,6 +1779,8 @@ def test_cascade_operations_report_an_mti_parent_and_child_sharing_a_rule_name()
     clash = command._rule_name_clashes[0]
     assert "via 'p_id'" in clash and "via 'c_id'" in clash
     assert 'the second replaces the first' in clash
+    # The bare name carries no column, so the plain "rename a column" remedy cannot apply.
+    assert 'renaming cannot help' in clash
 
 
 def test_a_rule_name_clash_fails_a_check_run_but_only_reports_on_a_generating_one():

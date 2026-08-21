@@ -809,7 +809,10 @@ class OperationsMixin:
                 f'{_rule_relation_label(claimed)} and {_rule_relation_label(relation)}. '
                 'PostgreSQL keeps one rule per name per table, so '
                 'the second replaces the first and that relation stops cascading. Rename a '
-                'column or a table so the two names differ.'
+                'column or a table so the two names differ. Where the shared name carries no '
+                'column at all -- one model holding a key to both an MTI parent and its child, '
+                'which resolve to one owner table -- renaming cannot help: point both keys at '
+                'one level of the chain, or cascade one of the two in Python.'
             )
 
     def _cascade_operations(self, model: type[models.Model], *, adopt: bool = False) -> list[str]:

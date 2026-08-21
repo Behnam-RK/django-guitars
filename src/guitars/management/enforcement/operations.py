@@ -43,6 +43,7 @@ from guitars.sql import _identifiers
 from guitars.sql import soft_delete as _soft_delete
 from guitars.sql import triggers as _triggers
 from guitars.tenancy.discovery import app_coverage, autofill_function_name, autofill_trigger_name
+from guitars.tenancy.spec import tenant_spec
 
 
 if TYPE_CHECKING:
@@ -114,6 +115,16 @@ def _owned_rule_name(dependent_table: str, foreign_key: str) -> str:
     return _identifiers._safe_ident('_'.join(parts))
 
 
+class _OwnerArm(NamedTuple):
+    """One owning column pointing at a dependent, as the guard needs to read it. Carries the
+    model as well as the table because the tenancy refusal asks ``tenant_spec`` a question
+    only the model can answer, and no table-keyed equivalent exists."""
+
+    owner_table: str
+    fk_column: str
+    owner_model: type[models.Model]
+
+
 def _rule_relation_label(relation: tuple) -> str:
     """A relation as prose for a clash report, phrased like the headers: the other table and
     the column, never which of the two holds it -- the cascade family reads the column off the
@@ -142,6 +153,8 @@ class OperationsMixin:
         reverse_relations_mapping: dict[type[models.Model], set]
         all_models: list[type[models.Model]]
         _rule_cycle_cache: set[tuple[str, str]] | None
+        _owner_arms_cache: dict[str, list[_OwnerArm]] | None
+        _refusals_over_live_rules: list[str]
         _table_app_labels_cache: dict[str, str] | None
         _required_autofill_cache: dict[tuple[str, str], tuple[str, str]] | None
         _relocated_autofill_cache: dict[tuple[str, str], tuple[str, str]] | None
@@ -715,6 +728,54 @@ class OperationsMixin:
             self._rule_cycle_cache = rule_update_cycle_edges(self.all_models)
         return self._rule_cycle_cache
 
+    def _owner_arms(self) -> dict[str, list[_OwnerArm]]:
+        """``dependent_table -> every owning column pointing at it``. Registry-wide for the
+        reason :meth:`_rule_cycle_edges` is, and lazy for the reason it is lazy: ``all_models``
+        is replaced after construction by ``isolate_apps``. See ADR 0012."""
+        if self._owner_arms_cache is None:
+            arms: dict[str, list[_OwnerArm]] = {}
+            for model in self.all_models:
+                for declared in model._meta.local_fields:
+                    fk_field = cast('models.ForeignKey', declared)
+                    # Only the refusals deciding whether an arm can be *expressed*. The two
+                    # about whether this owner's own rule can be *written* -- self-update and
+                    # cycle -- say nothing about whether its rows still own the target.
+                    if (
+                        not self._is_owned_candidate(model, declared)
+                        or not owns_column(model, '_deleted_at')
+                        or not has_column(fk_field.related_model, '_deleted_at')
+                        or not _targets_primary_key(fk_field)
+                    ):
+                        continue
+                    dependent_table = column_owner(
+                        fk_field.related_model, '_deleted_at'
+                    )._meta.db_table
+                    arms.setdefault(dependent_table, []).append(
+                        _OwnerArm(model._meta.db_table, fk_field.column, model)
+                    )
+            # Sorted, so the rendered guard -- and therefore the ``[SQL:...]`` identity that
+            # decides whether a migration is emitted -- does not move with registry order.
+            self._owner_arms_cache = {
+                table: sorted(found, key=lambda arm: (arm.owner_table, arm.fk_column))
+                for table, found in arms.items()
+            }
+        return self._owner_arms_cache
+
+    def _refuse_owned(self, key: tuple[str, str, str] | None, message: str) -> None:
+        """Record an owned-rule refusal, escalating where a rule for *key* is already recorded:
+        refusing emits nothing, so the stale rule stays live and wrong under a green
+        ``--check``, and no command retires it. See ADR 0012."""
+        self._mti_cascade_warnings.append(message)
+        if key is not None and key in self.existing.soft_delete_owned:
+            dependent_table, owner_table, foreign_key = key
+            self._refusals_over_live_rules.append(
+                f"Owned rule on '{dependent_table}' owned by '{owner_table}' via "
+                f"'{foreign_key}' is refused but already exists in this project's migrations. "
+                'It is still live in any migrated database and no longer correct. Drop it by '
+                f'hand: DROP RULE {_owned_rule_name(dependent_table, foreign_key)} ON '
+                f'{_identifiers._quote_table(owner_table)};'
+            )
+
     @staticmethod
     def _cycle_warning(kind: str, subject: str, fires_on: str, updates: str) -> str:
         """The shared refusal text for a rule that would close an ON UPDATE cycle -- one
@@ -920,11 +981,14 @@ class OperationsMixin:
             # other purpose, so a declaration that generates nothing is a misconfiguration.
             related_model = fk_field.related_model
             if not has_column(related_model, '_deleted_at'):
-                self._mti_cascade_warnings.append(
+                # No key to escalate on: the rule's dedupe key names the table holding the
+                # target's ``_deleted_at``, and there is none, so no recorded rule can match.
+                self._refuse_owned(
+                    None,
                     f"Owned rule for '{model._meta.db_table}.{fk_field.column}' skipped: "
                     f"'{related_model.__name__}' has no _deleted_at column, so "
                     'there is nothing for the rule to stamp. Make the target soft-deletable, '
-                    'or declare a plain ForeignKey.'
+                    'or declare a plain ForeignKey.',
                 )
                 continue
             if not owns_column(model, '_deleted_at'):
@@ -932,25 +996,31 @@ class OperationsMixin:
                 # does -- never ``owner_table``, which is where it would fire and has nothing
                 # to do with this relation's target. The body names that one instead.
                 dependent_table = column_owner(related_model, '_deleted_at')._meta.db_table
-                self._mti_cascade_warnings.append(
+                self._refuse_owned(
+                    (dependent_table, owner_table, fk_field.column),
                     f"Owned rule for '{model._meta.db_table}.{fk_field.column}' -> "
                     f"'{dependent_table}' skipped: '{model.__name__}' declares this foreign key "
                     'on its own table but inherits _deleted_at from a multi-table-inheritance '
                     f"ancestor, so the rule would fire on '{owner_table}', a table the column "
-                    'is not on.'
+                    'is not on.',
                 )
                 continue
             # ``guitars.E002``'s twin, as ``_rule_update_edges`` is ``E001``'s: the check
             # reports a redirected key, but ``--skip-checks`` still reaches here and the rule
             # would correlate the key against a primary key it never held.
             if not _targets_primary_key(fk_field):
-                self._mti_cascade_warnings.append(
+                self._refuse_owned(
+                    (
+                        column_owner(related_model, '_deleted_at')._meta.db_table,
+                        owner_table,
+                        fk_field.column,
+                    ),
                     f"Owned rule for '{model._meta.db_table}.{fk_field.column}' skipped: "
                     # ``remote_field.field_name``, not ``target_field.name``: the latter raises
                     # where ``to_field`` names nothing, which is one of the cases refused here.
                     f"to_field='{fk_field.remote_field.field_name}' is not the target's "
                     'primary key, which is what the rule correlates the key against, so it '
-                    'would stamp the wrong row. Drop to_field (guitars.E002).'
+                    'would stamp the wrong row. Drop to_field (guitars.E002).',
                 )
                 continue
             candidates.append(fk_field)
@@ -968,11 +1038,14 @@ class OperationsMixin:
         # as a target with none, and the reason ADR 0011 chose a checkable field subclass.
         if not has_column(model, '_deleted_at'):
             for fk_field in declared:
-                self._mti_cascade_warnings.append(
+                # No key: the dedupe key's middle term is the table owning the *owner's*
+                # ``_deleted_at``, and there is none, so no recorded rule can match.
+                self._refuse_owned(
+                    None,
                     f"Owned rule for '{model._meta.db_table}.{fk_field.column}' skipped: "
                     f"'{model.__name__}' has no _deleted_at column, so it is never "
                     'soft-deleted and nothing would ever fire the rule. Make the owner '
-                    'soft-deletable, or declare a plain ForeignKey.'
+                    'soft-deletable, or declare a plain ForeignKey.',
                 )
             return []
         owner = column_owner(model, '_deleted_at')
@@ -990,30 +1063,42 @@ class OperationsMixin:
             # chain shares one primary-key *value*, which is exactly what the FK holds.
             dependent = column_owner(fk_field.related_model, '_deleted_at')
             dependent_table = dependent._meta.db_table
+            key = (dependent_table, owner_table, fk_field.column)
             # A rule whose action updates the table it fires on is rewritten into itself, and
             # PostgreSQL then refuses *every* UPDATE there -- a plain save() included -- at
             # rewrite time, so the WHERE guard never gets to run. See docs/owned-relations.md.
             if dependent_table == owner_table:
-                self._mti_cascade_warnings.append(
+                self._refuse_owned(
+                    key,
                     f"Owned rule for '{owner_table}.{fk_field.column}' -> "
                     f"'{dependent_table}' skipped: the rule would update the same table it "
                     'fires on, which PostgreSQL rejects as infinite rule recursion on every '
-                    'UPDATE to that table. Handle this ownership in Python.'
+                    'UPDATE to that table. Handle this ownership in Python.',
                 )
                 continue
             # The multi-table form of the same rejection -- see _rule_cycle_edges.
             if (owner_table, dependent_table) in self._rule_cycle_edges():
-                self._mti_cascade_warnings.append(
+                self._refuse_owned(
+                    key,
                     self._cycle_warning(
                         'Owned',
                         f"'{owner_table}.{fk_field.column}'",
                         owner_table,
                         dependent_table,
-                    )
+                    ),
                 )
                 continue
             ident_foreign_key = _identifiers._escape_ident(fk_field.column)
-            key = (dependent_table, owner_table, fk_field.column)
+            # Every *other* owning column pointing at this dependent. Arm 0 -- this rule's own
+            # column -- is spelled out in the template, which is what keeps a single-owner
+            # dependent byte-identical to 2.3.0.
+            co_owners = [
+                arm
+                for arm in self._owner_arms().get(dependent_table, ())
+                if (arm.owner_table, arm.fk_column) != (owner_table, fk_field.column)
+            ]
+            if self._refuse_owned_tenancy_mismatch(key, dependent, co_owners):
+                continue
             header = HEADER_SOFT_DELETE_OWNED.format(
                 dependent_table=_identifiers._escape_ident(dependent_table),
                 table=header_owner_table,
@@ -1032,6 +1117,9 @@ class OperationsMixin:
                 ),
                 primary_key=ident_owner_pk,
                 foreign_key=ident_foreign_key,
+                co_owner_guards=self._owned_co_owner_guards(
+                    co_owners, owner_table, ident_owner_pk, ident_foreign_key
+                ),
             )
             reverse = _soft_delete._DROP_SOFT_DELETE_OWNED_OBJECT_RULE.format(
                 rule_name=rule_name, table=ident_owner_table
@@ -1046,6 +1134,118 @@ class OperationsMixin:
                 is_adopt=adopt,
             )
         return ops
+
+    def _refuse_owned_tenancy_mismatch(
+        self,
+        key: tuple[str, str, str],
+        dependent: type[models.Model],
+        co_owners: list[_OwnerArm],
+    ) -> bool:
+        """Refuse a rule whose guard would read a co-owner through a tenant policy the
+        dependent does not share -- an ordinary ``SELECT`` cannot see an out-of-tenant live
+        owner, so it would stamp a still-owned row. Why only co-owners: ADR 0012."""
+        # Nothing to hide behind where no policy is generated at all.
+        if not self._tenant_policies_enabled() or tenant_spec(dependent):
+            return False
+        tenanted = sorted({arm.owner_table for arm in co_owners if tenant_spec(arm.owner_model)})
+        if not tenanted:
+            return False
+        dependent_table, owner_table, foreign_key = key
+        self._refuse_owned(
+            key,
+            f"Owned rule for '{owner_table}.{foreign_key}' -> '{dependent_table}' skipped: "
+            f'co-owner {"table" if len(tenanted) == 1 else "tables"} '
+            f'{", ".join(repr(table) for table in tenanted)} '
+            f"{'is' if len(tenanted) == 1 else 'are'} tenanted while '{dependent_table}' is "
+            'not, so the last-owner guard reads those tables through a tenant policy and '
+            'cannot see a live owner in another tenant -- it would stamp a still-owned row. '
+            "Keep an owned target inside its owners' tenant dimension, or leave them all "
+            'untenanted. See docs/owned-relations.md.',
+        )
+        return True
+
+    @staticmethod
+    def _owned_co_owner_guards(
+        co_owners: list[_OwnerArm],
+        owner_table: str,
+        ident_owner_pk: str,
+        ident_declared_foreign_key: str,
+    ) -> str:
+        """The rendered co-owner arms, or ``''`` where the dependent is owned from exactly one
+        place -- which is what makes that case byte-identical to 2.3.0. Aliases are numbered
+        from 1, arm 0 keeping the literal ``guitars_owner`` the template spells out."""
+        arms: list[str] = []
+        for position, arm in enumerate(co_owners, start=1):
+            alias = f'guitars_owner_{position}'
+            # Per *row*, not per column: the row being soft-deleted must not count as its own
+            # live co-owner, or one owning the target through two of its columns holds it alive
+            # forever. On any other table there is no such row to exclude.
+            self_exclusion = (
+                _soft_delete._SOFT_DELETE_OWNED_CO_OWNER_SELF_EXCLUSION.format(
+                    alias=alias, primary_key=ident_owner_pk
+                )
+                if arm.owner_table == owner_table
+                else ''
+            )
+            arms.append(
+                _soft_delete._SOFT_DELETE_OWNED_CO_OWNER_GUARD.format(
+                    owner_table=_identifiers._quote_table(arm.owner_table),
+                    alias=alias,
+                    foreign_key=_identifiers._escape_ident(arm.fk_column),
+                    declared_foreign_key=ident_declared_foreign_key,
+                    self_exclusion=self_exclusion,
+                )
+            )
+        return ''.join(arms)
+
+    def _scoped_owned_gap_notes(self, requested: set[str]) -> list[str]:
+        """Owned rules this scoped run leaves stale: their guards read the whole registry, so a
+        model in an in-scope app moves the rule text of one that is not. Warned like its
+        cascade twin, not escalated -- an unscoped run, which is what CI runs, re-derives it."""
+        if not requested:
+            return []
+
+        in_scope_tables = {
+            model._meta.db_table
+            for app in django_apps.get_app_configs()
+            if _generator.is_local(app) and app.label in requested
+            for model in app.get_models()
+        }
+        if not in_scope_tables:
+            return []
+
+        notes: list[str] = []
+        for app in django_apps.get_app_configs():
+            if not _generator.is_local(app) or app.label in requested:
+                continue
+            for model in app.get_models():
+                if not owns_column(model, '_deleted_at'):
+                    continue
+                owner_table = model._meta.db_table
+                for fk_field in self._owned_candidates(
+                    model, owner_table, self._declared_owning_fields(model)
+                ):
+                    dependent_table = column_owner(
+                        fk_field.related_model, '_deleted_at'
+                    )._meta.db_table
+                    touching = sorted(
+                        {
+                            arm.owner_table
+                            for arm in self._owner_arms().get(dependent_table, ())
+                            if arm.owner_table in in_scope_tables
+                            and (arm.owner_table, arm.fk_column) != (owner_table, fk_field.column)
+                        }
+                    )
+                    if not touching:
+                        continue
+                    notes.append(
+                        f"Owned rule on '{dependent_table}' owned by '{owner_table}' via "
+                        f"'{fk_field.column}' may be stale: its last-owner guard reads "
+                        f"{', '.join(repr(table) for table in touching)}, in this run's "
+                        f"scope, but app '{app.label}' is not. Re-run "
+                        '`makeguitarmigrations` without app labels.'
+                    )
+        return notes
 
     def _scoped_cascade_gap_notes(self, requested: set[str]) -> list[str]:
         """Describe cross-app CASCADE soft-delete rules this scoped run won't create -- keyed

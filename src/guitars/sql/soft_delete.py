@@ -84,6 +84,10 @@ _DROP_SOFT_DELETE_RELATED_OBJECTS_RULE = """
 # sides swapped, the FK living on the owner. The NOT EXISTS is the last-owner guard, always
 # emitted -- see ADR 0011 for why it is never derived from a unique constraint. ----
 
+# The declaring column's arm is spelled out rather than composed, so a single-owner dependent
+# renders byte-identically to 2.3.0 and its ``[SQL:...]`` identity does not move on upgrade.
+# Every other owning column adds an arm via ``{co_owner_guards}``, ``''`` here. See ADR 0012.
+
 _CREATE_SOFT_DELETE_OWNED_OBJECT_RULE = """
     CREATE OR REPLACE RULE {rule_name}
         AS ON UPDATE TO {table}
@@ -99,9 +103,26 @@ _CREATE_SOFT_DELETE_OWNED_OBJECT_RULE = """
                   WHERE guitars_owner."{foreign_key}" = old."{foreign_key}"
                     AND guitars_owner."{primary_key}" <> old."{primary_key}"
                     AND guitars_owner._deleted_at IS NULL
-              )
+              ){co_owner_guards}
         );
 """
+
+# One co-owner arm, correlated against the *declaring* rule's column: the target row is named
+# by the rule's own key, not the co-owner's. Leads with a newline and ends without one, so
+# joining zero of them leaves the template above byte-for-byte untouched.
+_SOFT_DELETE_OWNED_CO_OWNER_GUARD = """
+              AND NOT EXISTS (
+                  SELECT 1 FROM {owner_table} AS {alias}
+                  WHERE {alias}."{foreign_key}" = old."{declared_foreign_key}"
+{self_exclusion}                    AND {alias}._deleted_at IS NULL
+              )"""
+
+# Spliced in only where the co-owner sits on the table the rule fires on. Keyed on the *row*:
+# a row owning the target through two of its own columns would otherwise read as its own last
+# live owner and hold the target alive forever.
+_SOFT_DELETE_OWNED_CO_OWNER_SELF_EXCLUSION = (
+    '                    AND {alias}."{primary_key}" <> old."{primary_key}"\n'
+)
 
 _DROP_SOFT_DELETE_OWNED_OBJECT_RULE = """
     DROP RULE {rule_name} ON {table};

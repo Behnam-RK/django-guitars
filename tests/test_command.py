@@ -1794,3 +1794,309 @@ def test_a_rule_name_clash_fails_a_check_run_but_only_reports_on_a_generating_on
         command._refuse_a_rule_name_clash(check_only=True)
 
     command._refuse_a_rule_name_clash(check_only=False)
+
+
+# ---- Cross-owner last-owner guard (ADR 0012) ------------------------------------------
+
+
+def _owned_blob(*models_to_register, subject=None):
+    """Build a Command over exactly *models_to_register* and return its owned operations for
+    *subject* (the first model by default). ``all_models`` by hand for the reason the cycle
+    tests above give: ``isolate_apps`` swaps ``Options.apps``, not the global registry."""
+    command = Command()
+    command._mti_cascade_warnings.clear()
+    command._refusals_over_live_rules.clear()
+    command.existing.soft_delete_owned.clear()
+    command.all_models = list(models_to_register)
+    ops = command._owned_operations(subject or models_to_register[0])
+    return command, '\n'.join(ops), ops
+
+
+def test_owned_guard_carries_an_arm_for_a_co_owner_on_another_table():
+    """The bug 2.4.0 exists for: two owner tables, each rule blind to the other, so the last
+    owner *of one kind* archived a dependent a live owner of the other kind still held."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Shared(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class OwnerLeft(SetarModel):
+            target = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class OwnerRight(SetarModel):
+            other = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        registry = (Shared, OwnerLeft, OwnerRight)
+        return (
+            _owned_blob(*registry, subject=OwnerLeft)[1],
+            _owned_blob(*registry, subject=OwnerRight)[1],
+        )
+
+    left, right = _build()
+
+    # Each rule reads its own table self-excluded, and the other's unqualified: the other
+    # table holds no row being soft-deleted by this statement, so there is none to exclude.
+    assert 'FROM "testapp_ownerleft" AS guitars_owner\n' in left
+    assert 'guitars_owner."target_id" = old."target_id"' in left
+    assert 'FROM "testapp_ownerright" AS guitars_owner_1' in left
+    assert 'guitars_owner_1."other_id" = old."target_id"' in left
+    assert 'guitars_owner_1."id" <> old."id"' not in left
+
+    assert 'FROM "testapp_ownerright" AS guitars_owner\n' in right
+    assert 'FROM "testapp_ownerleft" AS guitars_owner_1' in right
+    assert 'guitars_owner_1."target_id" = old."other_id"' in right
+    assert 'guitars_owner_1."id" <> old."id"' not in right
+
+
+def test_owned_guard_self_excludes_every_arm_on_the_declaring_table():
+    """Two owning columns on one table. Self-exclusion is per *row*, not per column: without
+    it on the second arm, a row owning the target through both columns reads as its own last
+    live owner and holds the target alive forever."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Shared(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Twice(SetarModel):
+            first = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True, related_name='+')
+            second = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True, related_name='+')
+
+            class Meta:
+                app_label = 'testapp'
+
+        return _owned_blob(Shared, Twice, subject=Twice)[1]
+
+    blob = _build()
+
+    assert blob.count('AS guitars_owner_1') == 2  # one arm in each of the two rules
+    assert 'guitars_owner_1."second_id" = old."first_id"' in blob
+    assert 'guitars_owner_1."first_id" = old."second_id"' in blob
+    # Both arms are on the table the rule fires on, so both exclude the row going away.
+    assert blob.count('guitars_owner_1."id" <> old."id"') == 2
+
+
+def test_owned_guard_scales_to_three_owners():
+    """N owning columns produce N rules of N arms. Guards the composition, not one shape."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Shared(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        owners = []
+        for name in ('OwnerOne', 'OwnerTwo', 'OwnerThree'):
+            owners.append(
+                type(
+                    name,
+                    (SetarModel,),
+                    {
+                        'target': OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True),
+                        'Meta': type('Meta', (), {'app_label': 'testapp'}),
+                        '__module__': 'tests.testapp.models',
+                    },
+                )
+            )
+        return [_owned_blob(Shared, *owners, subject=owner)[1] for owner in owners]
+
+    blobs = _build()
+
+    assert len(blobs) == 3
+    for blob in blobs:
+        assert blob.count('NOT EXISTS') == 3
+        assert 'AS guitars_owner\n' in blob
+        assert 'AS guitars_owner_1' in blob
+        assert 'AS guitars_owner_2' in blob
+
+
+def test_owned_guard_arm_order_does_not_follow_registry_order():
+    """The arms are sorted, so the rendered guard -- and the ``[SQL:...]`` identity deciding
+    whether a migration is emitted at all -- cannot move with the order models happen to be
+    registered in. An order-dependent digest would make ``--check`` flap."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Shared(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Zulu(SetarModel):
+            target = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Alpha(SetarModel):
+            target = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        forward = _owned_blob(Shared, Zulu, Alpha, subject=Zulu)[1]
+        reversed_ = _owned_blob(Alpha, Zulu, Shared, subject=Zulu)[1]
+        return forward, reversed_
+
+    forward, reversed_ = _build()
+
+    assert forward == reversed_
+
+
+def test_owned_guard_skips_a_co_owner_it_cannot_express():
+    """``Orchestra.programme`` owns PressKit but keeps ``_deleted_at`` on its MTI ancestor, so
+    an arm against it would need a join the template has no shape for. It contributes none --
+    and is already reported by the refusal that denies it a rule of its own."""
+    command = Command()
+    command.existing.soft_delete_owned.clear()
+
+    blob = '\n'.join(command._owned_operations(Album))
+
+    assert 'testapp_orchestra' not in blob
+    # The two arms it does carry are Album's own pair, not three.
+    assert blob.count('NOT EXISTS') == 4  # two rules, two arms each
+
+
+def test_owned_guard_reads_owners_the_kit_does_not_generate_for():
+    """A live owner is live whether or not its app is in ``LOCAL_APPS``. Excluding a non-local
+    co-owner would re-create the very bug this guard closes, for third-party models."""
+
+    # 'legacy_migrations' is installed but deliberately outside LOCAL_APPS, so the kit
+    # generates no enforcement for it -- exactly the asymmetry CHANGELOG 2.3.0 records.
+    @isolate_apps('tests.testapp', 'tests.legacy_migrations')
+    def _build():
+        class Shared(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Local(SetarModel):
+            target = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Vendor(SetarModel):
+            target = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True)
+
+            class Meta:
+                app_label = 'legacy_migrations'
+
+        assert 'tests.legacy_migrations' not in django_settings.LOCAL_APPS
+        return _owned_blob(Shared, Local, Vendor, subject=Local)[1]
+
+    blob = _build()
+
+    assert 'FROM "legacy_migrations_vendor" AS guitars_owner_1' in blob
+
+
+def test_owned_rule_is_refused_when_a_co_owner_is_tenanted_and_the_dependent_is_not():
+    """The guard's NOT EXISTS is an ordinary SELECT, so a policy on the co-owner's table hides
+    an out-of-tenant live owner and the rule stamps a still-owned row. 2.3.0 could only reach
+    that through the table you declared the key on; an arm reaches tables you never named."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        from guitars.tenancy import tenanted_manager
+
+        class Shared(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Plain(SetarModel):
+            target = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Scoped(SetarModel):
+            target = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True)
+            label = models.ForeignKey('testapp.Label', on_delete=CASCADE, null=True)
+            objects = tenanted_manager(label='label')
+
+            class Meta:
+                app_label = 'testapp'
+
+        return _owned_blob(Shared, Plain, Scoped, subject=Plain)
+
+    command, blob, ops = _build()
+
+    assert ops == []
+    assert len(command._mti_cascade_warnings) == 1
+    warning = command._mti_cascade_warnings[0]
+    assert "'testapp_scoped'" in warning
+    assert 'tenanted' in warning
+    assert 'another tenant' in warning
+
+
+def test_a_refused_owned_rule_that_already_exists_fails_check():
+    """Refusing emits nothing, so the rule 2.3.0 recorded stays live and wrong with nothing
+    else to notice -- unlike every other refusal, which only ever fires where no rule was
+    written. The escalation is the only thing between that and a green ``--check``."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Shared(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Cyclic(SetarModel):
+            target = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        # Shared owns Cyclic back, so both rules close an ON UPDATE cycle and are refused.
+        Shared.add_to_class(
+            'back', OwningForeignKey(Cyclic, on_delete=DO_NOTHING, null=True, related_name='+')
+        )
+
+        command = Command()
+        command._mti_cascade_warnings.clear()
+        command._refusals_over_live_rules.clear()
+        command.all_models = [Shared, Cyclic]
+        # Pretend the project already migrated this rule, which 2.3.0 would have written.
+        command.existing.soft_delete_owned.clear()
+        command.existing.soft_delete_owned[('testapp_shared', 'testapp_cyclic', 'target_id')] = (
+            'deadbeefcafe'
+        )
+        return command, command._owned_operations(Cyclic)
+
+    command, ops = _build()
+
+    assert ops == []
+    assert len(command._refusals_over_live_rules) == 1
+    assert 'DROP RULE' in command._refusals_over_live_rules[0]
+    with pytest.raises(CommandError, match='already exists'):
+        command._refuse_a_stale_owned_rule(check_only=True)
+    # A generating run reports it and carries on -- there is nothing it could emit instead.
+    command._refuse_a_stale_owned_rule(check_only=False)
+
+
+def test_a_single_owner_rule_is_byte_identical_to_2_3_0(snapshot):
+    """A dependent owned from one place renders exactly as 2.3.0 rendered it, so its
+    ``[SQL:...]`` identity does not move. Pinned byte for byte: a substring assertion cannot
+    catch a whitespace change, and whitespace is what the digest hashes."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Alone(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class OnlyOwner(SetarModel):
+            target = OwningForeignKey(Alone, on_delete=DO_NOTHING, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        return _owned_blob(Alone, OnlyOwner, subject=OnlyOwner)[1]
+
+    assert _build() == snapshot

@@ -434,3 +434,40 @@ class SquashCourt(Court):
 
     class Meta:
         pass
+
+
+class Placard(SetarModel):
+    """Owned target reachable from two *different* owner tables -- the shape ``PressKit`` does
+    not cover, its owning columns both living on ``testapp_album``. Each owner's rule must
+    carry an arm for the other, or one kind's last owner archives what the other holds."""
+
+    caption = CharField(max_length=100)
+
+    def __str__(self) -> str:
+        return self.caption
+
+
+class Kiosk(SetarModel):
+    """One of ``Placard``'s two owner tables."""
+
+    label = CharField(max_length=100)
+    placard = OwningForeignKey(
+        Placard, on_delete=DO_NOTHING, null=True, blank=True, related_name='kiosks'
+    )
+
+    def __str__(self) -> str:
+        return self.label
+
+
+class Foyer(SetarModel):
+    """The other. Deliberately a distinct table rather than a second column on ``Kiosk``:
+    a co-owner arm against another table carries no self-exclusion, which is the half
+    ``Album``'s same-table pair cannot exercise."""
+
+    label = CharField(max_length=100)
+    placard = OwningForeignKey(
+        Placard, on_delete=DO_NOTHING, null=True, blank=True, related_name='foyers'
+    )
+
+    def __str__(self) -> str:
+        return self.label

@@ -18,6 +18,7 @@ from django.db import models
 from guitars import sql
 from guitars.introspection import is_mti_child, owns_column
 from guitars.management import _generator
+from guitars.management.enforcement.graph import ObjectRef
 from guitars.management.enforcement.headers import (
     HEADER_PARENT_TRIGGER_FUNCTION,
     HEADER_TENANT_AUTOFILL_FUNCTION,
@@ -95,6 +96,10 @@ class Command(OperationsMixin, BaseCommand):
         # ``None`` rather than ``{}`` as the "not swept yet" mark, an empty verdict being the
         # ordinary answer for a project with no tenancy at all.
         self._owned_tenancy_cache: dict[tuple[str, str, str], list[str]] | None = None
+        # Objects the operations built for an app name, keyed by that app: a rule's action is
+        # parsed at CREATE time, so anything it references in *another* app needs a dependency
+        # edge. Filled as the rules are built and read back per app -- see ``_object_refs``.
+        self._object_refs: dict[str, list[ObjectRef]] = {}
         self._required_autofill_cache: dict[tuple[str, str], tuple[str, str]] | None = None
         self._relocated_autofill_cache: dict[tuple[str, str], tuple[str, str]] | None = None
 
@@ -495,7 +500,7 @@ class Command(OperationsMixin, BaseCommand):
             migration_name='auto_enforcement',
             build_ops=lambda app: self._build_operations(app, adopt=adopt),
             check_only=check_only,
-            dependencies_for=self._function_dependencies_for,
+            dependencies_for=self._dependencies_for,
             adopt=adopt,
         )
         changes_made = changes_made or stage_changed

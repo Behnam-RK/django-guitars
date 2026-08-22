@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, NamedTuple, cast
 
 from django.apps import apps as django_apps
 from django.db import models
+from django.db.migrations.loader import MigrationLoader
 
 from guitars import sql
 from guitars.introspection import (
@@ -21,6 +22,11 @@ from guitars.introspection import (
     rule_update_cycle_edges,
 )
 from guitars.management import _generator
+from guitars.management.enforcement.graph import (
+    ObjectRef,
+    resolve_dependencies,
+    would_close_a_cycle,
+)
 from guitars.management.enforcement.headers import (
     _RE_MTI_UPDATED_AT,
     _RE_TENANT_AUTOFILL,
@@ -151,6 +157,7 @@ class OperationsMixin:
         _rule_cycle_cache: set[tuple[str, str]] | None
         _owner_arms_cache: dict[str, list[OwnerArm]] | None
         _owned_tenancy_cache: dict[tuple[str, str, str], list[str]] | None
+        _object_refs: dict[str, list[ObjectRef]]
         _refusals_over_live_rules: list[str]
         _table_app_labels_cache: dict[str, str] | None
         _required_autofill_cache: dict[tuple[str, str], tuple[str, str]] | None
@@ -741,6 +748,17 @@ class OperationsMixin:
             self._owned_tenancy_cache = owned_tenancy_refusals(self.all_models)
         return self._owned_tenancy_cache
 
+    def _record_object_ref(
+        self, model: type[models.Model], referenced: type[models.Model], field: str | None = None
+    ) -> None:
+        """Note that a rule built for *model*'s app names *referenced*. Keyed by the app whose
+        migration will carry the operation, which is ``model``'s: ``_build_operations`` is
+        called per app and reads only that app's models, so the two cannot come apart."""
+        ref = ObjectRef(referenced._meta.app_label, referenced.__name__, field)
+        refs = self._object_refs.setdefault(model._meta.app_label, [])
+        if ref not in refs:
+            refs.append(ref)
+
     def _refuse_owned(self, key: tuple[str, str, str] | None, message: str) -> None:
         """Record an owned-rule refusal, escalating where a rule for *key* is already recorded:
         refusing emits nothing, so the stale rule stays live and wrong under a green
@@ -893,6 +911,10 @@ class OperationsMixin:
                     foreign_key=_identifiers._escape_ident(fk_field.column),
                 )
                 rule_name = _related_rule_name(related_table, fk_field.column)
+            # The rule's action names the related table *and* the foreign key on it, so one
+            # field ref covers both. Pre-existing gap, not new in 2.4.0: a CASCADE crossing
+            # apps has always emitted a rule naming a table nothing ordered it against.
+            self._record_object_ref(model, related_model, fk_field.name)
             # The relation, not `key`: `key` drops the column on the plain form, and two
             # relations can then share one key -- see `_claim_rule_name`'s docstring.
             self._claim_rule_name(
@@ -1090,6 +1112,14 @@ class OperationsMixin:
                 continue
             ident_foreign_key = _identifiers._escape_ident(fk_field.column)
             co_owners = self._co_owner_arms(dependent_table, owner_table, fk_field.column)
+            # Everything this rule's action names outside its own table: the dependent it
+            # updates, and each co-owner arm's column -- a joined arm also reading the MTI
+            # ancestor it takes liveness from. Cross-app ones become dependency edges.
+            self._record_object_ref(model, dependent)
+            for arm in co_owners:
+                self._record_object_ref(model, arm.owner_model, arm.fk_name)
+                if arm.root_model is not None:
+                    self._record_object_ref(model, arm.root_model)
             header = HEADER_SOFT_DELETE_OWNED.format(
                 dependent_table=_identifiers._escape_ident(dependent_table),
                 table=header_owner_table,
@@ -1323,6 +1353,54 @@ class OperationsMixin:
                     )
         return notes
 
+    def _dependencies_for(self, app: AppConfig, operations_blob: str) -> list[tuple[str, str]]:
+        """Every edge *app*'s new migration needs: the shared-function ones read off the
+        operation headers, plus one per object the rules name in another app. Both, in that
+        order, so a file's dependency list reads the same as it did before 2.5.0 plus."""
+        return self._function_dependencies_for(operations_blob) + self._object_dependencies_for(
+            app
+        )
+
+    def _object_dependencies_for(self, app: AppConfig) -> list[tuple[str, str]]:
+        """Edges to the migrations that create what *app*'s rules reference. A rule's action is
+        parsed by PostgreSQL at ``CREATE`` time, so a cross-app table or column it names must
+        already exist -- and only an explicit dependency orders that. See ADR 0013."""
+        refs = self._object_refs.get(app.label, [])
+        if not refs:
+            return []
+        # Loaded here rather than in the constructor: the scaffold for *this* app was written
+        # moments ago by ``create_empty_migration_file``, and the graph has to include it for
+        # the cycle question below to be asked about the file actually being written.
+        loader = MigrationLoader(None, ignore_no_migrations=True)
+        edges, unresolved = resolve_dependencies(loader, refs, own_app=app.label)
+        for ref in unresolved:
+            # Warned, not refused: an app with no migrations at all is a legitimate
+            # configuration, and withdrawing a rule that works today would be the worse trade.
+            self._mti_cascade_warnings.append(
+                f"Enforcement migration for '{app.label}' references '{ref.describe()}', but no "
+                'migration in that app creates it, so no dependency edge was emitted. A fresh '
+                '`migrate` may reach the rule first. Add the edge by hand if that app is '
+                'migrated elsewhere.'
+            )
+        return [edge for edge in edges if not self._refuse_cyclic_edge(app, edge, loader)]
+
+    def _refuse_cyclic_edge(self, app: AppConfig, edge: tuple[str, str], loader) -> bool:
+        """Whether *edge* has to be dropped for closing a cycle. It should never be: an edge to
+        the migration that *creates* an object is older than the rule naming it. Asked anyway --
+        a graph Django rejects bricks ``migrate`` outright, worse than what the edge prevents."""
+        leaves = sorted(loader.graph.leaf_nodes(app.label))
+        # The migration being written is not on the graph yet, so its own app's leaf stands in:
+        # the scaffold depends on it, so anything reaching the leaf reaches the new file too.
+        if not leaves or not would_close_a_cycle(loader, leaves[-1], edge):
+            return False
+        self._mti_cascade_warnings.append(
+            f"Enforcement migration for '{app.label}' needs '{edge[0]}.{edge[1]}' to run first, "
+            f"but '{edge[0]}' already depends on '{app.label}', so the edge would make the "
+            'migration graph cyclic and Django would refuse every `migrate`. Emitted without '
+            f"it -- migrate '{edge[0]}' before '{app.label}', or split the two apps' models."
+        )
+        return True
+
     def _function_dependencies_for(self, operations_blob: str) -> list[tuple[str, str]]:
         """Function-migration dependencies an app's operations actually require -- keyed off
         the operation headers, since only ``updated_at`` and autofill triggers call a shared
@@ -1351,7 +1429,7 @@ class OperationsMixin:
         migration_name: str,
         build_ops: Callable[[AppConfig], list[str]],
         check_only: bool,
-        dependencies_for: Callable[[str], list[tuple[str, str]]] | None = None,
+        dependencies_for: Callable[[AppConfig, str], list[tuple[str, str]]] | None = None,
         adopt: bool = False,
     ) -> tuple[bool, list[tuple[str, list[str]]]]:
         """Scaffold-and-write one migration per in-scope app with new operations. Shared by
@@ -1382,7 +1460,9 @@ class OperationsMixin:
                 continue
 
             migration_file = _generator.create_empty_migration_file(app, migration_name)
-            dependencies = dependencies_for('\n'.join(operations)) if dependencies_for else None
+            dependencies = (
+                dependencies_for(app, '\n'.join(operations)) if dependencies_for else None
+            )
             self._write_migration_file(
                 app=app,
                 migration_file=migration_file,

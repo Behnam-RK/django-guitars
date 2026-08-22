@@ -7,6 +7,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, NamedTuple, cast
 
 from django.apps import apps as django_apps
+from django.core.exceptions import FieldDoesNotExist
 from django.db import models
 from django.db.migrations.loader import MigrationLoader
 
@@ -917,6 +918,10 @@ class OperationsMixin:
             # field ref covers both. Pre-existing gap, not new in 2.4.0: a CASCADE crossing
             # apps has always emitted a rule naming a table nothing ordered it against.
             self._record_object_ref(model, related_model, fk_field.name)
+            # ``SET _deleted_at`` is a second column, and not necessarily as old as the table:
+            # a model promoted to ``SetarModel`` gains it in a later migration, and an edge to
+            # the creation alone would let the rule be created before the column exists.
+            self._record_object_ref(model, related_model, '_deleted_at')
             # The relation, not `key`: `key` drops the column on the plain form, and two
             # relations can then share one key -- see `_claim_rule_name`'s docstring.
             self._claim_rule_name(
@@ -1114,14 +1119,18 @@ class OperationsMixin:
                 continue
             ident_foreign_key = _identifiers._escape_ident(fk_field.column)
             co_owners = self._co_owner_arms(dependent_table, owner_table, fk_field.column)
-            # Everything this rule's action names outside its own table: the dependent it
-            # updates, and each co-owner arm's column -- a joined arm also reading the MTI
-            # ancestor it takes liveness from. Cross-app ones become dependency edges.
+            # Everything the action names outside its own table, each ``_deleted_at`` alongside
+            # the table holding it: a model promoted to ``SetarModel`` gains that column later
+            # than its table, so an edge to the table alone would not order the column.
             self._record_object_ref(model, dependent)
+            self._record_object_ref(model, dependent, '_deleted_at')
             for arm in co_owners:
                 self._record_object_ref(model, arm.owner_model, arm.fk_name)
                 if arm.root_model is not None:
                     self._record_object_ref(model, arm.root_model)
+                    self._record_object_ref(model, arm.root_model, '_deleted_at')
+                else:
+                    self._record_object_ref(model, arm.owner_model, '_deleted_at')
             header = HEADER_SOFT_DELETE_OWNED.format(
                 dependent_table=_identifiers._escape_ident(dependent_table),
                 table=header_owner_table,
@@ -1367,7 +1376,10 @@ class OperationsMixin:
         """Edges to the migrations that create what *app*'s rules reference. A rule's action is
         parsed by PostgreSQL at ``CREATE`` time, so a cross-app table or column it names must
         already exist -- and only an explicit dependency orders that. See ADR 0013."""
-        refs = self._object_refs.get(app.label, [])
+        # Own-app refs are filtered before the loader is built, not inside ``resolve_dependencies``
+        # alone: building one imports every migration module in the project, and a single-app
+        # project -- every consumer before 2.5.0 -- has nothing else for it to answer.
+        refs = [ref for ref in self._object_refs.get(app.label, []) if ref.app_label != app.label]
         if not refs:
             return []
         # Loaded here rather than in the constructor: the scaffold for *this* app was written
@@ -1390,18 +1402,19 @@ class OperationsMixin:
         """Enforcement migrations of *app* that name another app's table without being ordered
         against whatever creates it. Reachability, not a literal edge: an ordering already
         guaranteed through another path is guaranteed, and flagging it would be a false alarm."""
-        refs = self._object_refs.get(app.label, [])
+        # Cross-app refs only, and filtered before the loader is built for the reason
+        # ``_object_dependencies_for`` gives -- a single-app project builds none.
+        refs = [ref for ref in self._object_refs.get(app.label, []) if ref.app_label != app.label]
         if not refs:
             return []
         loader = MigrationLoader(None, ignore_no_migrations=True)
         notes: list[str] = []
         for ref in refs:
-            if ref.app_label == app.label:
-                continue
             edge = resolve_object_migration(loader, ref)
             table = self._ref_table(ref)
             if edge is None or table is None:
                 continue
+            column = self._ref_column(ref)
             for path, content in _generator.iter_migration_files(app):
                 # Only a migration whose SQL actually names the table: refs are collected per
                 # app, and an app's earlier enforcement migration may predate the rule needing
@@ -1410,17 +1423,25 @@ class OperationsMixin:
                 if (
                     not _generator.RE_DIGEST.search(content)
                     or f'"{table}"' not in content
+                    # ...and the column, where the ref names one: two refs can share a table
+                    # and resolve to *different* migrations, and matching the table alone then
+                    # reports the older file forever. Unquoted -- the bare name is in both.
+                    or (column is not None and column not in content)
                     or node not in loader.graph.node_map
                     or edge in set(loader.graph.forwards_plan(node))
                 ):
                     continue
-                notes.append(
+                note = (
                     f"Enforcement migration '{app.label}.{path.stem}' creates a rule naming "
                     f"'{table}', but nothing orders it after '{edge[0]}.{edge[1]}', which "
                     'creates that table -- a fresh `migrate` can reach the rule first and fail '
                     f'with `relation "{table}" does not exist`. Add to its dependencies:\n'
                     f"        ('{edge[0]}', '{edge[1]}'),"
                 )
+                # Deduped: several refs into one app resolve to one migration -- a table and
+                # the ``_deleted_at`` on it -- and the note names the file and the edge only.
+                if note not in notes:
+                    notes.append(note)
         return notes
 
     @staticmethod
@@ -1433,13 +1454,30 @@ class OperationsMixin:
         except LookupError:
             return None
 
+    @staticmethod
+    def _ref_column(ref: ObjectRef) -> str | None:
+        """The physical column behind *ref*, or ``None`` for a ref naming only a table -- and
+        for one whose field the registry no longer has, the same "not this check's business"
+        answer :meth:`_ref_table` gives. Read off the registry, like the refs themselves."""
+        if ref.field is None:
+            return None
+        try:
+            model = django_apps.get_model(ref.app_label, ref.model)
+        except LookupError:
+            return None
+        try:
+            return cast('str', model._meta.get_field(ref.field).column)
+        except FieldDoesNotExist:
+            return None
+
     def _refuse_cyclic_edge(self, app: AppConfig, edge: tuple[str, str], loader) -> bool:
         """Whether *edge* has to be dropped for closing a cycle. It should never be: an edge to
         the migration that *creates* an object is older than the rule naming it. Asked anyway --
         a graph Django rejects bricks ``migrate`` outright, worse than what the edge prevents."""
         leaves = sorted(loader.graph.leaf_nodes(app.label))
-        # The migration being written is not on the graph yet, so its own app's leaf stands in:
-        # the scaffold depends on it, so anything reaching the leaf reaches the new file too.
+        # The app's newest leaf stands in for the file being written: normally the scaffold
+        # itself, the loader having been built after it was written, and otherwise the leaf the
+        # scaffold depends on -- anything reaching which reaches the new file too.
         if not leaves or not would_close_a_cycle(loader, leaves[-1], edge):
             return False
         self._mti_cascade_warnings.append(

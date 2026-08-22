@@ -147,9 +147,10 @@ class OwnerArm(NamedTuple):
     owner_table: str
     fk_column: str
     owner_model: type[models.Model]
-    #: The *field* name behind ``fk_column``. Both are needed: the SQL names the column, while a
-    #: migration dependency is resolved against model state, which knows only field names.
-    fk_name: str = ''
+    #: The *field* name behind ``fk_column``: the SQL names the column, a migration dependency
+    #: resolves against model state, which knows only field names. No default -- an empty one
+    #: resolves to no migration, dropping the edge *and* the ``--check`` guard: a failure open.
+    fk_name: str
     #: Set only where the owner keeps ``_deleted_at`` on an MTI ancestor: that ancestor's table,
     #: model and primary key, and this table's parent-link primary key. The arm joins the two,
     #: the foreign key being on one table and liveness on the other. ``None`` for the plain form.

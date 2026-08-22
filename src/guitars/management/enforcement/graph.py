@@ -70,18 +70,30 @@ def _establishes(operation, model: str, field: str | None) -> bool:
 
     if isinstance(operation, CreateModel) and operation.name.lower() == model_lower:
         return any(name.lower() == field.lower() for name, _ in operation.fields)
-    if isinstance(operation, AddField | AlterField):
+    if isinstance(operation, AddField):
         return (
             operation.model_name.lower() == model_lower and operation.name.lower() == field.lower()
+        )
+    if isinstance(operation, AlterField):
+        # Only with an explicit ``db_column``, the one thing an ``AlterField`` can change about
+        # the *physical* column. Counting every one -- and this resolver takes the **last** --
+        # drags the edge onto an unrelated ``null=True``, over-constraining like a leaf edge.
+        return (
+            operation.field.db_column is not None
+            and operation.model_name.lower() == model_lower
+            and operation.name.lower() == field.lower()
         )
     if isinstance(operation, RenameField):
         return (
             operation.model_name.lower() == model_lower
             and operation.new_name.lower() == field.lower()
         )
-    # A renamed *model* moves the table its column lives on, so the column under this model's
-    # current name only exists from there on too.
-    return isinstance(operation, RenameModel) and operation.new_name.lower() == model_lower
+    # A renamed *model*, or one whose ``db_table`` moved, moves the table its column lives on,
+    # so the column exists under this model's name only from there. Both, not just the rename:
+    # a column is no more present on a table that does not exist yet -- see the branch above.
+    return (isinstance(operation, RenameModel) and operation.new_name.lower() == model_lower) or (
+        isinstance(operation, AlterModelTable) and operation.name.lower() == model_lower
+    )
 
 
 def resolve_object_migration(loader: MigrationLoader, ref: ObjectRef) -> tuple[str, str] | None:

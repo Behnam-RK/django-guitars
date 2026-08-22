@@ -26,6 +26,7 @@ from guitars.introspection import (
 from guitars.management import _generator
 from guitars.management.enforcement.graph import (
     ObjectRef,
+    drop_implied_edges,
     resolve_dependencies,
     resolve_object_migration,
 )
@@ -1434,7 +1435,7 @@ class OperationsMixin:
                 '`migrate` may reach the rule first. Add the edge by hand if that app is '
                 'migrated elsewhere.'
             )
-        return edges
+        return drop_implied_edges(loader, edges)
 
     def _missing_edge_notes(self, app: AppConfig) -> list[str]:
         """Enforcement migrations of *app* that name another app's table without being ordered
@@ -1509,9 +1510,9 @@ class OperationsMixin:
         try:
             bare = _policy._qualified_table(table)
         except ValueError:
-            # A ``db_table`` no policy could spell unquoted (mixed case, a space, a hyphen).
-            # ``_quote_table`` above is then the only form emitted, so the answer is no --
-            # raising here would crash the very report this guard exists to print.
+            # A ``db_table`` no policy could spell unquoted: the quoted form above is then the
+            # only one emitted, so the answer is no rather than a crashed report. ``_quote_table``
+            # raises for its own shapes uncaught -- rendering such a rule raises before this.
             return False
         # Delimited by SQL, never by a quote: a bare ``shop`` is a substring of ``shopping``,
         # sits inside a ``('shop', '0001_initial')`` dependency tuple, and is the escaped

@@ -65,9 +65,9 @@ class Command(OperationsMixin, BaseCommand):
         self.tenant_autofill_dependencies: dict[str, tuple[str, str]] = {}
         self.tenant_autofill_sql: dict[str, str | None] = {}
 
-        # Rules skipped this run, surfaced as warnings (not silent): cross-app / MTI cascade
-        # rules, the owned rules whose three shapes the generator refuses, and either kind
-        # refused for closing an ON UPDATE rule cycle. One list, one report loop.
+        # Surfaced as warnings, not silent: rules skipped this run -- cross-app / MTI cascade,
+        # the owned shapes the generator refuses, either kind on an ON UPDATE cycle -- plus, since
+        # 2.5.0, a rule *emitted* whose cross-app reference resolved to no migration to depend on.
         self._mti_cascade_warnings: list[str] = []
         # Two relations whose rules would share one name on one table. Emitted anyway -- the
         # cascade spelling is frozen -- so the report is the only thing standing between a

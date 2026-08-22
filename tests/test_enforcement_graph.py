@@ -20,6 +20,7 @@ from django.db.models import AutoField, CharField
 
 from guitars.management.enforcement.graph import (
     ObjectRef,
+    drop_implied_edges,
     resolve_dependencies,
     resolve_object_migration,
 )
@@ -372,3 +373,66 @@ def test_a_graph_node_with_no_migration_on_disk_is_skipped():
         'shop',
         '0002_add',
     )
+
+
+# ─── edges the graph already implies ───
+
+
+def _split_history() -> _FakeLoader:
+    """``shop`` creates its table in ``0001`` and gains a column in ``0002`` -- the shape two
+    refs into one app resolve differently through, and the reason one edge can imply another."""
+    return _FakeLoader(
+        {
+            ('shop', '0001_initial'): _migration(
+                '0001_initial',
+                'shop',
+                [CreateModel('Shop', [('id', AutoField(primary_key=True))])],
+                [],
+            ),
+            ('shop', '0002_added'): _migration(
+                '0002_added',
+                'shop',
+                [AddField('Shop', 'note', CharField(max_length=10))],
+                [('shop', '0001_initial')],
+            ),
+        }
+    )
+
+
+def test_an_edge_reachable_from_another_is_dropped():
+    """The later migration depends on the earlier, so writing both says nothing the graph did
+    not already say -- and the file then reads as if the rule needed two orderings."""
+    history = _split_history()
+
+    assert drop_implied_edges(
+        history, [('shop', '0002_added'), ('shop', '0001_initial')]
+    ) == [('shop', '0002_added')]
+
+
+def test_the_surviving_edge_is_kept_whichever_order_they_arrive_in():
+    """Reachability, not list position: the refs are collected as the rules are built, so which
+    of the two is seen first is an ordering nothing guarantees."""
+    history = _split_history()
+
+    assert drop_implied_edges(
+        history, [('shop', '0001_initial'), ('shop', '0002_added')]
+    ) == [('shop', '0002_added')]
+
+
+def test_edges_neither_of_which_reaches_the_other_both_survive():
+    """The ordinary multi-app case -- two apps owning one dependent -- where dropping either
+    would leave a rule unordered against the table it names."""
+    history = _split_history()
+    edges = [('shop', '0002_added'), ('other', '0001_initial')]
+
+    assert drop_implied_edges(history, edges) == edges
+
+
+def test_an_edge_the_graph_does_not_have_is_kept():
+    """Nothing can be shown to imply a node the loader never saw, and dropping it would lose
+    the only ordering the rule has. Kept, the same answer the resolver's own unknowns get."""
+    history = _split_history()
+
+    assert drop_implied_edges(history, [('ghost', '0001_initial')]) == [
+        ('ghost', '0001_initial')
+    ]

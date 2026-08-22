@@ -535,3 +535,18 @@ def test_a_table_no_policy_could_spell_unquoted_answers_no_rather_than_raising(t
     every migration file -- so the first one not quoting it must not crash the report."""
     assert not OperationsMixin._names_table('nothing quoting it here', table)
     assert OperationsMixin._names_table(f'UPDATE "{table}" SET', table)
+
+
+def test_only_the_edge_the_graph_does_not_already_imply_is_handed_to_the_writer():
+    """At the seam, not just over ``drop_implied_edges`` in isolation: the child's refs resolve
+    to both of the ancestor's migrations -- its table and ``_deleted_at`` to ``0001``, the tenant
+    column to ``0002`` -- and only the one the other does not reach should be written."""
+    from guitars.management.enforcement.command import Command
+
+    app = apps.get_app_config('crossapp_tenant_child')
+    command = Command()
+    command._build_operations(app)
+
+    assert command._object_dependencies_for(app) == [
+        ('crossapp_tenant_ancestor', '0002_tenantedancestor_label')
+    ]

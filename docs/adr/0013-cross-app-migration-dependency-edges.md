@@ -76,9 +76,8 @@ answered a question nobody needed to ask.
   re-running the generator adds nothing to it — hence a `--check` message actionable on its own.
   Folding edges into `[DIGEST:…]` was rejected: it would re-digest every enforcement migration in
   every consuming project, the exact cost [ADR 0006](0006-inline-generated-migration-sql.md) avoids.
-- **Edges are not perfectly minimal.** References are recorded when a rule is *built*, but an
-  operation already recorded is not re-emitted, so a partial regeneration can attach an edge for a
-  rule in an earlier migration. It cannot cycle and is the edge that migration should have carried.
+- **An edge the graph already implies is dropped** (`drop_implied_edges`). Two refs into one app routinely resolve differently — a table, and a column added later — and the older is then reachable from the newer, so writing it says nothing and reads as if the rule needed two orderings. Only *implied* ones go: edges neither of which reaches the other both stay, and so does one on a node the loader never saw.
+- **Not minimal in one remaining way.** References are recorded when a rule is *built*, but an operation already recorded is not re-emitted, so a partial regeneration can attach an edge for a rule in an earlier migration. It cannot cycle and is the edge that one should have carried.
 - **A latent bug in the writer had to be fixed first.** `write_migration_file` deduped a dependency
   by migration **name** alone — harmless for function migrations, whose names never collided, but
   cross-app edges routinely point at an `0001_initial`, so the scaffold's own masked another app's

@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     'ObjectRef',
+    'drop_implied_edges',
     'resolve_dependencies',
     'resolve_object_migration',
 ]
@@ -120,6 +121,23 @@ def resolve_object_migration(loader: MigrationLoader, ref: ObjectRef) -> tuple[s
         ):
             found = name
     return None if found is None else (ref.app_label, found)
+
+
+def drop_implied_edges(
+    loader: MigrationLoader, edges: list[tuple[str, str]]
+) -> list[tuple[str, str]]:
+    """*edges* with every one already reachable from another removed. Two refs into one app
+    routinely resolve to different migrations -- a table and a column added later -- and the
+    older is then implied, so writing it says nothing the graph did not already say."""
+    plans = {
+        edge: set(loader.graph.forwards_plan(edge)) - {edge}
+        for edge in edges
+        if edge in loader.graph.node_map
+    }
+    # Maximal elements of a strict partial order, so the answer is well defined and non-empty:
+    # reachability on an acyclic graph cannot have two edges imply each other. An edge the graph
+    # does not have is kept -- nothing can be shown to imply it, and dropping it would lose it.
+    return [edge for edge in edges if not any(edge in plan for plan in plans.values())]
 
 
 def resolve_dependencies(

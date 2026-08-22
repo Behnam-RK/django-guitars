@@ -7,7 +7,6 @@ class Migration(migrations.Migration):
 
     dependencies = [
         ('crossapp_tenant_ancestor', '0002_tenantedancestor_label'),
-        ('crossapp_tenant_ancestor', '0001_initial'),
         ('testapp', '0017_auto_enforcement_parent_trigger_function'),
         ('crossapp_tenant_child', '0001_initial'),
     ]

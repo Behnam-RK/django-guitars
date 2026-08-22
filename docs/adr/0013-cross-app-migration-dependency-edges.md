@@ -57,16 +57,15 @@ answered a question nobody needed to ask.
    the app's migrations in **graph** order (a squash can order two names against their numeric
    prefix) and takes the **last** operation establishing the object under its *current* name — a
    `RenameField` supersedes the `AddField`, the rule naming the current spelling.
-3. **Cycle safety is asserted, not assumed.** An edge that would make the graph cyclic is dropped
-   with a warning naming both migrations. It should never happen per the construction above, but a
-   graph Django rejects bricks `migrate` outright, worse than the failure the edge prevents.
+3. **No cycle guard, because a cycle cannot happen.** One was written and was theatre: the loader is rebuilt after the scaffold, so the app's newest leaf *is* that scaffold, nothing on disk can depend on a node written a moment ago, and the check answered "no cycle" for every possible input — its one test faked the verdict. Point 2 is the real argument and it is a proof: an edge at the creating migration points backwards. The one shape that genuinely cycles, an edge onto a migration already depending on the file that needs it, is what point 5 declines to report.
 4. **An unresolvable reference warns and emits no edge** — 2.4.2's behaviour, said out loud. An app
    with no migrations is legitimate (a third-party model its own package migrates), and refusing
    there would withdraw a rule that works today.
 5. **`--check` fails on a missing edge**, by **reachability** rather than by the literal tuple: an
    ordering already guaranteed through another path is guaranteed, and flagging it would fail a
-   build over a graph that works. The message prints the tuple to paste — so an edge point 3 drops
-   for cycling is not demanded either: Django would reject that tuple, leaving no move to clear it.
+   build over a graph that works. The message prints the tuple to paste — and is withheld where the
+   edge would land on a migration already depending on that file: Django rejects such a graph, so
+   printing it would be red with no move that clears it.
 
 ## Consequences
 

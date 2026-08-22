@@ -27,7 +27,6 @@ from guitars.management.enforcement.graph import (
     ObjectRef,
     resolve_dependencies,
     resolve_object_migration,
-    would_close_a_cycle,
 )
 from guitars.management.enforcement.headers import (
     _RE_MTI_UPDATED_AT,
@@ -1380,9 +1379,9 @@ class OperationsMixin:
         return self._loader_cache
 
     def _drop_cached_migration_loader(self) -> None:
-        """Forget the graph after writing a migration file. Called on both writes, the scaffold
-        and the rewrite: the first adds a node the cycle question has to see, the second changes
-        that node's dependencies. Cheap to over-invalidate, wrong to under-."""
+        """Forget the graph after writing a migration file. The file carries edges into other
+        apps, so it moves what the *next* app's reachability question answers -- the scaffold
+        write itself needs no drop, a ref always resolving in an app the new node is not in."""
         self._loader_cache = None
 
     def _dependencies_for(self, app: AppConfig, operations_blob: str) -> list[tuple[str, str]]:
@@ -1403,9 +1402,6 @@ class OperationsMixin:
         refs = [ref for ref in self._object_refs.get(app.label, []) if ref.app_label != app.label]
         if not refs:
             return []
-        # Not built in the constructor: the scaffold for *this* app was written moments ago by
-        # ``create_empty_migration_file``, which drops the cached loader, so the graph read here
-        # includes it -- the cycle question below is about the file actually being written.
         loader = self._migration_loader()
         edges, unresolved = resolve_dependencies(loader, refs, own_app=app.label)
         for ref in unresolved:
@@ -1417,7 +1413,7 @@ class OperationsMixin:
                 '`migrate` may reach the rule first. Add the edge by hand if that app is '
                 'migrated elsewhere.'
             )
-        return [edge for edge in edges if not self._refuse_cyclic_edge(app, edge, loader)]
+        return edges
 
     def _missing_edge_notes(self, app: AppConfig) -> list[str]:
         """Enforcement migrations of *app* that name another app's table without being ordered
@@ -1440,9 +1436,9 @@ class OperationsMixin:
             # quotes per part and a self-quoted one passes through, so the naive form matches
             # neither and the guard would go quiet on exactly the tables it is for.
             rendered_table = _identifiers._quote_table(table)
-            # Everything *edge* already depends on: such a migration cannot take the edge (see
-            # ``_refuse_cyclic_edge``), so reporting it would fail ``--check`` over a tuple no
-            # operator can paste -- red with no move that clears it.
+            # Everything *edge* already depends on: pasting the edge onto one of those is the
+            # one shape that genuinely cycles, and Django rejects such a graph outright -- so
+            # reporting it would be red with no move that clears it.
             behind_edge = (
                 set(loader.graph.forwards_plan(edge)) if edge in loader.graph.node_map else set()
             )
@@ -1501,24 +1497,6 @@ class OperationsMixin:
             return cast('str', model._meta.get_field(ref.field).column)
         except FieldDoesNotExist:
             return None
-
-    def _refuse_cyclic_edge(self, app: AppConfig, edge: tuple[str, str], loader) -> bool:
-        """Whether *edge* has to be dropped for closing a cycle. It should never be: an edge to
-        the migration that *creates* an object is older than the rule naming it. Asked anyway --
-        a graph Django rejects bricks ``migrate`` outright, worse than what the edge prevents."""
-        leaves = sorted(loader.graph.leaf_nodes(app.label))
-        # The app's newest leaf stands in for the file being written: normally the scaffold
-        # itself, the loader having been built after it was written, and otherwise the leaf the
-        # scaffold depends on -- anything reaching which reaches the new file too.
-        if not leaves or not would_close_a_cycle(loader, leaves[-1], edge):
-            return False
-        self._mti_cascade_warnings.append(
-            f"Enforcement migration for '{app.label}' needs '{edge[0]}.{edge[1]}' to run first, "
-            f"but '{edge[0]}' already depends on '{app.label}', so the edge would make the "
-            'migration graph cyclic and Django would refuse every `migrate`. Emitted without '
-            f"it -- migrate '{edge[0]}' before '{app.label}', or split the two apps' models."
-        )
-        return True
 
     def _function_dependencies_for(self, operations_blob: str) -> list[tuple[str, str]]:
         """Function-migration dependencies an app's operations actually require -- keyed off
@@ -1582,7 +1560,6 @@ class OperationsMixin:
                 continue
 
             migration_file = _generator.create_empty_migration_file(app, migration_name)
-            self._drop_cached_migration_loader()
             dependencies = (
                 dependencies_for(app, '\n'.join(operations)) if dependencies_for else None
             )

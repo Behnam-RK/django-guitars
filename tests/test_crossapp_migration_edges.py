@@ -406,28 +406,9 @@ def test_the_note_names_only_a_migration_carrying_the_column_the_reference_resol
         assert len(named._missing_edge_notes(app)) == 1
 
 
-def test_an_edge_that_would_close_a_cycle_is_dropped_with_a_warning():
-    """It should be unreachable: an edge points at the migration that *creates* an object, which
-    is older than any rule naming it. Asserted anyway, because the failure it guards against --
-    a graph Django rejects outright -- is worse than the ordering failure the edge prevents."""
-    from guitars.management.enforcement import operations as operations_module
-
-    command = _command_over('testapp', [ObjectRef('crossapp_owner', 'Owner', 'target')])
-    original = operations_module.would_close_a_cycle
-    operations_module.would_close_a_cycle = lambda *_: True
-    try:
-        edges = command._object_dependencies_for(apps.get_app_config('testapp'))
-    finally:
-        operations_module.would_close_a_cycle = original
-
-    assert edges == []
-    assert any('cyclic' in note for note in command._mti_cascade_warnings)
-    assert any('migrate' in note for note in command._mti_cascade_warnings)
-
-
-def test_an_edge_that_closes_no_cycle_is_emitted():
-    """The ordinary path, and the one the cycle check must not stand in the way of. Same shape as
-    the refusal test above without the patched verdict, so the two differ only in the answer."""
+def test_a_resolved_reference_becomes_an_edge_with_nothing_warned():
+    """The whole of the emitting path: a ref resolves, the edge comes back, and no warning is
+    raised. Every other outcome here is a warning with no edge, so this is the one that pairs."""
     command = _command_over('testapp', [ObjectRef('crossapp_owner', 'Owner', 'target')])
 
     assert command._object_dependencies_for(apps.get_app_config('testapp')) == [

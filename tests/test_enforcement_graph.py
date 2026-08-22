@@ -16,13 +16,12 @@ from django.db.migrations.operations import (
     RunSQL,
     SeparateDatabaseAndState,
 )
-from django.db.models import CASCADE, AutoField, CharField, ForeignKey
+from django.db.models import AutoField, CharField
 
 from guitars.management.enforcement.graph import (
     ObjectRef,
     resolve_dependencies,
     resolve_object_migration,
-    would_close_a_cycle,
 )
 
 
@@ -357,59 +356,6 @@ def test_an_unresolvable_ref_is_reported_rather_than_dropped(loader):
 
     assert edges == [('testapp', '0029_placard_kiosk_foyer')]
     assert [ref.describe() for ref in unresolved] == ['testapp.Ghost.col']
-
-
-# ─── cycle safety ───
-
-
-def _two_app_history() -> _FakeLoader:
-    return _FakeLoader(
-        {
-            ('a', '0001_initial'): _migration(
-                '0001_initial', 'a', [CreateModel('A', [('id', AutoField(primary_key=True))])], []
-            ),
-            ('b', '0001_initial'): _migration(
-                '0001_initial',
-                'b',
-                [
-                    CreateModel(
-                        'B',
-                        [
-                            ('id', AutoField(primary_key=True)),
-                            ('a', ForeignKey('a.A', CASCADE)),
-                        ],
-                    )
-                ],
-                [('a', '0001_initial')],
-            ),
-            ('a', '0002_rule'): _migration('0002_rule', 'a', [], [('a', '0001_initial')]),
-        }
-    )
-
-
-def test_an_edge_to_an_older_migration_does_not_close_a_cycle():
-    """The ordinary case, and the reason the field-creating migration is the right target: it
-    is always older than the rule naming it, so the edge points backwards and cannot loop."""
-    history = _two_app_history()
-
-    assert not would_close_a_cycle(history, ('b', '0001_initial'), ('a', '0001_initial'))
-
-
-def test_an_edge_whose_target_already_depends_on_the_migration_closes_a_cycle():
-    """``b.0001`` already depends on ``a.0001``, so making ``a.0001`` depend back on ``b.0001``
-    is a loop. Asserted rather than assumed -- Django rejects such a graph with
-    ``CircularDependencyError``, which bricks ``migrate`` outright rather than in one order."""
-    history = _two_app_history()
-
-    assert would_close_a_cycle(history, ('a', '0001_initial'), ('b', '0001_initial'))
-
-
-def test_a_node_the_graph_does_not_have_is_not_a_cycle():
-    """The migration being written is not in the loaded graph yet -- it is the file about to be
-    scaffolded -- so an unknown node answers "no cycle" rather than raising."""
-    history = _two_app_history()
-
-    assert not would_close_a_cycle(history, ('a', '9999_not_written_yet'), ('a', '0001_initial'))
 
 
 def test_a_graph_node_with_no_migration_on_disk_is_skipped():

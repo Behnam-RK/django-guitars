@@ -27,7 +27,6 @@ __all__ = [
     'ObjectRef',
     'resolve_dependencies',
     'resolve_object_migration',
-    'would_close_a_cycle',
 ]
 
 
@@ -121,19 +120,6 @@ def resolve_object_migration(loader: MigrationLoader, ref: ObjectRef) -> tuple[s
         ):
             found = name
     return None if found is None else (ref.app_label, found)
-
-
-def would_close_a_cycle(
-    loader: MigrationLoader, migration: tuple[str, str], dependency: tuple[str, str]
-) -> bool:
-    """Whether depending on *dependency* would make the graph cyclic. Asserted rather than
-    assumed: an edge to the migration that *creates* an object is older than the rule naming it
-    and so should never close one, but a graph Django rejects bricks ``migrate`` outright."""
-    # *dependency* reaching *migration* is what a cycle is here -- the new edge points the other
-    # way. Read off the existing graph, so no node has to be added to ask.
-    if dependency not in loader.graph.node_map or migration not in loader.graph.node_map:
-        return False
-    return migration in set(loader.graph.forwards_plan(dependency)) - {dependency}
 
 
 def resolve_dependencies(

@@ -15,7 +15,15 @@ import pytest
 from django.apps import apps
 from django.core.management import CommandError, call_command
 from django.db.migrations.loader import MigrationLoader
+
+from guitars.management.enforcement.graph import ObjectRef
 from django.test import override_settings
+
+
+#: Two tests here mutate the crossapp enforcement migrations in place, and the rest read them.
+#: ``xdist_group`` pins the module to one worker; under ``-n auto`` a reader on another worker
+#: otherwise sees a file mid-mutation. Honoured only because ``--dist loadgroup`` is in addopts.
+pytestmark = pytest.mark.xdist_group(name='crossapp_migration_files')
 
 
 def _enforcement_migration(app_label: str) -> Path:
@@ -243,3 +251,69 @@ def test_check_accepts_an_ordering_guaranteed_through_another_path():
     ordering guaranteed, and flagging it would fail a build over a graph that works."""
     with _without_dependency('crossapp_owner', 'crossapp_dependent'):
         _check('crossapp_owner')  # still reachable via crossapp_owner.0001_initial
+
+
+# ─── the paths that should never be taken ───
+
+
+def _command_over(app_label: str, refs: list) -> object:
+    """A command whose recorded references are *refs*, bypassing the build. The paths below are
+    all "should never happen" branches, and constructing the model shapes that reach them would
+    test the shapes rather than the branches."""
+    from guitars.management.enforcement.command import Command
+
+    command = Command()
+    command._object_refs[app_label] = refs
+    return command
+
+
+def test_a_reference_nothing_creates_warns_instead_of_emitting_an_edge():
+    """An app with no migration creating the object is legitimate -- a third-party model its own
+    package migrates -- so the rule stands and the operator is told. Refusing it would withdraw
+    a rule that works today; emitting silence is what 2.4.2 did."""
+    command = _command_over('testapp', [ObjectRef('crossapp_owner', 'Ghost', 'nope')])
+
+    edges = command._object_dependencies_for(apps.get_app_config('testapp'))
+
+    assert edges == []
+    assert any('crossapp_owner.Ghost.nope' in note for note in command._mti_cascade_warnings)
+    assert any('by hand' in note for note in command._mti_cascade_warnings)
+
+
+def test_a_reference_to_a_model_that_no_longer_exists_is_not_checked():
+    """A migration older than a deleted model still mentions its table, and that is not this
+    check's business -- ``_ref_table`` answers ``None`` and the reference is passed over rather
+    than reported against a model the registry cannot resolve."""
+    command = _command_over('testapp', [ObjectRef('crossapp_owner', 'Deleted', 'gone')])
+
+    assert command._missing_edge_notes(apps.get_app_config('testapp')) == []
+
+
+def test_an_edge_that_would_close_a_cycle_is_dropped_with_a_warning():
+    """It should be unreachable: an edge points at the migration that *creates* an object, which
+    is older than any rule naming it. Asserted anyway, because the failure it guards against --
+    a graph Django rejects outright -- is worse than the ordering failure the edge prevents."""
+    from guitars.management.enforcement import operations as operations_module
+
+    command = _command_over('testapp', [ObjectRef('crossapp_owner', 'Owner', 'target')])
+    original = operations_module.would_close_a_cycle
+    operations_module.would_close_a_cycle = lambda *_: True
+    try:
+        edges = command._object_dependencies_for(apps.get_app_config('testapp'))
+    finally:
+        operations_module.would_close_a_cycle = original
+
+    assert edges == []
+    assert any('cyclic' in note for note in command._mti_cascade_warnings)
+    assert any('migrate' in note for note in command._mti_cascade_warnings)
+
+
+def test_an_edge_that_closes_no_cycle_is_emitted():
+    """The ordinary path, and the one the cycle check must not stand in the way of. Same shape as
+    the refusal test above without the patched verdict, so the two differ only in the answer."""
+    command = _command_over('testapp', [ObjectRef('crossapp_owner', 'Owner', 'target')])
+
+    assert command._object_dependencies_for(apps.get_app_config('testapp')) == [
+        ('crossapp_owner', '0001_initial')
+    ]
+    assert command._mti_cascade_warnings == []

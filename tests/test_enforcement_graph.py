@@ -307,3 +307,19 @@ def test_a_node_the_graph_does_not_have_is_not_a_cycle():
     history = _two_app_history()
 
     assert not would_close_a_cycle(history, ('a', '9999_not_written_yet'), ('a', '0001_initial'))
+
+
+def test_a_graph_node_with_no_migration_on_disk_is_skipped():
+    """The graph and ``disk_migrations`` can diverge -- Django's loader adds replacement nodes
+    for a squash whose replaced files are gone. Skipped rather than raising: the question is
+    which migration creates an object, and a node with no operations answers nothing."""
+    history = _renamed_field_history()
+    del history.disk_migrations[('shop', '0003_rename')]
+
+    # The node is still on the graph, so it is still walked -- and the rename it carried is
+    # gone with it, so the answer falls back to where the field was added.
+    assert resolve_object_migration(history, ObjectRef('shop', 'Shop', 'new_name')) is None
+    assert resolve_object_migration(history, ObjectRef('shop', 'Shop', 'old_name')) == (
+        'shop',
+        '0002_add',
+    )

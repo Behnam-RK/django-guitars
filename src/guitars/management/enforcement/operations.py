@@ -1506,10 +1506,18 @@ class OperationsMixin:
         renders ``policy._qualified_table``, which leaves a bare name unquoted."""
         if _identifiers._quote_table(table) in content:
             return True
-        # On identifier boundaries, the quoted form needing none: a bare ``shop`` is a substring
-        # of ``shopping``, and a false match here names a migration whose rule is innocent.
-        bare = re.escape(_policy._qualified_table(table))
-        return re.search(rf'(?<![\w."]){bare}(?![\w."])', content) is not None
+        try:
+            bare = _policy._qualified_table(table)
+        except ValueError:
+            # A ``db_table`` no policy could spell unquoted (mixed case, a space, a hyphen).
+            # ``_quote_table`` above is then the only form emitted, so the answer is no --
+            # raising here would crash the very report this guard exists to print.
+            return False
+        # Delimited by SQL, never by a quote: a bare ``shop`` is a substring of ``shopping``,
+        # sits inside a ``('shop', '0001_initial')`` dependency tuple, and is the escaped
+        # literal an MTI ``updated_at`` trigger re-quotes at fire time -- none of those name it.
+        edge = r'[\w."\']'
+        return re.search(rf'(?<!{edge}){re.escape(bare)}(?!{edge})', content) is not None
 
     @staticmethod
     def _ref_column(ref: ObjectRef) -> str | None:

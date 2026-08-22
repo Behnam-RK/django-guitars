@@ -17,6 +17,7 @@ from django.core.management import CommandError, call_command
 from django.db.migrations.loader import MigrationLoader
 from django.test import override_settings
 
+from guitars import sql
 from guitars.management.enforcement.graph import ObjectRef
 from guitars.management.enforcement.operations import OperationsMixin
 
@@ -474,9 +475,9 @@ def test_the_policy_is_planned_after_the_migration_adding_the_column_it_reads():
     ]
 )
 def test_check_fails_when_the_policy_edge_is_absent():
-    """The retrofit guard over a family whose table is rendered *unquoted*: a rule quotes per
-    part, ``policy._qualified_table`` leaves a bare name alone, so matching only the quoted
-    form left this one silent on exactly the migration it exists to report."""
+    """The retrofit guard reaching the policy's owner join at all -- the edge is what the tenant
+    column needs and nothing else in the chain names it. Which *form* of the table name the
+    match has to accept is a separate question, asserted below off the rendered SQL."""
     with _without_dependency(
         'crossapp_tenant_child', 'crossapp_tenant_ancestor', '0002_tenantedancestor_label'
     ):
@@ -490,9 +491,47 @@ def test_check_fails_when_the_policy_edge_is_absent():
     _check('crossapp_tenant_child')  # and green again once restored
 
 
-def test_a_bare_table_name_is_matched_on_identifier_boundaries():
-    """The unquoted form only. A rule's quoted rendering needs no boundary check, but a bare
-    ``shop`` is a substring of ``shopping`` -- and a false match names an innocent migration."""
-    assert OperationsMixin._names_table('FROM shop AS _guitars_owner', 'shop')
-    assert not OperationsMixin._names_table('FROM shopping AS _guitars_owner', 'shop')
-    assert OperationsMixin._names_table('UPDATE "shop" SET', 'shop')
+def test_a_policy_naming_an_ancestor_renders_no_quoted_form_to_match():
+    """Why the match had to widen, read off the SQL rather than a fixture that also carries a
+    rule quoting the same table: ``create_table_rls`` names the ancestor and never quotes it, so
+    the quoted membership test alone answers no on the one operation the guard is here for."""
+    rendered = '\n'.join(
+        sql.create_table_rls(
+            table='child_tbl',
+            columns={},
+            owner_table='ancestor_tbl',
+            owner_pk='id',
+            child_pk='parent_ptr_id',
+            owner_columns={'label': 'label_id'},
+        )
+    )
+
+    assert '"ancestor_tbl"' not in rendered
+    assert OperationsMixin._names_table(rendered, 'ancestor_tbl')
+
+
+@pytest.mark.parametrize(
+    ('content', 'named'),
+    [
+        ('FROM shop AS _guitars_owner', True),
+        ('UPDATE "shop" SET', True),
+        # A bare ``shop`` is a substring of ``shopping``; it also sits inside a dependency tuple
+        # and inside the escaped literal an MTI ``updated_at`` trigger re-quotes at fire time.
+        # None of the three names the table, and a false match blames an innocent file.
+        ('FROM shopping AS _guitars_owner', False),
+        ("    dependencies = [\n        ('shop', '0001_initial'),\n    ]", False),
+        ("EXECUTE FUNCTION set_parent_updated_at('', 'shop', 'id', 'p_id')", False),
+    ],
+)
+def test_a_bare_table_name_is_matched_on_sql_boundaries(content, named):
+    """The unquoted form only -- a rule's quoted rendering needs no boundary check."""
+    assert OperationsMixin._names_table(content, 'shop') is named
+
+
+@pytest.mark.parametrize('table', ['MyTable', 'my-table', 'my table'])
+def test_a_table_no_policy_could_spell_unquoted_answers_no_rather_than_raising(table):
+    """``_quote_table`` takes any ``db_table``; ``policy._qualified_table`` refuses one that is
+    not a plain lower-case identifier. A rule may still name such a table, and the guard walks
+    every migration file -- so the first one not quoting it must not crash the report."""
+    assert not OperationsMixin._names_table('nothing quoting it here', table)
+    assert OperationsMixin._names_table(f'UPDATE "{table}" SET', table)

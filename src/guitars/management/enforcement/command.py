@@ -34,6 +34,7 @@ from guitars.tenancy.discovery import owner_autofill_notes, tenant_policies_enab
 
 if TYPE_CHECKING:
     from django.apps import AppConfig
+    from django.db.migrations.loader import MigrationLoader
 
 
 class Command(OperationsMixin, BaseCommand):
@@ -104,6 +105,10 @@ class Command(OperationsMixin, BaseCommand):
         # parsed at CREATE time, so anything it references in *another* app needs a dependency
         # edge. Filled as the rules are built and read back per app -- see ``_object_refs``.
         self._object_refs: dict[str, list[ObjectRef]] = {}
+        # The project's migration graph, shared by the two readers of it below and dropped
+        # whenever this command writes a file. ``None`` is "not built"; building one imports
+        # every migration module in the project, so it is worth not doing per app.
+        self._loader_cache: MigrationLoader | None = None
         self._required_autofill_cache: dict[tuple[str, str], tuple[str, str]] | None = None
         self._relocated_autofill_cache: dict[tuple[str, str], tuple[str, str]] | None = None
 

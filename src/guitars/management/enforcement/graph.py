@@ -58,9 +58,9 @@ def _app_migrations_in_order(loader: MigrationLoader, app_label: str) -> list[st
 
 
 def _establishes(operation, model: str, field: str | None) -> bool:
-    """Whether *operation* makes ``model[.field]`` exist **under the name asked for**. A rename
-    counts and an earlier creation then does not: the rule names the current spelling, which
-    only exists from the rename onwards. ``AlterField`` counts only for a ``db_column`` move."""
+    """Whether *operation* makes ``model[.field]`` exist **under the name asked for**: a rename
+    counts and the earlier creation then does not, the rule naming the current spelling. An
+    ``AlterField`` counts only where the field declares a ``db_column``."""
     model_lower = model.lower()
     if field is None:
         return (
@@ -75,9 +75,9 @@ def _establishes(operation, model: str, field: str | None) -> bool:
             operation.model_name.lower() == model_lower and operation.name.lower() == field.lower()
         )
     if isinstance(operation, AlterField):
-        # Only with an explicit ``db_column``, the one thing an ``AlterField`` can change about
-        # the *physical* column. Counting every one -- and this resolver takes the **last** --
-        # drags the edge onto an unrelated ``null=True``, over-constraining like a leaf edge.
+        # A ``db_column`` is the only *physical* change an ``AlterField`` makes, and this
+        # resolver takes the **last** match, so counting every one drags the edge onto an
+        # unrelated ``null=True``. Nothing holds the previous state, hence "declares", not "moved".
         return (
             operation.field.db_column is not None
             and operation.model_name.lower() == model_lower

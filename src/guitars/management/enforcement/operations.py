@@ -160,6 +160,7 @@ class OperationsMixin:
         _owner_arms_cache: dict[str, list[OwnerArm]] | None
         _owned_tenancy_cache: dict[tuple[str, str, str], list[str]] | None
         _object_refs: dict[str, list[ObjectRef]]
+        _loader_cache: MigrationLoader | None
         _refusals_over_live_rules: list[str]
         _missing_edges: list[str]
         _table_app_labels_cache: dict[str, str] | None
@@ -430,6 +431,12 @@ class OperationsMixin:
                 )
             elif is_mti_child(model, '_deleted_at'):
                 mti = self._mti_context(model, table, '_deleted_at')
+                # The redirect rule's action names the *ancestor's* table and ``_deleted_at``,
+                # both resolved as PostgreSQL parses it, so a chain crossing apps needs the same
+                # edges. Unlike the trigger above: its parent table is a literal, quoted to fire.
+                ancestor = column_owner(model, '_deleted_at')
+                self._record_object_ref(model, ancestor)
+                self._record_object_ref(model, ancestor, '_deleted_at')
                 mti_ident = {
                     'child_table': _identifiers._quote_table(mti['child_table']),
                     'parent_table': _identifiers._quote_table(mti['parent_table']),
@@ -1364,6 +1371,20 @@ class OperationsMixin:
                     )
         return notes
 
+    def _migration_loader(self) -> MigrationLoader:
+        """The project's migration graph, built at most once between writes. Building one imports
+        every migration module in the project, and both readers below ask one question per app --
+        so a per-call build squares that sweep against the local-app count."""
+        if self._loader_cache is None:
+            self._loader_cache = MigrationLoader(None, ignore_no_migrations=True)
+        return self._loader_cache
+
+    def _drop_cached_migration_loader(self) -> None:
+        """Forget the graph after writing a migration file. Called on both writes, the scaffold
+        and the rewrite: the first adds a node the cycle question has to see, the second changes
+        that node's dependencies. Cheap to over-invalidate, wrong to under-."""
+        self._loader_cache = None
+
     def _dependencies_for(self, app: AppConfig, operations_blob: str) -> list[tuple[str, str]]:
         """Every edge *app*'s new migration needs: the shared-function ones read off the
         operation headers, plus one per object the rules name in another app. Both, in that
@@ -1382,10 +1403,10 @@ class OperationsMixin:
         refs = [ref for ref in self._object_refs.get(app.label, []) if ref.app_label != app.label]
         if not refs:
             return []
-        # Loaded here rather than in the constructor: the scaffold for *this* app was written
-        # moments ago by ``create_empty_migration_file``, and the graph has to include it for
-        # the cycle question below to be asked about the file actually being written.
-        loader = MigrationLoader(None, ignore_no_migrations=True)
+        # Not built in the constructor: the scaffold for *this* app was written moments ago by
+        # ``create_empty_migration_file``, which drops the cached loader, so the graph read here
+        # includes it -- the cycle question below is about the file actually being written.
+        loader = self._migration_loader()
         edges, unresolved = resolve_dependencies(loader, refs, own_app=app.label)
         for ref in unresolved:
             # Warned, not refused: an app with no migrations at all is a legitimate
@@ -1407,7 +1428,7 @@ class OperationsMixin:
         refs = [ref for ref in self._object_refs.get(app.label, []) if ref.app_label != app.label]
         if not refs:
             return []
-        loader = MigrationLoader(None, ignore_no_migrations=True)
+        loader = self._migration_loader()
         notes: list[str] = []
         for ref in refs:
             edge = resolve_object_migration(loader, ref)
@@ -1415,6 +1436,12 @@ class OperationsMixin:
             if edge is None or table is None:
                 continue
             column = self._ref_column(ref)
+            # Everything *edge* already depends on: such a migration cannot take the edge (see
+            # ``_refuse_cyclic_edge``), so reporting it would fail ``--check`` over a tuple no
+            # operator can paste -- red with no move that clears it.
+            behind_edge = (
+                set(loader.graph.forwards_plan(edge)) if edge in loader.graph.node_map else set()
+            )
             for path, content in _generator.iter_migration_files(app):
                 # Only a migration whose SQL actually names the table: refs are collected per
                 # app, and an app's earlier enforcement migration may predate the rule needing
@@ -1428,6 +1455,7 @@ class OperationsMixin:
                     # reports the older file forever. Unquoted -- the bare name is in both.
                     or (column is not None and column not in content)
                     or node not in loader.graph.node_map
+                    or node in behind_edge
                     or edge in set(loader.graph.forwards_plan(node))
                 ):
                     continue
@@ -1550,6 +1578,7 @@ class OperationsMixin:
                 continue
 
             migration_file = _generator.create_empty_migration_file(app, migration_name)
+            self._drop_cached_migration_loader()
             dependencies = (
                 dependencies_for(app, '\n'.join(operations)) if dependencies_for else None
             )
@@ -1560,6 +1589,7 @@ class OperationsMixin:
                 operations_digest=operations_digest,
                 dependencies=dependencies,
             )
+            self._drop_cached_migration_loader()
 
             self.stdout.write(
                 self.style.MIGRATE_HEADING(f"Enforcement migrations for '{app.label}':")

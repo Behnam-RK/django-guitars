@@ -15,9 +15,10 @@ import pytest
 from django.apps import apps
 from django.core.management import CommandError, call_command
 from django.db.migrations.loader import MigrationLoader
+from django.test import override_settings
 
 from guitars.management.enforcement.graph import ObjectRef
-from django.test import override_settings
+from guitars.management.enforcement.operations import OperationsMixin
 
 
 #: Two tests here mutate the crossapp enforcement migrations in place, and the rest read them.
@@ -30,14 +31,18 @@ def _enforcement_migration(app_label: str) -> Path:
     return Path(apps.get_app_config(app_label).path) / 'migrations' / '0002_auto_enforcement.py'
 
 
+def _declared_dependencies(content: str) -> set[tuple[str, str]]:
+    """The ``dependencies`` list written into *content*. Scoped to that block, never the whole
+    file: an emitted policy's ``IN ('a', 'b')`` reads as a dependency tuple to the same regex."""
+    block = re.search(r'dependencies = \[(.*?)\]', content, re.DOTALL)
+    assert block is not None
+    return set(re.findall(r"\(\s*'([^']+)'\s*,\s*'([^']+)'\s*\)", block.group(1)))
+
+
 def _dependencies(app_label: str) -> set[tuple[str, str]]:
     """The ``dependencies`` list of *app_label*'s enforcement migration, read off the file --
     the migration objects Django loads normalise them, and the point is what was *written*."""
-    block = re.search(
-        r'dependencies = \[(.*?)\]', _enforcement_migration(app_label).read_text(), re.DOTALL
-    )
-    assert block is not None
-    return set(re.findall(r"\(\s*'([^']+)'\s*,\s*'([^']+)'\s*\)", block.group(1)))
+    return _declared_dependencies(_enforcement_migration(app_label).read_text())
 
 
 def _plan(app_label: str) -> list[tuple[str, str]]:
@@ -45,6 +50,51 @@ def _plan(app_label: str) -> list[tuple[str, str]]:
     loader = MigrationLoader(None, ignore_no_migrations=True)
     leaf = sorted(loader.graph.leaf_nodes(app_label))[-1]
     return list(loader.graph.forwards_plan(leaf))
+
+
+def _refs_recorded_for(app_label: str) -> list[ObjectRef]:
+    """The references a real build of *app_label*'s operations records. Asserted rather than the
+    generated file, for objects whose creating migration happens to be the one creating the
+    table: the edge would be identical either way, and the ref is what a later history splits."""
+    from guitars.management.enforcement.command import Command
+
+    command = Command()
+    command._build_operations(apps.get_app_config(app_label))
+    return command._object_refs.get(app_label, [])
+
+
+# ─── what a rule names, as the rules are built ───
+
+
+@pytest.mark.parametrize(
+    'ref',
+    [
+        # The table the rule updates, and the column it writes -- promoting a model to
+        # ``SetarModel`` gains that column in a migration later than the one creating its
+        # table, so an edge to the table alone would not order the column.
+        ObjectRef('crossapp_dependent', 'Shared', None),
+        ObjectRef('crossapp_dependent', 'Shared', '_deleted_at'),
+        # A co-owner arm: the column its ``NOT EXISTS`` reads, and the liveness column beside it.
+        ObjectRef('crossapp_dependent', 'LocalOwner', 'target'),
+        ObjectRef('crossapp_dependent', 'LocalOwner', '_deleted_at'),
+        ObjectRef('crossapp_third', 'ThirdOwner', 'target'),
+        ObjectRef('crossapp_third', 'ThirdOwner', '_deleted_at'),
+    ],
+)
+def test_an_owned_rule_records_every_object_its_action_names(ref):
+    """Structurally, as the rule is built -- a co-owner arm's table appears only in the rule
+    body, never in its header, so nothing could read these back off the rendered SQL."""
+    assert ref in _refs_recorded_for('crossapp_owner')
+
+
+def test_an_mti_redirect_rule_records_the_ancestor_table_and_its_deleted_at():
+    """``CREATE_MTI_SOFT_DELETE_RULE``'s action ``UPDATE``s the ancestor's table and its
+    ``_deleted_at``, both resolved as PostgreSQL parses it, so a chain crossing apps needs the
+    same edges. ``testapp``'s chains are one app, so only the recording can be asserted."""
+    refs = _refs_recorded_for('testapp')
+
+    assert ObjectRef('testapp', 'Ensemble', None) in refs
+    assert ObjectRef('testapp', 'Ensemble', '_deleted_at') in refs
 
 
 # ─── the edges themselves ───
@@ -77,7 +127,7 @@ def test_a_single_app_rule_gains_no_cross_app_edge():
     foreign = {
         path.name
         for path in testapp_migrations.glob('*_auto_enforcement*.py')
-        for app, _ in re.findall(r"\(\s*'([^']+)'\s*,\s*'([^']+)'\s*\)", path.read_text())
+        for app, _ in _declared_dependencies(path.read_text())
         if app not in {'testapp'}
     }
 
@@ -245,6 +295,35 @@ def test_check_fails_when_a_required_edge_is_absent_and_says_what_to_paste():
         'tests.crossapp_third',
     ]
 )
+def test_the_migration_graph_is_built_once_for_a_whole_check_run(monkeypatch):
+    """Building one imports every migration module in the project and the check asks a question
+    per in-scope app, so a build per call squares that sweep against the local-app count.
+    Counted, because the saving is invisible to every other assertion in this file."""
+    from guitars.management.enforcement import operations as operations_module
+
+    real = operations_module.MigrationLoader
+    builds: list[object] = []
+
+    def _counted(*args, **kwargs):
+        loader = real(*args, **kwargs)
+        builds.append(loader)
+        return loader
+
+    monkeypatch.setattr(operations_module, 'MigrationLoader', _counted)
+
+    _check('crossapp_dependent', 'crossapp_owner', 'crossapp_third')
+
+    assert len(builds) == 1
+
+
+@override_settings(
+    LOCAL_APPS=[
+        'tests.testapp',
+        'tests.crossapp_dependent',
+        'tests.crossapp_owner',
+        'tests.crossapp_third',
+    ]
+)
 def test_check_accepts_an_ordering_guaranteed_through_another_path():
     """Reachability, not a literal edge. ``crossapp_owner`` holds the foreign key, so its own
     ``0001_initial`` already depends on the dependent's -- dropping the explicit edge leaves the
@@ -280,13 +359,51 @@ def test_a_reference_nothing_creates_warns_instead_of_emitting_an_edge():
     assert any('by hand' in note for note in command._mti_cascade_warnings)
 
 
-def test_a_reference_to_a_model_that_no_longer_exists_is_not_checked():
-    """A migration older than a deleted model still mentions its table, and that is not this
-    check's business -- ``_ref_table`` answers ``None`` and the reference is passed over rather
-    than reported against a model the registry cannot resolve."""
+def test_a_reference_nothing_in_the_history_creates_is_not_checked():
+    """Nothing resolves it, so there is no migration to be ordered against and nothing to say.
+    The ``--check`` half of the warning above, which the generating half already covers."""
     command = _command_over('testapp', [ObjectRef('crossapp_owner', 'Deleted', 'gone')])
 
     assert command._missing_edge_notes(apps.get_app_config('testapp')) == []
+
+
+@pytest.mark.parametrize(
+    'ref',
+    [
+        # A migration older than a deleted model still mentions its table and column, and that
+        # is not this check's business: neither can be resolved against the live registry.
+        ObjectRef('crossapp_owner', 'Deleted', 'gone'),
+        ObjectRef('crossapp_owner', 'Owner', 'gone'),
+    ],
+)
+def test_a_reference_the_registry_can_no_longer_resolve_has_no_column(ref):
+    """``None`` rather than a raise, and rather than a guess: the column narrows *which* file a
+    note names, so answering it wrongly would name the wrong migration."""
+    assert OperationsMixin._ref_column(ref) is None
+
+
+def test_a_reference_naming_only_a_table_has_no_column():
+    """A cascade rule's related table and a joined arm's MTI ancestor name no column of their
+    own, so there is nothing for the file match to narrow on."""
+    assert OperationsMixin._ref_column(ObjectRef('crossapp_owner', 'Owner')) is None
+
+
+def test_the_note_names_only_a_migration_carrying_the_column_the_reference_resolves_to():
+    """Two refs into one app can share a table and resolve to *different* migrations -- a second
+    owning column added later -- so matching the table alone would report the older file forever,
+    a ``--check`` failure no edge on the file named could clear."""
+    app = apps.get_app_config('crossapp_third')
+
+    with _without_dependency('crossapp_third', 'crossapp_owner'):
+        # Same table, same missing edge, both unreachable -- only the column differs, and
+        # ``_created_at`` appears nowhere in an enforcement migration's SQL.
+        untouched = _command_over(
+            'crossapp_third', [ObjectRef('crossapp_owner', 'Owner', '_created_at')]
+        )
+        named = _command_over('crossapp_third', [ObjectRef('crossapp_owner', 'Owner', 'target')])
+
+        assert untouched._missing_edge_notes(app) == []
+        assert len(named._missing_edge_notes(app)) == 1
 
 
 def test_an_edge_that_would_close_a_cycle_is_dropped_with_a_warning():
@@ -317,3 +434,14 @@ def test_an_edge_that_closes_no_cycle_is_emitted():
         ('crossapp_owner', '0001_initial')
     ]
     assert command._mti_cascade_warnings == []
+
+
+def test_the_writer_is_handed_the_object_edges_and_not_only_the_function_ones():
+    """The wiring, at the seam ``handle()`` hands ``_generate_stage``. Unwiring it would leave
+    every test that reads a checked-in migration file green, the edges already being in them."""
+    command = _command_over('testapp', [ObjectRef('crossapp_owner', 'Owner', 'target')])
+
+    # An empty operations blob names no trigger header, so nothing comes back but the objects.
+    assert command._dependencies_for(apps.get_app_config('testapp'), '') == [
+        ('crossapp_owner', '0001_initial')
+    ]

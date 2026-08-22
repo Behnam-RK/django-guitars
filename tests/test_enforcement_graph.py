@@ -1,6 +1,6 @@
 """Tests for ``enforcement.graph`` (2.5.0): resolving an object an emitted rule names to the
-migration that makes it exist. Nothing calls this yet -- the edges it feeds are the next
-commit -- so these are unit tests over the checked-in history and hand-built graphs."""
+migration that makes it exist. Unit tests over the checked-in history and hand-built graphs;
+what the caller does with the edges is ``tests/test_crossapp_migration_edges.py``."""
 
 import pytest
 from django.db.migrations import Migration
@@ -8,6 +8,7 @@ from django.db.migrations.graph import MigrationGraph
 from django.db.migrations.loader import MigrationLoader
 from django.db.migrations.operations import (
     AddField,
+    AlterField,
     AlterModelTable,
     CreateModel,
     RenameField,
@@ -139,6 +140,54 @@ def test_a_name_the_rename_took_away_still_resolves_to_where_it_was_added():
     )
 
 
+def _altered_field_history(field: CharField) -> _FakeLoader:
+    """``code`` created in ``0001``, then altered in ``0002`` with whatever *field* declares."""
+    return _FakeLoader(
+        {
+            ('shop', '0001_initial'): _migration(
+                '0001_initial',
+                'shop',
+                [
+                    CreateModel(
+                        'Shop',
+                        [('id', AutoField(primary_key=True)), ('code', CharField(max_length=5))],
+                    )
+                ],
+                [],
+            ),
+            ('shop', '0002_alter'): _migration(
+                '0002_alter',
+                'shop',
+                [AlterField('shop', 'code', field)],
+                [('shop', '0001_initial')],
+            ),
+        }
+    )
+
+
+def test_an_alter_field_moving_the_db_column_establishes_the_column():
+    """``db_column`` is the one thing an ``AlterField`` changes about the *physical* column a rule
+    names, so the column under its current spelling only exists from the alter on."""
+    history = _altered_field_history(CharField(max_length=5, db_column='code_v2'))
+
+    assert resolve_object_migration(history, ObjectRef('shop', 'Shop', 'code')) == (
+        'shop',
+        '0002_alter',
+    )
+
+
+def test_an_alter_field_leaving_the_column_alone_does_not_move_the_edge():
+    """The narrowing that matters: this resolver takes the **last** match, so counting every
+    ``AlterField`` would drag the edge off ``0001`` and onto an unrelated ``null=True`` --
+    over-constraining the graph exactly the way depending on the app's leaf does."""
+    history = _altered_field_history(CharField(max_length=5, null=True))
+
+    assert resolve_object_migration(history, ObjectRef('shop', 'Shop', 'code')) == (
+        'shop',
+        '0001_initial',
+    )
+
+
 def test_a_renamed_model_establishes_its_columns_under_the_new_name():
     """A renamed model moves the table its columns live on, so a column reached through the new
     model name only exists from the rename on -- even though no field operation mentions it."""
@@ -167,15 +216,18 @@ def test_a_renamed_model_establishes_its_columns_under_the_new_name():
     )
 
 
-def test_a_retabled_model_resolves_to_the_alter_model_table():
-    """``db_table`` moving is the table-level equivalent of a rename: the rule names the new
-    table, which does not exist until the ``AlterModelTable`` runs."""
-    history = _FakeLoader(
+def _retabled_history() -> _FakeLoader:
+    return _FakeLoader(
         {
             ('shop', '0001_initial'): _migration(
                 '0001_initial',
                 'shop',
-                [CreateModel('Shop', [('id', AutoField(primary_key=True))])],
+                [
+                    CreateModel(
+                        'Shop',
+                        [('id', AutoField(primary_key=True)), ('code', CharField(max_length=5))],
+                    )
+                ],
                 [],
             ),
             ('shop', '0002_table'): _migration(
@@ -187,7 +239,24 @@ def test_a_retabled_model_resolves_to_the_alter_model_table():
         }
     )
 
-    assert resolve_object_migration(history, ObjectRef('shop', 'Shop')) == ('shop', '0002_table')
+
+def test_a_retabled_model_resolves_to_the_alter_model_table():
+    """``db_table`` moving is the table-level equivalent of a rename: the rule names the new
+    table, which does not exist until the ``AlterModelTable`` runs."""
+    assert resolve_object_migration(_retabled_history(), ObjectRef('shop', 'Shop')) == (
+        'shop',
+        '0002_table',
+    )
+
+
+def test_a_retabled_model_moves_its_columns_too():
+    """A column is no more present on a table that does not exist yet, so a *column* ref has to
+    resolve to the ``AlterModelTable`` as well. Resolving it to the original ``CreateModel``
+    would let a fresh ``migrate`` create the rule before the table it names was there."""
+    assert resolve_object_migration(_retabled_history(), ObjectRef('shop', 'Shop', 'code')) == (
+        'shop',
+        '0002_table',
+    )
 
 
 def test_order_is_read_off_the_graph_not_the_numeric_prefix():

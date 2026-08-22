@@ -658,6 +658,25 @@ def test_write_migration_file_skips_dependency_already_present(tmp_path):
     assert content.count('0001_initial') == 1
 
 
+def test_write_migration_file_keeps_a_dependency_whose_name_another_app_already_uses(tmp_path):
+    """Deduped on both halves, never the name alone: the scaffold depends on ``("testapp",
+    "0001_initial")`` and a cross-app edge routinely points at an ``0001_initial`` too, so
+    matching the name reads one as covering the other and drops a correctly computed edge."""
+    app, migration_file = _write_empty_migration(tmp_path)
+
+    Command._write_migration_file(
+        app=app,
+        migration_file=migration_file,
+        operations=[],
+        operations_digest='digest123',
+        dependencies=[('otherapp', '0001_initial')],
+    )
+
+    content = (tmp_path / 'migrations' / migration_file).read_text()
+    assert "('otherapp', '0001_initial')," in content
+    assert content.count('0001_initial') == 2
+
+
 def test_write_migration_file_raises_command_error_when_scaffold_has_no_dependencies_list(
     tmp_path,
 ):

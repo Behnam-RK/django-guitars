@@ -1,6 +1,6 @@
 """The dependent half of the cross-app ownership pair: a model owned from *another* app, so
-each owner's rule names a table its own app's migrations never create. Not in
-``INSTALLED_APPS`` -- its tests install it, as ``schema_qualified``'s do."""
+each owner's rule names a table its own app's migrations never create. Installed but left out
+of ``LOCAL_APPS`` -- the tests that generate or check its migrations scope explicitly."""
 
 from django.db.models import DO_NOTHING
 

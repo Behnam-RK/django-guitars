@@ -91,6 +91,9 @@ class Command(OperationsMixin, BaseCommand):
         self._rule_cycle_cache: set[tuple[str, str]] | None = None
         # Lazy for the same reason, and registry-wide for the reason ``_owner_arms`` gives.
         self._owner_arms_cache: dict[str, list[OwnerArm]] | None = None
+        # The other half of that shared answer, cached and lazy for the same two reasons -- and
+        # ``None`` rather than ``{}`` as the "not swept yet" mark, an empty verdict being the
+        # ordinary answer for a project with no tenancy at all.
         self._owned_tenancy_cache: dict[tuple[str, str, str], list[str]] | None = None
         self._required_autofill_cache: dict[tuple[str, str], tuple[str, str]] | None = None
         self._relocated_autofill_cache: dict[tuple[str, str], tuple[str, str]] | None = None

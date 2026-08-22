@@ -185,9 +185,9 @@ def owner_arms(candidates: Iterable[type[models.Model]]) -> dict[str, list[Owner
     arms: dict[str, list[OwnerArm]] = {}
     for model in _distinct(candidates):
         for field in model._meta.local_fields:
-            # Only the tests deciding whether an arm can be *expressed*. The ones about whether
-            # this owner's own rule can be *written* -- self-update, cycle, tenancy -- say
-            # nothing about whether its rows still own the target.
+            # Opens with ``_is_owned_candidate`` inlined (the narrowing ``ty`` needs, see there);
+            # a clause added there belongs here too. Then only the tests deciding whether an arm
+            # can be *expressed* -- self-update, cycle and tenancy say nothing about ownership.
             if (
                 not isinstance(field, OwningForeignKey)
                 # Reached through MTI is the same physical column on the ancestor's table,
@@ -260,9 +260,9 @@ def owned_tenancy_refusals(
             continue
         owner_table = model._meta.db_table
         for field in model._meta.local_fields:
-            # The earlier refusals that cost nothing to re-ask, so a key here is one tenancy
-            # alone would refuse -- a caller reading the dict as *the* reason a relation carries
-            # no rule would otherwise get the wrong remediation. One exception, below.
+            # ``_is_owned_candidate`` inlined as in :func:`owner_arms`, then the earlier refusals
+            # that cost nothing to re-ask, so a key here is one tenancy alone would refuse: read
+            # as *the* reason a relation carries no rule it would mislead. One exception, below.
             if (
                 not isinstance(field, OwningForeignKey)
                 or field.model is not model

@@ -281,20 +281,28 @@ def test_owned_tenancy_refusals_asks_each_model_for_its_dimensions_once(monkeypa
             class Meta:
                 app_label = 'testapp'
 
+        # Tenanted too, and on the dependent's own dimension so nothing is refused: an
+        # untenanted owner returns from ``assumed_policy_dimensions`` before the memo is ever
+        # reached, which would leave the arm half of this test passing vacuously.
         class Twice(SetarModel):
             first = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True, related_name='+')
             second = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True, related_name='+')
+            label = models.ForeignKey('testapp.Label', on_delete=CASCADE, null=True)
+            objects = tenanted_manager(label='label')
 
             class Meta:
                 app_label = 'testapp'
 
         return owned_tenancy_refusals([Shared, Twice])
 
-    _build()
+    refusals = _build()
 
     # Two relations over one dependent, each asking about the dependent and about the one
-    # co-owner arm: four questions over two tenanted models, and no table classified twice.
-    assert classified and len(classified) == len(set(classified))
+    # co-owner arm: four questions over two tenanted models, and neither table classified twice.
+    assert sorted(classified) == ['testapp_shared', 'testapp_twice']
+    # And on the same dimension, so the sweep runs the whole way through rather than short-
+    # circuiting on a refusal before the second relation is reached.
+    assert refusals == {}
 
 
 def test_owning_foreign_key_accepts_a_target_reached_through_mti():

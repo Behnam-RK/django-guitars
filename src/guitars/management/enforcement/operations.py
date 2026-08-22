@@ -927,6 +927,9 @@ class OperationsMixin:
         """Whether this outbound FK gets an owned soft-delete rule -- the mirror of
         :meth:`_is_cascade_candidate`, read off the declaration rather than ``on_delete``,
         which describes the opposite direction and cannot express ownership."""
+        # Spelled out again in ``introspection.owner_arms`` and ``owned_tenancy_refusals``,
+        # which cannot call this without losing the ``isinstance`` narrowing ``ty`` reads
+        # ``field.column``/``related_model`` through. A clause added here belongs in both.
         return (
             isinstance(fk_field, OwningForeignKey)
             # An FK reached through MTI is the same physical column on the ancestor's table,

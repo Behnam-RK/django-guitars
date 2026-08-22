@@ -1152,26 +1152,73 @@ def test_owned_targets_rechecks_a_target_whose_sibling_was_spared():
                 schema_editor.delete_model(model)
 
 
-def test_hard_delete_follows_exactly_the_relations_the_generator_emits_rules_for():
-    """The invariant CLAUDE.md states in prose, asserted over the whole registry: following in
-    Python what the generator refused destroys what the rule spared, and sparing what it emits
-    strands the row. Only the *cycle* half is structurally shared; this covers the rest."""
+def _owned_parity_mismatches(registry: list) -> dict:
+    """``label -> (emitted, followed)`` wherever the generator and ``hard_delete()`` disagree
+    about which of a model's owning columns carry a rule. *registry* is named rather than read,
+    so a shape ``testapp`` has no instance of can still be put to the same compare."""
     from guitars.management.enforcement.command import Command
 
     command = Command()
     # `handle()` fills this; left empty, `_rule_cycle_edges()` reads a registry of nothing --
     # the generator side of the compare with its cycle refusal off, so a cycle added to
     # `testapp` would read as a divergence rather than the agreement it actually is.
-    command.all_models = list(django_apps.get_models())
+    command.all_models = list(registry)
+    cycles = rule_update_cycle_edges(registry)
+    refusals = owned_tenancy_refusals(registry)
     mismatched = {}
-    for model in django_apps.get_models():
+    for model in registry:
         command.existing.soft_delete_owned.clear()
         command._mti_cascade_warnings.clear()
         emitted = set(re.findall(r'via "([^"]+)"!', '\n'.join(command._owned_operations(model))))
-        followed = {field.column for field in _owned_fields(model)}
+        followed = {field.column for field in _owned_fields(model, cycles, refusals)}
         if emitted != followed:
             mismatched[model._meta.label] = (sorted(emitted), sorted(followed))
+    return mismatched
 
+
+def test_hard_delete_follows_exactly_the_relations_the_generator_emits_rules_for():
+    """The invariant CLAUDE.md states in prose, asserted over the whole registry: following in
+    Python what the generator refused destroys what the rule spared, and sparing what it emits
+    strands the row. The end-to-end compare over every model ``testapp`` declares."""
+    assert _owned_parity_mismatches(list(django_apps.get_models())) == {}
+
+
+def test_hard_delete_follows_exactly_what_the_generator_emits_under_a_tenancy_refusal():
+    """The same compare over the one shape ``testapp`` has no instance of. ``owned_tenancy_
+    refusals`` is empty over the real registry, so the test above meets the tenancy half only
+    vacuously -- a divergence in how the two sides build the key would not show there."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        from guitars.tenancy import tenanted_manager
+
+        class Shared(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Plain(SetarModel):
+            target = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Scoped(SetarModel):
+            target = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True)
+            label = models.ForeignKey('testapp.Label', on_delete=CASCADE, null=True)
+            objects = tenanted_manager(label='label')
+
+            class Meta:
+                app_label = 'testapp'
+
+        registry = [Shared, Plain, Scoped]
+        return owned_tenancy_refusals(registry), _owned_parity_mismatches(registry)
+
+    refusals, mismatched = _build()
+
+    # One refused and one not, which is the asymmetry itself: ``Plain``'s rule would read the
+    # tenanted co-owner and is refused, while ``Scoped``'s reads only untenanted ``Plain``. So
+    # the compare below is not vacuous the way the registry one is, and not uniform either.
+    assert sorted(refusals) == [('testapp_shared', 'testapp_plain', 'target_id')]
     assert mismatched == {}
 
 

@@ -153,7 +153,10 @@ def write_migration_file(
     # name. Skip self-references and anything Django's scaffold already wrote.
     migration_stem = Path(migration_file).stem
     for dependency in dependencies or []:
-        if migration_stem == dependency[1]:
+        # Both halves, for the reason the scan below takes both: every app's enforcement
+        # migration is named ``auto_enforcement``, so the name alone reads another app's as
+        # this file itself and drops the edge.
+        if (app.label, migration_stem) == dependency:
             continue
         # Both halves on one line, never the name alone: cross-app edges (2.5.0) routinely point
         # at an ``0001_initial``, so matching the name reads the scaffold's own app's as covering

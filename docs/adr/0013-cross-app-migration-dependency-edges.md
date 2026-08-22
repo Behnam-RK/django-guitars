@@ -1,6 +1,6 @@
 # 0013 — a generated migration depends on what its rules name
 
-- **Status:** accepted — implemented in 2.5.0
+- **Status:** accepted — implemented in 2.5.0 for the three **rule** families below. **Known gap:** the tenant RLS policy's MTI owner-join (`sql.policy._owner_exists`) names the ancestor's table and its tenant column inside `EXISTS (…)`, resolved when `CREATE POLICY` is parsed, and the policy is written into the *child's* app while `by_owner`'s key is `column_owner(model, field)` — which may live in another app. No `ObjectRef` is recorded on that path, so neither an edge nor the `--check` guard reaches it.
 - **Date:** 2026-08-22
 - **Affects:** `makeguitarmigrations`, `guitars.management.enforcement.graph`, `guitars.management._generator`
 - **Reverses:** the "**assumed, not enforced**" paragraph in [`docs/migrations.md`](../migrations.md), which recorded emitting no edge as a deliberate choice. Both its rationale and its stated remedy are wrong in practice; see below.
@@ -12,7 +12,7 @@ column an emitted rule names must therefore already exist at `migrate` time. Wit
 scaffold's dependency on that app's leaf orders this for free. Across apps, only an explicit
 `dependencies` entry does — and the generator emitted none.
 
-Three rule families name another app's objects:
+Three rule families name another app's objects — the tenant policy is a fourth reference of the same kind, left uncovered (see **Status**):
 
 - **Owned rules** (2.4.0). One `NOT EXISTS` arm per owning column targeting the dependent, and a co-owner
   routinely lives in another app; a *joined* arm also reads the MTI ancestor it takes liveness
@@ -48,7 +48,7 @@ answered a question nobody needed to ask.
 
 ## Decision
 
-**Emit an edge to the migration that creates each object a rule names, for every family.**
+**Emit an edge to the migration that creates each object a rule names, for every rule family.**
 
 1. **References are collected structurally, as the rules are built** — never by parsing rendered
    SQL. A co-owner arm's table appears only in the rule body, not in its header, and reading

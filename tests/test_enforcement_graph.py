@@ -13,6 +13,8 @@ from django.db.migrations.operations import (
     CreateModel,
     RenameField,
     RenameModel,
+    RunSQL,
+    SeparateDatabaseAndState,
 )
 from django.db.models import CASCADE, AutoField, CharField, ForeignKey
 
@@ -162,6 +164,38 @@ def _altered_field_history(field: CharField) -> _FakeLoader:
                 [('shop', '0001_initial')],
             ),
         }
+    )
+
+
+def test_an_operation_wrapped_in_separate_database_and_state_still_establishes_its_field():
+    """The standard idiom for a column the database already has, and what a hand-tuned squash
+    carries. Read past, the ref resolves to nothing: a warning and no edge, which is the
+    pre-2.5.0 failure with a log line in front of it."""
+    history = _FakeLoader(
+        {
+            ('shop', '0001_initial'): _migration(
+                '0001_initial',
+                'shop',
+                [CreateModel('Shop', [('id', AutoField(primary_key=True))])],
+                [],
+            ),
+            ('shop', '0002_wrapped'): _migration(
+                '0002_wrapped',
+                'shop',
+                [
+                    SeparateDatabaseAndState(
+                        database_operations=[RunSQL('SELECT 1;')],
+                        state_operations=[AddField('shop', '_deleted_at', CharField(null=True))],
+                    )
+                ],
+                [('shop', '0001_initial')],
+            ),
+        }
+    )
+
+    assert resolve_object_migration(history, ObjectRef('shop', 'Shop', '_deleted_at')) == (
+        'shop',
+        '0002_wrapped',
     )
 
 

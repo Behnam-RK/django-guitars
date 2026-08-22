@@ -13,6 +13,7 @@ from django.db.migrations.operations import (
     CreateModel,
     RenameField,
     RenameModel,
+    SeparateDatabaseAndState,
 )
 
 
@@ -61,6 +62,14 @@ def _establishes(operation, model: str, field: str | None) -> bool:
     """Whether *operation* makes ``model[.field]`` exist **under the name asked for**: a rename
     counts and the earlier creation then does not, the rule naming the current spelling. An
     ``AlterField`` counts only where the field declares a ``db_column``."""
+    # Unwrapped, not skipped: this is the standard idiom for a column the database already has
+    # (and what a hand-tuned squash carries), and reading past it resolves the ref to nothing --
+    # a warning and no edge, which is the pre-2.5.0 failure with a log line in front of it.
+    if isinstance(operation, SeparateDatabaseAndState):
+        return any(
+            _establishes(inner, model, field)
+            for inner in (*operation.database_operations, *operation.state_operations)
+        )
     model_lower = model.lower()
     if field is None:
         return (

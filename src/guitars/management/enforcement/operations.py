@@ -1436,6 +1436,10 @@ class OperationsMixin:
             if edge is None or table is None:
                 continue
             column = self._ref_column(ref)
+            # As the rule renders it, never ``f'"{table}"'``: a schema-qualified ``db_table``
+            # quotes per part and a self-quoted one passes through, so the naive form matches
+            # neither and the guard would go quiet on exactly the tables it is for.
+            rendered_table = _identifiers._quote_table(table)
             # Everything *edge* already depends on: such a migration cannot take the edge (see
             # ``_refuse_cyclic_edge``), so reporting it would fail ``--check`` over a tuple no
             # operator can paste -- red with no move that clears it.
@@ -1445,11 +1449,11 @@ class OperationsMixin:
             for path, content in _generator.iter_migration_files(app):
                 # Only a migration whose SQL actually names the table: refs are collected per
                 # app, and an app's earlier enforcement migration may predate the rule needing
-                # this one. ``_quote_table`` always quotes, so membership is exact.
+                # this one. ``_quote_table`` renders it as the rule does, so membership is exact.
                 node = (app.label, path.stem)
                 if (
                     not _generator.RE_DIGEST.search(content)
-                    or f'"{table}"' not in content
+                    or rendered_table not in content
                     # ...and the column, where the ref names one: two refs can share a table
                     # and resolve to *different* migrations, and matching the table alone then
                     # reports the older file forever. Unquoted -- the bare name is in both.

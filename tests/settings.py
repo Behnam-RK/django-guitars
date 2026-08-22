@@ -19,9 +19,9 @@ DATABASES['pooled'] = {  # noqa: F405
     'TEST': {'MIRROR': 'default'},
 }
 
-# 'legacy_migrations'/'mti_incremental'/'crossapp_*' are installed but out of LOCAL_APPS --
-# each test scopes explicitly; the crossapp trio co-owns one dependent across app boundaries.
-# 'makemigrations_override'/'schema_qualified' aren't listed at all and self-install instead.
+# 'legacy_migrations'/'mti_incremental'/'crossapp_*' are installed but out of LOCAL_APPS -- each
+# test scopes explicitly; the trio co-owns one dependent across apps, the crossapp_tenant pair an
+# MTI chain tenanted one app up. 'makemigrations_override'/'schema_qualified' self-install instead.
 INSTALLED_APPS = [  # noqa: F405
     *INSTALLED_APPS,  # noqa: F405
     'tests.testapp',
@@ -30,6 +30,8 @@ INSTALLED_APPS = [  # noqa: F405
     'tests.crossapp_dependent',
     'tests.crossapp_owner',
     'tests.crossapp_third',
+    'tests.crossapp_tenant_ancestor',
+    'tests.crossapp_tenant_child',
 ]
 
 LOCAL_APPS = ['tests.testapp']

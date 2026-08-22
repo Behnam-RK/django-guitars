@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, NamedTuple, cast
 
 from django.apps import apps as django_apps
@@ -50,6 +51,7 @@ from guitars.management.enforcement.headers import (
 from guitars.management.enforcement.identity import _literal, _operation
 from guitars.models.fields import OwningForeignKey, _targets_primary_key
 from guitars.sql import _identifiers
+from guitars.sql import policy as _policy
 from guitars.sql import soft_delete as _soft_delete
 from guitars.sql import triggers as _triggers
 from guitars.tenancy.discovery import (
@@ -258,6 +260,16 @@ class OperationsMixin:
             operations.append(force_source)
         return operations
 
+    def _record_policy_object_refs(self, app: AppConfig, coverage: TableCoverage) -> None:
+        """Note the objects a tenant policy's owner join names. ``sql.policy._owner_exists``
+        reads the MTI ancestor's table and each tenant column on it, both resolved as
+        ``CREATE POLICY`` is parsed, and that ancestor routinely lives in another app."""
+        if coverage.owner_model is None:
+            return
+        self._record_app_object_ref(app.label, coverage.owner_model)
+        for field in coverage.owner_fields or ():
+            self._record_app_object_ref(app.label, coverage.owner_model, field)
+
     def _tenant_policy_operations(self, app: AppConfig, *, adopt: bool = False) -> list[str]:
         """Tenant-policy create/replace operations *app* is missing or has outdated."""
         if not self._tenant_policies_enabled():
@@ -268,6 +280,7 @@ class OperationsMixin:
 
         operations: list[str] = []
         for table, table_coverage in sorted(coverage.tables.items()):
+            self._record_policy_object_refs(app, table_coverage)
             # Two independent reasons to replace: the identity answers "does the policy
             # still say what the models imply" (a dimension or role changed); the SQL digest
             # answers "is the emitted text still what's on disk". Checking only one misses the other.
@@ -763,8 +776,16 @@ class OperationsMixin:
         """Note that a rule built for *model*'s app names *referenced*. Keyed by the app whose
         migration will carry the operation, which is ``model``'s: ``_build_operations`` is
         called per app and reads only that app's models, so the two cannot come apart."""
+        self._record_app_object_ref(model._meta.app_label, referenced, field)
+
+    def _record_app_object_ref(
+        self, app_label: str, referenced: type[models.Model], field: str | None = None
+    ) -> None:
+        """The same, for an operation built from a *table* rather than a model in hand -- a
+        tenant policy, whose coverage is keyed by table name. The app is the one being scanned,
+        which is where the operation lands, so it is passed rather than read off a model."""
         ref = ObjectRef(referenced._meta.app_label, referenced.__name__, field)
-        refs = self._object_refs.setdefault(model._meta.app_label, [])
+        refs = self._object_refs.setdefault(app_label, [])
         if ref not in refs:
             refs.append(ref)
 
@@ -1432,10 +1453,6 @@ class OperationsMixin:
             if edge is None or table is None:
                 continue
             column = self._ref_column(ref)
-            # As the rule renders it, never ``f'"{table}"'``: a schema-qualified ``db_table``
-            # quotes per part and a self-quoted one passes through, so the naive form matches
-            # neither and the guard would go quiet on exactly the tables it is for.
-            rendered_table = _identifiers._quote_table(table)
             # Everything *edge* already depends on: pasting the edge onto one of those is the
             # one shape that genuinely cycles, and Django rejects such a graph outright -- so
             # reporting it would be red with no move that clears it.
@@ -1449,7 +1466,7 @@ class OperationsMixin:
                 node = (app.label, path.stem)
                 if (
                     not _generator.RE_DIGEST.search(content)
-                    or rendered_table not in content
+                    or not self._names_table(content, table)
                     # ...and the column, where the ref names one: two refs can share a table
                     # and resolve to *different* migrations, and matching the table alone then
                     # reports the older file forever. Unquoted -- the bare name is in both.
@@ -1481,6 +1498,18 @@ class OperationsMixin:
             return django_apps.get_model(ref.app_label, ref.model)._meta.db_table
         except LookupError:
             return None
+
+    @staticmethod
+    def _names_table(content: str, table: str) -> bool:
+        """Whether *content*'s SQL names *table*, in either form the kit emits. A rule renders
+        ``_quote_table`` -- quoted per part, so membership is exact; a policy's owner join
+        renders ``policy._qualified_table``, which leaves a bare name unquoted."""
+        if _identifiers._quote_table(table) in content:
+            return True
+        # On identifier boundaries, the quoted form needing none: a bare ``shop`` is a substring
+        # of ``shopping``, and a false match here names a migration whose rule is innocent.
+        bare = re.escape(_policy._qualified_table(table))
+        return re.search(rf'(?<![\w."]){bare}(?![\w."])', content) is not None
 
     @staticmethod
     def _ref_column(ref: ObjectRef) -> str | None:

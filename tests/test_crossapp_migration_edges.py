@@ -27,8 +27,8 @@ from guitars.management.enforcement.operations import OperationsMixin
 pytestmark = pytest.mark.xdist_group(name='crossapp_migration_files')
 
 
-def _enforcement_migration(app_label: str) -> Path:
-    return Path(apps.get_app_config(app_label).path) / 'migrations' / '0002_auto_enforcement.py'
+def _enforcement_migration(app_label: str, name: str = '0002_auto_enforcement') -> Path:
+    return Path(apps.get_app_config(app_label).path) / 'migrations' / f'{name}.py'
 
 
 def _declared_dependencies(content: str) -> set[tuple[str, str]]:
@@ -236,10 +236,10 @@ def test_every_arm_of_a_three_way_dependent_is_ordered_against_its_own_app():
 
 
 @contextmanager
-def _without_dependency(app_label: str, dependency: str):
-    """Drop *dependency* from *app_label*'s enforcement migration for the duration. The module
-    is evicted from ``sys.modules`` on the way in *and* out: ``MigrationLoader`` imports
-    migrations, so a restored file that is still cached leaves the mutated graph live."""
+def _without_dependency(app_label: str, dependency: str, name: str = '0001_initial'):
+    """Drop the ``(dependency, name)`` edge from *app_label*'s enforcement migration for the
+    duration. The module is evicted from ``sys.modules`` on the way in *and* out --
+    ``MigrationLoader`` imports migrations, so a restored file still cached stays live."""
     path = _enforcement_migration(app_label)
     original = path.read_text()
     module = f'tests.{app_label}.migrations.{path.stem}'
@@ -249,7 +249,7 @@ def _without_dependency(app_label: str, dependency: str):
         importlib.invalidate_caches()
 
     try:
-        path.write_text(original.replace(f"        ('{dependency}', '0001_initial'),\n", '', 1))
+        path.write_text(original.replace(f"        ('{dependency}', '{name}'),\n", '', 1))
         _reload()
         yield
     finally:
@@ -426,3 +426,73 @@ def test_the_writer_is_handed_the_object_edges_and_not_only_the_function_ones():
     assert command._dependencies_for(apps.get_app_config('testapp'), '') == [
         ('crossapp_owner', '0001_initial')
     ]
+
+
+# ─── the tenant policy's owner join ───
+
+
+@pytest.mark.parametrize(
+    'ref',
+    [
+        # ``sql.policy._owner_exists`` names the ancestor's table in ``SELECT 1 FROM ...``
+        # and its tenant column in the ``= ANY(...)`` term beside it.
+        ObjectRef('crossapp_tenant_ancestor', 'TenantedAncestor', None),
+        ObjectRef('crossapp_tenant_ancestor', 'TenantedAncestor', 'label'),
+    ],
+)
+def test_a_tenant_policy_records_the_ancestor_table_and_its_tenant_column(ref):
+    """The policy is written into the *child's* app while the tenant column is resolved from
+    ``column_owner``, an MTI ancestor that can live anywhere. The table ref it shares with the
+    MTI redirect rule; the tenant column is named by nothing else in the chain."""
+    assert ref in _refs_recorded_for('crossapp_tenant_child')
+
+
+def test_the_policy_edge_points_at_the_migration_adding_the_tenant_column():
+    """Not the one creating the ancestor's table, which the child's ``parent_ptr`` already
+    orders it after: the ancestor was promoted to a tenanted model later, so the column the
+    predicate reads arrives in ``0002`` and nothing but this edge orders the policy after it."""
+    assert ('crossapp_tenant_ancestor', '0002_tenantedancestor_label') in _dependencies(
+        'crossapp_tenant_child'
+    )
+
+
+def test_the_policy_is_planned_after_the_migration_adding_the_column_it_reads():
+    """The ordering that matters, read off the graph rather than the file: a fresh
+    ``migrate crossapp_tenant_child`` must reach the column before the ``CREATE POLICY``."""
+    plan = _plan('crossapp_tenant_child')
+
+    assert plan.index(('crossapp_tenant_ancestor', '0002_tenantedancestor_label')) < plan.index(
+        ('crossapp_tenant_child', '0002_auto_enforcement')
+    )
+
+
+@override_settings(
+    LOCAL_APPS=[
+        'tests.testapp',
+        'tests.crossapp_tenant_ancestor',
+        'tests.crossapp_tenant_child',
+    ]
+)
+def test_check_fails_when_the_policy_edge_is_absent():
+    """The retrofit guard over a family whose table is rendered *unquoted*: a rule quotes per
+    part, ``policy._qualified_table`` leaves a bare name alone, so matching only the quoted
+    form left this one silent on exactly the migration it exists to report."""
+    with _without_dependency(
+        'crossapp_tenant_child', 'crossapp_tenant_ancestor', '0002_tenantedancestor_label'
+    ):
+        with pytest.raises(CommandError) as raised:
+            _check('crossapp_tenant_child')
+
+        message = str(raised.value)
+        assert 'crossapp_tenant_ancestor_tenantedancestor' in message
+        assert "('crossapp_tenant_ancestor', '0002_tenantedancestor_label')," in message
+
+    _check('crossapp_tenant_child')  # and green again once restored
+
+
+def test_a_bare_table_name_is_matched_on_identifier_boundaries():
+    """The unquoted form only. A rule's quoted rendering needs no boundary check, but a bare
+    ``shop`` is a substring of ``shopping`` -- and a false match names an innocent migration."""
+    assert OperationsMixin._names_table('FROM shop AS _guitars_owner', 'shop')
+    assert not OperationsMixin._names_table('FROM shopping AS _guitars_owner', 'shop')
+    assert OperationsMixin._names_table('UPDATE "shop" SET', 'shop')

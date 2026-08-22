@@ -76,6 +76,10 @@ class Command(OperationsMixin, BaseCommand):
         # live in every migrated database. Errors, and they fail ``--check``: refusing emits
         # nothing, so nothing else would notice. See ``_refuse_owned``.
         self._refusals_over_live_rules: list[str] = []
+        # Enforcement migrations naming another app's table with nothing ordering them
+        # against its creation. Errors, and they fail ``--check``: a fresh `migrate` fails
+        # on them while an incremental one passes, so nothing else notices. See ADR 0013.
+        self._missing_edges: list[str] = []
         self._claimed_rule_names: dict[tuple[str, str], tuple] = {}
         # Tables tenancy discovery could not cover, with the reason. Also surfaced.
         self._tenancy_notes: list[str] = []
@@ -412,6 +416,13 @@ class Command(OperationsMixin, BaseCommand):
             # uncaught CommandError, and double-wrapping garbles the ANSI codes.
             raise CommandError(self._rule_name_clashes[0])
 
+    def _refuse_a_missing_edge(self, *, check_only: bool) -> None:
+        """Fail a ``--check`` run over a rule nothing orders against the table it names. New
+        in 2.5.0, and the reason this is a minor release: a graph that was green before now
+        fails, which is the point -- it was green all the way to a virgin-database failure."""
+        if check_only and self._missing_edges:
+            raise CommandError(self._missing_edges[0])
+
     def _refuse_a_stale_owned_rule(self, *, check_only: bool) -> None:
         """Fail a ``--check`` run over an owned rule that is refused but already recorded.
         Unlike a name clash this one is not emitted at all, so a generating run leaves the
@@ -521,6 +532,7 @@ class Command(OperationsMixin, BaseCommand):
             *((self.style.WARNING, note) for note in self._mti_cascade_warnings),
             *((self.style.ERROR, note) for note in self._rule_name_clashes),
             *((self.style.ERROR, note) for note in self._refusals_over_live_rules),
+            *((self.style.ERROR, note) for note in self._missing_edges),
         ]:
             self.stderr.write(paint(note))
 
@@ -541,6 +553,7 @@ class Command(OperationsMixin, BaseCommand):
         # Before `_report_missing`, which also raises -- a clash is the more fundamental.
         self._refuse_a_rule_name_clash(check_only=check_only)
         self._refuse_a_stale_owned_rule(check_only=check_only)
+        self._refuse_a_missing_edge(check_only=check_only)
 
         if check_missing or function_check_messages:
             self._report_missing(check_missing, function_check_messages)

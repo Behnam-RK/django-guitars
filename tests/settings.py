@@ -19,14 +19,17 @@ DATABASES['pooled'] = {  # noqa: F405
     'TEST': {'MIRROR': 'default'},
 }
 
-# 'legacy_migrations'/'mti_incremental' are installed but left out of LOCAL_APPS -- each
-# test scopes explicitly. 'makemigrations_override'/'schema_qualified' aren't listed at all
-# (no checked-in migrations fails unscoped CI `--check`); their tests self-install instead.
+# 'legacy_migrations'/'mti_incremental'/'crossapp_*' are installed but out of LOCAL_APPS --
+# each test scopes explicitly; the crossapp trio co-owns one dependent across app boundaries.
+# 'makemigrations_override'/'schema_qualified' aren't listed at all and self-install instead.
 INSTALLED_APPS = [  # noqa: F405
     *INSTALLED_APPS,  # noqa: F405
     'tests.testapp',
     'tests.legacy_migrations',
     'tests.mti_incremental',
+    'tests.crossapp_dependent',
+    'tests.crossapp_owner',
+    'tests.crossapp_third',
 ]
 
 LOCAL_APPS = ['tests.testapp']

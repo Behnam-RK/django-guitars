@@ -25,6 +25,7 @@ from guitars.management import _generator
 from guitars.management.enforcement.graph import (
     ObjectRef,
     resolve_dependencies,
+    resolve_object_migration,
     would_close_a_cycle,
 )
 from guitars.management.enforcement.headers import (
@@ -159,6 +160,7 @@ class OperationsMixin:
         _owned_tenancy_cache: dict[tuple[str, str, str], list[str]] | None
         _object_refs: dict[str, list[ObjectRef]]
         _refusals_over_live_rules: list[str]
+        _missing_edges: list[str]
         _table_app_labels_cache: dict[str, str] | None
         _required_autofill_cache: dict[tuple[str, str], tuple[str, str]] | None
         _relocated_autofill_cache: dict[tuple[str, str], tuple[str, str]] | None
@@ -1384,6 +1386,53 @@ class OperationsMixin:
             )
         return [edge for edge in edges if not self._refuse_cyclic_edge(app, edge, loader)]
 
+    def _missing_edge_notes(self, app: AppConfig) -> list[str]:
+        """Enforcement migrations of *app* that name another app's table without being ordered
+        against whatever creates it. Reachability, not a literal edge: an ordering already
+        guaranteed through another path is guaranteed, and flagging it would be a false alarm."""
+        refs = self._object_refs.get(app.label, [])
+        if not refs:
+            return []
+        loader = MigrationLoader(None, ignore_no_migrations=True)
+        notes: list[str] = []
+        for ref in refs:
+            if ref.app_label == app.label:
+                continue
+            edge = resolve_object_migration(loader, ref)
+            table = self._ref_table(ref)
+            if edge is None or table is None:
+                continue
+            for path, content in _generator.iter_migration_files(app):
+                # Only a migration whose SQL actually names the table: refs are collected per
+                # app, and an app's earlier enforcement migration may predate the rule needing
+                # this one. ``_quote_table`` always quotes, so membership is exact.
+                node = (app.label, path.stem)
+                if (
+                    not _generator.RE_DIGEST.search(content)
+                    or f'"{table}"' not in content
+                    or node not in loader.graph.node_map
+                    or edge in set(loader.graph.forwards_plan(node))
+                ):
+                    continue
+                notes.append(
+                    f"Enforcement migration '{app.label}.{path.stem}' creates a rule naming "
+                    f"'{table}', but nothing orders it after '{edge[0]}.{edge[1]}', which "
+                    'creates that table -- a fresh `migrate` can reach the rule first and fail '
+                    f'with `relation "{table}" does not exist`. Add to its dependencies:\n'
+                    f"        ('{edge[0]}', '{edge[1]}'),"
+                )
+        return notes
+
+    @staticmethod
+    def _ref_table(ref: ObjectRef) -> str | None:
+        """The physical table behind *ref*, or ``None`` where the model is gone -- a migration
+        older than a deleted model still mentions its table, and that is not this check's
+        business. Read off the registry, the same place the refs themselves came from."""
+        try:
+            return django_apps.get_model(ref.app_label, ref.model)._meta.db_table
+        except LookupError:
+            return None
+
     def _refuse_cyclic_edge(self, app: AppConfig, edge: tuple[str, str], loader) -> bool:
         """Whether *edge* has to be dropped for closing a cycle. It should never be: an edge to
         the migration that *creates* an object is older than the rule naming it. Asked anyway --
@@ -1442,6 +1491,9 @@ class OperationsMixin:
                 continue
 
             operations = build_ops(app)
+            # Before the early exits below: an app whose operations are all already recorded
+            # emits nothing, and a missing edge on one of *those* is exactly what needs saying.
+            self._missing_edges.extend(self._missing_edge_notes(app))
             if not operations:
                 continue
 

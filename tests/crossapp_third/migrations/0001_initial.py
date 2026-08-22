@@ -11,20 +11,12 @@ class Migration(migrations.Migration):
     initial = True
 
     dependencies = [
+        ('crossapp_dependent', '0001_initial'),
     ]
 
     operations = [
         migrations.CreateModel(
-            name='Shared',
-            fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('_deleted_at', models.DateTimeField(editable=False, null=True, verbose_name='Deleted at')),
-                ('_created_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Created at')),
-                ('_updated_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Updated at')),
-            ],
-        ),
-        migrations.CreateModel(
-            name='LocalOwner',
+            name='ThirdOwner',
             fields=[
                 ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
                 ('_deleted_at', models.DateTimeField(editable=False, null=True, verbose_name='Deleted at')),

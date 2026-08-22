@@ -10,6 +10,13 @@ Full history and diffs: [GitHub releases](https://github.com/Behnam-RK/django-gu
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-08-22
+
+- Fixed: a generated enforcement migration now **depends on the migrations that create what its rules name**. PostgreSQL parses a rule's action when the rule is created, so every table and column it references must already exist — but across apps only an explicit dependency says so, and none was emitted. A co-owner arm reads another app's column and a cascade rule names another app's table, so a fresh `migrate` could reach the rule first and fail with `relation ... does not exist`. Reproduced in a consuming project on a virgin database. The edge points at the migration that *creates* the object, never the referenced app's leaf: a creating migration is always older than a rule naming it, so it cannot close a cycle, while a leaf edge over-constrains the graph and drags unrelated migrations forward — which is what hand-patching the edge did, trading one ordering failure for another. Both rule families are covered; the cascade half predates 2.4.0 ([ADR-0013](docs/adr/0013-cross-app-migration-dependency-edges.md)).
+- Fixed: `write_migration_file` deduped a dependency by migration **name** alone, so an edge whose name matched one already listed for a *different* app was silently dropped. Function-migration names never collided; cross-app edges routinely point at an `0001_initial`, where the scaffold's own entry masked the new one.
+- **Changed (may fail a previously-green build):** `makeguitarmigrations --check` now fails when an enforcement migration creates a rule naming a table nothing orders it against. Judged by graph *reachability*, not by the literal tuple, so an ordering already guaranteed through another path is accepted. A migration already recorded is skipped by the digest guard, so re-running the generator will not add the edge — the failure message names the migration, the table and the creating migration, and prints the entry to paste. This is why 2.5.0 is a minor release rather than a patch.
+- Changed: `docs/migrations.md` no longer records the missing edge as a deliberate "assumed, not enforced" tradeoff. Its cited cycle risk applies only to leaf edges, and its stated remedy — a hand-written `dependencies` entry — is what broke in the consumer.
+
 ## [2.4.2] - 2026-08-22
 
 - Fixed: `introspection.owner_arms` and `owned_tenancy_refusals` counted a model named twice in their sweep twice. `hard_delete()` builds that sweep as `[*claimed, *django_apps.get_models()]` and its claimed models are registered ones, so every one of them arrived twice — `rule_update_cycle_edges` absorbs that in a `set`, but these accumulate into lists, and a doubled arm is a doubled `NOT EXISTS` in the SQL a caller renders from them. No emitted rule changed, the only consumer reading the arms through a set comprehension, but the arms are a rendering input by contract.
@@ -171,7 +178,8 @@ First stable release. **BREAKING:** the instrument ladder shifted down one rung 
 
 - Added: initial release — `SetarModel`, `GuitarModel`, `SoftDeletableModel`, `DisableSignals`, `makeguitarmigrations`.
 
-[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.4.2...HEAD
+[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.5.0...HEAD
+[2.5.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.5.0
 [2.4.2]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.4.2
 [2.4.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.4.1
 [2.4.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.4.0

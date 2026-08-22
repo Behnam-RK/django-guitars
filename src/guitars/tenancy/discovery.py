@@ -7,6 +7,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, NamedTuple, TypedDict
 
 from django.apps import apps as django_apps
+from django.conf import settings
 
 from guitars.gucs import BYPASS_GUC, guc_name
 from guitars.introspection import column_owner, owns_column
@@ -44,6 +45,7 @@ __all__ = [
     'is_local',
     'owner_autofill_notes',
     'policy_dimensions',
+    'tenant_policies_enabled',
 ]
 
 
@@ -381,6 +383,13 @@ def _proxy_note(model: type[models.Model]) -> str:
         f'autofill trigger. Declare tenanted_manager() on '
         f"'{_meta(model).concrete_model.__name__}' instead. Python scoping still applies."
     )
+
+
+def tenant_policies_enabled() -> bool:
+    """Whether to emit tenant policies at all. ``False`` keeps the Python layer while leaving
+    the database alone -- adopting the loud layer first, or a role that could never own its
+    tables. One definition: the generator refuses on it and ``hard_delete()`` reads the same."""
+    return bool(getattr(settings, 'GUITARS_TENANT_POLICIES', True))
 
 
 def policy_dimensions(

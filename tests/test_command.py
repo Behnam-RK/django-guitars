@@ -2258,10 +2258,10 @@ def test_owned_rule_is_refused_when_the_dependent_is_one_the_kit_writes_no_polic
     assert "'testapp_scoped'" in command._mti_cascade_warnings[0]
 
 
-def test_policy_dimensions_are_asked_once_per_model_per_run():
-    """Two rules over one dependent, and the answer reaches ``_classify``, which sweeps the
-    registry for an MTI model that autofills. Memoised for the run rather than the process: it
-    moves with ``LOCAL_APPS``, and ``isolate_apps`` replaces the registry between runs."""
+def test_the_shared_owned_answers_are_swept_once_per_run():
+    """Both halves reach ``_classify``, which sweeps the registry for an MTI model that
+    autofills, so a rule with N arms would otherwise ask N times. Cached on the command rather
+    than the module: the answer moves with ``LOCAL_APPS``, which a test may replace."""
 
     @isolate_apps('tests.testapp')
     def _build():
@@ -2288,7 +2288,8 @@ def test_policy_dimensions_are_asked_once_per_model_per_run():
     # Both rules emitted: the owner carries none of the dependent's dimensions, so nothing its
     # arms read is filtered by one the dependent's own policy does not apply.
     assert len(ops) == 2
-    assert list(command._policy_dimension_memo.values()) == [frozenset({'label'})]
+    assert command._owned_tenancy_refusals() is command._owned_tenancy_refusals()
+    assert command._owner_arms() is command._owner_arms()
 
 
 def test_owned_rule_is_refused_when_a_joined_arm_reads_a_tenanted_ancestor():

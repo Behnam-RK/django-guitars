@@ -11,7 +11,7 @@ from django.db.models import CASCADE, DO_NOTHING, PROTECT, SET, SET_DEFAULT, SET
 from django.test.utils import isolate_apps
 
 from guitars import sql
-from guitars.introspection import rule_update_cycle_edges
+from guitars.introspection import owned_tenancy_refusals, rule_update_cycle_edges
 from guitars.models import OwningForeignKey, SetarModel
 from guitars.models.fields import _targets_primary_key
 from guitars.models.soft_deletion import (
@@ -157,6 +157,72 @@ def test_hard_delete_does_not_follow_an_owned_relation_the_generator_refused():
         return _owned_fields(SelfOwner)
 
     assert _build() == []
+
+
+def test_hard_delete_does_not_follow_an_owned_relation_a_tenant_policy_refused():
+    """The refusal the generator gained in 2.4.0, mirrored here at last. A co-owner behind a
+    tenant policy the dependent does not share means no rule is written, so following the
+    relation in Python removes the row that missing rule would have spared."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        from guitars.tenancy import tenanted_manager
+
+        class Shared(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Plain(SetarModel):
+            target = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Scoped(SetarModel):
+            target = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True)
+            label = models.ForeignKey('testapp.Label', on_delete=CASCADE, null=True)
+            objects = tenanted_manager(label='label')
+
+            class Meta:
+                app_label = 'testapp'
+
+        # Named explicitly, as the cycle test names its own model: ``isolate_apps`` swaps
+        # ``Options.apps``, so none of these three is in the global registry the default sweep
+        # would read.
+        refusals = owned_tenancy_refusals([Shared, Plain, Scoped])
+        return refusals, _owned_fields(Plain, tenancy_refusals=refusals), _owned_fields(
+            Plain, tenancy_refusals={}
+        )
+
+    refusals, refused, unguarded = _build()
+
+    assert list(refusals) == [('testapp_shared', 'testapp_plain', 'target_id')]
+    assert refusals['testapp_shared', 'testapp_plain', 'target_id'] == ['testapp_scoped']
+    assert refused == []
+    # And what the shared answer buys: without it the relation is followed, and Phase 2 removes
+    # a row a live out-of-tenant owner still points at.
+    assert [field.name for field in unguarded] == ['target']
+
+
+def test_owned_tenancy_refusals_passes_over_a_target_with_no_deleted_at():
+    """Such a relation is refused for having nothing to stamp, long before tenancy, and has no
+    dependent table to key an answer on. Passed over rather than reported twice."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Unstampable(models.Model):
+            class Meta:
+                app_label = 'testapp'
+
+        class Owner(SetarModel):
+            target = OwningForeignKey(Unstampable, on_delete=DO_NOTHING, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        return owned_tenancy_refusals([Unstampable, Owner])
+
+    assert _build() == {}
 
 
 def test_owning_foreign_key_accepts_a_target_reached_through_mti():

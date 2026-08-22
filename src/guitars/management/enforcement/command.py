@@ -24,17 +24,15 @@ from guitars.management.enforcement.headers import (
     HEADER_TRIGGER_FUNCTION,
 )
 from guitars.management.enforcement.identity import _operation
-from guitars.management.enforcement.operations import OperationsMixin, _OwnerArm
+from guitars.management.enforcement.operations import OperationsMixin, OwnerArm
 from guitars.management.enforcement.scanning import ExistingOperations, scan_existing_operations
 from guitars.sql import _identifiers
 from guitars.sql import triggers as _triggers
-from guitars.tenancy.discovery import owner_autofill_notes
+from guitars.tenancy.discovery import owner_autofill_notes, tenant_policies_enabled
 
 
 if TYPE_CHECKING:
     from django.apps import AppConfig
-
-    from guitars.tenancy.discovery import _PolicyDimensionMemo
 
 
 class Command(OperationsMixin, BaseCommand):
@@ -92,11 +90,8 @@ class Command(OperationsMixin, BaseCommand):
         # rather than the registry this constructor read. Building it here freezes the old answer.
         self._rule_cycle_cache: set[tuple[str, str]] | None = None
         # Lazy for the same reason, and registry-wide for the reason ``_owner_arms`` gives.
-        self._owner_arms_cache: dict[str, list[_OwnerArm]] | None = None
-        # Not lazy, and not module-level: ``policy_dimensions`` reaches a registry sweep for an
-        # MTI model that autofills, a rule with N arms asks about N models, and the answer moves
-        # with ``LOCAL_APPS`` -- so one run's worth of memo, thrown away with the command.
-        self._policy_dimension_memo: _PolicyDimensionMemo = {}
+        self._owner_arms_cache: dict[str, list[OwnerArm]] | None = None
+        self._owned_tenancy_cache: dict[tuple[str, str, str], list[str]] | None = None
         self._required_autofill_cache: dict[tuple[str, str], tuple[str, str]] | None = None
         self._relocated_autofill_cache: dict[tuple[str, str], tuple[str, str]] | None = None
 
@@ -165,10 +160,9 @@ class Command(OperationsMixin, BaseCommand):
 
     @staticmethod
     def _tenant_policies_enabled() -> bool:
-        """Whether to emit tenant policies at all. ``False`` keeps the Python layer while
-        leaving the database alone -- adopting the loud layer first, or a role that could
-        never own its tables and so could never be RLS-constrained anyway."""
-        return bool(getattr(settings, 'GUITARS_TENANT_POLICIES', True))
+        """Whether to emit tenant policies at all -- delegated, so the refusal this gates and
+        the one ``hard_delete()`` mirrors cannot come to read different settings."""
+        return tenant_policies_enabled()
 
     @staticmethod
     def _rls_force_enabled() -> bool:

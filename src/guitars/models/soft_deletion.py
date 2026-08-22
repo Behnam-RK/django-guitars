@@ -22,6 +22,7 @@ from guitars.introspection import (
     column_owner,
     has_column,
     mti_root,
+    owned_tenancy_refusals,
     owns_column,
     rule_update_cycle_edges,
 )
@@ -59,27 +60,35 @@ def _declared_owning_fields(model: type[Model]) -> list[OwningForeignKey]:
 
 
 def _owned_fields(
-    model: type[Model], cycles: set[tuple[str, str]] | None = None
+    model: type[Model],
+    cycles: set[tuple[str, str]] | None = None,
+    tenancy_refusals: dict[tuple[str, str, str], list[str]] | None = None,
 ) -> list[OwningForeignKey]:
     """``OwningForeignKey``s that actually carry a rule: a relation the generator refused has
-    none, so following it here destroys what the rule spared. *cycles* is the graph below,
-    passed in by a caller asking about several models so it is built once."""
+    none, so following it here destroys what the rule spared. Both graphs are passed in by a
+    caller asking about several models, so each registry sweep is paid once."""
     declared = _declared_owning_fields(model)
-    # Before the graph, not after: building it sweeps the whole model registry, and most
-    # models declare no ownership at all -- ``hard_delete`` asks this of every collected one.
+    # Before either sweep, not after: both read the whole model registry, and most models
+    # declare no ownership at all -- ``hard_delete`` asks this of every collected one.
     if not declared:
         return []
     table = model._meta.db_table
-    # The same graph the generator refuses cycle edges from -- a self-owning relation is the
-    # 1-cycle in it. Shared rather than re-derived, so the two cannot disagree about which
-    # relations carry a rule. *model* is named too: it may not be a registered one.
+    # The same two answers the generator refuses on, shared rather than re-derived so the two
+    # sides cannot disagree about which relations carry a rule. *model* is named alongside the
+    # registry for the reason ``_declared_owning_fields`` gives: it may not be registered.
     if cycles is None:
         cycles = rule_update_cycle_edges([model, *django_apps.get_models()])
-    return [
-        field
-        for field in declared
-        if (table, column_owner(field.related_model, '_deleted_at')._meta.db_table) not in cycles
-    ]
+    if tenancy_refusals is None:
+        tenancy_refusals = owned_tenancy_refusals([model, *django_apps.get_models()])
+    kept = []
+    for field in declared:
+        dependent_table = column_owner(field.related_model, '_deleted_at')._meta.db_table
+        if (table, dependent_table) in cycles:
+            continue
+        if (dependent_table, table, field.column) in tenancy_refusals:
+            continue
+        kept.append(field)
+    return kept
 
 
 def _mti_model_chain(model: type[Model]) -> list[type[Model]]:
@@ -225,9 +234,14 @@ def _owned_targets(
     # Once per call, not once per claimed model: the graph is registry-wide and identical for
     # every one of them. The claimed models are named alongside the registry for the same
     # reason ``_owned_fields`` names its own -- they may not be registered.
-    cycles = rule_update_cycle_edges([*claimed, *django_apps.get_models()])
+    swept = [*claimed, *django_apps.get_models()]
+    cycles = rule_update_cycle_edges(swept)
+    # The tenancy half of the same shared answer, and a second sweep of the registry -- paid per
+    # round like the graph above, ``claimed`` growing as rounds run. Skipped outright where
+    # ``GUITARS_TENANT_POLICIES`` is off; otherwise cheapest where no model is tenanted.
+    tenancy_refusals = owned_tenancy_refusals(swept)
     for model, pks in owning.items():
-        for field in _owned_fields(model, cycles):
+        for field in _owned_fields(model, cycles, tenancy_refusals):
             owned_pks = set(
                 _rows(model, using)
                 .filter(pk__in=pks)

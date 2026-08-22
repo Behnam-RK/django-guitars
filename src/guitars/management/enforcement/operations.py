@@ -11,9 +11,12 @@ from django.db import models
 
 from guitars import sql
 from guitars.introspection import (
+    OwnerArm,
     column_owner,
     has_column,
     is_mti_child,
+    owned_tenancy_refusals,
+    owner_arms,
     owns_column,
     rule_update_cycle_edges,
 )
@@ -44,10 +47,8 @@ from guitars.sql import soft_delete as _soft_delete
 from guitars.sql import triggers as _triggers
 from guitars.tenancy.discovery import (
     app_coverage,
-    assumed_policy_dimensions,
     autofill_function_name,
     autofill_trigger_name,
-    policy_dimensions,
 )
 
 
@@ -59,7 +60,7 @@ if TYPE_CHECKING:
     from django.core.management.color import Style
 
     from guitars.management.enforcement.scanning import ExistingOperations
-    from guitars.tenancy.discovery import TableCoverage, _PolicyDimensionMemo
+    from guitars.tenancy.discovery import TableCoverage
 
 
 class _OperationRow(NamedTuple):
@@ -120,37 +121,6 @@ def _owned_rule_name(dependent_table: str, foreign_key: str) -> str:
     return _identifiers._safe_ident('_'.join(parts))
 
 
-class _OwnerArm(NamedTuple):
-    """One owning column pointing at a dependent, as the guard needs to read it. Carries the
-    model as well as the table because the tenancy refusal asks ``tenant_spec`` a question
-    only the model can answer, and no table-keyed equivalent exists."""
-
-    owner_table: str
-    fk_column: str
-    owner_model: type[models.Model]
-    #: Set only where the owner keeps ``_deleted_at`` on an MTI ancestor: that ancestor's table,
-    #: model and primary key, and this table's parent-link primary key. The arm joins the two,
-    #: the foreign key being on one table and liveness on the other. ``None`` for the plain form.
-    root_table: str | None = None
-    root_pk: str | None = None
-    child_pk: str | None = None
-    root_model: type[models.Model] | None = None
-
-    def reads(self) -> tuple[tuple[str, type[models.Model]], ...]:
-        """``(table, model)`` for every table this arm's ``SELECT`` touches -- two for a joined
-        arm. A tenant policy on *either* filters the read, so both have to be asked about."""
-        own = (self.owner_table, self.owner_model)
-        if self.root_model is None:
-            return (own,)
-        return (own, (cast('str', self.root_table), self.root_model))
-
-    def liveness_table(self) -> str:
-        """The table whose ``_deleted_at`` this arm reads -- the ancestor's where it joins.
-        Which row the arm must not count as an owner is decided against this one, the arm
-        matching a row per *liveness* row, not per row holding the key."""
-        return self.owner_table if self.root_table is None else self.root_table
-
-
 def _rule_relation_label(relation: tuple) -> str:
     """A relation as prose for a clash report, phrased like the headers: the other table and
     the column, never which of the two holds it -- the cascade family reads the column off the
@@ -179,8 +149,8 @@ class OperationsMixin:
         reverse_relations_mapping: dict[type[models.Model], set]
         all_models: list[type[models.Model]]
         _rule_cycle_cache: set[tuple[str, str]] | None
-        _owner_arms_cache: dict[str, list[_OwnerArm]] | None
-        _policy_dimension_memo: _PolicyDimensionMemo
+        _owner_arms_cache: dict[str, list[OwnerArm]] | None
+        _owned_tenancy_cache: dict[tuple[str, str, str], list[str]] | None
         _refusals_over_live_rules: list[str]
         _table_app_labels_cache: dict[str, str] | None
         _required_autofill_cache: dict[tuple[str, str], tuple[str, str]] | None
@@ -755,57 +725,21 @@ class OperationsMixin:
             self._rule_cycle_cache = rule_update_cycle_edges(self.all_models)
         return self._rule_cycle_cache
 
-    def _owner_arms(self) -> dict[str, list[_OwnerArm]]:
-        """``dependent_table -> every owning column pointing at it``. Registry-wide for the
-        reason :meth:`_rule_cycle_edges` is, and lazy for the reason it is lazy: ``all_models``
-        is replaced after construction by ``isolate_apps``. See ADR 0012."""
+    def _owner_arms(self) -> dict[str, list[OwnerArm]]:
+        """``dependent_table -> every owning column pointing at it``, from the shared sweep.
+        Cached rather than re-derived: ``all_models`` is replaced after construction by
+        ``isolate_apps``, so the sweep has to be lazy. See ADR 0012."""
         if self._owner_arms_cache is None:
-            arms: dict[str, list[_OwnerArm]] = {}
-            for model in self.all_models:
-                for declared in model._meta.local_fields:
-                    fk_field = cast('models.ForeignKey', declared)
-                    # Only the refusals deciding whether an arm can be *expressed*. The two
-                    # about whether this owner's own rule can be *written* -- self-update and
-                    # cycle -- say nothing about whether its rows still own the target.
-                    if (
-                        not self._is_owned_candidate(model, declared)
-                        or not has_column(model, '_deleted_at')
-                        or not has_column(fk_field.related_model, '_deleted_at')
-                        or not _targets_primary_key(fk_field)
-                    ):
-                        continue
-                    dependent_table = column_owner(
-                        fk_field.related_model, '_deleted_at'
-                    )._meta.db_table
-                    arms.setdefault(dependent_table, []).append(self._owner_arm(model, fk_field))
-            # Sorted, so the rendered guard -- and therefore the ``[SQL:...]`` identity that
-            # decides whether a migration is emitted -- does not move with registry order.
-            self._owner_arms_cache = {
-                table: sorted(found, key=lambda arm: (arm.owner_table, arm.fk_column))
-                for table, found in arms.items()
-            }
+            self._owner_arms_cache = owner_arms(self.all_models)
         return self._owner_arms_cache
 
-    @staticmethod
-    def _owner_arm(model: type[models.Model], fk_field: models.ForeignKey) -> _OwnerArm:
-        """One arm, in whichever of the two forms the owner's own shape calls for. An owner
-        that inherits ``_deleted_at`` is refused a rule of its *own* -- the rule would fire on
-        a table its key is not on -- but its rows own the target all the same. See ADR 0012."""
-        table = model._meta.db_table
-        if owns_column(model, '_deleted_at'):
-            return _OwnerArm(table, fk_field.column, model)
-        root = column_owner(model, '_deleted_at')
-        # Joined on the primary key, which every table in an MTI chain shares one *value* of --
-        # the same soundness the owned rule's own correlation rests on.
-        return _OwnerArm(
-            table,
-            fk_field.column,
-            model,
-            root_table=root._meta.db_table,
-            root_pk=cast(str, root._meta.pk.column),
-            child_pk=cast(str, model._meta.pk.column),
-            root_model=root,
-        )
+    def _owned_tenancy_refusals(self) -> dict[tuple[str, str, str], list[str]]:
+        """The other half of that shared answer: which owned rules a tenant policy on a table
+        their guard reads makes unsafe to write. Read here to refuse them and by
+        ``hard_delete()`` to not follow them -- one sweep, lazy for the same reason."""
+        if self._owned_tenancy_cache is None:
+            self._owned_tenancy_cache = owned_tenancy_refusals(self.all_models)
+        return self._owned_tenancy_cache
 
     def _refuse_owned(self, key: tuple[str, str, str] | None, message: str) -> None:
         """Record an owned-rule refusal, escalating where a rule for *key* is already recorded:
@@ -1149,7 +1083,7 @@ class OperationsMixin:
                 continue
             ident_foreign_key = _identifiers._escape_ident(fk_field.column)
             co_owners = self._co_owner_arms(dependent_table, owner_table, fk_field.column)
-            if self._refuse_owned_tenancy_mismatch(key, dependent, co_owners):
+            if self._refuse_owned_tenancy_mismatch(key):
                 continue
             header = HEADER_SOFT_DELETE_OWNED.format(
                 dependent_table=_identifiers._escape_ident(dependent_table),
@@ -1194,7 +1128,7 @@ class OperationsMixin:
 
     def _co_owner_arms(
         self, dependent_table: str, owner_table: str, fk_column: str
-    ) -> list[_OwnerArm]:
+    ) -> list[OwnerArm]:
         """Every *other* owning column pointing at this dependent. Arm 0 -- the rule's own
         column -- is spelled out in the template, which is what keeps a single-owner dependent
         byte-identical to 2.3.0."""
@@ -1204,43 +1138,10 @@ class OperationsMixin:
             if (arm.owner_table, arm.fk_column) != (owner_table, fk_column)
         ]
 
-    def _owned_tenancy_mismatch(
-        self, dependent: type[models.Model], co_owners: list[_OwnerArm]
-    ) -> list[str]:
-        """Co-owner tables a tenant policy filters on a dimension the dependent's does not --
-        an ordinary ``SELECT`` cannot see an out-of-tenant live owner there, so a guard reading
-        them would stamp a still-owned row. Why only co-owners: ADR 0012."""
-        # Nothing to hide behind where no policy is generated at all.
-        if not self._tenant_policies_enabled():
-            return []
-        # Per *dimension*, and per what a policy predicates rather than what a manager
-        # declares: reaching the dependent's row put the session inside the dimensions its own
-        # policy filters on, so only one a co-owner's policy has and it does not can hide a row.
-        memo = self._policy_dimension_memo
-        # The two sides take opposite defaults for a model this kit writes no policy for, one
-        # subtracting and one adding: assume the dependent's read is unfiltered, and the arm's
-        # filtered. Both readings refuse rather than emit a guard that cannot see an owner.
-        dependent_dimensions = policy_dimensions(dependent, memo)
-        # Every table the arm reads, not just the one holding the key: a joined arm takes
-        # liveness from an MTI ancestor, and a policy there hides the same live owner.
-        return sorted(
-            {
-                table
-                for arm in co_owners
-                for table, model in arm.reads()
-                if assumed_policy_dimensions(model, memo) - dependent_dimensions
-            }
-        )
-
-    def _refuse_owned_tenancy_mismatch(
-        self,
-        key: tuple[str, str, str],
-        dependent: type[models.Model],
-        co_owners: list[_OwnerArm],
-    ) -> bool:
-        """:meth:`_owned_tenancy_mismatch`, reported. Split so the scoped gap notes can ask
-        which relations carry a rule without reporting an app the run never named."""
-        tenanted = self._owned_tenancy_mismatch(dependent, co_owners)
+    def _refuse_owned_tenancy_mismatch(self, key: tuple[str, str, str]) -> bool:
+        """The shared refusal, reported. Only the message is the generator's: the decision has
+        to be one answer, or ``hard_delete()`` removes what a refused rule spared."""
+        tenanted = self._owned_tenancy_refusals().get(key)
         if not tenanted:
             return False
         dependent_table, owner_table, foreign_key = key
@@ -1259,7 +1160,7 @@ class OperationsMixin:
 
     @staticmethod
     def _owned_co_owner_guards(
-        co_owners: list[_OwnerArm],
+        co_owners: list[OwnerArm],
         owner_table: str,
         ident_owner_pk: str,
         ident_declared_foreign_key: str,
@@ -1352,7 +1253,8 @@ class OperationsMixin:
                     if (
                         dependent_table == owner_table
                         or (owner_table, dependent_table) in self._rule_cycle_edges()
-                        or self._owned_tenancy_mismatch(dependent, co_owners)
+                        or (dependent_table, owner_table, fk_field.column)
+                        in self._owned_tenancy_refusals()
                     ):
                         continue
                     # Every table the arm names, a joined one naming two: either moving puts

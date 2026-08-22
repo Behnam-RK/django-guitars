@@ -4,7 +4,7 @@ whose column lives on an ancestor's table, where a rule referencing it is invali
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple, cast
 
 
 if TYPE_CHECKING:
@@ -12,12 +12,17 @@ if TYPE_CHECKING:
 
     from django.db import models
 
+    from guitars.tenancy.discovery import _PolicyDimensionMemo
+
 
 __all__ = [
+    'OwnerArm',
     'column_owner',
     'has_column',
     'is_mti_child',
     'mti_root',
+    'owned_tenancy_refusals',
+    'owner_arms',
     'owns_column',
     'rule_update_cycle_edges',
 ]
@@ -125,3 +130,157 @@ def rule_update_cycle_edges(candidates: Iterable[type[models.Model]]) -> set[tup
     # depend on iteration order, and an order-dependent refusal cannot stay stable run to
     # run -- the generator's `--check` would flap and `hard_delete()` would disagree with it.
     return {(source, target) for source, target in edges if _reaches(target, source)}
+
+
+class OwnerArm(NamedTuple):
+    """One owning column pointing at a dependent, as a last-owner guard needs to read it.
+    Carries the models as well as the tables: the tenancy question is answerable only from a
+    model, and no table-keyed equivalent exists. See ADR 0012."""
+
+    owner_table: str
+    fk_column: str
+    owner_model: type[models.Model]
+    #: Set only where the owner keeps ``_deleted_at`` on an MTI ancestor: that ancestor's table,
+    #: model and primary key, and this table's parent-link primary key. The arm joins the two,
+    #: the foreign key being on one table and liveness on the other. ``None`` for the plain form.
+    root_table: str | None = None
+    root_pk: str | None = None
+    child_pk: str | None = None
+    root_model: type[models.Model] | None = None
+
+    def reads(self) -> tuple[tuple[str, type[models.Model]], ...]:
+        """``(table, model)`` for every table this arm's ``SELECT`` touches -- two for a joined
+        arm. A tenant policy on *either* filters the read, so both have to be asked about."""
+        own = (self.owner_table, self.owner_model)
+        if self.root_model is None:
+            return (own,)
+        return (own, (cast('str', self.root_table), self.root_model))
+
+    def liveness_table(self) -> str:
+        """The table whose ``_deleted_at`` this arm reads -- the ancestor's where it joins.
+        Which row the arm must not count as an owner is decided against this one, the arm
+        matching a row per *liveness* row, not per row holding the key."""
+        return self.owner_table if self.root_table is None else self.root_table
+
+
+def owner_arms(candidates: Iterable[type[models.Model]]) -> dict[str, list[OwnerArm]]:
+    """``dependent_table -> every owning column pointing at it``. Swept over the whole registry
+    for the reason :func:`rule_update_cycle_edges` is: which relations carry a rule must be one
+    answer, or the generator and ``hard_delete()`` disagree about what a guard spared."""
+    # Deferred for the reason ``_rule_update_edges`` gives: ``guitars.models.fields`` reaches
+    # the tenancy runtime behind ``guitars.models.__init__``, a cost only a caller asking
+    # about rules should pay.
+    from guitars.models.fields import (  # noqa: PLC0415 - see the comment above
+        OwningForeignKey,
+        _targets_primary_key,
+    )
+
+    arms: dict[str, list[OwnerArm]] = {}
+    for model in candidates:
+        for field in model._meta.local_fields:
+            # Only the tests deciding whether an arm can be *expressed*. The ones about whether
+            # this owner's own rule can be *written* -- self-update, cycle, tenancy -- say
+            # nothing about whether its rows still own the target.
+            if (
+                not isinstance(field, OwningForeignKey)
+                # Reached through MTI is the same physical column on the ancestor's table,
+                # covered by that ancestor's own pass.
+                or field.model is not model
+                or not has_column(model, '_deleted_at')
+                or not has_column(field.related_model, '_deleted_at')
+                or not _targets_primary_key(field)
+            ):
+                continue
+            dependent_table = column_owner(field.related_model, '_deleted_at')._meta.db_table
+            arms.setdefault(dependent_table, []).append(_owner_arm(model, field))
+    # Sorted, so a rendered guard -- and therefore the ``[SQL:...]`` identity that decides
+    # whether a migration is emitted -- does not move with registry order.
+    return {
+        table: sorted(found, key=lambda arm: (arm.owner_table, arm.fk_column))
+        for table, found in arms.items()
+    }
+
+
+def _owner_arm(model: type[models.Model], field: models.ForeignKey) -> OwnerArm:
+    """One arm, in whichever of the two forms the owner's own shape calls for. An owner that
+    inherits ``_deleted_at`` is refused a rule of its *own* -- that would fire on a table its
+    key is not on -- but its rows own the target all the same."""
+    table = model._meta.db_table
+    if owns_column(model, '_deleted_at'):
+        return OwnerArm(table, field.column, model)
+    root = column_owner(model, '_deleted_at')
+    # Joined on the primary key, which every table in an MTI chain shares one *value* of --
+    # the same soundness the owned rule's own correlation rests on.
+    return OwnerArm(
+        table,
+        field.column,
+        model,
+        root_table=root._meta.db_table,
+        root_pk=cast('str', root._meta.pk.column),
+        child_pk=cast('str', model._meta.pk.column),
+        root_model=root,
+    )
+
+
+def owned_tenancy_refusals(
+    candidates: Iterable[type[models.Model]],
+) -> dict[tuple[str, str, str], list[str]]:
+    """``(dependent_table, owner_table, fk_column) -> the tables a tenant policy filters on a
+    dimension the dependent's does not``. An arm's ``NOT EXISTS`` is an ordinary ``SELECT``, so
+    such a policy hides a live owner: the rule is refused, and not followed in Python either."""
+    # Deferred for the reason ``owner_arms`` gives, and because ``guitars.tenancy`` imports this
+    # module -- at module level the two would close a cycle.
+    from guitars.models.fields import (  # noqa: PLC0415 - see the comment above
+        OwningForeignKey,
+        _targets_primary_key,
+    )
+    from guitars.tenancy.discovery import (  # noqa: PLC0415 - see the comment above
+        assumed_policy_dimensions,
+        policy_dimensions,
+        tenant_policies_enabled,
+    )
+
+    if not tenant_policies_enabled():
+        return {}
+    swept = list(candidates)
+    arms = owner_arms(swept)
+    memo: _PolicyDimensionMemo = {}
+    refused: dict[tuple[str, str, str], list[str]] = {}
+    for model in swept:
+        # An owner that does not own the column is refused a rule anyway, on the MTI ground;
+        # asking here would name a table the rule could never fire on.
+        if not owns_column(model, '_deleted_at'):
+            continue
+        owner_table = model._meta.db_table
+        for field in model._meta.local_fields:
+            # Every refusal that comes *before* this one, so a key here means "refused for
+            # tenancy" and nothing else: a caller reading the dict as the reason a relation
+            # carries no rule would otherwise be handed the wrong remediation.
+            if (
+                not isinstance(field, OwningForeignKey)
+                or field.model is not model
+                or not has_column(field.related_model, '_deleted_at')
+                or not _targets_primary_key(field)
+            ):
+                continue
+            dependent = column_owner(field.related_model, '_deleted_at')
+            dependent_table = dependent._meta.db_table
+            # A rule updating the table it fires on is refused for infinite rule recursion. The
+            # cycle graph itself stays the caller's, being needed on its own account.
+            if dependent_table == owner_table:
+                continue
+            dimensions = policy_dimensions(dependent, memo)
+            # Every table each arm reads, not just the one holding the key: a joined arm takes
+            # liveness from an MTI ancestor, and a policy there hides the same live owner.
+            offending = sorted(
+                {
+                    table
+                    for arm in arms.get(dependent_table, ())
+                    if (arm.owner_table, arm.fk_column) != (owner_table, field.column)
+                    for table, arm_model in arm.reads()
+                    if assumed_policy_dimensions(arm_model, memo) - dimensions
+                }
+            )
+            if offending:
+                refused[dependent_table, owner_table, field.column] = offending
+    return refused

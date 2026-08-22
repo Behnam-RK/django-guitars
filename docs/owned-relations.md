@@ -28,9 +28,8 @@ reaches one, the other runs no checks at all, and a redirected key stamps then *
 More shapes the generator refuses rather than a check, warned about since each depends on the
 *other* model — plus the [MTI](#mti) one below and the tenancy one under the guard:
 
-- **A target, or an owner, with no `_deleted_at`.** Nothing for the rule to stamp, or nothing whose
-  transition ever fires it. Reported, not passed over: unlike a plain `ForeignKey` an
-  `OwningForeignKey` has no other purpose, so generating nothing is a misconfiguration.
+- **A target, or an owner, with no `_deleted_at`.** Nothing to stamp, or nothing whose transition
+  fires it. Reported: an `OwningForeignKey` has no other purpose, so generating nothing is a bug.
 - **A relation closing a cycle of `ON UPDATE` rules** — owning yourself
   (`OwningForeignKey('self', …)`), owning an MTI descendant, or a longer loop back through another
   model's owned or `CASCADE` rules. A rule's action expands *before* the original statement, so the
@@ -63,10 +62,10 @@ counts, going *with* the row, discounted by **row** rather than relation and at 
 absolutely: the batch being gone by construction, a target the per-statement limit below left *live*
 is still removed — straight to gone, never archived.
 
-One thing collection does **not** reach: a `GenericRelation` on an owned target. It carries no
-foreign-key constraint, so it cannot fail at `COMMIT` and rightly does not hold the row back — but
-nothing removes it either. Only Phase 1's `Collector` walks `_meta.private_fields`, and an owned row
-is soft-deleted by a *rule*, never collected. Delete through the target, which runs the `Collector`.
+One thing collection does **not** reach: a `GenericRelation` on an owned target. No foreign-key
+constraint, so it cannot fail at `COMMIT` and rightly does not hold the row back — but nothing
+removes it either: only Phase 1's `Collector` walks `_meta.private_fields`, and an owned row is
+soft-deleted by a *rule*. Delete through the target, which runs the `Collector`.
 
 Two limits the guard does not cover, both by construction:
 
@@ -76,12 +75,13 @@ Two limits the guard does not cover, both by construction:
 - **Per visible row.** Every arm's `NOT EXISTS` is an ordinary `SELECT`, so a
   [tenant policy](tenancy.md) on the table it reads filters it: a live sibling owner in another
   tenant is invisible, the guard reads "last owner", and a still-owned row is stamped — the one place
-  the kit's guards do not fail safe. `hard_delete()` reads through the same policy and then *removes*
-  the row, which the foreign-key check does not (integrity is exempt from RLS), so that aborts at
-  `COMMIT`. Keep an owned target inside its owners' tenant dimension. Since 2.4.0 the *co-owner*
-  case is **refused** instead, where a policy on either table its arm reads — the co-owner's, or the
-  MTI ancestor it takes liveness from — filters on a dimension the dependent's does not. Refusing
-  emits nothing, so one over a rule already recorded fails `--check`. Drop that rule by hand.
+  the kit's guards do not fail safe. `hard_delete()` reads through that policy and then *removes* the
+  row, which the foreign-key check does not (integrity is exempt from RLS), so that aborts at
+  `COMMIT` — the *declaring* owner's own tenancy, not re-examined: keep an owned target inside its
+  owners' tenant dimension. The *co-owner* case is **refused** instead since 2.4.0, where a policy
+  on either table its arm reads — the co-owner's, or the MTI ancestor it takes liveness from —
+  filters on a dimension the dependent's does not, and since 2.4.1 `hard_delete()` reads that same
+  verdict. Refusing emits nothing, so one over a recorded rule fails `--check`: drop it by hand.
 
 ## MTI
 

@@ -10,6 +10,11 @@ Full history and diffs: [GitHub releases](https://github.com/Behnam-RK/django-gu
 
 ## [Unreleased]
 
+## [2.4.1] - 2026-08-21
+
+- Fixed: `hard_delete()` no longer follows an owned relation the generator refuses on tenancy grounds. 2.4.0 added that refusal to the generator only, so `models.soft_deletion._owned_fields` still treated the relation as carrying a rule: Phase 2 collected the dependent, read the co-owner through the same tenant policy that hid it from the guard, and *removed* the row the missing rule would have spared. The deferred foreign-key check is exempt from RLS, so in the ordinary case that aborted the transaction at `COMMIT` rather than destroying anything — loud, but a caller's transaction lost all the same — while an `OwningForeignKey(db_constraint=False)` gives up the check that made it loud and the removal went through.
+- Changed: which owned relations carry a rule is now **one shared answer in `guitars.introspection`**, matching what `rule_update_cycle_edges` has always been: `owner_arms` is the registry-wide sweep behind both the guard's arms and the refusal, and `owned_tenancy_refusals` is the verdict, read by `makeguitarmigrations` to refuse a rule and by `hard_delete()` to not follow one. The generator still owns the wording of its warning; only the decision is shared. `guitars.tenancy.discovery.tenant_policies_enabled` is likewise the one definition of the `GUITARS_TENANT_POLICIES` gate — the generator, `hard_delete()` and both system checks read it — so they cannot come to disagree about whether policies are on. No generated SQL changes and no migration is emitted — this moves where the decision lives, not what it decides ([ADR-0012](docs/adr/0012-cross-owner-last-owner-guard.md)).
+
 ## [2.4.0] - 2026-08-21
 
 - Fixed: the owned rule's last-owner guard now reads **every** `OwningForeignKey` pointing at the dependent, not only the rule's own column. 2.3.0 scanned the declaring owner's column on the declaring owner's table alone, so where a dependent was owned from two places, soft-deleting the last owner *of one kind* archived it while a live owner *of another kind* still pointed at it — data loss, reproduced against a real database within a day of that release. Each rule now carries one `NOT EXISTS` arm per owning column targeting the dependent: N owning columns produce N rules of N arms each. `on_delete` never covered this and could not have — `RESTRICT`/`PROTECT` govern deletion of the *target*, while the owned rule fires when an *owner* is soft-deleted ([ADR-0012](docs/adr/0012-cross-owner-last-owner-guard.md), `docs/owned-relations.md`).
@@ -160,7 +165,8 @@ First stable release. **BREAKING:** the instrument ladder shifted down one rung 
 
 - Added: initial release — `SetarModel`, `GuitarModel`, `SoftDeletableModel`, `DisableSignals`, `makeguitarmigrations`.
 
-[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.4.0...HEAD
+[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.4.1...HEAD
+[2.4.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.4.1
 [2.4.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.4.0
 [2.3.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.3.0
 [2.2.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.2.1

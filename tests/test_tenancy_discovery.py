@@ -11,6 +11,7 @@ from guitars.tenancy import tenanted_manager
 from guitars.tenancy.spec import tenant_spec
 from guitars.tenancy.discovery import (
     TableCoverage,
+    assumed_policy_dimensions,
     app_coverage,
     expected_coverage,
     is_local,
@@ -294,3 +295,17 @@ class TestPolicyDimensions:
 
     def test_an_untenanted_model_is_empty(self):
         assert policy_dimensions(Label) == frozenset()
+
+    def test_a_caller_memo_is_filled_and_reused(self):
+        """The sweep behind this reaches ``_classify``, and a rule with N arms asks about N
+        models. Memoised by the caller: keyed on the model *and* which of the two asked, the
+        two disagreeing only outside ``LOCAL_APPS`` -- but disagreeing there."""
+        memo: dict = {}
+
+        assert policy_dimensions(Release, memo) == frozenset({'label'})
+        assert list(memo.values()) == [frozenset({'label'})]
+        assert policy_dimensions(Release, memo) == frozenset({'label'})
+        assert len(memo) == 1
+
+        assert assumed_policy_dimensions(Release, memo) == frozenset({'label'})
+        assert len(memo) == 2  # a second key: same model, the other caller

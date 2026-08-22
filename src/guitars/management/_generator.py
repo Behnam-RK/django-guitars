@@ -118,6 +118,13 @@ def create_empty_migration_file(app: AppConfig, name: str) -> str:
     return match.group('filename')
 
 
+def _mentions_dependency(line: str, dependency: tuple[str, str]) -> bool:
+    """Whether *line* already declares *dependency* -- both halves on it, in either quoting.
+    Django's writer ``repr``s the tuple to single quotes; a hand-edited file may use double,
+    and a file written before 2.5.0 is read the same way, so neither is assumed."""
+    return all(f"'{part}'" in line or f'"{part}"' in line for part in dependency)
+
+
 def write_migration_file(
     app: AppConfig,
     migration_file: str,
@@ -142,13 +149,19 @@ def write_migration_file(
         for line in indented.split('\n'):
             lines.insert(-1, f'{line}\n')
 
-    # Depend on the singleton function migration(s) where needed. Skip self-references and
-    # anything Django's scaffold already wrote, so it's never listed twice.
+    # Depend on the function migration(s) and on whatever creates the objects the operations
+    # name. Skip self-references and anything Django's scaffold already wrote.
     migration_stem = Path(migration_file).stem
     for dependency in dependencies or []:
-        if migration_stem == dependency[1]:
+        # Both halves, for the reason the scan below takes both: every app's enforcement
+        # migration is named ``auto_enforcement``, so the name alone reads another app's as
+        # this file itself and drops the edge.
+        if (app.label, migration_stem) == dependency:
             continue
-        if any(f'"{dependency[1]}"' in line or f"'{dependency[1]}'" in line for line in lines):
+        # Both halves on one line, never the name alone: cross-app edges (2.5.0) routinely point
+        # at an ``0001_initial``, so matching the name reads the scaffold's own app's as covering
+        # another's and drops the edge. Function migration names happened never to collide.
+        if any(_mentions_dependency(line, dependency) for line in lines):
             continue
         # Single-quoted, matching what Django's own writer emits (it ``repr``s the tuple)
         # and what a ruff- or black-free formatter leaves alone. The scan above accepts

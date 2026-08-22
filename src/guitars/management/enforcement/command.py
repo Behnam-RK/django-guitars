@@ -18,6 +18,7 @@ from django.db import models
 from guitars import sql
 from guitars.introspection import is_mti_child, owns_column
 from guitars.management import _generator
+from guitars.management.enforcement.graph import ObjectRef
 from guitars.management.enforcement.headers import (
     HEADER_PARENT_TRIGGER_FUNCTION,
     HEADER_TENANT_AUTOFILL_FUNCTION,
@@ -33,6 +34,7 @@ from guitars.tenancy.discovery import owner_autofill_notes, tenant_policies_enab
 
 if TYPE_CHECKING:
     from django.apps import AppConfig
+    from django.db.migrations.loader import MigrationLoader
 
 
 class Command(OperationsMixin, BaseCommand):
@@ -63,9 +65,9 @@ class Command(OperationsMixin, BaseCommand):
         self.tenant_autofill_dependencies: dict[str, tuple[str, str]] = {}
         self.tenant_autofill_sql: dict[str, str | None] = {}
 
-        # Rules skipped this run, surfaced as warnings (not silent): cross-app / MTI cascade
-        # rules, the owned rules whose three shapes the generator refuses, and either kind
-        # refused for closing an ON UPDATE rule cycle. One list, one report loop.
+        # Surfaced as warnings, not silent: rules skipped this run -- cross-app / MTI cascade,
+        # the owned shapes the generator refuses, either kind on an ON UPDATE cycle -- plus, since
+        # 2.5.0, a rule *emitted* whose cross-app reference resolved to no migration to depend on.
         self._mti_cascade_warnings: list[str] = []
         # Two relations whose rules would share one name on one table. Emitted anyway -- the
         # cascade spelling is frozen -- so the report is the only thing standing between a
@@ -75,6 +77,10 @@ class Command(OperationsMixin, BaseCommand):
         # live in every migrated database. Errors, and they fail ``--check``: refusing emits
         # nothing, so nothing else would notice. See ``_refuse_owned``.
         self._refusals_over_live_rules: list[str] = []
+        # Enforcement migrations naming another app's table with nothing ordering them
+        # against its creation. Errors, and they fail ``--check``: a fresh `migrate` fails
+        # on them while an incremental one passes, so nothing else notices. See ADR 0013.
+        self._missing_edges: list[str] = []
         self._claimed_rule_names: dict[tuple[str, str], tuple] = {}
         # Tables tenancy discovery could not cover, with the reason. Also surfaced.
         self._tenancy_notes: list[str] = []
@@ -95,6 +101,14 @@ class Command(OperationsMixin, BaseCommand):
         # ``None`` rather than ``{}`` as the "not swept yet" mark, an empty verdict being the
         # ordinary answer for a project with no tenancy at all.
         self._owned_tenancy_cache: dict[tuple[str, str, str], list[str]] | None = None
+        # Objects the operations built for an app name, keyed by that app: a rule's action is
+        # parsed at CREATE time, so anything it references in *another* app needs a dependency
+        # edge. Filled as the rules are built and read back per app -- see ``_object_refs``.
+        self._object_refs: dict[str, list[ObjectRef]] = {}
+        # The project's migration graph, shared by the two readers of it below and dropped
+        # whenever this command writes a file. ``None`` is "not built"; building one imports
+        # every migration module in the project, so it is worth not doing per app.
+        self._loader_cache: MigrationLoader | None = None
         self._required_autofill_cache: dict[tuple[str, str], tuple[str, str]] | None = None
         self._relocated_autofill_cache: dict[tuple[str, str], tuple[str, str]] | None = None
 
@@ -407,6 +421,13 @@ class Command(OperationsMixin, BaseCommand):
             # uncaught CommandError, and double-wrapping garbles the ANSI codes.
             raise CommandError(self._rule_name_clashes[0])
 
+    def _refuse_a_missing_edge(self, *, check_only: bool) -> None:
+        """Fail a ``--check`` run over a rule nothing orders against the table it names. New
+        in 2.5.0, and the reason this is a minor release: a graph that was green before now
+        fails, which is the point -- it was green all the way to a virgin-database failure."""
+        if check_only and self._missing_edges:
+            raise CommandError(self._missing_edges[0])
+
     def _refuse_a_stale_owned_rule(self, *, check_only: bool) -> None:
         """Fail a ``--check`` run over an owned rule that is refused but already recorded.
         Unlike a name clash this one is not emitted at all, so a generating run leaves the
@@ -495,7 +516,7 @@ class Command(OperationsMixin, BaseCommand):
             migration_name='auto_enforcement',
             build_ops=lambda app: self._build_operations(app, adopt=adopt),
             check_only=check_only,
-            dependencies_for=self._function_dependencies_for,
+            dependencies_for=self._dependencies_for,
             adopt=adopt,
         )
         changes_made = changes_made or stage_changed
@@ -516,6 +537,7 @@ class Command(OperationsMixin, BaseCommand):
             *((self.style.WARNING, note) for note in self._mti_cascade_warnings),
             *((self.style.ERROR, note) for note in self._rule_name_clashes),
             *((self.style.ERROR, note) for note in self._refusals_over_live_rules),
+            *((self.style.ERROR, note) for note in self._missing_edges),
         ]:
             self.stderr.write(paint(note))
 
@@ -536,6 +558,7 @@ class Command(OperationsMixin, BaseCommand):
         # Before `_report_missing`, which also raises -- a clash is the more fundamental.
         self._refuse_a_rule_name_clash(check_only=check_only)
         self._refuse_a_stale_owned_rule(check_only=check_only)
+        self._refuse_a_missing_edge(check_only=check_only)
 
         if check_missing or function_check_messages:
             self._report_missing(check_missing, function_check_messages)

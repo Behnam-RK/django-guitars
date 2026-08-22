@@ -99,6 +99,11 @@ class TableCoverage(NamedTuple):
     #: the owner's app, since a trigger here could not write an ancestor's column (ADR 0009).
     #: Outside ``as_kwargs`` for the same reason as above.
     owner_autofill_columns: dict[str, str] | None = None
+    #: The model behind ``owner_table``, and the *field* names behind ``owner_columns``. The
+    #: policy names both at ``CREATE`` time and the ancestor can live in another app, so the
+    #: migration needs an edge -- resolved against model state, which knows only field names.
+    owner_model: type[models.Model] | None = None
+    owner_fields: tuple[str, ...] | None = None
 
     def as_kwargs(self) -> PolicyKwargs:
         """The keyword arguments ``guitars.sql.create_table_rls`` expects -- owner keys
@@ -208,8 +213,12 @@ def _classify(
 
     owner_columns: dict[str, str] = {}
     owner_table = owner_pk = child_pk = None
+    owner: type[models.Model] | None = None
+    owner_fields: tuple[str, ...] = ()
     if by_owner:
         owner, owner_columns = next(iter(by_owner.items()))
+        # ``local`` is the dimension -> *field* mapping the columns above were resolved from.
+        owner_fields = tuple(sorted(local[dimension] for dimension in owner_columns))
         owner_table = _meta(owner).db_table
         owner_pk = _meta(owner).pk.column
         # The child's own primary key is its parent-link column, and every table in an MTI
@@ -224,7 +233,7 @@ def _classify(
     # ``_autofills`` short-circuits ``_relocatable``'s registry sweep and cannot change its
     # answer: *model* claims every column in ``owner_columns``, so one that does not autofill
     # is always refused. The note is unaffected -- ``owner_autofill_notes`` computes its own.
-    if by_owner and _autofills(model):
+    if owner is not None and _autofills(model):
         relocated = {
             dimension: column
             for dimension, column in owner_columns.items()
@@ -240,6 +249,8 @@ def _classify(
             owner_columns=owner_columns or None,
             autofill_columns=autofill_columns,
             owner_autofill_columns=relocated or None,
+            owner_model=owner,
+            owner_fields=owner_fields or None,
         ),
         notes,
     )

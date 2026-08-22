@@ -17,7 +17,7 @@ from guitars import sql
 from guitars.management.commands.audittenancy import Command as AuditCommand
 from guitars.sql import triggers
 from guitars.tenancy import tenant
-from tests.conftest import execute
+from tests.conftest import execute, rows
 from guitars.tenancy.discovery import (
     autofill_function_name,
     autofill_trigger_name,
@@ -794,7 +794,17 @@ class TestOptions:
         from guitars.tenancy.discovery import expected_coverage
 
         tables = sorted(expected_coverage().tables)
-        _execute(*[sql.drop_tenant_policy(table=table) for table in tables])
+        # Every policy in the database, not only the expected ones: a fixture app outside
+        # ``LOCAL_APPS`` is policied by the migrations the test database is built from, and one
+        # surviving policy leaves oids to look columns up for -- the path this test is here for.
+        _execute(*[
+            sql.drop_tenant_policy(table=table)
+            for (table,) in rows(
+                'SELECT relname FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid '
+                'WHERE p.polname = %s',
+                [sql.TENANT_POLICY],
+            )
+        ])
 
         output = _audit_failure()
 

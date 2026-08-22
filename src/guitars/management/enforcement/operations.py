@@ -4,10 +4,13 @@
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, NamedTuple, cast
 
 from django.apps import apps as django_apps
+from django.core.exceptions import FieldDoesNotExist
 from django.db import models
+from django.db.migrations.loader import MigrationLoader
 
 from guitars import sql
 from guitars.introspection import (
@@ -21,6 +24,12 @@ from guitars.introspection import (
     rule_update_cycle_edges,
 )
 from guitars.management import _generator
+from guitars.management.enforcement.graph import (
+    ObjectRef,
+    drop_implied_edges,
+    resolve_dependencies,
+    resolve_object_migration,
+)
 from guitars.management.enforcement.headers import (
     _RE_MTI_UPDATED_AT,
     _RE_TENANT_AUTOFILL,
@@ -43,6 +52,7 @@ from guitars.management.enforcement.headers import (
 from guitars.management.enforcement.identity import _literal, _operation
 from guitars.models.fields import OwningForeignKey, _targets_primary_key
 from guitars.sql import _identifiers
+from guitars.sql import policy as _policy
 from guitars.sql import soft_delete as _soft_delete
 from guitars.sql import triggers as _triggers
 from guitars.tenancy.discovery import (
@@ -151,7 +161,10 @@ class OperationsMixin:
         _rule_cycle_cache: set[tuple[str, str]] | None
         _owner_arms_cache: dict[str, list[OwnerArm]] | None
         _owned_tenancy_cache: dict[tuple[str, str, str], list[str]] | None
+        _object_refs: dict[str, list[ObjectRef]]
+        _loader_cache: MigrationLoader | None
         _refusals_over_live_rules: list[str]
+        _missing_edges: list[str]
         _table_app_labels_cache: dict[str, str] | None
         _required_autofill_cache: dict[tuple[str, str], tuple[str, str]] | None
         _relocated_autofill_cache: dict[tuple[str, str], tuple[str, str]] | None
@@ -248,6 +261,16 @@ class OperationsMixin:
             operations.append(force_source)
         return operations
 
+    def _record_policy_object_refs(self, app: AppConfig, coverage: TableCoverage) -> None:
+        """Note the objects a tenant policy's owner join names. ``sql.policy._owner_exists``
+        reads the MTI ancestor's table and each tenant column on it, both resolved as
+        ``CREATE POLICY`` is parsed, and that ancestor routinely lives in another app."""
+        if coverage.owner_model is None:
+            return
+        self._record_app_object_ref(app.label, coverage.owner_model)
+        for field in coverage.owner_fields or ():
+            self._record_app_object_ref(app.label, coverage.owner_model, field)
+
     def _tenant_policy_operations(self, app: AppConfig, *, adopt: bool = False) -> list[str]:
         """Tenant-policy create/replace operations *app* is missing or has outdated."""
         if not self._tenant_policies_enabled():
@@ -258,6 +281,7 @@ class OperationsMixin:
 
         operations: list[str] = []
         for table, table_coverage in sorted(coverage.tables.items()):
+            self._record_policy_object_refs(app, table_coverage)
             # Two independent reasons to replace: the identity answers "does the policy
             # still say what the models imply" (a dimension or role changed); the SQL digest
             # answers "is the emitted text still what's on disk". Checking only one misses the other.
@@ -420,6 +444,12 @@ class OperationsMixin:
                 )
             elif is_mti_child(model, '_deleted_at'):
                 mti = self._mti_context(model, table, '_deleted_at')
+                # The redirect rule's action names the *ancestor's* table and ``_deleted_at``,
+                # both resolved as PostgreSQL parses it, so a chain crossing apps needs the same
+                # edges. Unlike the trigger above: its parent table is a literal, quoted to fire.
+                ancestor = column_owner(model, '_deleted_at')
+                self._record_object_ref(model, ancestor)
+                self._record_object_ref(model, ancestor, '_deleted_at')
                 mti_ident = {
                     'child_table': _identifiers._quote_table(mti['child_table']),
                     'parent_table': _identifiers._quote_table(mti['parent_table']),
@@ -741,6 +771,25 @@ class OperationsMixin:
             self._owned_tenancy_cache = owned_tenancy_refusals(self.all_models)
         return self._owned_tenancy_cache
 
+    def _record_object_ref(
+        self, model: type[models.Model], referenced: type[models.Model], field: str | None = None
+    ) -> None:
+        """Note that a rule built for *model*'s app names *referenced*. Keyed by the app whose
+        migration will carry the operation, which is ``model``'s: ``_build_operations`` is
+        called per app and reads only that app's models, so the two cannot come apart."""
+        self._record_app_object_ref(model._meta.app_label, referenced, field)
+
+    def _record_app_object_ref(
+        self, app_label: str, referenced: type[models.Model], field: str | None = None
+    ) -> None:
+        """The same, for an operation built from a *table* rather than a model in hand -- a
+        tenant policy, whose coverage is keyed by table name. The app is the one being scanned,
+        which is where the operation lands, so it is passed rather than read off a model."""
+        ref = ObjectRef(referenced._meta.app_label, referenced.__name__, field)
+        refs = self._object_refs.setdefault(app_label, [])
+        if ref not in refs:
+            refs.append(ref)
+
     def _refuse_owned(self, key: tuple[str, str, str] | None, message: str) -> None:
         """Record an owned-rule refusal, escalating where a rule for *key* is already recorded:
         refusing emits nothing, so the stale rule stays live and wrong under a green
@@ -893,6 +942,14 @@ class OperationsMixin:
                     foreign_key=_identifiers._escape_ident(fk_field.column),
                 )
                 rule_name = _related_rule_name(related_table, fk_field.column)
+            # The rule's action names the related table *and* the foreign key on it, so one
+            # field ref covers both. Pre-existing gap, not new in 2.4.0: a CASCADE crossing
+            # apps has always emitted a rule naming a table nothing ordered it against.
+            self._record_object_ref(model, related_model, fk_field.name)
+            # ``SET _deleted_at`` is a second column, and not necessarily as old as the table:
+            # a model promoted to ``SetarModel`` gains it in a later migration, and an edge to
+            # the creation alone would let the rule be created before the column exists.
+            self._record_object_ref(model, related_model, '_deleted_at')
             # The relation, not `key`: `key` drops the column on the plain form, and two
             # relations can then share one key -- see `_claim_rule_name`'s docstring.
             self._claim_rule_name(
@@ -1090,6 +1147,18 @@ class OperationsMixin:
                 continue
             ident_foreign_key = _identifiers._escape_ident(fk_field.column)
             co_owners = self._co_owner_arms(dependent_table, owner_table, fk_field.column)
+            # Everything the action names outside its own table, each ``_deleted_at`` alongside
+            # the table holding it: a model promoted to ``SetarModel`` gains that column later
+            # than its table, so an edge to the table alone would not order the column.
+            self._record_object_ref(model, dependent)
+            self._record_object_ref(model, dependent, '_deleted_at')
+            for arm in co_owners:
+                self._record_object_ref(model, arm.owner_model, arm.fk_name)
+                if arm.root_model is not None:
+                    self._record_object_ref(model, arm.root_model)
+                    self._record_object_ref(model, arm.root_model, '_deleted_at')
+                else:
+                    self._record_object_ref(model, arm.owner_model, '_deleted_at')
             header = HEADER_SOFT_DELETE_OWNED.format(
                 dependent_table=_identifiers._escape_ident(dependent_table),
                 table=header_owner_table,
@@ -1323,6 +1392,150 @@ class OperationsMixin:
                     )
         return notes
 
+    def _migration_loader(self) -> MigrationLoader:
+        """The project's migration graph, built at most once between writes. Building one imports
+        every migration module in the project, and both readers below ask one question per app --
+        so a per-call build squares that sweep against the local-app count."""
+        if self._loader_cache is None:
+            self._loader_cache = MigrationLoader(None, ignore_no_migrations=True)
+        return self._loader_cache
+
+    def _drop_cached_migration_loader(self) -> None:
+        """Forget the graph after writing a migration file. The file carries edges into other
+        apps, so it moves what the *next* app's reachability question answers -- the scaffold
+        write itself needs no drop, a ref always resolving in an app the new node is not in."""
+        self._loader_cache = None
+
+    def _dependencies_for(self, app: AppConfig, operations_blob: str) -> list[tuple[str, str]]:
+        """Every edge *app*'s new migration needs: the shared-function ones read off the
+        operation headers, plus one per object the rules name in another app. Both, in that
+        order, so a file's dependency list reads the same as it did before 2.5.0 plus."""
+        return self._function_dependencies_for(operations_blob) + self._object_dependencies_for(
+            app
+        )
+
+    def _object_dependencies_for(self, app: AppConfig) -> list[tuple[str, str]]:
+        """Edges to the migrations that create what *app*'s rules reference. A rule's action is
+        parsed by PostgreSQL at ``CREATE`` time, so a cross-app table or column it names must
+        already exist -- and only an explicit dependency orders that. See ADR 0013."""
+        # Own-app refs are filtered before the loader is built, not inside ``resolve_dependencies``
+        # alone: building one imports every migration module in the project, and a single-app
+        # project -- every consumer before 2.5.0 -- has nothing else for it to answer.
+        refs = [ref for ref in self._object_refs.get(app.label, []) if ref.app_label != app.label]
+        if not refs:
+            return []
+        loader = self._migration_loader()
+        edges, unresolved = resolve_dependencies(loader, refs, own_app=app.label)
+        for ref in unresolved:
+            # Warned, not refused: an app with no migrations at all is a legitimate
+            # configuration, and withdrawing a rule that works today would be the worse trade.
+            self._mti_cascade_warnings.append(
+                f"Enforcement migration for '{app.label}' references '{ref.describe()}', but no "
+                'migration in that app creates it, so no dependency edge was emitted. A fresh '
+                '`migrate` may reach the rule first. Add the edge by hand if that app is '
+                'migrated elsewhere.'
+            )
+        return drop_implied_edges(loader, edges)
+
+    def _missing_edge_notes(self, app: AppConfig) -> list[str]:
+        """Enforcement migrations of *app* that name another app's table without being ordered
+        against whatever creates it. Reachability, not a literal edge: an ordering already
+        guaranteed through another path is guaranteed, and flagging it would be a false alarm."""
+        # Cross-app refs only, and filtered before the loader is built for the reason
+        # ``_object_dependencies_for`` gives -- a single-app project builds none.
+        refs = [ref for ref in self._object_refs.get(app.label, []) if ref.app_label != app.label]
+        if not refs:
+            return []
+        loader = self._migration_loader()
+        notes: list[str] = []
+        for ref in refs:
+            edge = resolve_object_migration(loader, ref)
+            table = self._ref_table(ref)
+            if edge is None or table is None:
+                continue
+            column = self._ref_column(ref)
+            # Everything *edge* already depends on: pasting the edge onto one of those is the
+            # one shape that genuinely cycles, and Django rejects such a graph outright -- so
+            # reporting it would be red with no move that clears it.
+            behind_edge = (
+                set(loader.graph.forwards_plan(edge)) if edge in loader.graph.node_map else set()
+            )
+            for path, content in _generator.iter_migration_files(app):
+                # Only a migration whose SQL actually names the table: refs are collected per
+                # app, and an app's earlier enforcement migration may predate the rule needing
+                # this one. ``_quote_table`` renders it as the rule does, so membership is exact.
+                node = (app.label, path.stem)
+                if (
+                    not _generator.RE_DIGEST.search(content)
+                    or not self._names_table(content, table)
+                    # ...and the column, where the ref names one: two refs can share a table
+                    # and resolve to *different* migrations, and matching the table alone then
+                    # reports the older file forever. Unquoted -- the bare name is in both.
+                    or (column is not None and column not in content)
+                    or node not in loader.graph.node_map
+                    or node in behind_edge
+                    or edge in set(loader.graph.forwards_plan(node))
+                ):
+                    continue
+                note = (
+                    f"Enforcement migration '{app.label}.{path.stem}' creates a rule naming "
+                    f"'{table}', but nothing orders it after '{edge[0]}.{edge[1]}', which "
+                    'creates that table -- a fresh `migrate` can reach the rule first and fail '
+                    f'with `relation "{table}" does not exist`. Add to its dependencies:\n'
+                    f"        ('{edge[0]}', '{edge[1]}'),"
+                )
+                # Deduped: several refs into one app resolve to one migration -- a table and
+                # the ``_deleted_at`` on it -- and the note names the file and the edge only.
+                if note not in notes:
+                    notes.append(note)
+        return notes
+
+    @staticmethod
+    def _ref_table(ref: ObjectRef) -> str | None:
+        """The physical table behind *ref*, or ``None`` where the model is gone -- a migration
+        older than a deleted model still mentions its table, and that is not this check's
+        business. Read off the registry, the same place the refs themselves came from."""
+        try:
+            return django_apps.get_model(ref.app_label, ref.model)._meta.db_table
+        except LookupError:
+            return None
+
+    @staticmethod
+    def _names_table(content: str, table: str) -> bool:
+        """Whether *content*'s SQL names *table*, in either form the kit emits. A rule renders
+        ``_quote_table`` -- quoted per part, so membership is exact; a policy's owner join
+        renders ``policy._qualified_table``, which leaves a bare name unquoted."""
+        if _identifiers._quote_table(table) in content:
+            return True
+        try:
+            bare = _policy._qualified_table(table)
+        except ValueError:
+            # A ``db_table`` no policy could spell unquoted: the quoted form above is then the
+            # only one emitted, so the answer is no rather than a crashed report. ``_quote_table``
+            # raises for its own shapes uncaught -- rendering such a rule raises before this.
+            return False
+        # Delimited by SQL, never by a quote: a bare ``shop`` is a substring of ``shopping``,
+        # sits inside a ``('shop', '0001_initial')`` dependency tuple, and is the escaped
+        # literal an MTI ``updated_at`` trigger re-quotes at fire time -- none of those name it.
+        edge = r'[\w."\']'
+        return re.search(rf'(?<!{edge}){re.escape(bare)}(?!{edge})', content) is not None
+
+    @staticmethod
+    def _ref_column(ref: ObjectRef) -> str | None:
+        """The physical column behind *ref*, or ``None`` for a ref naming only a table -- and
+        for one whose field the registry no longer has, the same "not this check's business"
+        answer :meth:`_ref_table` gives. Read off the registry, like the refs themselves."""
+        if ref.field is None:
+            return None
+        try:
+            model = django_apps.get_model(ref.app_label, ref.model)
+        except LookupError:
+            return None
+        try:
+            return cast('str', model._meta.get_field(ref.field).column)
+        except FieldDoesNotExist:
+            return None
+
     def _function_dependencies_for(self, operations_blob: str) -> list[tuple[str, str]]:
         """Function-migration dependencies an app's operations actually require -- keyed off
         the operation headers, since only ``updated_at`` and autofill triggers call a shared
@@ -1351,7 +1564,7 @@ class OperationsMixin:
         migration_name: str,
         build_ops: Callable[[AppConfig], list[str]],
         check_only: bool,
-        dependencies_for: Callable[[str], list[tuple[str, str]]] | None = None,
+        dependencies_for: Callable[[AppConfig, str], list[tuple[str, str]]] | None = None,
         adopt: bool = False,
     ) -> tuple[bool, list[tuple[str, list[str]]]]:
         """Scaffold-and-write one migration per in-scope app with new operations. Shared by
@@ -1364,6 +1577,9 @@ class OperationsMixin:
                 continue
 
             operations = build_ops(app)
+            # Before the early exits below: an app whose operations are all already recorded
+            # emits nothing, and a missing edge on one of *those* is exactly what needs saying.
+            self._missing_edges.extend(self._missing_edge_notes(app))
             if not operations:
                 continue
 
@@ -1382,7 +1598,9 @@ class OperationsMixin:
                 continue
 
             migration_file = _generator.create_empty_migration_file(app, migration_name)
-            dependencies = dependencies_for('\n'.join(operations)) if dependencies_for else None
+            dependencies = (
+                dependencies_for(app, '\n'.join(operations)) if dependencies_for else None
+            )
             self._write_migration_file(
                 app=app,
                 migration_file=migration_file,
@@ -1390,6 +1608,7 @@ class OperationsMixin:
                 operations_digest=operations_digest,
                 dependencies=dependencies,
             )
+            self._drop_cached_migration_loader()
 
             self.stdout.write(
                 self.style.MIGRATE_HEADING(f"Enforcement migrations for '{app.label}':")

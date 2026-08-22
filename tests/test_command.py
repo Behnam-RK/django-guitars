@@ -583,7 +583,9 @@ def _write_empty_migration(tmp_path, filename='0002_auto_enforcement.py'):
     migrations_dir = tmp_path / 'migrations'
     migrations_dir.mkdir()
     (migrations_dir / filename).write_text(_EMPTY_MIGRATION_SCAFFOLD)
-    return types.SimpleNamespace(path=str(tmp_path)), filename
+    # ``label`` as well as ``path``: the self-reference skip reads both halves, the scaffold's
+    # own app being ``testapp`` in every scaffold below.
+    return types.SimpleNamespace(path=str(tmp_path), label='testapp'), filename
 
 
 def test_write_migration_file_output_is_exact(tmp_path, snapshot):
@@ -642,6 +644,24 @@ def test_write_migration_file_skips_self_referential_dependency(tmp_path):
     assert content.count('0002_auto_enforcement') == 0
 
 
+def test_write_migration_file_keeps_another_apps_migration_of_the_same_name(tmp_path):
+    """The self-reference skip reads both halves too: every app's enforcement migration is named
+    ``auto_enforcement``, so a cross-app edge pointing at one would read as this file itself and
+    be dropped -- the writer bug ADR 0013 describes, one stem short of the other half."""
+    app, migration_file = _write_empty_migration(tmp_path)
+
+    Command._write_migration_file(
+        app=app,
+        migration_file=migration_file,
+        operations=[],
+        operations_digest='digest123',
+        dependencies=[('otherapp', '0002_auto_enforcement')],
+    )
+
+    content = (tmp_path / 'migrations' / migration_file).read_text()
+    assert "('otherapp', '0002_auto_enforcement')," in content
+
+
 def test_write_migration_file_skips_dependency_already_present(tmp_path):
     app, migration_file = _write_empty_migration(tmp_path)
     # The scaffold already depends on ("testapp", "0001_initial").
@@ -656,6 +676,25 @@ def test_write_migration_file_skips_dependency_already_present(tmp_path):
 
     content = (tmp_path / 'migrations' / migration_file).read_text()
     assert content.count('0001_initial') == 1
+
+
+def test_write_migration_file_keeps_a_dependency_whose_name_another_app_already_uses(tmp_path):
+    """Deduped on both halves, never the name alone: the scaffold depends on ``("testapp",
+    "0001_initial")`` and a cross-app edge routinely points at an ``0001_initial`` too, so
+    matching the name reads one as covering the other and drops a correctly computed edge."""
+    app, migration_file = _write_empty_migration(tmp_path)
+
+    Command._write_migration_file(
+        app=app,
+        migration_file=migration_file,
+        operations=[],
+        operations_digest='digest123',
+        dependencies=[('otherapp', '0001_initial')],
+    )
+
+    content = (tmp_path / 'migrations' / migration_file).read_text()
+    assert "('otherapp', '0001_initial')," in content
+    assert content.count('0001_initial') == 2
 
 
 def test_write_migration_file_raises_command_error_when_scaffold_has_no_dependencies_list(
@@ -673,7 +712,7 @@ def test_write_migration_file_raises_command_error_when_scaffold_has_no_dependen
         '    operations = [\n'
         '    ]\n'
     )
-    app = types.SimpleNamespace(path=str(tmp_path))
+    app = types.SimpleNamespace(path=str(tmp_path), label='testapp')
 
     with pytest.raises(CommandError, match='dependencies = \\['):
         Command._write_migration_file(

@@ -2259,9 +2259,9 @@ def test_owned_rule_is_refused_when_the_dependent_is_one_the_kit_writes_no_polic
 
 
 def test_the_shared_owned_answers_are_swept_once_per_run():
-    """Both halves reach ``_classify``, which sweeps the registry for an MTI model that
-    autofills, so a rule with N arms would otherwise ask N times. Cached on the command rather
-    than the module: the answer moves with ``LOCAL_APPS``, which a test may replace."""
+    """Each half sweeps the registry, and a run asks once per candidate relation. Cached on the
+    command, not the module: the answer moves with ``LOCAL_APPS``, which a test may replace.
+    That a *sweep* asks ``_classify`` once per model is the memo's, guarded where it lives."""
 
     @isolate_apps('tests.testapp')
     def _build():

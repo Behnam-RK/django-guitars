@@ -11,7 +11,11 @@ from django.db.models import CASCADE, DO_NOTHING, PROTECT, SET, SET_DEFAULT, SET
 from django.test.utils import isolate_apps
 
 from guitars import sql
-from guitars.introspection import owned_tenancy_refusals, rule_update_cycle_edges
+from guitars.introspection import (
+    owned_tenancy_refusals,
+    owner_arms,
+    rule_update_cycle_edges,
+)
 from guitars.models import OwningForeignKey, SetarModel
 from guitars.models.fields import _targets_primary_key
 from guitars.models.soft_deletion import (
@@ -223,6 +227,74 @@ def test_owned_tenancy_refusals_passes_over_a_target_with_no_deleted_at():
         return owned_tenancy_refusals([Unstampable, Owner])
 
     assert _build() == {}
+
+
+def test_the_shared_owned_sweeps_count_a_model_named_twice_once():
+    """``hard_delete`` sweeps ``[*claimed, *get_models()]``, whose claimed models are registered
+    too, so each arrives twice. ``rule_update_cycle_edges`` absorbs that in a set; these
+    accumulate into lists, and a doubled arm is a doubled ``NOT EXISTS`` in a rendered guard."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Shared(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Owner(SetarModel):
+            target = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        models_ = [Shared, Owner]
+        return owner_arms(models_), owner_arms([*models_, *models_])
+
+    once, twice = _build()
+
+    assert [arm.fk_column for arm in once['testapp_shared']] == ['target_id']
+    assert twice == once
+
+
+def test_owned_tenancy_refusals_asks_each_model_for_its_dimensions_once(monkeypatch):
+    """The answer reaches ``_classify``, which sweeps the registry for an MTI model that
+    autofills, and a dependent owned from N places is asked about once per arm. Memoised for the
+    sweep rather than the process: it moves with ``LOCAL_APPS``, which a test may replace."""
+    from guitars.tenancy import discovery
+
+    classified: list[str] = []
+    real_classify = discovery._classify
+
+    def _spy(model, memo=None):
+        classified.append(model._meta.db_table)
+        return real_classify(model, memo)
+
+    monkeypatch.setattr(discovery, '_classify', _spy)
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        from guitars.tenancy import tenanted_manager
+
+        class Shared(SetarModel):
+            label = models.ForeignKey('testapp.Label', on_delete=CASCADE, null=True)
+            objects = tenanted_manager(label='label')
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Twice(SetarModel):
+            first = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True, related_name='+')
+            second = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True, related_name='+')
+
+            class Meta:
+                app_label = 'testapp'
+
+        return owned_tenancy_refusals([Shared, Twice])
+
+    _build()
+
+    # Two relations over one dependent, each asking about the dependent and about the one
+    # co-owner arm: four questions over two tenanted models, and no table classified twice.
+    assert classified and len(classified) == len(set(classified))
 
 
 def test_owning_foreign_key_accepts_a_target_reached_through_mti():

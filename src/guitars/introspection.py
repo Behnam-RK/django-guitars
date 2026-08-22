@@ -1,6 +1,6 @@
-"""Which physical table actually holds a column, given Django's two inheritance styles --
-see ``docs/mti.md``. ``hasattr`` is the wrong question: it answers yes for an MTI child
-whose column lives on an ancestor's table, where a rule referencing it is invalid SQL."""
+"""Which physical table holds a column, given Django's two inheritance styles (``docs/mti.md``):
+``hasattr`` says yes for an MTI child whose column is on an ancestor's, where a rule is invalid
+SQL. Home too of the rule-carrying sweeps: ``hard_delete()`` must not destroy what one spared."""
 
 from __future__ import annotations
 
@@ -132,6 +132,13 @@ def rule_update_cycle_edges(candidates: Iterable[type[models.Model]]) -> set[tup
     return {(source, target) for source, target in edges if _reaches(target, source)}
 
 
+def _distinct(candidates: Iterable[type[models.Model]]) -> list[type[models.Model]]:
+    """*candidates* with repeats dropped. A sweep is built as ``[*named, *get_models()]``, whose
+    named models are usually registered too, so one arrives twice. :func:`rule_update_cycle_edges`
+    absorbs that in a ``set``; the two below accumulate into lists and would count it twice."""
+    return list(dict.fromkeys(candidates))
+
+
 class OwnerArm(NamedTuple):
     """One owning column pointing at a dependent, as a last-owner guard needs to read it.
     Carries the models as well as the tables: the tenancy question is answerable only from a
@@ -176,7 +183,7 @@ def owner_arms(candidates: Iterable[type[models.Model]]) -> dict[str, list[Owner
     )
 
     arms: dict[str, list[OwnerArm]] = {}
-    for model in candidates:
+    for model in _distinct(candidates):
         for field in model._meta.local_fields:
             # Only the tests deciding whether an arm can be *expressed*. The ones about whether
             # this owner's own rule can be *written* -- self-update, cycle, tenancy -- say
@@ -242,7 +249,7 @@ def owned_tenancy_refusals(
 
     if not tenant_policies_enabled():
         return {}
-    swept = list(candidates)
+    swept = _distinct(candidates)
     arms = owner_arms(swept)
     memo: _PolicyDimensionMemo = {}
     refused: dict[tuple[str, str, str], list[str]] = {}
@@ -253,9 +260,9 @@ def owned_tenancy_refusals(
             continue
         owner_table = model._meta.db_table
         for field in model._meta.local_fields:
-            # Every refusal that comes *before* this one, so a key here means "refused for
-            # tenancy" and nothing else: a caller reading the dict as the reason a relation
-            # carries no rule would otherwise be handed the wrong remediation.
+            # The earlier refusals that cost nothing to re-ask, so a key here is one tenancy
+            # alone would refuse -- a caller reading the dict as *the* reason a relation carries
+            # no rule would otherwise get the wrong remediation. One exception, below.
             if (
                 not isinstance(field, OwningForeignKey)
                 or field.model is not model
@@ -266,17 +273,24 @@ def owned_tenancy_refusals(
             dependent = column_owner(field.related_model, '_deleted_at')
             dependent_table = dependent._meta.db_table
             # A rule updating the table it fires on is refused for infinite rule recursion. The
-            # cycle graph itself stays the caller's, being needed on its own account.
+            # exception: its multi-table form stays the caller's, which builds that graph on its
+            # own account -- so a key here may be cycle-refused too, and callers read both.
             if dependent_table == owner_table:
                 continue
+            # Per *dimension*, and per what a policy predicates rather than what a manager
+            # declares: reaching the dependent's row put the session inside the dimensions its
+            # own policy filters on, so only one a co-owner's has and it does not can hide a row.
             dimensions = policy_dimensions(dependent, memo)
-            # Every table each arm reads, not just the one holding the key: a joined arm takes
-            # liveness from an MTI ancestor, and a policy there hides the same live owner.
+            # Opposite defaults, deliberately: for a model the kit writes no policy for, the
+            # dependent's read is assumed unfiltered and the arm's filtered -- both refuse, and
+            # one function for the two emits exactly the guard that cannot see a live owner.
             offending = sorted(
                 {
                     table
                     for arm in arms.get(dependent_table, ())
                     if (arm.owner_table, arm.fk_column) != (owner_table, field.column)
+                    # Every table the arm reads, not just the one holding the key: a joined arm
+                    # takes liveness from an MTI ancestor, and a policy there hides it as well.
                     for table, arm_model in arm.reads()
                     if assumed_policy_dimensions(arm_model, memo) - dimensions
                 }

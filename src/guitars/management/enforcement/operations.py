@@ -1081,10 +1081,12 @@ class OperationsMixin:
                     ),
                 )
                 continue
-            ident_foreign_key = _identifiers._escape_ident(fk_field.column)
-            co_owners = self._co_owner_arms(dependent_table, owner_table, fk_field.column)
+            # Before the arms, not after: a refused relation renders no guard, and the lookup
+            # would be one more walk of every arm pointing at this dependent for nothing.
             if self._refuse_owned_tenancy_mismatch(key):
                 continue
+            ident_foreign_key = _identifiers._escape_ident(fk_field.column)
+            co_owners = self._co_owner_arms(dependent_table, owner_table, fk_field.column)
             header = HEADER_SOFT_DELETE_OWNED.format(
                 dependent_table=_identifiers._escape_ident(dependent_table),
                 table=header_owner_table,

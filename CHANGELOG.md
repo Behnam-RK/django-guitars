@@ -10,10 +10,16 @@ Full history and diffs: [GitHub releases](https://github.com/Behnam-RK/django-gu
 
 ## [Unreleased]
 
+## [2.4.2] - 2026-08-22
+
+- Fixed: `introspection.owner_arms` and `owned_tenancy_refusals` counted a model named twice in their sweep twice. `hard_delete()` builds that sweep as `[*claimed, *django_apps.get_models()]` and its claimed models are registered ones, so every one of them arrived twice — `rule_update_cycle_edges` absorbs that in a `set`, but these accumulate into lists, and a doubled arm is a doubled `NOT EXISTS` in the SQL a caller renders from them. No emitted rule changed, the only consumer reading the arms through a set comprehension, but the arms are a rendering input by contract.
+- Documented: turning `GUITARS_TENANT_POLICIES` off **after** generating reopens the gap 2.4.1 closes. The generator reads it when migrations are written and `hard_delete()` on every call; disabling it emits nothing and retires no policy already migrated, so the policies stay live in the database while `hard_delete()` sees no refusal and follows every relation the refusal spared. Turn it off before the first generation, or drop the policies in the migration that flips it (`docs/migrations.md`, "Staging row-level security").
+- Internal: the registry-wide generator/`hard_delete()` parity test met the tenancy half vacuously — `owned_tenancy_refusals` is empty over the test app, so reverting the `_owned_fields` guard left it green. It now also runs over a registry that reaches a refusal. The three copies of the owned-candidate predicate (`OperationsMixin._is_owned_candidate` and both `introspection` sweeps, which cannot call it without losing the `isinstance` narrowing the type checker reads the field's `column` and `related_model` through) now cross-reference each other.
+
 ## [2.4.1] - 2026-08-22
 
 - Fixed: `hard_delete()` no longer follows an owned relation the generator refuses on tenancy grounds. 2.4.0 added that refusal to the generator only, so `models.soft_deletion._owned_fields` still treated the relation as carrying a rule: Phase 2 collected the dependent, read the co-owner through the same tenant policy that hid it from the guard, and *removed* the row the missing rule would have spared. The deferred foreign-key check is exempt from RLS, so in the ordinary case that aborted the transaction at `COMMIT` rather than destroying anything — loud, but a caller's transaction lost all the same — while an `OwningForeignKey(db_constraint=False)` gives up the check that made it loud and the removal went through.
-- Changed: which owned relations carry a rule is now **one shared answer in `guitars.introspection`**, matching what `rule_update_cycle_edges` has always been: `owner_arms` is the registry-wide sweep behind both the guard's arms and the refusal, and `owned_tenancy_refusals` is the verdict, read by `makeguitarmigrations` to refuse a rule and by `hard_delete()` to not follow one. The generator still owns the wording of its warning; only the decision is shared. `guitars.tenancy.discovery.tenant_policies_enabled` is likewise the one definition of the `GUITARS_TENANT_POLICIES` gate — the generator, `hard_delete()` and both system checks read it — so they cannot come to disagree about whether policies are on — they read it at different *times* though, and `docs/owned-relations.md` now records what turning it off after generating reopens. No generated SQL changes and no migration is emitted — this moves where the decision lives, not what it decides ([ADR-0012](docs/adr/0012-cross-owner-last-owner-guard.md)).
+- Changed: which owned relations carry a rule is now **one shared answer in `guitars.introspection`**, matching what `rule_update_cycle_edges` has always been: `owner_arms` is the registry-wide sweep behind both the guard's arms and the refusal, and `owned_tenancy_refusals` is the verdict, read by `makeguitarmigrations` to refuse a rule and by `hard_delete()` to not follow one. The generator still owns the wording of its warning; only the decision is shared. `guitars.tenancy.discovery.tenant_policies_enabled` is likewise the one definition of the `GUITARS_TENANT_POLICIES` gate — the generator, `hard_delete()` and both system checks read it — so they cannot come to disagree about whether policies are on. No generated SQL changes and no migration is emitted — this moves where the decision lives, not what it decides ([ADR-0012](docs/adr/0012-cross-owner-last-owner-guard.md)).
 
 ## [2.4.0] - 2026-08-21
 
@@ -165,7 +171,8 @@ First stable release. **BREAKING:** the instrument ladder shifted down one rung 
 
 - Added: initial release — `SetarModel`, `GuitarModel`, `SoftDeletableModel`, `DisableSignals`, `makeguitarmigrations`.
 
-[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.4.1...HEAD
+[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.4.2...HEAD
+[2.4.2]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.4.2
 [2.4.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.4.1
 [2.4.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.4.0
 [2.3.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.3.0

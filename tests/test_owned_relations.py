@@ -1176,7 +1176,7 @@ def _owned_parity_mismatches(registry: list) -> dict:
     mismatched = {}
     for model in registry:
         command.existing.soft_delete_owned.clear()
-        command._mti_cascade_warnings.clear()
+        command._skipped_rule_notes.clear()
         emitted = set(re.findall(r'via "([^"]+)"!', '\n'.join(command._owned_operations(model))))
         followed = {field.column for field in _owned_fields(model, cycles, refusals)}
         if emitted != followed:

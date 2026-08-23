@@ -968,7 +968,7 @@ def test_handle_skips_app_when_digest_already_exists(monkeypatch):
     assert created == []
 
 
-def test_handle_check_only_reports_missing_migrations_and_mti_warnings(monkeypatch):
+def test_handle_check_only_reports_missing_migrations_and_rule_warnings(monkeypatch):
     command = Command()
     command.stdout = StringIO()
     command.stderr = StringIO()
@@ -981,14 +981,18 @@ def test_handle_check_only_reports_missing_migrations_and_mti_warnings(monkeypat
     command.parent_trigger_function_dependency = ('testapp', '0001_pretend_parent')
     command.existing.existing_digests.clear()
     # Surfaced regardless of check_only -- seeded directly rather than relying on a real
-    # MTI-cascade-limitation model, since that's covered at the unit level above.
+    # MTI-cascade-limitation model, since that's covered at the unit level above. Both
+    # warning lists, the report loop being the one place either can go unwritten.
     command._skipped_rule_notes.append('some skipped MTI cascade rule')
+    command._unresolved_reference_notes.append('some unresolved cross-app reference')
 
     with pytest.raises(CommandError, match='Run `manage.py makeguitarmigrations`'):
         command.handle('testapp', check_only=True)
 
-    assert 'Missing or outdated enforcement migrations' in command.stderr.getvalue()
-    assert 'some skipped MTI cascade rule' in command.stderr.getvalue()
+    stderr = command.stderr.getvalue()
+    assert 'Missing or outdated enforcement migrations' in stderr
+    assert 'some skipped MTI cascade rule' in stderr
+    assert 'some unresolved cross-app reference' in stderr
 
 
 def test_check_reports_both_function_and_app_level_gaps_in_one_run():

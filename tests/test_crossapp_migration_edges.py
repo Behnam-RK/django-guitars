@@ -419,6 +419,7 @@ def test_a_resolved_reference_becomes_an_edge_with_nothing_warned():
         ('crossapp_owner', '0001_initial')
     ]
     assert command._unresolved_reference_notes == []
+    assert command._skipped_rule_notes == []
 
 
 def test_the_writer_is_handed_the_object_edges_and_not_only_the_function_ones():

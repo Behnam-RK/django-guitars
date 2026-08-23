@@ -150,7 +150,7 @@ class OperationsMixin:
         stderr: OutputWrapper
         style: Style
         _tenancy_notes: list[str]
-        _mti_cascade_warnings: list[str]
+        _skipped_rule_notes: list[str]
         _rule_name_clashes: list[str]
         _claimed_rule_names: dict[tuple[str, str], tuple]
         trigger_function_dependency: tuple[str, str] | None
@@ -165,6 +165,7 @@ class OperationsMixin:
         _loader_cache: MigrationLoader | None
         _refusals_over_live_rules: list[str]
         _missing_edges: list[str]
+        _unresolved_reference_notes: list[str]
         _table_app_labels_cache: dict[str, str] | None
         _required_autofill_cache: dict[tuple[str, str], tuple[str, str]] | None
         _relocated_autofill_cache: dict[tuple[str, str], tuple[str, str]] | None
@@ -794,7 +795,7 @@ class OperationsMixin:
         """Record an owned-rule refusal, escalating where a rule for *key* is already recorded:
         refusing emits nothing, so the stale rule stays live and wrong under a green
         ``--check``, and no command retires it. See ADR 0012."""
-        self._mti_cascade_warnings.append(message)
+        self._skipped_rule_notes.append(message)
         if key is not None and key in self.existing.soft_delete_owned:
             dependent_table, owner_table, foreign_key = key
             self._refusals_over_live_rules.append(
@@ -855,7 +856,7 @@ class OperationsMixin:
             # PostgreSQL then refuses *every* UPDATE there -- a plain save() included -- at
             # rewrite time, so the WHERE guard never runs. A self-referential CASCADE FK.
             if related_table == owner_table:
-                self._mti_cascade_warnings.append(
+                self._skipped_rule_notes.append(
                     f"Cascade rule for '{related_table}' -> '{owner_table}' skipped: the rule "
                     'would update the same table it fires on, which PostgreSQL rejects as '
                     'infinite rule recursion on every UPDATE to that table. A self-referential '
@@ -866,7 +867,7 @@ class OperationsMixin:
             # other are rewritten into each other. Checked against the whole-registry graph,
             # so a cycle closed through another app's model is still caught.
             if (owner_table, related_table) in self._rule_cycle_edges():
-                self._mti_cascade_warnings.append(
+                self._skipped_rule_notes.append(
                     self._cycle_warning(
                         'Cascade', f"'{related_table}'", owner_table, related_table
                     )
@@ -876,7 +877,7 @@ class OperationsMixin:
             # related child owns that column on the table its FK lives on. An FK whose
             # _deleted_at lives on a farther MTI ancestor needs a join form not emitted yet.
             if not owns_column(related_model, '_deleted_at'):
-                self._mti_cascade_warnings.append(
+                self._skipped_rule_notes.append(
                     f"Cascade rule for '{related_table}' -> '{owner_table}' skipped: "
                     f"'{related_model.__name__}' declares this foreign key on its own table "
                     'but inherits _deleted_at from a multi-table-inheritance ancestor, which '
@@ -1429,7 +1430,8 @@ class OperationsMixin:
         for ref in unresolved:
             # Warned, not refused: an app with no migrations at all is a legitimate
             # configuration, and withdrawing a rule that works today would be the worse trade.
-            self._mti_cascade_warnings.append(
+            # Its own list, not the skipped-rule one: the rule *was* emitted.
+            self._unresolved_reference_notes.append(
                 f"Enforcement migration for '{app.label}' references '{ref.describe()}', but no "
                 'migration in that app creates it, so no dependency edge was emitted. A fresh '
                 '`migrate` may reach the rule first. Add the edge by hand if that app is '

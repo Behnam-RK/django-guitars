@@ -65,10 +65,10 @@ class Command(OperationsMixin, BaseCommand):
         self.tenant_autofill_dependencies: dict[str, tuple[str, str]] = {}
         self.tenant_autofill_sql: dict[str, str | None] = {}
 
-        # Surfaced as warnings, not silent: rules skipped this run -- cross-app / MTI cascade,
-        # the owned shapes the generator refuses, either kind on an ON UPDATE cycle -- plus, since
-        # 2.5.0, a rule *emitted* whose cross-app reference resolved to no migration to depend on.
-        self._mti_cascade_warnings: list[str] = []
+        # Surfaced as warnings, not silent: rules skipped this run -- MTI cascade, the owned
+        # shapes the generator refuses, either kind on an ON UPDATE cycle. Not the cross-app
+        # gap a scoped run leaves: `_scoped_cascade_gap_notes` reports that one, on stdout.
+        self._skipped_rule_notes: list[str] = []
         # Two relations whose rules would share one name on one table. Emitted anyway -- the
         # cascade spelling is frozen -- so the report is the only thing standing between a
         # silent replacement and the operator. See ``_claim_rule_name``.
@@ -81,6 +81,10 @@ class Command(OperationsMixin, BaseCommand):
         # against its creation. Errors, and they fail ``--check``: a fresh `migrate` fails
         # on them while an incremental one passes, so nothing else notices. See ADR 0013.
         self._missing_edges: list[str] = []
+        # The warning half of ADR 0013: above nothing *orders* an edge that resolves, here
+        # nothing in the app creates the object at all, so there was no edge. Not an error and
+        # no ``--check`` failure -- an app with no migrations of its own is legitimate.
+        self._unresolved_reference_notes: list[str] = []
         self._claimed_rule_names: dict[tuple[str, str], tuple] = {}
         # Tables tenancy discovery could not cover, with the reason. Also surfaced.
         self._tenancy_notes: list[str] = []
@@ -530,11 +534,12 @@ class Command(OperationsMixin, BaseCommand):
         ):
             self.stdout.write(self.style.WARNING(note))
 
-        # MTI cascade rules skipped as warnings; two relations sharing a rule name as an error,
-        # that one being *emitted* rather than skipped -- so one of the pair does not exist in
-        # the database it ships to. One loop, so neither kind can go unwritten.
+        # Skipped rules and unresolved references as warnings; two relations sharing a rule name
+        # as an error, that one being *emitted* rather than skipped -- so one of the pair does not
+        # exist in the database it ships to. One loop, so no kind can go unwritten.
         for paint, note in [
-            *((self.style.WARNING, note) for note in self._mti_cascade_warnings),
+            *((self.style.WARNING, note) for note in self._skipped_rule_notes),
+            *((self.style.WARNING, note) for note in self._unresolved_reference_notes),
             *((self.style.ERROR, note) for note in self._rule_name_clashes),
             *((self.style.ERROR, note) for note in self._refusals_over_live_rules),
             *((self.style.ERROR, note) for note in self._missing_edges),

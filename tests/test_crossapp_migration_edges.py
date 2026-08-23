@@ -356,8 +356,11 @@ def test_a_reference_nothing_creates_warns_instead_of_emitting_an_edge():
     edges = command._object_dependencies_for(apps.get_app_config('testapp'))
 
     assert edges == []
-    assert any('crossapp_owner.Ghost.nope' in note for note in command._mti_cascade_warnings)
-    assert any('by hand' in note for note in command._mti_cascade_warnings)
+    notes = command._unresolved_reference_notes
+    assert any('crossapp_owner.Ghost.nope' in note for note in notes)
+    assert any('by hand' in note for note in notes)
+    # Its own list since 2.5.1: the rule *was* emitted, so it is not a skipped-rule note.
+    assert command._skipped_rule_notes == []
 
 
 def test_a_reference_nothing_in_the_history_creates_is_not_checked():
@@ -415,7 +418,8 @@ def test_a_resolved_reference_becomes_an_edge_with_nothing_warned():
     assert command._object_dependencies_for(apps.get_app_config('testapp')) == [
         ('crossapp_owner', '0001_initial')
     ]
-    assert command._mti_cascade_warnings == []
+    assert command._unresolved_reference_notes == []
+    assert command._skipped_rule_notes == []
 
 
 def test_the_writer_is_handed_the_object_edges_and_not_only_the_function_ones():

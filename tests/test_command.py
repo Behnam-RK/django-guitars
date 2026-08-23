@@ -239,7 +239,7 @@ def test_cascade_operation_warns_when_related_model_is_mti_child_without_own_del
     supported (needs a join form) -- must warn, not emit a broken rule. Synthetic
     reverse-relation, not a new schema field: purely about the command's own logic."""
     command = Command()
-    command._mti_cascade_warnings.clear()
+    command._skipped_rule_notes.clear()
     command.existing.soft_delete_related.clear()
 
     class _FakeFKField:
@@ -252,8 +252,8 @@ def test_cascade_operation_warns_when_related_model_is_mti_child_without_own_del
     ops = command._cascade_operations(Band)
 
     assert ops == []
-    assert len(command._mti_cascade_warnings) == 1
-    warning = command._mti_cascade_warnings[0]
+    assert len(command._skipped_rule_notes) == 1
+    warning = command._skipped_rule_notes[0]
     assert 'testapp_orchestra' in warning
     assert 'multi-table-inheritance ancestor' in warning
 
@@ -355,14 +355,14 @@ def test_owned_operation_warns_when_the_owner_inherits_deleted_at_from_an_ancest
     """``Orchestra.programme`` sits on the child's own table while the rule must fire on
     Ensemble, where ``old."programme_id"`` names nothing. Warn, emit nothing."""
     command = Command()
-    command._mti_cascade_warnings.clear()
+    command._skipped_rule_notes.clear()
     command.existing.soft_delete_owned.clear()
 
     ops = command._owned_operations(Orchestra)
 
     assert ops == []
-    assert len(command._mti_cascade_warnings) == 1
-    warning = command._mti_cascade_warnings[0]
+    assert len(command._skipped_rule_notes) == 1
+    warning = command._skipped_rule_notes[0]
     assert 'testapp_orchestra.programme_id' in warning
     assert 'multi-table-inheritance' in warning
 
@@ -372,7 +372,7 @@ def test_owned_operation_warns_when_the_owner_owns_its_own_table():
     PostgreSQL then rejects *every* UPDATE on that table -- a plain ``save()`` included --
     with "infinite recursion detected in rules for relation". Warn, emit nothing."""
     command = Command()
-    command._mti_cascade_warnings.clear()
+    command._skipped_rule_notes.clear()
     command.existing.soft_delete_owned.clear()
 
     @isolate_apps('tests.testapp')
@@ -386,15 +386,15 @@ def test_owned_operation_warns_when_the_owner_owns_its_own_table():
         return command._owned_operations(SelfOwner)
 
     assert _build() == []
-    assert len(command._mti_cascade_warnings) == 1
-    assert 'infinite rule recursion' in command._mti_cascade_warnings[0]
+    assert len(command._skipped_rule_notes) == 1
+    assert 'infinite rule recursion' in command._skipped_rule_notes[0]
 
 
 def test_owned_operation_warns_when_the_target_is_not_soft_deletable():
     """An ``OwningForeignKey`` has no purpose other than the rule, so a target with no
     ``_deleted_at`` to stamp is a misconfiguration, not a relation to pass over quietly."""
     command = Command()
-    command._mti_cascade_warnings.clear()
+    command._skipped_rule_notes.clear()
     command.existing.soft_delete_owned.clear()
 
     @isolate_apps('tests.testapp')
@@ -412,8 +412,8 @@ def test_owned_operation_warns_when_the_target_is_not_soft_deletable():
         return command._owned_operations(Owner)
 
     assert _build() == []
-    assert len(command._mti_cascade_warnings) == 1
-    assert 'no _deleted_at column' in command._mti_cascade_warnings[0]
+    assert len(command._skipped_rule_notes) == 1
+    assert 'no _deleted_at column' in command._skipped_rule_notes[0]
 
 
 def test_owned_operation_warns_when_the_owner_is_not_soft_deletable():
@@ -421,7 +421,7 @@ def test_owned_operation_warns_when_the_owner_is_not_soft_deletable():
     such column can never fire it. Silence here is the failure mode ADR 0011 chose a
     checkable field subclass to avoid: a declaration that quietly generates nothing."""
     command = Command()
-    command._mti_cascade_warnings.clear()
+    command._skipped_rule_notes.clear()
     command.existing.soft_delete_owned.clear()
 
     @isolate_apps('tests.testapp')
@@ -439,9 +439,9 @@ def test_owned_operation_warns_when_the_owner_is_not_soft_deletable():
         return command._owned_operations(PlainOwner)
 
     assert _build() == []
-    assert len(command._mti_cascade_warnings) == 1
-    assert 'has no _deleted_at column' in command._mti_cascade_warnings[0]
-    assert 'never soft-deleted' in command._mti_cascade_warnings[0]
+    assert len(command._skipped_rule_notes) == 1
+    assert 'has no _deleted_at column' in command._skipped_rule_notes[0]
+    assert 'never soft-deleted' in command._skipped_rule_notes[0]
 
 
 def test_owned_operation_warns_when_the_key_is_redirected_off_the_primary_key():
@@ -449,7 +449,7 @@ def test_owned_operation_warns_when_the_key_is_redirected_off_the_primary_key():
     the generator, and the rule would correlate the key against a primary key it never held --
     stamping whichever row happens to carry that value as its pk."""
     command = Command()
-    command._mti_cascade_warnings.clear()
+    command._skipped_rule_notes.clear()
     command.existing.soft_delete_owned.clear()
 
     @isolate_apps('tests.testapp')
@@ -471,19 +471,19 @@ def test_owned_operation_warns_when_the_key_is_redirected_off_the_primary_key():
         return command._owned_operations(Owner)
 
     assert _build() == []
-    assert len(command._mti_cascade_warnings) == 1
-    assert "to_field='legacy_id'" in command._mti_cascade_warnings[0]
-    assert 'would stamp the wrong row' in command._mti_cascade_warnings[0]
+    assert len(command._skipped_rule_notes) == 1
+    assert "to_field='legacy_id'" in command._skipped_rule_notes[0]
+    assert 'would stamp the wrong row' in command._skipped_rule_notes[0]
 
 
 def test_owned_operations_are_a_no_op_for_a_model_declaring_none():
     """Called for every model now, not only soft-deletable ones, so the common case has to
     cost nothing and warn about nothing."""
     command = Command()
-    command._mti_cascade_warnings.clear()
+    command._skipped_rule_notes.clear()
 
     assert command._owned_operations(Band) == []
-    assert command._mti_cascade_warnings == []
+    assert command._skipped_rule_notes == []
 
 
 def test_owned_operations_are_idempotent_across_two_runs():
@@ -525,7 +525,7 @@ def test_cascade_operation_refuses_a_self_referential_cascade_foreign_key():
     DO ALSO UPDATE t, which PostgreSQL rejects at rewrite time -- bricking *every* UPDATE on
     the table, a plain ``save()`` included, with `migrate` having reported success."""
     command = Command()
-    command._mti_cascade_warnings.clear()
+    command._skipped_rule_notes.clear()
     command.existing.soft_delete_related.clear()
 
     class _SelfReferentialFKField:
@@ -538,8 +538,8 @@ def test_cascade_operation_refuses_a_self_referential_cascade_foreign_key():
     ops = command._cascade_operations(Band)
 
     assert ops == []
-    assert len(command._mti_cascade_warnings) == 1
-    assert 'infinite rule recursion' in command._mti_cascade_warnings[0]
+    assert len(command._skipped_rule_notes) == 1
+    assert 'infinite rule recursion' in command._skipped_rule_notes[0]
 
 
 def test_constructing_the_command_does_not_touch_the_filesystem(monkeypatch):
@@ -968,7 +968,7 @@ def test_handle_skips_app_when_digest_already_exists(monkeypatch):
     assert created == []
 
 
-def test_handle_check_only_reports_missing_migrations_and_mti_warnings(monkeypatch):
+def test_handle_check_only_reports_missing_migrations_and_rule_warnings(monkeypatch):
     command = Command()
     command.stdout = StringIO()
     command.stderr = StringIO()
@@ -981,14 +981,18 @@ def test_handle_check_only_reports_missing_migrations_and_mti_warnings(monkeypat
     command.parent_trigger_function_dependency = ('testapp', '0001_pretend_parent')
     command.existing.existing_digests.clear()
     # Surfaced regardless of check_only -- seeded directly rather than relying on a real
-    # MTI-cascade-limitation model, since that's covered at the unit level above.
-    command._mti_cascade_warnings.append('some skipped MTI cascade rule')
+    # MTI-cascade-limitation model, since that's covered at the unit level above. Both
+    # warning lists, the report loop being the one place either can go unwritten.
+    command._skipped_rule_notes.append('some skipped MTI cascade rule')
+    command._unresolved_reference_notes.append('some unresolved cross-app reference')
 
     with pytest.raises(CommandError, match='Run `manage.py makeguitarmigrations`'):
         command.handle('testapp', check_only=True)
 
-    assert 'Missing or outdated enforcement migrations' in command.stderr.getvalue()
-    assert 'some skipped MTI cascade rule' in command.stderr.getvalue()
+    stderr = command.stderr.getvalue()
+    assert 'Missing or outdated enforcement migrations' in stderr
+    assert 'some skipped MTI cascade rule' in stderr
+    assert 'some unresolved cross-app reference' in stderr
 
 
 def test_check_reports_both_function_and_app_level_gaps_in_one_run():
@@ -1643,7 +1647,7 @@ def test_owned_operation_warns_when_two_models_own_each_other():
         # registry ``_setup_models_and_reverse_relations`` reads, so a Command built here
         # sees neither model. The self-referential cascade test injects the mapping likewise.
         command = Command()
-        command._mti_cascade_warnings.clear()
+        command._skipped_rule_notes.clear()
         command.existing.soft_delete_owned.clear()
         command.all_models = [OwnerA, OwnerB]
         return command, command._owned_operations(OwnerA) + command._owned_operations(OwnerB)
@@ -1651,8 +1655,8 @@ def test_owned_operation_warns_when_two_models_own_each_other():
     command, ops = _build()
 
     assert ops == []
-    assert len(command._mti_cascade_warnings) == 2
-    for warning in command._mti_cascade_warnings:
+    assert len(command._skipped_rule_notes) == 2
+    for warning in command._skipped_rule_notes:
         assert 'infinite rule recursion' in warning
         assert 'cycle of ON UPDATE rules' in warning
 
@@ -1674,14 +1678,14 @@ def test_owned_operation_still_emits_when_ownership_is_one_way():
                 app_label = 'testapp'
 
         command = Command()
-        command._mti_cascade_warnings.clear()
+        command._skipped_rule_notes.clear()
         command.existing.soft_delete_owned.clear()
         command.all_models = [OneWayOwner, OneWayOwned]
         return command, command._owned_operations(OneWayOwner)
 
     command, ops = _build()
 
-    assert command._mti_cascade_warnings == []
+    assert command._skipped_rule_notes == []
     assert len(ops) == 1
     assert 'testapp_onewayowned' in ops[0]
 
@@ -1705,7 +1709,7 @@ def test_cascade_operation_warns_when_an_owned_rule_closes_the_cycle():
                 app_label = 'testapp'
 
         command = Command()
-        command._mti_cascade_warnings.clear()
+        command._skipped_rule_notes.clear()
         command.existing.soft_delete_owned.clear()
         command.existing.soft_delete_related.clear()
         command.all_models = [Held, Holder]
@@ -1719,9 +1723,9 @@ def test_cascade_operation_warns_when_an_owned_rule_closes_the_cycle():
     command, ops = _build()
 
     assert ops == []
-    kinds = sorted(warning.split(' rule for ')[0] for warning in command._mti_cascade_warnings)
+    kinds = sorted(warning.split(' rule for ')[0] for warning in command._skipped_rule_notes)
     assert kinds == ['Cascade', 'Owned']
-    for warning in command._mti_cascade_warnings:
+    for warning in command._skipped_rule_notes:
         assert 'cycle of ON UPDATE rules' in warning
 
 
@@ -1843,7 +1847,7 @@ def _owned_blob(*models_to_register, subject=None):
     *subject* (the first model by default). ``all_models`` by hand for the reason the cycle
     tests above give: ``isolate_apps`` swaps ``Options.apps``, not the global registry."""
     command = Command()
-    command._mti_cascade_warnings.clear()
+    command._skipped_rule_notes.clear()
     command._refusals_over_live_rules.clear()
     command.existing.soft_delete_owned.clear()
     command.all_models = list(models_to_register)
@@ -2099,8 +2103,8 @@ def test_owned_rule_is_refused_when_a_co_owner_is_tenanted_and_the_dependent_is_
     command, blob, ops = _build()
 
     assert ops == []
-    assert len(command._mti_cascade_warnings) == 1
-    warning = command._mti_cascade_warnings[0]
+    assert len(command._skipped_rule_notes) == 1
+    warning = command._skipped_rule_notes[0]
     assert "'testapp_scoped'" in warning
     assert 'tenanted' in warning
     assert 'another tenant' in warning
@@ -2141,8 +2145,8 @@ def test_owned_rule_is_refused_when_a_co_owner_carries_a_dimension_the_dependent
     command, blob, ops = _build()
 
     assert ops == []
-    assert len(command._mti_cascade_warnings) == 1
-    assert "'testapp_scoped'" in command._mti_cascade_warnings[0]
+    assert len(command._skipped_rule_notes) == 1
+    assert "'testapp_scoped'" in command._skipped_rule_notes[0]
 
 
 def test_owned_rule_survives_a_co_owner_tenanted_on_the_dependent_s_own_dimension():
@@ -2179,7 +2183,7 @@ def test_owned_rule_survives_a_co_owner_tenanted_on_the_dependent_s_own_dimensio
 
     command, blob, ops = _build()
 
-    assert command._mti_cascade_warnings == []
+    assert command._skipped_rule_notes == []
     assert 'FROM "testapp_scoped" AS guitars_owner_1' in blob
 
 
@@ -2215,7 +2219,7 @@ def test_owned_rule_survives_a_co_owner_whose_dimension_no_policy_can_filter_on(
 
     command, blob, ops = _build()
 
-    assert command._mti_cascade_warnings == []
+    assert command._skipped_rule_notes == []
     assert 'FROM "testapp_hop" AS guitars_owner_1' in blob
 
 
@@ -2254,8 +2258,8 @@ def test_owned_rule_is_refused_when_the_dependent_s_own_dimension_predicates_not
     command, blob, ops = _build()
 
     assert ops == []
-    assert len(command._mti_cascade_warnings) == 1
-    assert "'testapp_scoped'" in command._mti_cascade_warnings[0]
+    assert len(command._skipped_rule_notes) == 1
+    assert "'testapp_scoped'" in command._skipped_rule_notes[0]
 
 
 def test_owned_rule_is_refused_when_the_dependent_is_one_the_kit_writes_no_policy_for():
@@ -2293,8 +2297,8 @@ def test_owned_rule_is_refused_when_the_dependent_is_one_the_kit_writes_no_polic
     command, blob, ops = _build()
 
     assert ops == []
-    assert len(command._mti_cascade_warnings) == 1
-    assert "'testapp_scoped'" in command._mti_cascade_warnings[0]
+    assert len(command._skipped_rule_notes) == 1
+    assert "'testapp_scoped'" in command._skipped_rule_notes[0]
 
 
 def test_the_shared_owned_answers_are_swept_once_per_run():
@@ -2372,9 +2376,9 @@ def test_owned_rule_is_refused_when_a_joined_arm_reads_a_tenanted_ancestor():
     command, blob, ops = _build()
 
     assert ops == []
-    assert len(command._mti_cascade_warnings) == 1
+    assert len(command._skipped_rule_notes) == 1
     # The table named is the one carrying the policy, not the one carrying the key.
-    assert "'testapp_root'" in command._mti_cascade_warnings[0]
+    assert "'testapp_root'" in command._skipped_rule_notes[0]
 
 
 def test_a_joined_arm_on_the_table_the_rule_fires_on_excludes_the_row_going_away():
@@ -2474,8 +2478,8 @@ def test_owned_rule_is_refused_for_a_tenanted_co_owner_the_kit_generates_no_poli
     command, blob, ops = _build()
 
     assert ops == []
-    assert len(command._mti_cascade_warnings) == 1
-    assert "'legacy_migrations_vendor'" in command._mti_cascade_warnings[0]
+    assert len(command._skipped_rule_notes) == 1
+    assert "'legacy_migrations_vendor'" in command._skipped_rule_notes[0]
 
 
 @override_settings(LOCAL_APPS=['fake.kioska', 'fake.loopb'])
@@ -2484,7 +2488,7 @@ def test_a_scoped_run_says_nothing_about_a_rule_that_will_never_exist(monkeypatc
     A relation refused *after* the candidate test -- self-update here -- has none, and the
     unscoped run it asked for would print the same note again."""
     command = Command()
-    command._mti_cascade_warnings.clear()
+    command._skipped_rule_notes.clear()
 
     @isolate_apps('tests.testapp')
     def _build():
@@ -2514,7 +2518,7 @@ def test_a_scoped_run_does_not_report_an_out_of_scope_app_s_own_misconfiguration
     about, taking its verdict without its reporting: otherwise a scoped run prints another app's
     misconfiguration, and where that app recorded the rule, raises over it."""
     command = Command()
-    command._mti_cascade_warnings.clear()
+    command._skipped_rule_notes.clear()
     command._refusals_over_live_rules.clear()
     command.existing.soft_delete_owned.clear()
 
@@ -2551,7 +2555,7 @@ def test_a_scoped_run_does_not_report_an_out_of_scope_app_s_own_misconfiguration
         return command._scoped_owned_gap_notes({'kioska'})
 
     assert _build() == []
-    assert command._mti_cascade_warnings == []
+    assert command._skipped_rule_notes == []
     assert command._refusals_over_live_rules == []
 
 
@@ -2578,7 +2582,7 @@ def test_a_refused_owned_rule_that_already_exists_fails_check():
         )
 
         command = Command()
-        command._mti_cascade_warnings.clear()
+        command._skipped_rule_notes.clear()
         command._refusals_over_live_rules.clear()
         command.all_models = [Shared, Cyclic]
         # Pretend the project already migrated this rule, which 2.3.0 would have written.

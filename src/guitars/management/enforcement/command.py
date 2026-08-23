@@ -65,8 +65,9 @@ class Command(OperationsMixin, BaseCommand):
         self.tenant_autofill_dependencies: dict[str, tuple[str, str]] = {}
         self.tenant_autofill_sql: dict[str, str | None] = {}
 
-        # Surfaced as warnings, not silent: rules skipped this run -- cross-app / MTI cascade,
-        # the owned shapes the generator refuses, either kind on an ON UPDATE cycle.
+        # Surfaced as warnings, not silent: rules skipped this run -- MTI cascade, the owned
+        # shapes the generator refuses, either kind on an ON UPDATE cycle. Not the cross-app
+        # gap a scoped run leaves: `_scoped_cascade_gap_notes` reports that one, on stdout.
         self._skipped_rule_notes: list[str] = []
         # Two relations whose rules would share one name on one table. Emitted anyway -- the
         # cascade spelling is frozen -- so the report is the only thing standing between a

@@ -10,6 +10,10 @@ Full history and diffs: [GitHub releases](https://github.com/Behnam-RK/django-gu
 
 ## [Unreleased]
 
+## [2.5.1] - 2026-08-23
+
+- Internal: `Command._mti_cascade_warnings` is now `_skipped_rule_notes`, and the unresolved-cross-app-reference note 2.5.0 added to it moved to its own `_unresolved_reference_notes`. One list held two things: four writers reporting *a rule was skipped* -- a cascade rule the generator does not emit a join form for, an owned rule it refuses, either kind on an `ON UPDATE` cycle -- and one reporting *a rule was emitted, and nothing orders it against a table it names*. A comment carried that distinction; the names carry it now. The new list sits beside `_missing_edges`, which is its error half: there an edge resolves and is missing from a recorded migration, here nothing in the referenced app creates the object at all, so there was no edge to emit ([ADR-0013](docs/adr/0013-cross-app-migration-dependency-edges.md)). Private attributes, in no `__all__`; every note keeps its text, its stream, its paint and its `--check` semantics.
+
 ## [2.5.0] - 2026-08-22
 
 - Fixed: a generated enforcement migration now **depends on the migrations that create what its rules name**. PostgreSQL parses a rule's action when the rule is created, so every table and column it references must already exist — but across apps only an explicit dependency says so, and none was emitted. A co-owner arm reads another app's column and a cascade rule names another app's table, so a fresh `migrate` could reach the rule first and fail with `relation ... does not exist`. Reproduced in a consuming project on a virgin database. The edge points at the migration that *creates* the object, never the referenced app's leaf: a creating migration is always older than a rule naming it, so it cannot close a cycle, while a leaf edge over-constrains the graph and drags unrelated migrations forward — which is what hand-patching the edge did, trading one ordering failure for another. Every *rule* family that names a table it does not fire on is covered — owned, cascade, and the MTI redirect rule, whose action names the ancestor's table and `_deleted_at`; only the cascade and MTI halves predate 2.4.0. The tenant RLS policy is covered on the same footing, and predates 2.4.0 too: its MTI owner-join names the ancestor's table and tenant column inside `EXISTS (…)`, resolved at `CREATE POLICY` time, and the ancestor is `column_owner(model, field)` while the policy lands in the *child's* app — so it crosses an app boundary whenever the chain does. It is the only family rendering its table **unquoted**, so `--check` matches both forms, the bare one delimited by SQL rather than by a quote — a dependency tuple and an MTI trigger's escaped literal both spell a table name without naming it. A `db_table` no policy could spell unquoted answers *no* there rather than raising. The MTI `_updated_at` trigger needs no edge: its parent table is an escaped literal re-quoted at fire time, not a parse-time reference ([ADR-0013](docs/adr/0013-cross-app-migration-dependency-edges.md)).
@@ -182,7 +186,8 @@ First stable release. **BREAKING:** the instrument ladder shifted down one rung 
 
 - Added: initial release — `SetarModel`, `GuitarModel`, `SoftDeletableModel`, `DisableSignals`, `makeguitarmigrations`.
 
-[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.5.0...HEAD
+[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.5.1...HEAD
+[2.5.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.5.1
 [2.5.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.5.0
 [2.4.2]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.4.2
 [2.4.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.4.1

@@ -1,0 +1,14 @@
+{
+  "extraKnownMarketplaces": {
+    "ai-toolkit": {
+      "source": {
+        "source": "github",
+        "repo": "VConvert/ai-toolkit"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "docs@ai-toolkit": true,
+    "review-loop@ai-toolkit": true
+  }
+}

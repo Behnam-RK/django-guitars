@@ -1,0 +1,55 @@
+# Configures the `docs@ai-toolkit` plugin. Advisory only: nothing here blocks a
+# commit. The gate that blocks is still `scripts/doc_budget.py`, run from
+# pre-commit and CI -- see CLAUDE.md.
+
+profile = "default"
+
+# `git ls-files` pathspec, where `*` crosses `/`, so each entry is recursive
+# under its root. `core/`, `manage.py`, `noxfile.py`, `scripts/` and `.github/`
+# stay out, matching the scope `scripts/doc_budget.py` documents.
+[corpus]
+code_globs = ["src/*.py", "tests/*.py"]
+doc_globs = ["*.md", "docs/*.md"]
+
+# Matched by the engine's own globber, where `*` does NOT cross `/` -- hence the
+# leading `**/`. Migration comment headers are either the frozen enforcement
+# interface (`HEADER_*`, guarded by tests/test_enforcement_identity.py and
+# tests/test_header_corpus.py) or a fixture modelling one; trimming either for a
+# budget falsifies what it proves. `doc_budget.py` skips them for the same reason.
+[exclude]
+paths = ["**/migrations/*.py"]
+
+# Both caps are in lines and reproduce `doc_budget.py`'s DOCSTRING_CAP. The
+# engine's default is 0, which means *no* cap and reports every docstring as
+# "delete -- not runtime-surfaced".
+[python]
+docstring_cap = 3
+module_docstring_cap = 3
+
+# The axes `doc_budget.py` already gates, named explicitly because neither
+# shipped profile matches: `strict` turns `stale-file-ref` off, which is exactly
+# its dangling-reference axis, and `default` leaves `docstring` and
+# `section-citation` off.
+[rules.docstring]
+severity = "fail"
+
+[rules.comment-block]
+severity = "fail"
+
+[rules.section-citation]
+severity = "fail"
+
+# Left at its default `warn`, not raised to `fail` with the three above. This
+# repo spells a path inside the package relative to it -- `sql/__init__.py`
+# means `src/guitars/sql/__init__.py` -- and the rule resolves against the repo
+# root, so all 13 of its findings here are that shorthand rather than a stale
+# reference. `doc_budget.py` still fails on the narrower thing it can judge: a
+# `docs/X.md` path referenced from Python source that does not exist.
+[rules.stale-file-ref]
+severity = "warn"
+
+# The hook defaults to AGENTS.md, which this repo does not have. Trigger left at
+# the shipped default.
+[doc-gate]
+enabled = true
+routing_doc = "CLAUDE.md"

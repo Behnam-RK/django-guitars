@@ -1,6 +1,6 @@
-# Changelog
-
 <!-- doc-budget: exempt — release history; length tracks release count, not verbosity -->
+
+# Changelog
 
 All notable changes to this project are documented in this file.
 
@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Full history and diffs: [GitHub releases](https://github.com/Behnam-RK/django-guitars/releases).
 
 ## [Unreleased]
+
+## [2.5.2] - 2026-08-30
+
+- Added: the `docs` and `review-loop` plugins from the `ai-toolkit` marketplace, enabled from a tracked `.claude/settings.json` — the first file under `.claude/` this repo tracks, so `.gitignore` moved from ignoring the directory to `.claude/*` plus a negation for that one file. Only the Claude Code channel is wired. The upstream pre-commit hook and its CI form both clone a private repository, and this one is public: CI would need a deploy-key secret and a fork's pull request could never read it, so `.pre-commit-config.yaml` and `.github/workflows/ci.yml` are untouched and `scripts/doc_budget.py` remains the gate that blocks.
+- Added: `.docs.toml`, configuring the `docs` engine to mirror what `doc_budget.py` measures — `src/` and `tests/` for Python, root markdown and `docs/**`, `**/migrations/*.py` excluded because those comment headers are the frozen enforcement interface. `profile = "default"` with the rules named one by one, since neither shipped profile fits: `strict` turns `stale-file-ref` *off*, which is exactly the dangling-reference axis, and `default` leaves `docstring` and `section-citation` off. `docstring_cap = 3` reproduces `DOCSTRING_CAP`; the engine's own default of `0` means no cap and reports every docstring as one to delete. `stale-file-ref` stays at `warn` rather than joining the three at `fail`: this repo spells a path inside the package relative to it, so `sql/__init__.py` means `src/guitars/sql/__init__.py`, and the rule resolves against the repo root.
+- Added: markdown token caps are left at the engine's defaults, so `docs check` reports `CLAUDE.md`, `docs/tenancy.md` and `docs/migrations.md` as over the hard cap. That is a backlog, not a build status — the engine measures weighted tokens while this repo was squeezed to a 100-*line* cap, which produced dense long lines. Nothing blocks on it.
+- Changed: the `<!-- doc-budget: exempt -->` markers in `CHANGELOG.md`, `CONTEXT.md` and `docs/api-reference.md` moved above their headings. The engine honours a marker only as the first non-blank line, so all three were inert; `doc_budget.py` accepts one anywhere in the first ten lines, so line 1 satisfies both. The `doc-budget:` spelling is kept — `doc_budget.py` matches only that, and the engine accepts both.
 
 ## [2.5.1] - 2026-08-23
 
@@ -186,7 +193,8 @@ First stable release. **BREAKING:** the instrument ladder shifted down one rung 
 
 - Added: initial release — `SetarModel`, `GuitarModel`, `SoftDeletableModel`, `DisableSignals`, `makeguitarmigrations`.
 
-[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.5.1...HEAD
+[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.5.2...HEAD
+[2.5.2]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.5.2
 [2.5.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.5.1
 [2.5.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.5.0
 [2.4.2]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.4.2

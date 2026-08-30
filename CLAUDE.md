@@ -76,9 +76,7 @@ Set `GUITARS_AUTO_MAKE_MIGRATIONS = False` to make `makemigrations` skip the enf
 ./scripts/release.sh          # git tag + push + GitHub release (gh)
 ```
 
-`pyproject.toml` is the single source of truth for the version; `guitars.__version__` reads it from installed package metadata (`importlib.metadata`) — no second string to bump.
-
-**Merging to `main` always requires a version bump.** `.github/workflows/tag-release.yml` tags `main` with `v<pyproject version>` on every push and fails if that version isn't strictly newer than the latest tag, then **calls** `_create-release.yml` as a reusable workflow. Run `./scripts/bump.sh` before merging to `main`.
+**Merging to `main` always requires a version bump.** `.github/workflows/tag-release.yml` tags `main` with `v<pyproject version>` on every push and fails if that version isn't strictly newer than the latest tag, then **calls** `_create-release.yml` as a reusable workflow. Run `./scripts/bump.sh` before merging to `main`. `pyproject.toml` is the single source of truth for the version; `guitars.__version__` reads it from installed package metadata (`importlib.metadata`) — no second string to bump.
 
 Two things about that wiring look like they could be simplified but are load-bearing: **a call, not a tag-push trigger** (GitHub suppresses workflow triggers for events created with the default `GITHUB_TOKEN`, what pushes the tag, so `release.yml`'s `on: push: tags` would never fire for an auto-tag); and **it calls `_create-release.yml`, not `release.yml`** (a called workflow's `permissions` are validated *statically* across every job — `release.yml` holds the PyPI `publish` job with `id-token: write`, so calling it would fail startup unless the push-to-main run were granted OIDC). Folding the three files back into two reintroduces one of these. PyPI publishing itself lives in `release.yml` and is manual-only, triggered from the Actions tab via `workflow_dispatch`, checking the `publish` input.
 
@@ -92,6 +90,8 @@ uv run bandit -c pyproject.toml -r src
 ```
 
 `pytest` runs with `filterwarnings = ["error"]` and `xfail_strict` — warnings and unexpected passes fail the suite. `ruff` and `ty` are scoped to `src` and exclude `tests/`.
+
+Doc stewardship comes from the `docs@ai-toolkit` plugin, enabled by `.claude/settings.json` and configured by `.docs.toml`: `docs check` applies weighted-token caps and in-code doc rules, `docs scan` runs the same engine advisory. **It is advisory here — the gate that blocks is still `scripts/doc_budget.py`,** run from pre-commit and CI, and the two disagree by design: `doc_budget.py` caps markdown by *line* (100) and this repo is tuned to that, while `docs` caps by *weighted token*, so docs squeezed to 100 dense lines are over its caps — a shrink-pass backlog, not a build status. Its `stale-file-ref` rule reads a path like `sql/__init__.py` as repo-relative; here that spelling means `src/guitars/sql/__init__.py`.
 
 ## Conventions
 

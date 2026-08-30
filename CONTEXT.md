@@ -1,6 +1,6 @@
-# Domain model
-
 <!-- doc-budget: exempt — enumeration; length tracks the glossary's term count, not verbosity -->
+
+# Domain model
 
 The vocabulary this codebase uses, and means precisely. Definitions only — the
 mechanics live in [`docs/`](docs/).

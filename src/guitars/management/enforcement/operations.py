@@ -816,19 +816,39 @@ class OperationsMixin:
             refs.append(ref)
 
     def _refuse_owned(self, key: tuple[str, str, str] | None, message: str) -> None:
-        """Record an owned-rule refusal, escalating where a rule for *key* is already recorded:
-        refusing emits nothing, so the stale rule stays live and wrong under a green
+        """Record an owned-rule refusal, escalating where anything for *key* is already
+        recorded: refusing emits nothing, so what is live stays live and wrong under a green
         ``--check``, and no command retires it. See ADR 0012."""
         self._skipped_rule_notes.append(message)
-        if key is not None and key in self.existing.soft_delete_owned:
-            dependent_table, owner_table, foreign_key = key
-            self._refusals_over_live_rules.append(
-                f"Owned rule on '{dependent_table}' owned by '{owner_table}' via "
-                f"'{foreign_key}' is refused but already exists in this project's migrations. "
-                'It is still live in any migrated database and no longer correct. Drop it by '
-                f'hand: DROP RULE {_owned_rule_name(dependent_table, foreign_key)} ON '
-                f'{_identifiers._quote_table(owner_table)};'
+        if key is None:
+            return
+        # Both halves, or an operator told to drop the rule leaves the 2.6.0 sweep stamping
+        # the very rows the refusal exists to spare -- and a sweep can outlive its rule, the
+        # two being separate operations with separate identities.
+        recorded = [
+            existing
+            for existing in (
+                self.existing.soft_delete_owned,
+                self.existing.soft_delete_owned_sweep,
             )
+            if key in existing
+        ]
+        if not recorded:
+            return
+        dependent_table, owner_table, foreign_key = key
+        table = _identifiers._quote_table(owner_table)
+        drops = []
+        if key in self.existing.soft_delete_owned:
+            drops.append(f'DROP RULE {_owned_rule_name(dependent_table, foreign_key)} ON {table};')
+        if key in self.existing.soft_delete_owned_sweep:
+            sweep = _owned_sweep_name(owner_table, dependent_table, foreign_key)
+            drops.append(f'DROP TRIGGER {sweep} ON {table}; DROP FUNCTION {sweep}();')
+        self._refusals_over_live_rules.append(
+            f"Owned enforcement on '{dependent_table}' owned by '{owner_table}' via "
+            f"'{foreign_key}' is refused but already exists in this project's migrations. "
+            'It is still live in any migrated database and no longer correct. Drop it by '
+            f'hand: {" ".join(drops)}'
+        )
 
     @staticmethod
     def _cycle_warning(kind: str, subject: str, fires_on: str, updates: str) -> str:
@@ -1275,7 +1295,6 @@ class OperationsMixin:
         # parse-time reference. The rule's refs, recorded above, order the runtime case.
         dependent_table = key[0]
         name = _owned_sweep_name(owner_table, dependent_table, foreign_key)
-        self._claim_sweep_function_name(name, key)
         slots = {
             'function': name,
             'trigger': name,
@@ -1311,14 +1330,28 @@ class OperationsMixin:
         # the generated migration would fail `migrate` with a bare syntax error.
         for slot, rendered in slots.items():
             if '$$' in rendered:
+                # No key: ``_refuse_owned``'s escalation would name the *rule* the loop above
+                # just emitted. Only the sweep is refused, so only a recorded sweep is stale,
+                # and that is escalated on its own below.
                 self._refuse_owned(
-                    key,
+                    None,
                     f"Owned sweep for '{owner_table}.{foreign_key}' -> '{dependent_table}' "
                     f'skipped: the {slot} {rendered!r} contains "$$", which closes the dollar '
                     f'quoting this trigger function depends on -- the generated migration '
                     f'would not apply. Set a db_table / db_column without it.',
                 )
+                if key in self.existing.soft_delete_owned_sweep:
+                    self._refusals_over_live_rules.append(
+                        f"Owned sweep on '{dependent_table}' owned by '{owner_table}' via "
+                        f"'{foreign_key}' is refused but already exists in this project's "
+                        'migrations. It is still live in any migrated database and running a '
+                        f'stale predicate. Drop it by hand: DROP TRIGGER {name} ON '
+                        f'{ident_owner_table}; DROP FUNCTION {name}();'
+                    )
                 return
+        # Claimed only once it is really emitted: a refused sweep holding its name would
+        # report a clash against the one relation that does reach it.
+        self._claim_sweep_function_name(name, key)
         self._append_if_stale(
             ops,
             self.existing.soft_delete_owned_sweep,

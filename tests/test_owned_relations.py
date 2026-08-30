@@ -9,6 +9,7 @@ from django.apps import apps as django_apps
 from django.db import connection, models
 from django.db.models import CASCADE, DO_NOTHING, PROTECT, SET, SET_DEFAULT, SET_NULL
 from django.test.utils import isolate_apps
+from django.utils import timezone
 
 from guitars import sql
 from guitars.introspection import (
@@ -489,22 +490,45 @@ def test_one_statement_spares_a_row_a_co_owner_on_the_same_table_holds(band):
 
 
 @pytest.mark.django_db
-def test_the_hard_deletion_switch_suppresses_the_owned_sweep(band):
-    """The trigger carries the identical ``<> 'on'`` guard the rule does. Without it the
-    sweep would stamp rows ``hard_delete()`` is in the middle of removing -- the one thing
-    the switch exists to prevent, and unreachable through the rule alone."""
-    kit = PressKit.objects.create(headline='Doomed')
-    kit_pk = kit.pk
-    first = Album.objects.create(title='Hemispheres', band=band, press_kit=kit)
+def test_one_statement_archiving_every_owner_still_spares_a_co_owner_elsewhere(band):
+    """The case only the sweep reaches, with an arm to re-ask: every owner in the statement
+    is archived, so the rule stamps nothing and the sweep decides -- and a live owner on
+    another table, spliced in as an arm, still has to spare the target."""
+    kit = PressKit.objects.create(headline='Shared')
+    Album.objects.create(title='Hemispheres', band=band, press_kit=kit)
     Album.objects.create(title='Permanent Waves', band=band, press_kit=kit)
+    ensemble = Ensemble.objects.create(name='Quartet', press_kit=kit)
+
+    Album.objects.filter(press_kit=kit).delete()  # one statement, every album owner
+
+    assert PressKit.objects.filter(pk=kit.pk).exists()  # the ensemble's arm spared it
+
+    ensemble.delete()  # and once the last arm goes, the kit follows
+
+    assert not PressKit.objects.filter(pk=kit.pk).exists()
+
+
+@pytest.mark.django_db
+def test_the_hard_deletion_switch_suppresses_the_owned_sweep(band):
+    """The trigger carries the identical ``<> 'on'`` guard the rule does. Driven by a direct
+    ``UPDATE``, not a ``delete()``: under the switch the soft-delete rule stops rewriting the
+    DELETE at all, so no UPDATE reaches the owner table and the guard is never consulted."""
+    spared = PressKit.objects.create(headline='Doomed')
+    swept = PressKit.objects.create(headline='Control')
+    for kit in (spared, swept):
+        Album.objects.create(title=f'{kit.headline} I', band=band, press_kit=kit)
+        Album.objects.create(title=f'{kit.headline} II', band=band, press_kit=kit)
 
     with connection.cursor() as cursor:
         cursor.execute(sql.SWITCH_ON_HARD_DELETION)
-        Album.objects.filter(press_kit=kit).delete()
+        Album._all_objects.filter(press_kit=spared).update(_deleted_at=timezone.now())
         cursor.execute(sql.SWITCH_OFF_HARD_DELETION)
+    # The control: the identical statement with the switch off, proving it does reach the
+    # sweep and that the assertion above is the guard's doing rather than the statement's.
+    Album._all_objects.filter(press_kit=swept).update(_deleted_at=timezone.now())
 
-    assert not Album._all_objects.filter(pk=first.pk).exists()  # really removed
-    assert PressKit.objects.filter(pk=kit_pk).exists()  # and the kit was left alone
+    assert PressKit.objects.filter(pk=spared.pk).exists()
+    assert not PressKit.objects.filter(pk=swept.pk).exists()
 
 
 @pytest.mark.django_db
@@ -521,6 +545,24 @@ def test_one_statement_sweeps_through_a_chain_of_ownership(band):
 
     assert not Rider.objects.filter(pk=rider.pk).exists()
     assert not Stagehand.objects.filter(pk=stagehand.pk).exists()
+
+
+@pytest.mark.django_db
+def test_a_statement_that_moves_the_key_while_archiving_sweeps_the_key_it_held():
+    """The sweep reads the archived owner's **before** image, so it asks about the row the
+    rule's ``old`` asks about. Off the after image it stamped the newly-pointed-at placard --
+    a row no live owner ever held -- and left the one the owner actually held to the rule."""
+    held = Placard.objects.create(caption='Held')
+    moved_to = Placard.objects.create(caption='Moved to')
+    kiosk = Kiosk.objects.create(label='Foyer-side', placard=held)
+
+    # One statement, both writes: the owner goes away and its key moves in the same UPDATE.
+    Kiosk._all_objects.filter(pk=kiosk.pk).update(
+        _deleted_at=timezone.now(), placard=moved_to
+    )
+
+    assert not Placard.objects.filter(pk=held.pk).exists()  # the key it actually held
+    assert Placard.objects.filter(pk=moved_to.pk).exists()  # never owned by a live row
 
 
 @pytest.mark.django_db

@@ -4,11 +4,17 @@ The leak is reproduced by dropping the sweep trigger, which is what such a datab
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from django.core.management import CommandError, call_command
 from django.db import connection
+from django.utils import timezone
 from io import StringIO
 
+from guitars.management.commands import sweepowned as sweepowned_module
+from tests.crossapp_dependent.models import Shared
+from tests.crossapp_owner.models import Owner
 from tests.testapp.models import Album, Band, Ensemble, Foyer, Kiosk, Placard, PressKit, Rider
 from tests.testapp.models import Residency, Stagehand
 
@@ -30,6 +36,19 @@ def _drop_sweep_triggers():
         """)
         for trigger, table in cursor.fetchall():
             cursor.execute(f'DROP TRIGGER "{trigger}" ON "{table}"')
+
+
+def _drop_owned_rules(table: str) -> None:
+    """Put one table back to never-generated: rules gone, so the database says this relation
+    carries none. What an app outside a consumer's LOCAL_APPS actually looks like."""
+    with connection.cursor() as cursor:
+        cursor.execute(
+            'SELECT rulename FROM pg_rules WHERE tablename = %s '
+            "AND rulename LIKE 'soft/_delete/_owned/_%%' ESCAPE '/'",
+            [table],
+        )
+        for (rule,) in cursor.fetchall():
+            cursor.execute(f'DROP RULE "{rule}" ON "{table}"')
 
 
 def _sweep(*args) -> str:
@@ -160,3 +179,86 @@ def test_the_sweep_counts_an_archived_co_owner_on_another_table():
 
     _sweep('--repair')
     assert not Placard.objects.filter(pk=placard.pk).exists()
+
+
+@pytest.mark.django_db
+def test_the_sweep_reports_the_number_of_tables_it_actually_checked(band):
+    """The count is what the run examined, not what the project holds. Reporting the whole
+    registry under a scoped run is the vacuously-green report the label validation above
+    exists to prevent, arriving by the other door."""
+    _drop_sweep_triggers()
+    kit = PressKit.objects.create(headline='Shared')
+    Album.objects.create(title='Hemispheres', band=band, press_kit=kit)
+    Album.objects.create(title='Permanent Waves', band=band, press_kit=kit)
+    Album.objects.filter(press_kit=kit).delete()
+
+    unscoped = re.search(r'(\d+) dependent table\(s\) checked', _sweep('--repair'))
+    scoped = re.search(r'(\d+) dependent table\(s\) checked', _sweep('testapp'))
+
+    assert int(unscoped.group(1)) > int(scoped.group(1))
+    # `crossapp_dependent_shared` is a dependent too, and the scoped run did not reach it.
+    assert int(scoped.group(1)) >= 1
+
+
+@pytest.mark.django_db
+def test_the_sweep_follows_an_owner_whose_app_is_outside_local_apps():
+    """What the generator would emit *today* is the wrong question. `crossapp_owner` is out of
+    ``LOCAL_APPS``, yet its migrations created a live owned rule, so it leaks like any other
+    and the repair is exactly as owed. Gating on ``LOCAL_APPS`` declined it."""
+    _drop_sweep_triggers()
+    shared = Shared.objects.create()
+    Owner.objects.create(target=shared)
+    Owner.objects.create(target=shared)
+    Owner.objects.filter(target=shared).delete()  # one statement, both owners: leaked
+
+    assert Shared.objects.filter(pk=shared.pk).exists()
+    _sweep('--repair')
+    assert not Shared.objects.filter(pk=shared.pk).exists()
+
+
+@pytest.mark.django_db
+def test_the_sweep_does_not_follow_a_relation_the_database_has_no_rule_for():
+    """The other half of the same question: a declared ``OwningForeignKey`` whose rule was
+    never created -- an app never generated for -- stamped nothing going away, so repairing
+    through it invents a soft-deletion the database was never asked for."""
+    _drop_sweep_triggers()
+    _drop_owned_rules('crossapp_owner_owner')
+    shared = Shared.objects.create()
+    Owner.objects.create(target=shared)
+    Owner.objects.create(target=shared)
+    Owner._all_objects.filter(target=shared).update(_deleted_at=timezone.now())
+
+    assert 'Owned sweep complete.' in _sweep()
+    assert Shared.objects.filter(pk=shared.pk).exists()
+
+
+@pytest.mark.django_db
+def test_repair_re_asks_the_predicate_against_an_owner_that_appeared_after_the_scan():
+    """The scan and the stamp are two statements. An owner committed between them makes the
+    scan's verdict stale, and stamping on it destroys a row a live owner holds -- the very
+    loss the last-owner guard exists for."""
+    _drop_sweep_triggers()
+    placard = Placard.objects.create(caption='Contended')
+    Kiosk.objects.create(label='Lobby', placard=placard)
+    Kiosk.objects.create(label='Balcony', placard=placard)
+    Kiosk.objects.filter(placard=placard).delete()  # one statement, both owners: leaked
+    assert Placard.objects.filter(pk=placard.pk).exists()
+
+    # ``timezone.now`` is read while building the UPDATE, after the scan has been read back
+    # and before the statement runs -- exactly the window a concurrent commit lands in.
+    real_now = sweepowned_module.timezone.now
+    arrived = []
+
+    def racing_now():
+        if not arrived:
+            arrived.append('once')  # before the create, whose own now() would recurse
+            Foyer.objects.create(label='Mezzanine', placard=placard)
+        return real_now()
+
+    sweepowned_module.timezone.now = racing_now
+    try:
+        _sweep('--repair')
+    finally:
+        sweepowned_module.timezone.now = real_now
+
+    assert Placard.objects.filter(pk=placard.pk).exists()

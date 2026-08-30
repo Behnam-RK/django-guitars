@@ -59,8 +59,7 @@ still-referenced row fails the deferred constraint at `COMMIT`. Collection runs 
 row spared by a reference itself collected later is picked up later; a `CASCADE` referrer never
 counts, going *with* the row, discounted by **row** rather than relation and at any depth. Queryset
 `hard_delete()` walks neither reverse-FK children nor owned relations. Narrower **per row**, not
-absolutely: the batch being gone by construction, it removes a target that is merely *archived*,
-which the rule leaves where it stamped it.
+absolutely: the batch being gone by construction, it removes a target the rule merely *archived*.
 
 One thing collection does **not** reach: a `GenericRelation` on an owned target. No foreign-key
 constraint, so it cannot fail at `COMMIT` and rightly does not hold the row back — but nothing
@@ -72,7 +71,8 @@ Two limits the guard does not cover on its own:
 - **Per statement — closed in 2.6.0.** A rule's action expands *before* the original update, so owners
   archived by one statement read as live to each other's guards and nothing ever stamped the target. Each
   rule now carries an additive statement-level sweep, on the same key and refusals; `sweepowned` repairs
-  what older databases leaked. See [ADR 0014](adr/0014-statement-level-owned-sweep.md).- **Per visible row.** Every arm's `NOT EXISTS` is an ordinary `SELECT`, so a
+  older databases. See [ADR 0014](adr/0014-statement-level-owned-sweep.md).
+- **Per visible row.** Every arm's `NOT EXISTS` is an ordinary `SELECT`, so a
   [tenant policy](tenancy.md) on the table it reads filters it: a live sibling owner in another
   tenant is invisible, the guard reads "last owner", and a still-owned row is stamped — the one place
   the kit's guards do not fail safe. `hard_delete()` reads through that policy and then *removes* the

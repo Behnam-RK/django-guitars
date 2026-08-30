@@ -159,6 +159,10 @@ _DROP_SOFT_DELETE_OWNED_OBJECT_RULE = """
 # stamps a subset of this and whichever runs first the other's ``_deleted_at IS NULL`` makes
 # a no-op. Nothing is retired, which is what ADR 0012 costed the trigger as needing.
 
+# The subquery selects the **before** image, so the key read here is the one ``old`` gives the
+# rule. Reading the after image made a statement that archives an owner *and* moves its key
+# stamp the new target the rule never touched, and skip the old one it did.
+
 # Terminated ``$$;`` unlike the autofill template it mirrors: that is an operation by itself,
 # this is concatenated before its CREATE TRIGGER and an unterminated body swallows it. The
 # indentation lands the spliced arms at the depth they are written with.
@@ -173,13 +177,13 @@ _CREATE_SOFT_DELETE_OWNED_SWEEP_FUNCTION = """
             UPDATE {dependent_table} AS guitars_dependent
             SET _deleted_at = NOW(){updated_at_assignment}
             FROM (
-                SELECT guitars_after.*
-                FROM guitars_owned_after AS guitars_after
-                JOIN guitars_owned_before AS guitars_before
-                    ON guitars_before."{primary_key}" = guitars_after."{primary_key}"
+                SELECT guitars_before.*
+                FROM guitars_owned_before AS guitars_before
+                JOIN guitars_owned_after AS guitars_after
+                    ON guitars_after."{primary_key}" = guitars_before."{primary_key}"
                 WHERE guitars_before._deleted_at IS NULL
                   AND guitars_after._deleted_at IS NOT NULL
-                  AND guitars_after."{foreign_key}" IS NOT NULL
+                  AND guitars_before."{foreign_key}" IS NOT NULL
             ) AS guitars_archived
             WHERE guitars_dependent."{dependent_primary_key}" = guitars_archived."{foreign_key}"
               AND guitars_dependent._deleted_at IS NULL

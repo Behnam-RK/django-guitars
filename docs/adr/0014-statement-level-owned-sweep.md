@@ -37,8 +37,10 @@ same arms once the statement has settled, over an `OLD TABLE`/`NEW TABLE` transi
   are untouched. That owned edges would leave that graph was 0012's strongest objection.
 - **The arms are spliced in verbatim**, the archived owners aliased into a subquery the templates
   read as `{owner_row}` — the rule passes the literal `old`, so every existing rule still renders
-  byte-identically and no `[SQL:…]` identity moves. No second renderer to keep in step. The alias
-  may not itself *be* `old`: a plpgsql record variable, which PostgreSQL will not let it shadow.
+  byte-identically and no `[SQL:…]` identity moves. The alias may not itself *be* `old`, a plpgsql
+  record variable PostgreSQL will not let it shadow. It selects the **before** image, so the key it
+  reads is `old`'s: off the after image, archiving an owner *and* moving its key in one statement
+  stamped the newly-pointed-at row, skipped the held one, and broke the subset.
 - **No `WHEN (pg_trigger_depth() = 0)`**, unlike the `updated_at` trigger it mirrors: the sweep's
   `UPDATE` must fire the dependent's sweep in turn, or a chain stops a hop short. Recursion ends on
   `_deleted_at IS NULL`, and a cycle is refused a rule — so a trigger — before either. Running at
@@ -52,14 +54,14 @@ same arms once the statement has settled, over an `OLD TABLE`/`NEW TABLE` transi
   parse-time reference [ADR 0013](0013-cross-app-migration-dependency-edges.md) exists for; the
   rule's refs, recorded for the same relation in one pass, order the runtime case anyway.
 - **`sweepowned` repairs what is already lost**, the trigger reaching no database that leaked
-  before it, and reads the same shared verdicts so it never follows a refused relation.
+  before it. It follows no refused relation, and none the database holds no rule for — what the
+  generator would emit *today* is the wrong question. Its predicate is re-asked inside the `UPDATE`.
 
 ## Why not the alternatives
 
 **A guard the rule could express on its own** — issue #40's option 2, excluding rows whose
 `_deleted_at` the current statement is setting. Not implementable: a rule's action sees only
-`old`/`new` for the current row in the pre-update snapshot, and is rewritten *into* the query
-rather than executed after it, so it cannot reach the statement's row set.
+`old`/`new` for the current row, and is rewritten *into* the query rather than run after it.
 
 **Widening the guard to every inbound foreign key.** Still rejected on 0012's ground: a referrer
 table without `_deleted_at` has no column to read liveness from, and would pin the dependent
@@ -67,8 +69,8 @@ un-archivable for ever.
 
 **A `QuerySet.delete()` override, or a warning** — issue #40's option 4. Per-row fallback
 contradicts the thesis the kit exists for, that correctness holds on paths never touching Python;
-it is O(n) statements; and it is bypassed by raw SQL and by the `Collector` batching the report
-itself names. A system check cannot see it either — the shape is a call pattern, not a declaration.
+it is O(n) statements, bypassed by raw SQL and by the `Collector` batching the report itself names.
+A system check cannot see it either — the shape is a call pattern, not a declaration.
 
 **The sweep without the command**, leaving every pre-2.6.0 database wrong with no way back.
 
@@ -76,25 +78,23 @@ itself names. A system check cannot see it either — the shape is a call patter
 
 **Accepted costs.**
 - A new operation family: header, derived scanner, container, name family, corpus baseline — the
-  bulk of the change, though smaller than 0012 estimated, the owned SQL templates being private
-  already, so nothing joins `guitars.sql`'s frozen names.
-- One `CREATE FUNCTION` and `CREATE TRIGGER` per owned relation, and one more statement-level
-  trigger per `UPDATE` on an owner table — matching nothing in the common single-row case, the
-  rule having stamped the row already.
-- A `db_table` or column containing `$$` is **refused**, not escaped: it closes the dollar quoting
-  the body depends on and `migrate` would fail on a bare syntax error, as the autofill family found.
+  bulk of the change, smaller than 0012 estimated: the owned SQL templates were private already.
+- One `CREATE FUNCTION` and `CREATE TRIGGER` per owned relation, plus a statement-level trigger
+  per `UPDATE` on an owner table, matching nothing where the rule already stamped the row.
+- A `db_table` or column containing `$$` is **refused**, not escaped: it closes the body's dollar
+  quoting and `migrate` would fail on a syntax error. The sweep alone is skipped, the rule beside
+  it untouched, so only a sweep already recorded is named to drop by hand.
 - `hard_delete()`'s behaviour is unchanged, its *intermediate* state is not: a target whose owners
-  were all archived by one `UPDATE` is now archived in Phase 1 and removed by Phase 2, where before
-  it went straight from live to gone.
-- `sweepowned` reads with tenancy bypassed and needs a role that sees every tenant: reading through
-  a policy would hide a live owner and manufacture an orphan — the failure the co-owner tenancy
-  refusal prevents, and one nothing refuses in Python.
+  one `UPDATE` archived is archived in Phase 1 and removed by Phase 2, not live straight to gone.
+- `sweepowned` reads with tenancy bypassed and needs a role that sees every tenant: through a
+  policy a hidden live owner would manufacture an orphan, unrefusable in Python.
+- The transition tables correlate on the primary key, their only row identity, so a statement
+  writing an owner's **pk** while archiving it drops it from the join and the sweep misses it.
 
 **Reversibility.** Low, as 0011 and 0012 describe: the SQL is inlined, so a database keeps what it
-was migrated with until a regeneration and a `migrate`, and dropping the family later would leave
-every migrated project's triggers live, no command retiring one.
+was migrated with until a regeneration and a `migrate`, and dropping the family later leaves every
+migrated project's triggers live, no command retiring one.
 
 ## Related
 
-- [ADR 0012](0012-cross-owner-last-owner-guard.md) — amended · [ADR 0011](0011-owner-side-soft-delete-ownership.md) — where the limit was recorded
-- [ADR 0013](0013-cross-app-migration-dependency-edges.md) — why this needs no edges · [`docs/owned-relations.md`](../owned-relations.md) — the guide
+- [ADR 0012](0012-cross-owner-last-owner-guard.md) — amended · [ADR 0011](0011-owner-side-soft-delete-ownership.md) — where the limit was recorded · [ADR 0013](0013-cross-app-migration-dependency-edges.md) — why this needs no edges · [`docs/owned-relations.md`](../owned-relations.md) — the guide

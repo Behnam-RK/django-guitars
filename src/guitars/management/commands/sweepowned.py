@@ -17,7 +17,9 @@ from guitars.introspection import (
     rule_update_cycle_edges,
 )
 from guitars.management import _generator
+from guitars.management.enforcement.operations import _owned_rule_name
 from guitars.models.soft_deletion import _owned_fields
+from guitars.sql._identifiers import _unescape_ident
 from guitars.tenancy import tenancy_bypassed
 
 
@@ -34,7 +36,11 @@ class Command(BaseCommand):
             'args',
             metavar='app_label',
             nargs='*',
-            help='Optional app labels to scope the sweep to (default: all LOCAL_APPS).',
+            help=(
+                'Optional app labels to scope the sweep to, matched against the app of '
+                'the *dependent* being repaired rather than of the owner above it '
+                '(default: every dependent of an owned rule this database holds).'
+            ),
         )
         parser.add_argument(
             '--database',
@@ -53,7 +59,21 @@ class Command(BaseCommand):
         )
 
     @staticmethod
-    def _rule_carrying_owners():
+    def _owned_rules_in_database(using: str) -> set[tuple[str, str]]:
+        """``(table, rule_name)`` for every owned rule the database actually holds, under both
+        the bare and the schema-qualified table name."""
+        with connections[using].cursor() as cursor:
+            cursor.execute(
+                'SELECT schemaname, tablename, rulename FROM pg_rules '
+                "WHERE rulename LIKE 'soft/_delete/_owned/_%' ESCAPE '/'"
+            )
+            live = set()
+            for schema, table, rule in cursor.fetchall():
+                live.update({(table, rule), (f'{schema}.{table}', rule)})
+            return live
+
+    @classmethod
+    def _rule_carrying_owners(cls, using: str):
         """``dependent_model -> [(owner_model, fk_field_name)]`` for every relation that
         carries a rule, through ``_owned_fields`` so the verdicts are the generator's own."""
         # Repairing a relation it refused destroys what that refusal spared -- the mistake
@@ -61,10 +81,18 @@ class Command(BaseCommand):
         registry = list(django_apps.get_models())
         cycles = rule_update_cycle_edges(registry)
         refusals = owned_tenancy_refusals(registry)
+        # What the generator would emit *today* is the wrong question: an app generated under
+        # a scoped run, or dropped from LOCAL_APPS since, keeps a live rule that leaks and
+        # needs repairing. The database's own answer covers both, and invents nothing.
+        live = cls._owned_rules_in_database(using)
         owners: dict[type, list[tuple[type, str]]] = {}
         for model in registry:
             for field in _owned_fields(model, cycles, refusals):
                 dependent = column_owner(field.related_model, '_deleted_at')
+                rule = _owned_rule_name(dependent._meta.db_table, field.column)
+                owner_table = column_owner(model, '_deleted_at')._meta.db_table
+                if (owner_table, _unescape_ident(rule[1:-1])) not in live:
+                    continue
                 owners.setdefault(dependent, []).append((model, field.name))
         return owners
 
@@ -101,7 +129,7 @@ class Command(BaseCommand):
         # green gate that swept nothing. Same validation as `makeguitarmigrations`.
         _generator.validate_app_labels(requested)
 
-        rule_owners = self._rule_carrying_owners()
+        rule_owners = self._rule_carrying_owners(using)
         # The sparing half, deliberately wider than the stamping half above: ``owner_arms`` is
         # the very sweep the rule's own last-owner guard is built from, so an owner the
         # generator refused a rule still counts here -- it owns what it points at either way.
@@ -109,6 +137,8 @@ class Command(BaseCommand):
 
         findings: list[str] = []
         repaired = 0
+        # Tables, not models: the report says "table(s)", and two models can resolve to one.
+        checked: set[str] = set()
         # Tenancy bypassed: a policy hiding a live owner would manufacture an orphan and
         # stamp a still-owned row -- what the co-owner tenancy refusal prevents, unrefusable
         # here. Needs a role that sees every tenant; see docs/owned-relations.md.
@@ -117,12 +147,11 @@ class Command(BaseCommand):
                 if requested and dependent._meta.app_label not in requested:
                     continue
                 dependent_table = dependent._meta.db_table
-                orphans = self._orphans(
-                    dependent,
-                    [(arm.owner_model, arm.fk_name) for arm in arms.get(dependent_table, ())],
-                    owners,
-                    using,
-                )
+                checked.add(dependent_table)
+                arm_pairs = [
+                    (arm.owner_model, arm.fk_name) for arm in arms.get(dependent_table, ())
+                ]
+                orphans = self._orphans(dependent, arm_pairs, owners, using)
                 pks = list(orphans.values_list('pk', flat=True))
                 if not pks:
                     continue
@@ -132,16 +161,19 @@ class Command(BaseCommand):
                 )
                 if repair:
                     with transaction.atomic(using=using):
+                        # The predicate re-asked at UPDATE time, not the pks read before it:
+                        # a concurrent transaction committing a live owner in between would
+                        # otherwise have its dependent stamped on a verdict already stale.
                         repaired += (
-                            dependent._all_objects.using(using)
-                            .filter(pk__in=pks, _deleted_at__isnull=True)
+                            self._orphans(dependent, arm_pairs, owners, using)
+                            .filter(pk__in=pks)
                             .update(_deleted_at=timezone.now())
                         )
 
         self.stdout.write(
             self.style.MIGRATE_HEADING(
                 f'Owned sweep on {connections[using].alias}: '
-                f'{len(rule_owners)} dependent table(s) checked, '
+                f'{len(checked)} dependent table(s) checked, '
                 f'{len(findings)} with orphaned rows'
                 + (f', {repaired} row(s) stamped.' if repair else '.')
             )

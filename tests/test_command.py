@@ -2434,9 +2434,7 @@ def test_a_joined_arm_on_the_table_the_rule_fires_on_excludes_the_row_going_away
                 app_label = 'testapp'
 
         class Kid(Root):
-            programme = OwningForeignKey(
-                Shared, on_delete=DO_NOTHING, null=True, related_name='+'
-            )
+            programme = OwningForeignKey(Shared, on_delete=DO_NOTHING, null=True, related_name='+')
 
             class Meta:
                 app_label = 'testapp'
@@ -2640,6 +2638,131 @@ def test_a_refused_owned_rule_that_already_exists_fails_check():
     command._refuse_a_stale_owned_rule(check_only=False)
 
 
+def test_the_sweep_name_clash_is_reported_on_the_name_alone():
+    """A function is namespaced per schema, so the second CREATE OR REPLACE overwrites the
+    first's body and one table's trigger runs the other's predicate. Driven directly: the
+    sizing in ``_owned_sweep_name`` is what puts a colliding pair of models out of reach."""
+    command = Command()
+    command._rule_name_clashes.clear()
+    command._claimed_sweep_names.clear()
+
+    command._claim_sweep_function_name('shared', ('dep', 'owner_a', 'fk_id'))
+    command._claim_sweep_function_name('shared', ('dep', 'owner_a', 'fk_id'))  # same, no clash
+    assert command._rule_name_clashes == []
+
+    command._claim_sweep_function_name('shared', ('dep', 'owner_b', 'fk_id'))
+
+    assert len(command._rule_name_clashes) == 1
+    assert 'Owned sweep function shared is named by both' in command._rule_name_clashes[0]
+
+
+def test_the_sweep_under_adopt_drops_its_trigger_if_it_exists():
+    """``--adopt`` is the one path that may not know whether the object is there. The rule
+    beside it stays a plain CREATE OR REPLACE, and so does the function -- only the trigger,
+    which has no REPLACE form, needs the IF EXISTS."""
+    command = Command()
+    command.existing.soft_delete_owned.clear()
+    command.existing.soft_delete_owned_sweep.clear()
+
+    sweeps = [
+        op
+        for op in command._owned_operations(Album, adopt=True)
+        if op.startswith('# Soft Delete Owned Sweep')
+    ]
+
+    assert sweeps
+    for sweep in sweeps:
+        assert 'DROP TRIGGER IF EXISTS' in sweep
+        # The function is CREATE OR REPLACE either way -- DROP FUNCTION refuses while a
+        # trigger depends on it, so only the reverse half carries one.
+        assert sweep.split('reverse_sql')[0].count('DROP FUNCTION') == 0
+        assert 'CREATE OR REPLACE FUNCTION' in sweep
+
+
+def test_a_refused_relation_names_its_live_sweep_as_well_as_its_rule():
+    """A refusal retires nothing, and since 2.6.0 there are two live objects to retire by
+    hand. Naming only the rule leaves the sweep stamping the rows the refusal exists to
+    spare -- the tenancy refusal's whole point."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Twinned(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class TwinCyclic(SetarModel):
+            target = OwningForeignKey(Twinned, on_delete=DO_NOTHING, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        Twinned.add_to_class(
+            'back',
+            OwningForeignKey(TwinCyclic, on_delete=DO_NOTHING, null=True, related_name='+'),
+        )
+
+        command = Command()
+        command._skipped_rule_notes.clear()
+        command._refusals_over_live_rules.clear()
+        command.all_models = [Twinned, TwinCyclic]
+        # A 2.6.0 project: the same relation recorded both halves before it went cyclic.
+        key = ('testapp_twinned', 'testapp_twincyclic', 'target_id')
+        command.existing.soft_delete_owned.clear()
+        command.existing.soft_delete_owned_sweep.clear()
+        command.existing.soft_delete_owned[key] = 'deadbeefcafe'
+        command.existing.soft_delete_owned_sweep[key] = 'cafedeadbeef'
+        return command, command._owned_operations(TwinCyclic)
+
+    command, ops = _build()
+
+    assert ops == []
+    assert len(command._refusals_over_live_rules) == 1
+    escalation = command._refusals_over_live_rules[0]
+    assert 'DROP RULE' in escalation
+    assert 'DROP TRIGGER' in escalation
+    assert 'DROP FUNCTION' in escalation
+
+
+def test_a_refused_relation_escalates_over_a_sweep_recorded_without_its_rule():
+    """The two are separate operations with separate identities, so a project can hold one
+    without the other. A sweep alone still stamps, so it still has to be named."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Loner(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class LoneCyclic(SetarModel):
+            target = OwningForeignKey(Loner, on_delete=DO_NOTHING, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        Loner.add_to_class(
+            'back',
+            OwningForeignKey(LoneCyclic, on_delete=DO_NOTHING, null=True, related_name='+'),
+        )
+
+        command = Command()
+        command._skipped_rule_notes.clear()
+        command._refusals_over_live_rules.clear()
+        command.all_models = [Loner, LoneCyclic]
+        command.existing.soft_delete_owned.clear()
+        command.existing.soft_delete_owned_sweep.clear()
+        command.existing.soft_delete_owned_sweep[
+            ('testapp_loner', 'testapp_lonecyclic', 'target_id')
+        ] = 'cafedeadbeef'
+        return command, command._owned_operations(LoneCyclic)
+
+    command, ops = _build()
+
+    assert ops == []
+    assert len(command._refusals_over_live_rules) == 1
+    assert 'DROP TRIGGER' in command._refusals_over_live_rules[0]
+    assert 'DROP RULE' not in command._refusals_over_live_rules[0]
+
+
 def test_a_single_owner_rule_is_byte_identical_to_2_3_0(snapshot):
     """A dependent owned from one place renders exactly as 2.3.0 rendered it, so its
     ``[SQL:...]`` identity does not move. Pinned byte for byte: a substring assertion cannot
@@ -2691,3 +2814,114 @@ def test_scoped_run_warns_that_an_out_of_scope_owned_rule_may_be_stale(monkeypat
     # The in-scope table whose arm moved the out-of-scope rule's text, and the app that holds
     # the rule this run leaves alone.
     assert "reads 'testapp_kiosk', in this run's scope, but app 'foyerb' is not" in notes[0]
+
+
+def test_a_sweep_refused_for_dollar_quoting_does_not_escalate_over_its_live_rule():
+    """The ``$$`` refusal skips the *sweep* only -- the rule beside it is emitted, and is
+    exactly as correct as it was in 2.3.0. Routing that refusal through the shared escalation
+    would tell the operator to ``DROP RULE`` a rule this very run just wrote."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Dollared(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+                db_table = 'testapp_doll$$ared'
+
+        class DollarHolder(SetarModel):
+            target = OwningForeignKey(Dollared, on_delete=DO_NOTHING, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        command = Command()
+        command._skipped_rule_notes.clear()
+        command._refusals_over_live_rules.clear()
+        command.existing.soft_delete_owned.clear()
+        command.existing.soft_delete_owned_sweep.clear()
+        # The upgrading project: 2.3.0 wrote this rule and it is live and still right.
+        command.existing.soft_delete_owned[
+            ('testapp_doll$$ared', 'testapp_dollarholder', 'target_id')
+        ] = 'deadbeefcafe'
+        command.all_models = [Dollared, DollarHolder]
+        return command, command._owned_operations(DollarHolder)
+
+    command, ops = _build()
+
+    # The sweep is skipped, with a note naming it as the sweep rather than the rule.
+    assert len(command._skipped_rule_notes) == 1
+    assert 'Owned sweep' in command._skipped_rule_notes[0]
+    assert not [op for op in ops if op.startswith('# Soft Delete Owned Sweep')]
+    # ...and nothing tells the operator to drop the rule that refusal did not touch.
+    assert command._refusals_over_live_rules == []
+    command._refuse_a_stale_owned_rule(check_only=True)
+
+
+def test_a_sweep_refused_for_dollar_quoting_escalates_over_its_own_live_sweep():
+    """The refusal spares the rule but not a sweep already recorded under the same key: a
+    ``$$`` reaching only a co-owner table leaves that key untouched, so nothing is emitted
+    and the live trigger keeps a stale predicate under a green ``--check``."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Stale(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+                db_table = 'testapp_sta$$le'
+
+        class StaleHolder(SetarModel):
+            target = OwningForeignKey(Stale, on_delete=DO_NOTHING, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        command = Command()
+        command._skipped_rule_notes.clear()
+        command._refusals_over_live_rules.clear()
+        command.existing.soft_delete_owned.clear()
+        command.existing.soft_delete_owned_sweep.clear()
+        command.existing.soft_delete_owned_sweep[
+            ('testapp_sta$$le', 'testapp_staleholder', 'target_id')
+        ] = 'cafedeadbeef'
+        command.all_models = [Stale, StaleHolder]
+        return command, command._owned_operations(StaleHolder)
+
+    command, ops = _build()
+
+    assert not [op for op in ops if op.startswith('# Soft Delete Owned Sweep')]
+    assert len(command._refusals_over_live_rules) == 1
+    escalation = command._refusals_over_live_rules[0]
+    assert 'DROP TRIGGER' in escalation and 'DROP FUNCTION' in escalation
+    assert 'DROP RULE' not in escalation  # the rule is emitted, not refused
+
+
+def test_a_refused_sweep_does_not_claim_its_function_name():
+    """A name claimed by an operation that never lands would report a clash against the one
+    relation that does reach it -- a ``--check`` failure over a collision with nothing."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Unclaimed(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+                db_table = 'testapp_uncl$$aimed'
+
+        class UnclaimedHolder(SetarModel):
+            target = OwningForeignKey(Unclaimed, on_delete=DO_NOTHING, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        command = Command()
+        command._skipped_rule_notes.clear()
+        command._rule_name_clashes.clear()
+        command._claimed_sweep_names.clear()
+        command.existing.soft_delete_owned.clear()
+        command.existing.soft_delete_owned_sweep.clear()
+        command.all_models = [Unclaimed, UnclaimedHolder]
+        command._owned_operations(UnclaimedHolder)
+        return command
+
+    command = _build()
+
+    assert command._claimed_sweep_names == {}

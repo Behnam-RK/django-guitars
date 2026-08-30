@@ -297,11 +297,13 @@ def test_owned_operations_emit_only_for_owning_foreign_keys():
     the owning pair gets a rule -- ``on_delete`` never decides this."""
     command = Command()
     command.existing.soft_delete_owned.clear()
+    command.existing.soft_delete_owned_sweep.clear()
 
     ops = command._owned_operations(Album)
     blob = '\n'.join(ops)
 
-    assert len(ops) == 2
+    assert len(_owned_rule_ops(ops)) == 2
+    assert len(ops) == 4  # each rule paired with its statement-level sweep
     assert 'that is owned by "testapp_album"' in blob
     assert 'testapp_presskit' in blob
     # `band` (CASCADE) and `producer` (SET_NULL) are plain ForeignKeys: no ownership either way.
@@ -313,6 +315,7 @@ def test_owned_operations_name_one_rule_per_foreign_key_column():
     keeping their rule names apart -- a collision would silently replace, not fail."""
     command = Command()
     command.existing.soft_delete_owned.clear()
+    command.existing.soft_delete_owned_sweep.clear()
 
     blob = '\n'.join(command._owned_operations(Album))
 
@@ -328,6 +331,7 @@ def test_owned_rule_carries_the_last_owner_guard():
     before the original update, so without it the NOT EXISTS never holds and nothing fires."""
     command = Command()
     command.existing.soft_delete_owned.clear()
+    command.existing.soft_delete_owned_sweep.clear()
 
     blob = '\n'.join(command._owned_operations(Album))
 
@@ -343,6 +347,7 @@ def test_owned_operation_correlates_an_mti_dependent_against_its_owner_table():
     ancestor's table is both correct and the only one carrying a column to stamp."""
     command = Command()
     command.existing.soft_delete_owned.clear()
+    command.existing.soft_delete_owned_sweep.clear()
 
     blob = '\n'.join(command._owned_operations(Merch))
 
@@ -357,6 +362,7 @@ def test_owned_operation_warns_when_the_owner_inherits_deleted_at_from_an_ancest
     command = Command()
     command._skipped_rule_notes.clear()
     command.existing.soft_delete_owned.clear()
+    command.existing.soft_delete_owned_sweep.clear()
 
     ops = command._owned_operations(Orchestra)
 
@@ -374,6 +380,7 @@ def test_owned_operation_warns_when_the_owner_owns_its_own_table():
     command = Command()
     command._skipped_rule_notes.clear()
     command.existing.soft_delete_owned.clear()
+    command.existing.soft_delete_owned_sweep.clear()
 
     @isolate_apps('tests.testapp')
     def _build():
@@ -396,6 +403,7 @@ def test_owned_operation_warns_when_the_target_is_not_soft_deletable():
     command = Command()
     command._skipped_rule_notes.clear()
     command.existing.soft_delete_owned.clear()
+    command.existing.soft_delete_owned_sweep.clear()
 
     @isolate_apps('tests.testapp')
     def _build():
@@ -423,6 +431,7 @@ def test_owned_operation_warns_when_the_owner_is_not_soft_deletable():
     command = Command()
     command._skipped_rule_notes.clear()
     command.existing.soft_delete_owned.clear()
+    command.existing.soft_delete_owned_sweep.clear()
 
     @isolate_apps('tests.testapp')
     def _build():
@@ -451,6 +460,7 @@ def test_owned_operation_warns_when_the_key_is_redirected_off_the_primary_key():
     command = Command()
     command._skipped_rule_notes.clear()
     command.existing.soft_delete_owned.clear()
+    command.existing.soft_delete_owned_sweep.clear()
 
     @isolate_apps('tests.testapp')
     def _build():
@@ -491,18 +501,23 @@ def test_owned_operations_are_idempotent_across_two_runs():
     identity and the dedupe key all have to agree on the same three-part key."""
     command = Command()
     command.existing.soft_delete_owned.clear()
+    command.existing.soft_delete_owned_sweep.clear()
 
     blob = '\n'.join(command._owned_operations(Album))
 
-    for match in headers_module._RE_SOFT_DELETE_OWNED.finditer(blob):
-        key = (
-            _identifiers._unescape_ident(match.group(1)),
-            _identifiers._unescape_ident(match.group(2)),
-            _identifiers._unescape_ident(match.group(3)),
-        )
-        command.existing.soft_delete_owned[key] = identity_module._recorded_sql_identity(
-            blob, match
-        )
+    # Both families: they key on the same triple but are separate operations with separate
+    # identities, so reading back only the rules would leave every sweep re-emitted for ever.
+    for scanner, recorded in (
+        (headers_module._RE_SOFT_DELETE_OWNED, command.existing.soft_delete_owned),
+        (headers_module._RE_SOFT_DELETE_OWNED_SWEEP, command.existing.soft_delete_owned_sweep),
+    ):
+        for match in scanner.finditer(blob):
+            key = (
+                _identifiers._unescape_ident(match.group(1)),
+                _identifiers._unescape_ident(match.group(2)),
+                _identifiers._unescape_ident(match.group(3)),
+            )
+            recorded[key] = identity_module._recorded_sql_identity(blob, match)
 
     assert command._owned_operations(Album) == []
 
@@ -513,6 +528,7 @@ def test_owned_operations_under_adopt_stay_a_plain_create_or_replace():
     instant where a DELETE on that table destroys rows."""
     command = Command()
     command.existing.soft_delete_owned.clear()
+    command.existing.soft_delete_owned_sweep.clear()
 
     blob = '\n'.join(command._owned_operations(Album, adopt=True))
 
@@ -1649,6 +1665,7 @@ def test_owned_operation_warns_when_two_models_own_each_other():
         command = Command()
         command._skipped_rule_notes.clear()
         command.existing.soft_delete_owned.clear()
+        command.existing.soft_delete_owned_sweep.clear()
         command.all_models = [OwnerA, OwnerB]
         return command, command._owned_operations(OwnerA) + command._owned_operations(OwnerB)
 
@@ -1680,13 +1697,14 @@ def test_owned_operation_still_emits_when_ownership_is_one_way():
         command = Command()
         command._skipped_rule_notes.clear()
         command.existing.soft_delete_owned.clear()
+        command.existing.soft_delete_owned_sweep.clear()
         command.all_models = [OneWayOwner, OneWayOwned]
         return command, command._owned_operations(OneWayOwner)
 
     command, ops = _build()
 
     assert command._skipped_rule_notes == []
-    assert len(ops) == 1
+    assert len(_owned_rule_ops(ops)) == 1
     assert 'testapp_onewayowned' in ops[0]
 
 
@@ -1711,6 +1729,7 @@ def test_cascade_operation_warns_when_an_owned_rule_closes_the_cycle():
         command = Command()
         command._skipped_rule_notes.clear()
         command.existing.soft_delete_owned.clear()
+        command.existing.soft_delete_owned_sweep.clear()
         command.existing.soft_delete_related.clear()
         command.all_models = [Held, Holder]
         command.reverse_relations_mapping[Held] = {
@@ -1850,9 +1869,21 @@ def _owned_blob(*models_to_register, subject=None):
     command._skipped_rule_notes.clear()
     command._refusals_over_live_rules.clear()
     command.existing.soft_delete_owned.clear()
+    command.existing.soft_delete_owned_sweep.clear()
     command.all_models = list(models_to_register)
     ops = command._owned_operations(subject or models_to_register[0])
-    return command, '\n'.join(ops), ops
+    # The blob is the *rule* operations alone: each relation also emits a sweep carrying the
+    # same rendered arms (ADR 0014), so a blob holding both doubles every
+    # ``count('NOT EXISTS')``. Tests about the pairing take the full ``ops`` instead.
+    rules = [op for op in ops if not op.startswith('# Soft Delete Owned Sweep')]
+    return command, '\n'.join(rules), ops
+
+
+def _owned_rule_ops(ops):
+    """The rule half of ``_owned_operations``' output: a test about which relations got a
+    rule, or how many arms one has, reads this rather than the whole list, where the sweep
+    beside each rule (ADR 0014) carries the same arms and would count them twice."""
+    return [op for op in ops if op.startswith('# Soft Delete Owned Rule')]
 
 
 def test_owned_guard_carries_an_arm_for_a_co_owner_on_another_table():
@@ -1951,7 +1982,9 @@ def test_owned_guard_does_not_count_a_self_owning_target_as_its_own_owner():
 
     command, blob, ops = _build()
 
-    assert len(ops) == 1  # Shared's own relation is refused; Owner's still carries its arm
+    # Shared's own relation is refused; Owner's still carries its arm -- and its sweep, the
+    # two being appended together, so a refusal can never drop one half and keep the other.
+    assert len(_owned_rule_ops(ops)) == 1
     assert 'FROM "testapp_shared" AS guitars_owner_1' in blob
     assert 'guitars_owner_1."id" <> old."target_id"' in blob
 
@@ -2028,8 +2061,9 @@ def test_owned_guard_joins_to_reach_a_co_owner_that_inherits_deleted_at():
     rows own the kit, so the arm joins the two tables on the pk value the chain shares."""
     command = Command()
     command.existing.soft_delete_owned.clear()
+    command.existing.soft_delete_owned_sweep.clear()
 
-    blob = '\n'.join(command._owned_operations(Album))
+    blob = '\n'.join(_owned_rule_ops(command._owned_operations(Album)))
 
     assert blob.count('NOT EXISTS') == 8  # two rules, four arms each
     assert 'FROM "testapp_orchestra" AS guitars_owner_3' in blob
@@ -2328,9 +2362,10 @@ def test_the_shared_owned_answers_are_swept_once_per_run():
 
     command, blob, ops = _build()
 
-    # Both rules emitted: the owner carries none of the dependent's dimensions, so nothing its
-    # arms read is filtered by one the dependent's own policy does not apply.
-    assert len(ops) == 2
+    # Both rules emitted, each with its sweep: the owner carries none of the dependent's
+    # dimensions, so nothing its arms read is filtered by one the dependent's policy does not.
+    # Four for two relations is the pairing -- a refusal drops both, sharing one loop.
+    assert len(ops) == 4
     assert command._owned_tenancy_refusals() is command._owned_tenancy_refusals()
     assert command._owner_arms() is command._owner_arms()
 
@@ -2521,6 +2556,7 @@ def test_a_scoped_run_does_not_report_an_out_of_scope_app_s_own_misconfiguration
     command._skipped_rule_notes.clear()
     command._refusals_over_live_rules.clear()
     command.existing.soft_delete_owned.clear()
+    command.existing.soft_delete_owned_sweep.clear()
 
     @isolate_apps('tests.testapp')
     def _build():
@@ -2587,6 +2623,7 @@ def test_a_refused_owned_rule_that_already_exists_fails_check():
         command.all_models = [Shared, Cyclic]
         # Pretend the project already migrated this rule, which 2.3.0 would have written.
         command.existing.soft_delete_owned.clear()
+        command.existing.soft_delete_owned_sweep.clear()
         command.existing.soft_delete_owned[('testapp_shared', 'testapp_cyclic', 'target_id')] = (
             'deadbeefcafe'
         )
@@ -2607,6 +2644,8 @@ def test_a_single_owner_rule_is_byte_identical_to_2_3_0(snapshot):
     """A dependent owned from one place renders exactly as 2.3.0 rendered it, so its
     ``[SQL:...]`` identity does not move. Pinned byte for byte: a substring assertion cannot
     catch a whitespace change, and whitespace is what the digest hashes."""
+    # The rule operation alone: 2.6.0 appends a sweep beside it, and folding that in would
+    # report every later edit to the sweep as a break in the rule's 2.3.0 identity.
 
     @isolate_apps('tests.testapp')
     def _build():
@@ -2620,9 +2659,12 @@ def test_a_single_owner_rule_is_byte_identical_to_2_3_0(snapshot):
             class Meta:
                 app_label = 'testapp'
 
-        return _owned_blob(Alone, OnlyOwner, subject=OnlyOwner)[1]
+        return _owned_blob(Alone, OnlyOwner, subject=OnlyOwner)[2]
 
-    assert _build() == snapshot
+    rule, sweep = _build()
+    assert rule == snapshot
+    # The pairing itself, asserted here so the snapshot above can stay the rule's alone.
+    assert sweep.startswith('# Soft Delete Owned Sweep on "testapp_alone"')
 
 
 @override_settings(LOCAL_APPS=['fake.kioska', 'fake.foyerb'])

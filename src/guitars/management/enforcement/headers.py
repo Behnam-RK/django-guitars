@@ -33,6 +33,14 @@ HEADER_SOFT_DELETE_OWNED = (
     'via "{foreign_key}"!'
 )
 
+# The statement-level half of the rule above (ADR 0014), on the same triple and from the same
+# loop, so a relation refused a rule is refused a sweep. "Sweep" not "Rule" keeps the scanners
+# disjoint: one reading both would take every recorded rule for a sweep, and duplicate it.
+HEADER_SOFT_DELETE_OWNED_SWEEP = (
+    '# Soft Delete Owned Sweep on "{dependent_table}" that is owned by "{table}" '
+    'via "{foreign_key}"!'
+)
+
 # --- Multi-table inheritance (MTI) operations ---
 
 HEADER_PARENT_TRIGGER_FUNCTION = '# Define function for MTI parent updated at triggers!'
@@ -92,6 +100,9 @@ _RE_SOFT_DELETE = _derive_scanner(HEADER_SOFT_DELETE)
 # Derivable where its cascade siblings are not: the owned header has one form, always
 # carrying the FK, so there is nothing to fuse an optional group around.
 _RE_SOFT_DELETE_OWNED = _derive_scanner(HEADER_SOFT_DELETE_OWNED)
+# Derivable for the same reason, and disjoint from the above on the literal token after
+# "Owned" -- neither header can be read as the other's.
+_RE_SOFT_DELETE_OWNED_SWEEP = _derive_scanner(HEADER_SOFT_DELETE_OWNED_SWEEP)
 _RE_TENANT_FORCE = _derive_scanner(HEADER_TENANT_FORCE)
 _RE_TENANT_AUTOFILL_FUNCTION = _derive_scanner(HEADER_TENANT_AUTOFILL_FUNCTION)
 # Derived, and deliberately NOT fused with _RE_TENANT_AUTOFILL the way _RE_TENANT_POLICY

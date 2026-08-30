@@ -1,6 +1,6 @@
 # 0012 — the last-owner guard reads every owning column, not just its own
 
-- **Status:** accepted — implemented in 2.4.0
+- **Status:** accepted — implemented in 2.4.0; its rejection of a statement-level trigger is superseded by [ADR 0014](0014-statement-level-owned-sweep.md) (2.6.0). The rest stands.
 - **Date:** 2026-08-21
 - **Affects:** `guitars.sql.soft_delete`, `makeguitarmigrations`
 - **Amends:** [ADR 0011](0011-owner-side-soft-delete-ownership.md) — supersedes its per-**column** limit and the claim that lifting it needs a statement-level trigger. The rest of 0011 stands.
@@ -60,13 +60,13 @@ N owning columns produce N rules of N arms.
 ## Why not the alternatives
 
 **A statement-level trigger** — the obvious reading of ADR 0011:64, chosen and then reversed during
-planning. It closes the per-**statement** limit, but a transition table carries rows from one
-statement on one table, so it does **not** subsume the arms: cross-owner is always two statements on
-two tables. Additive, not a replacement — and against it: a whole new operation family (header, scanner,
-container, name family, corpus entry); rule-retirement machinery that does not exist, a 2.3.0 rule
-left live beside a trigger stamping exactly where the trigger spares; and owned edges leaving
-`introspection._rule_update_edges`, silently changing which cascade relations get refused *and* what
-`hard_delete()` follows. All for a hole that **fails safe** — the limit stays open, 0011:64's half.
+planning; **reversed again in 2.6.0**, see [ADR 0014](0014-statement-level-owned-sweep.md). It closes
+the per-**statement** limit, but a transition table carries rows from one statement on one table, so it
+does **not** subsume the arms: cross-owner is always two statements on two tables. Additive, not a
+replacement — and against it: a whole new operation family; rule-retirement machinery that does not
+exist; and owned edges leaving `introspection._rule_update_edges`, silently changing which cascade
+relations get refused *and* what `hard_delete()` follows. All for a hole that **fails safe** — in
+*direction* only, nothing stamping the dependent later either, which is what #40 established.
 
 **Widening the guard to every inbound foreign key**, converging on `_still_referenced`'s breadth.
 Rejected on a defect that does not survive contact: a referrer table without `_deleted_at` has no

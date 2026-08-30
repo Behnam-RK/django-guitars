@@ -51,6 +51,11 @@ HEADER_SCANNERS = [
         {'dependent_table': 'shop_label', 'table': 'shop_order', 'foreign_key': 'label_id'},
     ),
     (
+        headers_module.HEADER_SOFT_DELETE_OWNED_SWEEP,
+        headers_module._RE_SOFT_DELETE_OWNED_SWEEP,
+        {'dependent_table': 'shop_label', 'table': 'shop_order', 'foreign_key': 'label_id'},
+    ),
+    (
         headers_module.HEADER_MTI_UPDATED_AT,
         headers_module._RE_MTI_UPDATED_AT,
         {'child_table': 'shop_giftorder', 'parent_table': 'shop_order'},
@@ -155,6 +160,25 @@ def test_the_autofill_headers_cannot_be_read_as_any_other_trigger():
         assert scanner.search(autofill) is None
     assert headers_module._RE_TENANT_AUTOFILL.search(function) is None
     assert headers_module._RE_TENANT_AUTOFILL.search(autofill) is not None
+
+
+def test_the_owned_rule_and_sweep_headers_never_match_each_other():
+    """They key on the same triple, differing only in the token after "Owned". One scanner
+    reading both would take every recorded owned rule for a recorded sweep -- so no upgrading
+    project would receive one -- and every sweep for a rule, re-emitting each. See ADR 0014."""
+    slots = {'dependent_table': 'shop_label', 'table': 'shop_order', 'foreign_key': 'label_id'}
+    rule = headers_module.HEADER_SOFT_DELETE_OWNED.format(**slots)
+    sweep = headers_module.HEADER_SOFT_DELETE_OWNED_SWEEP.format(**slots)
+
+    assert headers_module._RE_SOFT_DELETE_OWNED.search(sweep) is None
+    assert headers_module._RE_SOFT_DELETE_OWNED_SWEEP.search(rule) is None
+    assert headers_module._RE_SOFT_DELETE_OWNED_SWEEP.search(sweep).groups() == (
+        'shop_label',
+        'shop_order',
+        'label_id',
+    )
+    # The cascade family reads neither: its rule fires on the other side of the relation.
+    assert headers_module._RE_SOFT_DELETE_RELATED.search(sweep) is None
 
 
 def test_the_live_and_retired_autofill_headers_never_match_each_other():

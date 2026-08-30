@@ -1,6 +1,6 @@
 # 0011 — soft-delete ownership is declared by a field subclass and always guarded
 
-- **Status:** accepted — implemented in 2.3.0; the per-**column** limit below is superseded by [ADR 0012](0012-cross-owner-last-owner-guard.md) (2.4.0)
+- **Status:** accepted — implemented in 2.3.0; the per-**column** limit below is superseded by [ADR 0012](0012-cross-owner-last-owner-guard.md) (2.4.0) and the per-**statement** half by [ADR 0014](0014-statement-level-owned-sweep.md) (2.6.0)
 - **Date:** 2026-08-19
 - **Affects:** `guitars.models.OwningForeignKey`, `guitars.sql.soft_delete`, `makeguitarmigrations`, `SoftDeletableModel.hard_delete`
 
@@ -63,7 +63,10 @@ The cost of always emitting it is one `NOT EXISTS` on the foreign-key column per
 - `hard_delete()` re-implements the guard in Python, narrowed a third way beyond the two above: **any** surviving foreign key holds an owned row back, not only the owning column, because dropping a still-referenced row fails the deferred constraint at `COMMIT`. Collection therefore runs to a fixpoint — a row spared by a reference that is *itself* collected later is picked up on a later pass. The two predicates must be changed together; a test asserts the sparing behaviour on both paths. It also has to re-implement the *candidate* test — a relation the generator refused (a cycle, the owner-side MTI case above, or a target with no `_deleted_at`) has no rule, so following it in Python would destroy exactly what the rule spared.
 - The guard is per foreign-key **column** and per **statement**, not per target row. A second `OwningForeignKey` to the same row does not spare it, and one statement soft-deleting every owner leaves the target alive, since PostgreSQL runs an `ON UPDATE` rule's action before the original update — each guard still sees its siblings as live. Both are documented in [`docs/owned-relations.md`](../owned-relations.md); lifting either means leaving the rule form behind for a statement-level trigger.
 
-  **Superseded in 2.4.0 for the per-column half** — and the trigger claim with it. [ADR 0012](0012-cross-owner-last-owner-guard.md) lifts the per-column limit by giving each rule one `NOT EXISTS` arm per owning column, staying in the rule form: cross-owner is always two statements on two tables, which a transition table cannot span, so the trigger would have been additive rather than a replacement. The per-**statement** half stands as written.
+  **Superseded in 2.4.0 for the per-column half** — and the trigger claim with it. [ADR 0012](0012-cross-owner-last-owner-guard.md) lifts the per-column limit by giving each rule one `NOT EXISTS` arm per owning column, staying in the rule form: cross-owner is always two statements on two tables, which a transition table cannot span, so the trigger would have been additive rather than a replacement. **The per-statement half is
+  superseded in 2.6.0** — by exactly that additive trigger, which 0012 had costed and declined:
+  each rule is now paired with an `AFTER UPDATE ... FOR EACH STATEMENT` sweep re-asking the same
+  arms once the statement has settled. See [ADR 0014](0014-statement-level-owned-sweep.md).
 
 **Reversibility.** Low cost to extend, high cost to reverse. Adding a keyword to relax the guard later is additive. Removing the guard from already-generated migrations is not: the SQL is inlined, so an existing database keeps whatever it was migrated with until a regeneration and a `migrate`.
 

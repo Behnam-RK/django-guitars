@@ -445,10 +445,10 @@ def test_the_rule_reaches_an_owned_row_whose_deleted_at_lives_on_an_mti_ancestor
 
 
 @pytest.mark.django_db
-def test_one_statement_deleting_every_owner_leaves_the_shared_row_alive(band):
-    """Per *statement*: a rule action runs before the original update, so each owner still
-    reads as live to its siblings' guards. Pinned because it fails safe, and because lifting
-    it means a statement-level trigger rather than a rule."""
+def test_one_statement_deleting_every_owner_archives_the_shared_row(band):
+    """Issue #40's own reproduction. A rule action runs *before* the original update, so each
+    owner reads as live to its siblings' guards and the rule stamps nothing -- leaking the kit
+    for ever. The statement-level sweep runs once settled, where liveness is true (ADR 0014)."""
     kit = PressKit.objects.create(headline='Shared')
     Album.objects.create(title='Hemispheres', band=band, press_kit=kit)
     Album.objects.create(title='Permanent Waves', band=band, press_kit=kit)
@@ -456,7 +456,71 @@ def test_one_statement_deleting_every_owner_leaves_the_shared_row_alive(band):
     Album.objects.filter(press_kit=kit).delete()  # one statement, both owners
 
     assert not Album.objects.filter(press_kit=kit).exists()  # the owners did go
-    assert PressKit.objects.filter(pk=kit.pk).exists()  # the shared target did not
+    assert not PressKit.objects.filter(pk=kit.pk).exists()  # and so did the shared target
+    assert PressKit._archives.get(pk=kit.pk)._deleted_at is not None
+
+
+@pytest.mark.django_db
+def test_one_statement_spares_a_row_a_co_owner_elsewhere_still_holds(band):
+    """The sweep must not archive more than the rule would have: it re-asks the same arms,
+    over every owning column, once the statement has settled. A live owner on *another* table
+    was never part of this statement and still spares the target."""
+    kit = PressKit.objects.create(headline='Shared')
+    Album.objects.create(title='Hemispheres', band=band, press_kit=kit)
+    Album.objects.create(title='Permanent Waves', band=band, press_kit=kit)
+    Ensemble.objects.create(name='Quartet', press_kit=kit)  # live, on a different table
+
+    Album.objects.filter(press_kit=kit).delete()
+
+    assert PressKit.objects.filter(pk=kit.pk).exists()
+
+
+@pytest.mark.django_db
+def test_one_statement_spares_a_row_a_co_owner_on_the_same_table_holds(band):
+    """The same, through the *declaring* table's other owning column. ``alt_press_kit``
+    survives the statement, so the kit it points at is still owned."""
+    kit = PressKit.objects.create(headline='Shared')
+    Album.objects.create(title='Hemispheres', band=band, press_kit=kit)
+    Album.objects.create(title='Signals', band=band, alt_press_kit=kit)
+
+    Album.objects.filter(press_kit=kit).delete()  # leaves the alt_press_kit owner live
+
+    assert PressKit.objects.filter(pk=kit.pk).exists()
+
+
+@pytest.mark.django_db
+def test_the_hard_deletion_switch_suppresses_the_owned_sweep(band):
+    """The trigger carries the identical ``<> 'on'`` guard the rule does. Without it the
+    sweep would stamp rows ``hard_delete()`` is in the middle of removing -- the one thing
+    the switch exists to prevent, and unreachable through the rule alone."""
+    kit = PressKit.objects.create(headline='Doomed')
+    kit_pk = kit.pk
+    first = Album.objects.create(title='Hemispheres', band=band, press_kit=kit)
+    Album.objects.create(title='Permanent Waves', band=band, press_kit=kit)
+
+    with connection.cursor() as cursor:
+        cursor.execute(sql.SWITCH_ON_HARD_DELETION)
+        Album.objects.filter(press_kit=kit).delete()
+        cursor.execute(sql.SWITCH_OFF_HARD_DELETION)
+
+    assert not Album._all_objects.filter(pk=first.pk).exists()  # really removed
+    assert PressKit.objects.filter(pk=kit_pk).exists()  # and the kit was left alone
+
+
+@pytest.mark.django_db
+def test_one_statement_sweeps_through_a_chain_of_ownership(band):
+    """The trigger carries no ``pg_trigger_depth()`` guard, so its own UPDATE fires the
+    dependent's sweep in turn. ``Residency`` owns a ``Rider`` which owns a ``Stagehand``:
+    one statement over the residencies has to reach both hops."""
+    stagehand = Stagehand.objects.create(name='Rigger')
+    rider = Rider.objects.create(clause='No brown M&Ms', stagehand=stagehand)
+    Residency.objects.create(venue_name='Massey Hall', rider=rider)
+    Residency.objects.create(venue_name='Hammersmith', rider=rider)
+
+    Residency.objects.filter(rider=rider).delete()  # one statement, both owners
+
+    assert not Rider.objects.filter(pk=rider.pk).exists()
+    assert not Stagehand.objects.filter(pk=stagehand.pk).exists()
 
 
 @pytest.mark.django_db
@@ -1403,7 +1467,7 @@ def test_the_dependent_is_archived_once_every_owner_of_every_kind_is_gone():
     foyer = Foyer.objects.create(label='Mezzanine', placard=placard)
 
     kiosk.delete()
-    foyer.delete()  # one at a time: the per-statement limit is unchanged, see ADR 0011
+    foyer.delete()  # one at a time; the statement-level sweep covers the batched form
 
     assert not Placard.objects.filter(pk=placard_pk).exists()
     assert Placard._archives.get(pk=placard_pk)._deleted_at is not None
@@ -1445,8 +1509,8 @@ def test_hard_delete_does_not_collect_a_dependent_a_co_owner_still_holds():
 @pytest.mark.django_db
 def test_hard_delete_collects_a_dependent_once_no_co_owner_holds_it():
     """The control for the above, and the case where ``hard_delete()`` is deliberately
-    narrower than the rule: the whole batch is gone by construction, so it removes what the
-    per-statement rule would have spared."""
+    narrower than the rule: the whole batch is gone by construction, so it removes the row
+    rather than leaving it archived."""
     placard = Placard.objects.create(caption='Unheld')
     placard_pk = placard.pk
     kiosk = Kiosk.objects.create(label='Lobby', placard=placard)

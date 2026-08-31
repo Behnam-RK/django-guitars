@@ -131,6 +131,8 @@ owners by the per-statement hole closed in 2.6.0 (see
 [`owned-relations.md`](owned-relations.md)). Scoped by the *dependent's* app.
 Reads owners with tenancy bypassed, so it needs a role that sees every tenant,
 and follows only relations this database actually holds an owned rule for.
+`--repair` runs to a fixpoint (2.7.0): one pass walks dependents by model
+label, so a chain of ownership sorting against that order needs another.
 | Flag | Effect |
 | --- | --- |
 | `--database ALIAS` | Database alias to sweep (default `"default"`). |

@@ -60,15 +60,15 @@ The blast radius is the *connection*: with any pool, one rolled-back
 > **Do not** fix this by reversing the enforcement migration: `reverse_sql`
 > *drops* the rules, and `migrate <app> <previous>` unapplies later ones too.
 
-**Instance-level `hard_delete()` is two-phase:** soft-delete first (so cascade
-rules fire), then DFS-collect `CASCADE` children through `_all_objects` and
-hard-delete child-first — Django's `CASCADE` is Python-level (`Collector`),
-not `ON DELETE CASCADE`, so a raw parent `DELETE` would fail the FK check. An
-owned row goes the other way — *after* its owner, which still references it.
+**Instance-level `hard_delete()` is two-phase:** soft-delete first (so cascade rules fire), then
+DFS-collect `CASCADE` children through `_all_objects` and hard-delete child-first — Django's
+`CASCADE` is Python-level (`Collector`), not `ON DELETE CASCADE`, so a raw parent `DELETE` would
+fail the FK check. An owned row goes the other way — *after* its owner, which still references it.
+`GenericRelation` children are collected from `_meta.private_fields` (2.7.0); they hold nothing
+back, having no key column to fail a constraint with.
 
-Queryset-level `hard_delete()` is blunter: it deletes matched rows (and, for
-MTI, the whole table chain) but does **not** walk reverse-FK children or owned
-relations.
+Queryset-level `hard_delete()` is blunter: it deletes matched rows (and, for MTI, the whole table
+chain) but does **not** walk reverse-FK children or owned relations.
 
 ## Managers and the base manager
 

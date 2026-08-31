@@ -1,3 +1,4 @@
+from django.contrib.contenttypes.fields import GenericForeignKey, GenericRelation
 from django.db.models import (
     CASCADE,
     DO_NOTHING,
@@ -6,6 +7,7 @@ from django.db.models import (
     ForeignKey,
     IntegerField,
     ManyToManyField,
+    PositiveBigIntegerField,
 )
 from django.utils.functional import cached_property
 
@@ -15,6 +17,7 @@ from guitars.models import (
     LiveManager,
     OwningForeignKey,
     SetarModel,
+    SoftDeletableModel,
     TarModel,
 )
 from guitars.tenancy import tenanted_manager
@@ -500,3 +503,86 @@ class Foyer(SetarModel):
 
     def __str__(self) -> str:
         return self.label
+
+
+class Awning(SetarModel):
+    """Owned by ``NeonMarquee``, itself owned by ``Billboard``: a chain of ownership whose
+    *deeper* dependent sorts earlier by model label, so one repair pass in that order spares
+    this row and then archives its owner behind it. ``Residency``'s chain sorts the other way."""
+
+    fabric = CharField(max_length=100)
+
+    def __str__(self) -> str:
+        return self.fabric
+
+
+class Marquee(DutarModel):
+    """Timestamps only, and an MTI *parent* -- the half of the one shape that splits
+    ``_updated_at`` from ``_deleted_at`` across two tables. Every rung from ``SetarModel``
+    up carries both together, so nothing else in this app can exercise it."""
+
+    headline = CharField(max_length=100)
+
+    def __str__(self) -> str:
+        return self.headline
+
+
+class NeonMarquee(Marquee, SoftDeletableModel):
+    """The other half: ``_deleted_at`` lands here, ``_updated_at`` stays on
+    ``testapp_marquee``. An owned sweep stamping this row cannot reach that column with an
+    assignment, and the ancestor's own trigger is suppressed at depth 1 -- see ADR 0014."""
+
+    glow = CharField(max_length=100)
+    awning = OwningForeignKey(
+        Awning, on_delete=DO_NOTHING, null=True, blank=True, related_name='marquees'
+    )
+    # Redeclared, not inherited: ``Marquee`` comes first in the MRO and its plain manager would
+    # otherwise shadow the mixin's ``LiveManager``, leaving ``objects`` returning archived rows.
+    # ``_archives``/``_all_objects`` do not collide -- nothing above declares them.
+    objects = LiveManager()
+
+    class Meta(SoftDeletableModel.Meta):
+        pass
+
+    def __str__(self) -> str:
+        return self.glow
+
+
+class Billboard(SetarModel):
+    """Two of these pointing at one ``NeonMarquee`` is the statement the sweep exists for:
+    one ``DELETE`` archives both, each rule arm still reads the other as live, and the
+    sweep stamps once the statement has settled."""
+
+    label = CharField(max_length=100)
+    marquee = OwningForeignKey(
+        NeonMarquee, on_delete=DO_NOTHING, null=True, blank=True, related_name='billboards'
+    )
+
+    def __str__(self) -> str:
+        return self.label
+
+
+class Signboard(SetarModel):
+    """Carries a ``GenericRelation``. Its children point at it through a content-type and an
+    object id rather than a key column, so no constraint ties them to it -- which is why they
+    never hold it back, and why the collecting half has to find them some other way."""
+
+    caption = CharField(max_length=100)
+    scribbles = GenericRelation('Scribble')
+
+    def __str__(self) -> str:
+        return self.caption
+
+
+class Scribble(SetarModel):
+    """The generic child. Phase 1's ``Collector`` walks ``_meta.private_fields`` and reaches
+    it; Phase 2's own walk reads key columns, of which this has none, so before 2.7.0 the row
+    was archived and then left behind pointing at a primary key nothing holds."""
+
+    text = CharField(max_length=100)
+    content_type = ForeignKey('contenttypes.ContentType', on_delete=CASCADE)
+    object_id = PositiveBigIntegerField()
+    content_object = GenericForeignKey('content_type', 'object_id')
+
+    def __str__(self) -> str:
+        return self.text

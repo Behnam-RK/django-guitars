@@ -141,6 +141,36 @@ class Command(BaseCommand):
             )
         return candidates.filter(was_owned)
 
+    def _sweep_pass(self, rule_owners, arms, requested, using, repair):
+        """One walk of every rule-carrying dependent: ``({(label, table): rows}, stamped, tables
+        looked at)``. Split out of :meth:`handle` so a repair can run it again -- stamping a
+        dependent can orphan what *it* owns, and the walk is ordered by label, not ownership."""
+        found: dict[tuple[str, str], int] = {}
+        stamped = 0
+        checked: set[str] = set()
+        for dependent, owners in sorted(rule_owners.items(), key=_by_label):
+            if requested and dependent._meta.app_label not in requested:
+                continue
+            dependent_table = dependent._meta.db_table
+            checked.add(dependent_table)
+            arm_pairs = [(arm.owner_model, arm.fk_name) for arm in arms.get(dependent_table, ())]
+            orphans = self._orphans(dependent, arm_pairs, owners, using)
+            pks = list(orphans.values_list('pk', flat=True))
+            if not pks:
+                continue
+            found[dependent._meta.label, dependent_table] = len(pks)
+            if repair:
+                with transaction.atomic(using=using):
+                    # The predicate re-asked at UPDATE time, not the pks read before it:
+                    # a concurrent transaction committing a live owner in between would
+                    # otherwise have its dependent stamped on a verdict already stale.
+                    stamped += (
+                        self._orphans(dependent, arm_pairs, owners, using)
+                        .filter(pk__in=pks)
+                        .update(_deleted_at=timezone.now())
+                    )
+        return found, stamped, checked
+
     def handle(self, *app_labels, **options):
         using = options['database']
         repair = options['repair']
@@ -155,40 +185,45 @@ class Command(BaseCommand):
         # generator refused a rule still counts here -- it owns what it points at either way.
         arms = owner_arms(django_apps.get_models())
 
-        findings: list[str] = []
+        # ``{(label, table): rows found}`` rather than rendered lines, so a table yielding
+        # fresh orphans on a later pass is one entry with a summed count -- and ``len()``
+        # still counts tables, which is what the heading claims it counts.
+        findings: dict[tuple[str, str], int] = {}
         repaired = 0
         # Tables, not models: the report says "table(s)", and two models can resolve to one.
         checked: set[str] = set()
+        # A pass repairs in model-label order, so a chain whose owner sorts *after* what it owns
+        # leaves a fresh orphan behind it. The trigger settles a chain inside the one statement.
+
+        # This command is for a database holding rules and no trigger, so it runs to a fixpoint
+        # here rather than making the operator re-run to one.
+        passes = max(len(rule_owners), 1) + 1
         # Tenancy bypassed: a policy hiding a live owner would manufacture an orphan and
         # stamp a still-owned row -- what the co-owner tenancy refusal prevents, unrefusable
         # here. Needs a role that sees every tenant; see docs/owned-relations.md.
         with tenancy_bypassed():
-            for dependent, owners in sorted(rule_owners.items(), key=_by_label):
-                if requested and dependent._meta.app_label not in requested:
-                    continue
-                dependent_table = dependent._meta.db_table
-                checked.add(dependent_table)
-                arm_pairs = [
-                    (arm.owner_model, arm.fk_name) for arm in arms.get(dependent_table, ())
-                ]
-                orphans = self._orphans(dependent, arm_pairs, owners, using)
-                pks = list(orphans.values_list('pk', flat=True))
-                if not pks:
-                    continue
-                findings.append(
-                    f'{dependent._meta.label} ({dependent_table}): {len(pks)} row(s) live '
-                    f'with no live owner and at least one archived owner.'
+            for _ in range(passes):
+                found, stamped, seen = self._sweep_pass(
+                    rule_owners, arms, requested, using, repair
                 )
-                if repair:
-                    with transaction.atomic(using=using):
-                        # The predicate re-asked at UPDATE time, not the pks read before it:
-                        # a concurrent transaction committing a live owner in between would
-                        # otherwise have its dependent stamped on a verdict already stale.
-                        repaired += (
-                            self._orphans(dependent, arm_pairs, owners, using)
-                            .filter(pk__in=pks)
-                            .update(_deleted_at=timezone.now())
-                        )
+                checked |= seen
+                for entry, rows in found.items():
+                    findings[entry] = findings.get(entry, 0) + rows
+                repaired += stamped
+                # Report-only describes the database as it stands, so a second look at an
+                # unchanged one would only repeat itself.
+                if not repair or not stamped:
+                    break
+            else:
+                # Reachable, unlike an assertion: the bound holds because a chain of ownership
+                # is acyclic, the generator refusing a rule on an ON UPDATE cycle -- but this
+                # follows the *database*'s rules, which on an old enough one predate that.
+                raise CommandError(
+                    f'The owned sweep still stamped rows after {passes} passes over '
+                    f'{len(rule_owners)} dependent table(s), which a chain of ownership '
+                    'cannot need. Check the database for a cycle of ON UPDATE rules; '
+                    f'{repaired} row(s) were stamped before this was raised.'
+                )
 
         self.stdout.write(
             self.style.MIGRATE_HEADING(
@@ -198,7 +233,11 @@ class Command(BaseCommand):
                 + (f', {repaired} row(s) stamped.' if repair else '.')
             )
         )
-        for line in findings:
+        for (label, table), rows in findings.items():
+            line = (
+                f'{label} ({table}): {rows} row(s) live with no live owner and at least '
+                'one archived owner.'
+            )
             self.stdout.write(self.style.SUCCESS(line) if repair else self.style.WARNING(line))
         # Before the gate, and on stderr: a relation this could not name was not swept, and a
         # run that stayed silent about it would report a clean sweep of a table it skipped.

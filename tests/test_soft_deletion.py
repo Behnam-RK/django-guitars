@@ -16,6 +16,7 @@ from guitars.models.soft_deletion import (
 from guitars.sql import SWITCH_OFF_HARD_DELETION, SWITCH_ON_HARD_DELETION
 from tests.conftest import scalar as _scalar
 from tests.testapp.models import Album, Band, Genre, Merch, Orchestra, Riff
+from tests.testapp.models import Scribble, Signboard
 
 
 @pytest.mark.django_db
@@ -93,6 +94,35 @@ def test_hard_delete_collects_a_diamond_convergence_once():
 
     assert not Merch._all_objects.filter(pk=via_album.pk).exists()
     assert not Merch._all_objects.filter(pk=via_bonus.pk).exists()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_hard_delete_takes_a_generic_relation_child_with_it():
+    """A ``GenericRelation`` child has no key column, so Phase 2's walk could not see it while
+    Phase 1's ``Collector`` archived it, and the row survived pointing at a gone primary key.
+    Collected from the same ``_meta.private_fields`` since 2.7.0."""
+    signboard = Signboard.objects.create(caption='Farewell')
+    scribble = Scribble.objects.create(text='sold out', content_object=signboard)
+
+    signboard.hard_delete()
+
+    assert not Signboard._all_objects.filter(pk=signboard.pk).exists()
+    assert not Scribble._all_objects.filter(pk=scribble.pk).exists()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_hard_delete_leaves_another_targets_generic_children_alone():
+    """Collected through ``bulk_related_objects``, which asks about *these* rows: a child of
+    another target shares the content type and must not come along with it."""
+    doomed = Signboard.objects.create(caption='Farewell')
+    kept = Signboard.objects.create(caption='Encore')
+    Scribble.objects.create(text='sold out', content_object=doomed)
+    survivor = Scribble.objects.create(text='on sale', content_object=kept)
+
+    doomed.hard_delete()
+
+    assert Scribble.objects.filter(pk=survivor.pk).exists()
+    assert Signboard.objects.filter(pk=kept.pk).exists()
 
 
 @pytest.mark.django_db(transaction=True)

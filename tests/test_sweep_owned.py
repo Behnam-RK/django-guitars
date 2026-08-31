@@ -19,7 +19,8 @@ from guitars.management.enforcement.operations import _owned_rule_name
 from guitars.sql._identifiers import _unescape_ident
 from tests.crossapp_dependent.models import Shared
 from tests.crossapp_owner.models import Owner
-from tests.testapp.models import Album, Band, Ensemble, Foyer, Kiosk, Placard, PressKit, Rider
+from tests.testapp.models import Album, Awning, Band, Billboard, Ensemble, Foyer, Kiosk
+from tests.testapp.models import NeonMarquee, Placard, PressKit, Rider
 from tests.testapp.models import Residency, Stagehand
 
 
@@ -147,6 +148,32 @@ def test_the_sweep_reaches_a_chained_orphan():
     assert not Rider.objects.exists()
     assert not Stagehand.objects.filter(pk=stagehand.pk).exists()
     assert 'Owned sweep complete.' in _sweep()  # and the run is a fixpoint
+
+
+@pytest.mark.django_db
+def test_the_repair_runs_to_a_fixpoint_when_the_chain_sorts_against_it():
+    """``Residency``'s chain settles in one pass only because label order happens to agree with
+    ownership. ``Awning`` sorts *before* the ``NeonMarquee`` rows owning it: pass one spares it
+    while they are live, then archives them -- in one statement, so their rule decides nothing."""
+    _drop_sweep_triggers()
+    awning = Awning.objects.create(fabric='striped')
+    # Two owners at each hop, or the per-row rule settles that hop on its own and the
+    # statement-level hole this command repairs is never reached.
+    for glow in ('amber', 'neon'):
+        marquee = NeonMarquee.objects.create(headline=f'{glow} nights', glow=glow, awning=awning)
+        Billboard.objects.create(label=f'{glow} north', marquee=marquee)
+        Billboard.objects.create(label=f'{glow} south', marquee=marquee)
+
+    Billboard.objects.all().delete()  # one statement, every owner of both marquees
+
+    assert NeonMarquee.objects.count() == 2  # leaked, as a 2.5.x database is
+    assert Awning.objects.filter(pk=awning.pk).exists()
+
+    _sweep('--repair')
+
+    assert not NeonMarquee.objects.exists()
+    assert not Awning.objects.filter(pk=awning.pk).exists()  # the hop behind the walk
+    assert 'Owned sweep complete.' in _sweep()  # and the run really is a fixpoint
 
 
 @pytest.mark.django_db

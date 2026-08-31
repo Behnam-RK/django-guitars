@@ -136,7 +136,10 @@ def _referring_relations(model: type[Model]) -> list:
     disagree. ``include_hidden``: a ``related_name='+'`` key dangles too."""
     # ``ManyToOneRel`` (``OneToOneRel`` and the parent-link with it) is exactly the reverse of a
     # ForeignKey -- the only rel whose ``attname`` is the key column both callers read. An m2m
-    # reverse owns none; a ``GenericRelation`` neither dangles nor gets collected -- see the doc.
+    # reverse owns none.
+
+    # A ``GenericRelation`` cannot dangle, having no column to dangle by; ``_collect`` walks
+    # ``_meta.private_fields`` separately to take those along -- see the doc.
     return [
         relation
         for relation in model._meta.get_fields(include_hidden=True)
@@ -496,6 +499,25 @@ class SoftDeletableModel(Model):
                         else mti_root(related_model),
                         child_pks,
                     )
+                # A ``GenericRelation`` lives in ``_meta.private_fields`` and owns no key column,
+                # so ``_referring_relations`` cannot see it -- and must not: with no constraint to
+                # fail at ``COMMIT`` it never holds a row back.
+
+                # Collected all the same, as Phase 1's ``Collector`` collects it, or the child is
+                # archived and then left pointing at a primary key nothing holds.
+
+                # Duck-typed on ``bulk_related_objects``, as that ``Collector`` is, so nothing
+                # here imports ``contenttypes`` -- an app a consumer need not have installed.
+                instances = None
+                for private in model._meta.private_fields:
+                    if not hasattr(private, 'bulk_related_objects'):
+                        continue
+                    if instances is None:
+                        instances = list(_rows(model, using).filter(pk__in=new_pks))
+                    generic_pks = set(
+                        private.bulk_related_objects(instances, using).values_list('pk', flat=True)
+                    )
+                    _collect(mti_root(private.related_model), generic_pks)
                 if model not in model_order:
                     model_order.append(model)
 

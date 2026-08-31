@@ -13,6 +13,7 @@ from django.db import models
 from django.db.migrations.loader import MigrationLoader
 
 from guitars import sql
+from guitars.checks import orphaned_soft_delete_ancestors
 from guitars.introspection import (
     OwnerArm,
     column_owner,
@@ -453,7 +454,20 @@ class OperationsMixin:
             # --- soft-delete rule: own table vs. MTI redirect-to-owner --- No replace/adopt
             # form: created OR REPLACE, since an instant without one is an instant where
             # DELETE destroys rows.
-            if owns_column(model, '_deleted_at'):
+            orphan_ancestors = orphaned_soft_delete_ancestors([model])
+            if orphan_ancestors:
+                # Re-asked here rather than trusted from ``guitars.E003``: ``--skip-checks``
+                # reaches the generator, and emitting the rule anyway is what makes the shape
+                # abort at COMMIT -- the child's row is kept while the ancestor's is removed.
+                for _, parent in orphan_ancestors:
+                    self._skipped_rule_notes.append(
+                        f"Soft delete rule on '{table}' skipped: '{model.__name__}' declares "
+                        f'_deleted_at on its own table while its multi-table-inheritance '
+                        f"ancestor '{parent._meta.db_table}' declares none, so the rule would "
+                        f"keep this row while the ancestor's unguarded DELETE removes the row "
+                        f'it points at, aborting at COMMIT. Make the ancestor soft-deletable.'
+                    )
+            elif owns_column(model, '_deleted_at'):
                 qualified_table = _identifiers._quote_table(table)
                 rows.append(
                     _OperationRow(
@@ -1295,22 +1309,14 @@ class OperationsMixin:
         # parse-time reference. The rule's refs, recorded above, order the runtime case.
         dependent_table = key[0]
         name = _owned_sweep_name(owner_table, dependent_table, foreign_key)
-        ident_dependent_pk = _identifiers._escape_ident(cast(str, dependent._meta.pk.column))
-        # ``_updated_at`` may sit on an MTI ancestor *further up* than the table holding
-        # ``_deleted_at``, where the assignment below cannot reach it and the ancestor's own
-        # trigger is the one suppressed at depth 1. That case takes the CTE form instead.
-        updated_at_owner = (
-            column_owner(dependent, '_updated_at')
-            if has_column(dependent, '_updated_at')
-            else None
-        )
-        on_ancestor = updated_at_owner is not None and updated_at_owner is not dependent
         slots = {
             'function': name,
             'trigger': name,
             'table': ident_owner_table,
             'dependent_table': _identifiers._quote_table(dependent_table),
-            'dependent_primary_key': ident_dependent_pk,
+            'dependent_primary_key': _identifiers._escape_ident(
+                cast(str, dependent._meta.pk.column)
+            ),
             'primary_key': ident_owner_pk,
             'foreign_key': ident_foreign_key,
             # Stamped here rather than left to the dependent's own trigger: that one carries
@@ -1318,23 +1324,7 @@ class OperationsMixin:
             # this the column moves on the rule's path and not on this one.
             'updated_at_assignment': (
                 _soft_delete._SOFT_DELETE_OWNED_SWEEP_UPDATED_AT
-                if updated_at_owner is dependent
-                else ''
-            ),
-            # Empty unless the column is an ancestor's, which keeps every sweep 2.6.0 wrote
-            # -- and its ``[SQL:...]`` -- exactly where that release left it.
-            'ancestor_updated_at': (
-                _soft_delete._SOFT_DELETE_OWNED_SWEEP_ANCESTOR_UPDATED_AT.format(
-                    dependent_table=_identifiers._quote_table(dependent_table),
-                    dependent_primary_key=ident_dependent_pk,
-                    primary_key=ident_owner_pk,
-                    foreign_key=ident_foreign_key,
-                    updated_at_table=_identifiers._quote_table(updated_at_owner._meta.db_table),
-                    updated_at_primary_key=_identifiers._escape_ident(
-                        cast(str, updated_at_owner._meta.pk.column)
-                    ),
-                )
-                if on_ancestor
+                if owns_column(dependent, '_updated_at')
                 else ''
             ),
             # The same rendered arms the rule carries, correlated against this form's alias
@@ -1345,7 +1335,7 @@ class OperationsMixin:
                 ident_owner_pk,
                 ident_foreign_key,
                 dependent_table,
-                ident_dependent_pk,
+                _identifiers._escape_ident(cast(str, dependent._meta.pk.column)),
                 owner_row='guitars_archived',
             ),
             # The same arms again for the pk-rewrite guard, which asks the UPDATE's question
@@ -1357,7 +1347,7 @@ class OperationsMixin:
                 ident_owner_pk,
                 ident_foreign_key,
                 dependent_table,
-                ident_dependent_pk,
+                _identifiers._escape_ident(cast(str, dependent._meta.pk.column)),
                 owner_row='guitars_before',
             ),
         }

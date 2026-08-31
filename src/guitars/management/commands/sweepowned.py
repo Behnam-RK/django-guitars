@@ -186,8 +186,8 @@ class Command(BaseCommand):
         arms = owner_arms(django_apps.get_models())
 
         # ``{(label, table): rows found}`` rather than rendered lines, so a table yielding
-        # fresh orphans on a later pass is one entry with a summed count -- and ``len()``
-        # still counts tables, which is what the heading claims it counts.
+        # fresh orphans on a later pass is one entry with a summed count rather than a second
+        # line. Keyed by model as the report line is; the heading counts tables separately.
         findings: dict[tuple[str, str], int] = {}
         repaired = 0
         # Tables, not models: the report says "table(s)", and two models can resolve to one.
@@ -201,6 +201,7 @@ class Command(BaseCommand):
         # Tenancy bypassed: a policy hiding a live owner would manufacture an orphan and
         # stamp a still-owned row -- what the co-owner tenancy refusal prevents, unrefusable
         # here. Needs a role that sees every tenant; see docs/owned-relations.md.
+        settled = True
         with tenancy_bypassed():
             for _ in range(passes):
                 found, stamped, seen = self._sweep_pass(
@@ -215,21 +216,19 @@ class Command(BaseCommand):
                 if not repair or not stamped:
                     break
             else:
-                # Reachable, unlike an assertion: the bound holds because a chain of ownership
-                # is acyclic, the generator refusing a rule on an ON UPDATE cycle -- but this
-                # follows the *database*'s rules, which on an old enough one predate that.
-                raise CommandError(
-                    f'The owned sweep still stamped rows after {passes} passes over '
-                    f'{len(rule_owners)} dependent table(s), which a chain of ownership '
-                    'cannot need. Check the database for a cycle of ON UPDATE rules; '
-                    f'{repaired} row(s) were stamped before this was raised.'
-                )
+                # Exhausting the bound says the run did not settle, not why: depth beyond it
+                # needs a cycle of ON UPDATE rules, while fresh orphans arriving between passes
+                # need only a concurrent writer -- ordinary on a busy database.
+
+                # Reported, not raised as a diagnosis: every pass committed real repairs, and
+                # naming a cycle the operator may not have would send them after nothing.
+                settled = False
 
         self.stdout.write(
             self.style.MIGRATE_HEADING(
                 f'Owned sweep on {connections[using].alias}: '
                 f'{len(checked)} dependent table(s) checked, '
-                f'{len(findings)} with orphaned rows'
+                f'{len({table for _, table in findings})} with orphaned rows'
                 + (f', {repaired} row(s) stamped.' if repair else '.')
             )
         )
@@ -244,6 +243,15 @@ class Command(BaseCommand):
         for line in unresolved:
             self.stderr.write(self.style.WARNING(line))
 
+        if not settled:
+            # Non-zero for the same reason the report-only gate is: the database is not in
+            # the state a clean run leaves it in, and the operator has something to do.
+            raise CommandError(
+                f'The owned sweep stamped {repaired} row(s) but had not settled after '
+                f'{passes} passes. Re-run --repair; if it never settles, check the database '
+                'for a cycle of ON UPDATE rules, which the generator refuses but a database '
+                'migrated before that refusal may still hold.'
+            )
         if findings and not repair:
             # A CommandError so this works as a CI gate; --repair turns the same finding into
             # a success, the rows having been dealt with.

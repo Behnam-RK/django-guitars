@@ -17,7 +17,6 @@ from guitars.models import (
     LiveManager,
     OwningForeignKey,
     SetarModel,
-    SoftDeletableModel,
     TarModel,
 )
 from guitars.tenancy import tenanted_manager
@@ -506,9 +505,9 @@ class Foyer(SetarModel):
 
 
 class Awning(SetarModel):
-    """Owned by ``NeonMarquee``, itself owned by ``Billboard``: a chain of ownership whose
-    *deeper* dependent sorts earlier by model label, so one repair pass in that order spares
-    this row and then archives its owner behind it. ``Residency``'s chain sorts the other way."""
+    """The deep end of a chain of ownership that sorts *against* the repair order: ``Banner``
+    owns this, ``Billboard`` owns the banner, and ``testapp.Awning`` sorts first, so one pass
+    over the dependents by label spares it and then archives its owners behind it."""
 
     fabric = CharField(max_length=100)
 
@@ -516,46 +515,27 @@ class Awning(SetarModel):
         return self.fabric
 
 
-class Marquee(DutarModel):
-    """Timestamps only, and an MTI *parent* -- the half of the one shape that splits
-    ``_updated_at`` from ``_deleted_at`` across two tables. Every rung from ``SetarModel``
-    up carries both together, so nothing else in this app can exercise it."""
+class Banner(SetarModel):
+    """The middle hop. Two of these on one ``Awning`` is what leaves the awning to the command
+    rather than the rule: one statement archiving both means neither rule sees a last owner."""
 
-    headline = CharField(max_length=100)
-
-    def __str__(self) -> str:
-        return self.headline
-
-
-class NeonMarquee(Marquee, SoftDeletableModel):
-    """The other half: ``_deleted_at`` lands here, ``_updated_at`` stays on
-    ``testapp_marquee``. An owned sweep stamping this row cannot reach that column with an
-    assignment, and the ancestor's own trigger is suppressed at depth 1 -- see ADR 0014."""
-
-    glow = CharField(max_length=100)
+    slogan = CharField(max_length=100)
     awning = OwningForeignKey(
-        Awning, on_delete=DO_NOTHING, null=True, blank=True, related_name='marquees'
+        Awning, on_delete=DO_NOTHING, null=True, blank=True, related_name='banners'
     )
-    # Redeclared, not inherited: ``Marquee`` comes first in the MRO and its plain manager would
-    # otherwise shadow the mixin's ``LiveManager``, leaving ``objects`` returning archived rows.
-    # ``_archives``/``_all_objects`` do not collide -- nothing above declares them.
-    objects = LiveManager()
-
-    class Meta(SoftDeletableModel.Meta):
-        pass
 
     def __str__(self) -> str:
-        return self.glow
+        return self.slogan
 
 
 class Billboard(SetarModel):
-    """Two of these pointing at one ``NeonMarquee`` is the statement the sweep exists for:
-    one ``DELETE`` archives both, each rule arm still reads the other as live, and the
-    sweep stamps once the statement has settled."""
+    """The top of the chain, and the statement the sweep exists for: two of these on one
+    ``Banner``, deleted together, archive both owners while each rule arm still reads the
+    other as live."""
 
     label = CharField(max_length=100)
-    marquee = OwningForeignKey(
-        NeonMarquee, on_delete=DO_NOTHING, null=True, blank=True, related_name='billboards'
+    banner = OwningForeignKey(
+        Banner, on_delete=DO_NOTHING, null=True, blank=True, related_name='billboards'
     )
 
     def __str__(self) -> str:

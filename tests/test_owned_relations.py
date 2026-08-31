@@ -30,13 +30,10 @@ from guitars.sql import _identifiers
 from tests.testapp.models import (
     Album,
     Band,
-    Billboard,
     Ensemble,
     Foyer,
     Kiosk,
-    Marquee,
     Merch,
-    NeonMarquee,
     Orchestra,
     Patron,
     Placard,
@@ -463,38 +460,6 @@ def test_one_statement_deleting_every_owner_archives_the_shared_row(band):
     assert not Album.objects.filter(press_kit=kit).exists()  # the owners did go
     assert not PressKit.objects.filter(pk=kit.pk).exists()  # and so did the shared target
     assert PressKit._archives.get(pk=kit.pk)._deleted_at is not None
-
-
-@pytest.mark.django_db(transaction=True)
-def test_the_sweep_stamps_updated_at_on_the_ancestor_that_owns_the_column():
-    """``NeonMarquee`` holds ``_deleted_at`` on its own table and ``_updated_at`` on
-    ``testapp_marquee``, which the sweep's assignment cannot reach and whose own trigger is
-    suppressed at depth 1. ``transaction=True``, ``NOW()`` being per transaction."""
-    marquee = NeonMarquee.objects.create(headline='Ten Nights', glow='amber')
-    Billboard.objects.create(label='north', marquee=marquee)
-    Billboard.objects.create(label='south', marquee=marquee)
-    before = Marquee.objects.get(pk=marquee.pk)._updated_at
-
-    Billboard.objects.filter(marquee=marquee).delete()  # one statement, both owners
-
-    assert NeonMarquee._archives.get(pk=marquee.pk)._deleted_at is not None
-    assert Marquee.objects.get(pk=marquee.pk)._updated_at > before
-
-
-@pytest.mark.django_db(transaction=True)
-def test_the_ancestor_stamp_spares_a_marquee_a_live_owner_still_holds():
-    """The CTE inherits the UPDATE's predicate rather than restating it: a dependent the
-    statement did not archive is returned by nothing, so its ancestor's ``_updated_at`` must
-    not move either. Otherwise the two tables disagree about whether anything happened."""
-    kept = NeonMarquee.objects.create(headline='Kept', glow='green')
-    Billboard.objects.create(label='doomed', marquee=kept)
-    Billboard.objects.create(label='survivor', marquee=kept)
-    before = Marquee.objects.get(pk=kept.pk)._updated_at
-
-    Billboard.objects.filter(label='doomed').delete()  # one owner archived, one still live
-
-    assert NeonMarquee.objects.filter(pk=kept.pk).exists()
-    assert Marquee.objects.get(pk=kept.pk)._updated_at == before
 
 
 @pytest.mark.django_db

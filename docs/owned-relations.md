@@ -1,9 +1,9 @@
 # Owned relations
 
-[Cascades](soft-deletion.md#cascades) run *inbound*: the foreign key is on the child, pointing at the row
-being deleted. When a row **owns** what it points at, the key is on the owner and the predicate is reversed.
-`on_delete` cannot say this — it describes what happens to *this* row when the target goes — so ownership
-has its own declaration:
+[Cascades](soft-deletion.md#cascades) run *inbound*: the foreign key is on the child, pointing at
+the row being deleted. When a row **owns** what it points at, the key is on the owner and the
+predicate is reversed. `on_delete` cannot say this — it describes what happens to *this* row when
+the target goes, the opposite direction — so ownership has its own declaration:
 
 ```python
 from django.db.models import DO_NOTHING
@@ -13,26 +13,28 @@ class Album(SetarModel):
     press_kit = OwningForeignKey(PressKit, DO_NOTHING, null=True, related_name='albums')
 ```
 
-Soft-deleting the album soft-deletes its press kit. An `on_delete` that *clears* the key — `SET_NULL`,
-`SET_DEFAULT`, `SET(…)` — warns (`guitars.W001`): deleting the *press kit* runs Django's `Collector`, which
-clears `press_kit_id` on every album **before** the rule turns the `DELETE` into an `UPDATE`, leaving the
-archived kit uncollectable by `hard_delete()`. Legal, occasionally wanted, silent otherwise.
-`DO_NOTHING`/`PROTECT`/`RESTRICT` keep the key — and make `kit.hard_delete()` fail rather than orphan it: go
-through the owner. `on_delete=CASCADE` is **refused** (`guitars.E001`): it means deleting the press kit
-deletes the album, the opposite of ownership, and would emit the cascade rule backwards. `to_field` is
-refused too (`guitars.E002`): the rule correlates the key against the target's *primary* key, which also
-makes [MTI](#mti) work — re-asked by the generator and `hard_delete()`, not trusted from the check, since
-`--skip-checks` reaches one, the other runs no checks at all, and a redirected key removes a wrong row.
+Soft-deleting the album soft-deletes its press kit. An `on_delete` that *clears* the key —
+`SET_NULL`, `SET_DEFAULT`, `SET(…)` — warns (`guitars.W001`): deleting the *press kit* runs
+Django's `Collector`, which clears `press_kit_id` on every album **before** the rule turns the
+`DELETE` into an `UPDATE`, leaving the archived kit uncollectable by `hard_delete()`. Legal,
+occasionally wanted, silent otherwise. `DO_NOTHING`/`PROTECT`/`RESTRICT` keep the key — and make
+`kit.hard_delete()` fail rather than orphan it: go through the owner. `on_delete=CASCADE` is
+**refused** (`guitars.E001`): it means deleting the press kit deletes the album, the opposite of
+ownership, and would emit the cascade rule backwards. `to_field` is refused too (`guitars.E002`):
+the rule correlates the key against the target's *primary* key, which also makes [MTI](#mti) work —
+re-asked by the generator and `hard_delete()`, not trusted from the check, since `--skip-checks`
+reaches one, the other runs no checks at all, and a redirected key stamps then *removes* a wrong row.
 
-More shapes the generator refuses rather than a check, warned about since each depends on the *other*
-model — plus the [MTI](#mti) one below and the tenancy one under the guard:
+More shapes the generator refuses rather than a check, warned about since each depends on the
+*other* model — plus the [MTI](#mti) one below and the tenancy one under the guard:
 
-- **A target, or an owner, with no `_deleted_at`.** Nothing to stamp, or nothing whose transition fires it.
-  Reported: an `OwningForeignKey` has no other purpose, so generating nothing is a bug.
-- **A relation closing a cycle of `ON UPDATE` rules** — owning yourself (`OwningForeignKey('self', …)`),
-  owning an MTI descendant, or a longer loop back through another model's owned or `CASCADE` rules. A rule's
-  action expands *before* the original statement, so the cycle is rewritten into itself and PostgreSQL
-  rejects *every* `UPDATE` to *every* table in it, a plain `save()` included. Every edge is refused.
+- **A target, or an owner, with no `_deleted_at`.** Nothing to stamp, or nothing whose transition
+  fires it. Reported: an `OwningForeignKey` has no other purpose, so generating nothing is a bug.
+- **A relation closing a cycle of `ON UPDATE` rules** — owning yourself
+  (`OwningForeignKey('self', …)`), owning an MTI descendant, or a longer loop back through another
+  model's owned or `CASCADE` rules. A rule's action expands *before* the original statement, so the
+  cycle is rewritten into itself and PostgreSQL rejects *every* `UPDATE` to *every* table in it — a
+  plain `save()` included. Every edge is refused, not one chosen by order; `hard_delete()` too.
 
 ## The last-owner guard
 
@@ -59,19 +61,17 @@ counts, going *with* the row, discounted by **row** rather than relation and at 
 `hard_delete()` walks neither reverse-FK children nor owned relations. Narrower **per row**, not
 absolutely: the batch being gone by construction, it removes a target the rule merely *archived*.
 
-A `GenericRelation` is the one referring shape with no key column. It cannot fail at `COMMIT`, so it rightly
-never holds a row back — and before 2.7.0 nothing removed it either: only Phase 1's `Collector` walked
-`_meta.private_fields`, leaving the child archived and pointing at a gone primary key. Phase 2 walks them too
-now, duck-typed on `bulk_related_objects` as that `Collector` is.
+A `GenericRelation` is the one referring shape with no key column. It cannot fail at `COMMIT`, so it
+rightly never holds a row back — and before 2.7.0 nothing removed it either: only Phase 1's `Collector`
+walked `_meta.private_fields`, leaving the child archived and pointing at a gone primary key. Phase 2
+walks them too now, duck-typed on `bulk_related_objects` as that `Collector` is.
 
 Two limits the guard does not cover on its own:
 
 - **Per statement — closed in 2.6.0.** A rule's action expands *before* the original update, so owners
   archived by one statement read as live to each other's guards and nothing ever stamped the target. Each
-  rule now carries an additive sweep, on the same key and refusals; `sweepowned` repairs older databases, to a
-  fixpoint since 2.7.0 — a pass walks dependents by model label, so a chain sorting against that order is left a
-  hop short. Where the dependent's `_updated_at` is an MTI ancestor's, 2.7.0 stamps it in a second statement.
-  Rewriting a live owner's **own pk** to strand its target raises `feature_not_supported`; permuting pks among owners is out of scope. See [ADR 0014](adr/0014-statement-level-owned-sweep.md).
+  rule now carries an additive sweep, on the same key and refusals; `sweepowned` repairs older databases.
+  Rewriting a live owner's **own pk** to strand its target raises `feature_not_supported`; permuting pks among owners is out of scope. `sweepowned --repair` runs to a fixpoint since 2.7.0. See [ADR 0014](adr/0014-statement-level-owned-sweep.md).
 - **Per visible row.** Every arm's `NOT EXISTS` is an ordinary `SELECT`, so a
   [tenant policy](tenancy.md) on the table it reads filters it: a live sibling owner in another
   tenant is invisible, the guard reads "last owner", and a still-owned row is stamped — the one place

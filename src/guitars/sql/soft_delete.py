@@ -234,7 +234,7 @@ _CREATE_SOFT_DELETE_OWNED_SWEEP_FUNCTION = """
                   WHERE guitars_owner."{foreign_key}" = guitars_archived."{foreign_key}"
                     AND guitars_owner."{primary_key}" <> guitars_archived."{primary_key}"
                     AND guitars_owner._deleted_at IS NULL
-              ){co_owner_guards};{ancestor_updated_at}
+              ){co_owner_guards};
         END IF;
         RETURN NULL;
     END;
@@ -245,42 +245,6 @@ _CREATE_SOFT_DELETE_OWNED_SWEEP_FUNCTION = """
 #: ``updated_at_trigger`` fires; this runs at depth 1, where its ``WHEN`` suppresses it --
 #: without this the column moves on one path and not the other, for one logical event.
 _SOFT_DELETE_OWNED_SWEEP_UPDATED_AT = ', _updated_at = NOW()'
-
-# The other half of that stamp, for a dependent whose ``_updated_at`` sits on an MTI ancestor
-# further up than the table holding its ``_deleted_at``: the assignment above cannot reach another
-# table, and the ancestor's own trigger is the one suppressed at depth 1.
-
-# Empty where the dependent owns the column, so every sweep 2.6.0 wrote -- and its ``[SQL:...]`` --
-# stays byte-identical, exactly as ``owner_row='old'`` keeps every 2.4.0 rule where it was.
-
-# A second statement rather than a data-modifying CTE around the first: the dependent's table may
-# carry an owned ON UPDATE rule, and PostgreSQL refuses a DO ALSO rule on a data-modifying
-# statement inside WITH -- precisely a chain of ownership, the shape most in need of this.
-
-# It re-reads no arm. ``_deleted_at = NOW()`` names exactly what the UPDATE above stamped, NOW()
-# being the transaction's timestamp, and the ``EXISTS`` holds it to the dependents this
-# statement's own archived owners pointed at.
-
-# A row some earlier statement in the same transaction archived can match too: setting its
-# ancestor to the same timestamp its own depth-0 trigger already wrote is a no-op in value.
-_SOFT_DELETE_OWNED_SWEEP_ANCESTOR_UPDATED_AT = """
-            UPDATE {updated_at_table} AS guitars_ancestor
-            SET _updated_at = NOW()
-            FROM {dependent_table} AS guitars_dependent
-            WHERE guitars_ancestor."{updated_at_primary_key}"
-                      = guitars_dependent."{dependent_primary_key}"
-              AND guitars_dependent._deleted_at = NOW()
-              AND EXISTS (
-                  SELECT 1
-                  FROM guitars_owned_before AS guitars_before
-                  JOIN guitars_owned_after AS guitars_after
-                      ON guitars_after."{primary_key}" = guitars_before."{primary_key}"
-                  WHERE guitars_before._deleted_at IS NULL
-                    AND guitars_after._deleted_at IS NOT NULL
-                    AND guitars_before."{foreign_key}"
-                          = guitars_dependent."{dependent_primary_key}"
-              );
-"""
 
 _DROP_SOFT_DELETE_OWNED_SWEEP_FUNCTION = """
     DROP FUNCTION {function}();

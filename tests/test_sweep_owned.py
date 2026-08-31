@@ -19,8 +19,8 @@ from guitars.management.enforcement.operations import _owned_rule_name
 from guitars.sql._identifiers import _unescape_ident
 from tests.crossapp_dependent.models import Shared
 from tests.crossapp_owner.models import Owner
-from tests.testapp.models import Album, Awning, Band, Billboard, Ensemble, Foyer, Kiosk
-from tests.testapp.models import NeonMarquee, Placard, PressKit, Rider
+from tests.testapp.models import Album, Awning, Band, Banner, Billboard, Ensemble, Foyer
+from tests.testapp.models import Kiosk, Placard, PressKit, Rider
 from tests.testapp.models import Residency, Stagehand
 
 
@@ -153,27 +153,59 @@ def test_the_sweep_reaches_a_chained_orphan():
 @pytest.mark.django_db
 def test_the_repair_runs_to_a_fixpoint_when_the_chain_sorts_against_it():
     """``Residency``'s chain settles in one pass only because label order happens to agree with
-    ownership. ``Awning`` sorts *before* the ``NeonMarquee`` rows owning it: pass one spares it
-    while they are live, then archives them -- in one statement, so their rule decides nothing."""
+    ownership. ``Awning`` sorts *before* the ``Banner`` rows owning it: pass one spares it while
+    they are live, then archives them -- in one statement, so their rule decides nothing."""
     _drop_sweep_triggers()
     awning = Awning.objects.create(fabric='striped')
-    # Two owners at each hop, or the per-row rule settles that hop on its own and the
+    # Two owners at each hop, or the per-row rule settles that hop itself and the
     # statement-level hole this command repairs is never reached.
-    for glow in ('amber', 'neon'):
-        marquee = NeonMarquee.objects.create(headline=f'{glow} nights', glow=glow, awning=awning)
-        Billboard.objects.create(label=f'{glow} north', marquee=marquee)
-        Billboard.objects.create(label=f'{glow} south', marquee=marquee)
+    for slogan in ('north', 'south'):
+        banner = Banner.objects.create(slogan=slogan, awning=awning)
+        Billboard.objects.create(label=f'{slogan} left', banner=banner)
+        Billboard.objects.create(label=f'{slogan} right', banner=banner)
 
-    Billboard.objects.all().delete()  # one statement, every owner of both marquees
+    Billboard.objects.all().delete()  # one statement, every owner of both banners
 
-    assert NeonMarquee.objects.count() == 2  # leaked, as a 2.5.x database is
+    assert Banner.objects.count() == 2  # leaked, as a 2.5.x database is
     assert Awning.objects.filter(pk=awning.pk).exists()
 
     _sweep('--repair')
 
-    assert not NeonMarquee.objects.exists()
+    assert not Banner.objects.exists()
     assert not Awning.objects.filter(pk=awning.pk).exists()  # the hop behind the walk
     assert 'Owned sweep complete.' in _sweep()  # and the run really is a fixpoint
+
+
+@pytest.mark.django_db
+def test_the_heading_counts_tables_where_two_models_resolve_to_one(monkeypatch):
+    """The heading says "dependent table(s)", and ``checked`` is a set of tables -- so
+    counting per-model findings beside it reads "1 table checked, 2 with orphaned rows"."""
+    findings = {('testapp.One', 'shared_table'): 1, ('testapp.Two', 'shared_table'): 2}
+    monkeypatch.setattr(Command, '_sweep_pass', lambda *a, **k: (findings, 0, {'shared_table'}))
+
+    out = StringIO()
+    with pytest.raises(CommandError):  # report-only is a gate and there are findings
+        call_command('sweepowned', stdout=out, stderr=out)
+
+    assert '1 dependent table(s) checked, 1 with orphaned rows' in out.getvalue()
+
+
+@pytest.mark.django_db
+def test_a_repair_that_does_not_settle_reports_rather_than_diagnosing_a_cycle(monkeypatch):
+    """Exhausting the pass bound says the run did not settle, not why. Depth beyond the bound
+    needs a rule cycle; fresh orphans arriving between passes need only a concurrent writer,
+    ordinary on the busy database this command is for. Naming a cycle sends them nowhere."""
+    monkeypatch.setattr(
+        Command, '_sweep_pass', lambda *args, **kwargs: ({('testapp.Rider', 'x'): 1}, 1, {'x'})
+    )
+
+    with pytest.raises(CommandError) as raised:
+        _sweep('--repair')
+
+    assert 'had not settled' in str(raised.value)
+    assert 'Re-run --repair' in str(raised.value)
+    # The cycle is named as one possibility among two, never as the finding.
+    assert 'if it never settles' in str(raised.value)
 
 
 @pytest.mark.django_db

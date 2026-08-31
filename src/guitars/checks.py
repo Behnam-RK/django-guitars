@@ -1,0 +1,78 @@
+"""Startup validation for model *shapes* the enforcement layer cannot express, as
+``guitars.tenancy.checks`` does for the tenancy settings. One shape so far, and it is the
+one that destroys a row rather than sparing it."""
+
+from __future__ import annotations
+
+from django.apps import apps as django_apps
+from django.core.checks import Error, register
+from django.db import models
+
+from guitars.introspection import has_column, owns_column
+
+
+__all__ = [
+    'ORPHAN_ANCESTOR_ID',
+    'check_soft_deletable_mti_children_have_a_soft_deletable_ancestor',
+    'register_checks',
+]
+
+#: Namespaced to match the field's own ``guitars.E001``/``E002``.
+ORPHAN_ANCESTOR_ID = 'guitars.E003'
+
+
+def _candidate_models(app_configs) -> list[type[models.Model]]:
+    """The models a check should consider -- reporting outside the requested apps would
+    make a scoped ``manage.py check <app>`` run answer a question it wasn't asked."""
+    if app_configs is None:
+        return list(django_apps.get_models())
+    return [model for config in app_configs for model in config.get_models()]
+
+
+def orphaned_soft_delete_ancestors(
+    candidates: list[type[models.Model]],
+) -> list[tuple[type[models.Model], type[models.Model]]]:
+    """``(child, ancestor)`` for every concrete MTI child declaring ``_deleted_at`` on its own
+    table under an ancestor that has none. Shared with the generator, which re-asks it:
+    ``--skip-checks`` reaches the generator and ``hard_delete()`` runs no checks at all."""
+    found = []
+    for model in candidates:
+        if not model._meta.parents or not owns_column(model, '_deleted_at'):
+            continue
+        for parent in model._meta.parents:
+            if not has_column(parent, '_deleted_at'):
+                found.append((model, parent))
+    return found
+
+
+def check_soft_deletable_mti_children_have_a_soft_deletable_ancestor(
+    app_configs, **kwargs
+) -> list[Error]:
+    """Django's ``Collector`` issues one ``DELETE`` per table in an MTI chain. A child
+    declaring ``_deleted_at`` keeps its row through its own rule, while the ancestor, having no
+    column to stamp, gets no rule and is really deleted."""
+    # An error rather than a warning: the row does not merely go unstamped, the statement
+    # aborts at COMMIT on the child's own parent-link constraint. Nothing is recoverable
+    # from it at runtime, and no code path in the kit can spare it.
+    return [
+        Error(
+            f"'{child._meta.label}' declares _deleted_at on its own table while its "
+            f"multi-table-inheritance ancestor '{parent._meta.label}' declares none, so "
+            f"deleting one aborts at COMMIT: the child's soft-delete rule keeps its row "
+            f"while the ancestor's DELETE, which no rule guards, removes the row that "
+            f'row points at.',
+            hint=(
+                f"Make '{parent._meta.label}' soft-deletable too (SetarModel or the "
+                f'SoftDeletableModel mixin), so _deleted_at lives on the ancestor and the '
+                f'child gets the MTI redirect rule instead of a rule of its own.'
+            ),
+            obj=child,
+            id=ORPHAN_ANCESTOR_ID,
+        )
+        for child, parent in orphaned_soft_delete_ancestors(_candidate_models(app_configs))
+    ]
+
+
+def register_checks() -> None:
+    """Register the checks -- idempotent, Django's registry is a set keyed by function."""
+    register(check_soft_deletable_mti_children_have_a_soft_deletable_ancestor)

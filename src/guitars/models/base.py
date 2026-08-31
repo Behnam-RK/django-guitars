@@ -13,6 +13,7 @@ from django.db.models.base import Model
 from django.db.models.functions import Now
 from django.utils.functional import cached_property
 
+from guitars.checks import register_checks as register_shape_checks
 from guitars.tenancy import tenanted_manager
 from guitars.tenancy.checks import register_checks
 
@@ -325,6 +326,7 @@ def _install_tenancy(tenant_model: str, field_name: str) -> None:
 # pure-library project with GUITARS_TENANT_MODEL unset -- exactly the case E003 exists to
 # catch. Checks are cheap; the enforcement machinery isn't, so that stays behind install().
 register_checks()
+register_shape_checks()
 
 if _TENANT_MODEL:
     _install_tenancy(_TENANT_MODEL, _TENANT_FIELD)

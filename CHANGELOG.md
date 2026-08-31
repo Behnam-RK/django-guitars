@@ -10,6 +10,22 @@ Full history and diffs: [GitHub releases](https://github.com/Behnam-RK/django-gu
 
 ## [Unreleased]
 
+## [2.7.0] - 2026-08-31
+
+### Added
+
+- `django.contrib.contenttypes` is installed in the **test harness** (`tests/settings.py`) so `tests/testapp` can declare a `GenericRelation` at all. Harness-only: `core/settings.py` and the shipped wheel are untouched, and contenttypes stays outside `LOCAL_APPS`, so it generates no enforcement migrations.
+
+### Changed
+
+- **The owned sweep stamps `_updated_at` when that column lives on an MTI ancestor further up than the table holding `_deleted_at`.** The sweep's assignment can only reach the table it updates, and the ancestor's own `set_parent_updated_at` trigger carries `WHEN (pg_trigger_depth() = 0)`, so at the depth the sweep runs it is suppressed: the column moved on the rule's path and stood still on the sweep's, for one logical event. A **second `UPDATE`** now follows the first, not a data-modifying CTE around it -- PostgreSQL refuses a `DO ALSO` rule on a data-modifying statement inside `WITH`, which is exactly a dependent that owns something itself, so the CTE form failed on the one shape most in need of it. It re-reads no arm: `_deleted_at = NOW()` names precisely the rows the first `UPDATE` stamped, `NOW()` being the transaction's timestamp, and an `EXISTS` over the transition tables holds it to the dependents this statement's own archived owners pointed at. Both slots render empty where the dependent owns the column, so **every sweep 2.6.0 wrote renders byte-identically and no `[SQL:...]` identity moves**.
+- **`sweepowned --repair` runs to a fixpoint** rather than asking the operator to re-run to one, which 2.6.0's own changelog entry did. A pass walks dependents in model-label order, so a chain of ownership sorting against that order is left a hop short: the repairing `UPDATE` fires the owned rule, but the rule alone decides nothing where one statement archives every owner of the next hop, and the statement-level trigger is precisely what a database needing this command does not have. The pass count is bounded by the number of dependent tables -- a chain is acyclic because the generator refuses a rule on an `ON UPDATE` cycle -- and a run exceeding that bound raises rather than exiting quietly, since this follows the rules the *database* holds and an old enough one predates that refusal.
+
+### Fixed
+
+- **`hard_delete()` now collects `GenericRelation` children.** Phase 1's Django `Collector` walks `_meta.private_fields` and soft-deletes them; Phase 2's own walk reads key columns, of which a generic child has none, so the row was archived and then left behind pointing at a primary key nothing holds. `_referring_relations` is deliberately *not* widened -- it is the one walk collection and the still-referenced guard share, and a generic child must never hold a row back, having no constraint to fail at `COMMIT`. `_collect` walks `_meta.private_fields` separately instead, duck-typed on `bulk_related_objects` exactly as that `Collector` is, so nothing in the shipped package imports `contenttypes`.
+- ADR 0014 records the primary-key **permutation** limit, which 2.6.0's pull request said it carried and which lived only in `CHANGELOG.md` and a source comment.
+
 ## [2.6.0] - 2026-08-30
 
 - Fixed: **one statement soft-deleting several co-owners of a dependent no longer leaks that dependent for ever.** A rule's action expands *before* the original update, so every owner archived by `Album.objects.filter(press_kit=kit).delete()` still read as live to the others' last-owner guards and nothing stamped the kit -- and nothing ever would, no later code path stamping it either. The same deletion one album at a time archived it correctly, with nothing at the declaration site to distinguish the two; Django's `Collector` batches by model on its own, so a cascade from a third model reached the same single statement without anyone writing a queryset delete. Reported as issue #40. Each owned rule now carries an `AFTER UPDATE ... FOR EACH STATEMENT` **sweep** trigger that re-asks the same arms once the statement has settled, taking the archived owners from an `OLD TABLE`/`NEW TABLE` join. **Additive, never a replacement**: the rule stamps only where no sibling was live beforehand and a statement that archives owners never creates one, so the rule's stamping is a strict subset of the sweep's and whichever runs first the other's `_deleted_at IS NULL` makes it a no-op -- which is why no rule-retirement machinery was needed. The sweep is emitted from inside `_owned_operations`' own loop, against the same key and after every refusal that loop applies, so which relations carry one *is* the rule's answer: no second candidate predicate, and `introspection._rule_update_edges`, `rule_update_cycle_edges`, `owned_tenancy_refusals` and `hard_delete()` are untouched. That was [ADR-0012](docs/adr/0012-cross-owner-last-owner-guard.md)'s strongest objection to the trigger it costed and declined ([ADR-0014](docs/adr/0014-statement-level-owned-sweep.md)).
@@ -206,7 +222,8 @@ First stable release. **BREAKING:** the instrument ladder shifted down one rung 
 
 - Added: initial release — `SetarModel`, `GuitarModel`, `SoftDeletableModel`, `DisableSignals`, `makeguitarmigrations`.
 
-[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.6.0...HEAD
+[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.7.0...HEAD
+[2.7.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.7.0
 [2.6.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.6.0
 [2.5.2]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.5.2
 [2.5.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.5.1

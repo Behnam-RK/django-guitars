@@ -1324,6 +1324,18 @@ class OperationsMixin:
                 _identifiers._escape_ident(cast(str, dependent._meta.pk.column)),
                 owner_row='guitars_archived',
             ),
+            # The same arms again for the pk-rewrite guard, which asks the UPDATE's question
+            # over the *vanished* rows: asking it without them refused a statement whose
+            # dependent a co-owner on another column, or another table, still held.
+            'guard_co_owner_guards': self._owned_co_owner_guards(
+                co_owners,
+                owner_table,
+                ident_owner_pk,
+                ident_foreign_key,
+                dependent_table,
+                _identifiers._escape_ident(cast(str, dependent._meta.pk.column)),
+                owner_row='guitars_before',
+            ),
         }
         # Refused rather than escaped, as the autofill slots refuse it: an identifier admits
         # '$', so a db_table like 'a$$b' would close this template's dollar quoting early and

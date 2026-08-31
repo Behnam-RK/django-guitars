@@ -7,7 +7,7 @@ from __future__ import annotations
 from django.apps import apps as django_apps
 from django.core.management.base import BaseCommand, CommandError
 from django.db import DEFAULT_DB_ALIAS, connections, transaction
-from django.db.models import Q
+from django.db.models import F, Q
 from django.utils import timezone
 
 from guitars.introspection import (
@@ -19,7 +19,7 @@ from guitars.introspection import (
 from guitars.management import _generator
 from guitars.management.enforcement.operations import _owned_rule_name
 from guitars.models.soft_deletion import _owned_fields
-from guitars.sql._identifiers import _unescape_ident
+from guitars.sql._identifiers import _split_qualified, _unescape_ident
 from guitars.tenancy import tenancy_bypassed
 
 
@@ -86,15 +86,31 @@ class Command(BaseCommand):
         # needs repairing. The database's own answer covers both, and invents nothing.
         live = cls._owned_rules_in_database(using)
         owners: dict[type, list[tuple[type, str]]] = {}
+        unresolved: list[str] = []
         for model in registry:
             for field in _owned_fields(model, cycles, refusals):
                 dependent = column_owner(field.related_model, '_deleted_at')
-                rule = _owned_rule_name(dependent._meta.db_table, field.column)
                 owner_table = column_owner(model, '_deleted_at')._meta.db_table
-                if (owner_table, _unescape_ident(rule[1:-1])) not in live:
+                # ``pg_rules`` reports bare identifiers; a ``db_table`` may carry Django's own
+                # pre-quoted or self-quoted form. Compared raw, such a table matches nothing,
+                # every relation on it is dropped, and the run reports a sweep of none of them.
+                try:
+                    rule = _owned_rule_name(dependent._meta.db_table, field.column)
+                    schema, bare = _split_qualified('table', owner_table)
+                except ValueError as exc:
+                    # Named, never swallowed: a `db_table` this cannot spell is one relation
+                    # skipped, and the operator has to know which. Raising instead would take
+                    # the whole report down over a table the run may not even have needed.
+                    unresolved.append(
+                        f"'{model._meta.label}.{field.name}' -> '{dependent._meta.label}' "
+                        f'skipped: {exc}'
+                    )
+                    continue
+                key = bare if schema is None else f'{schema}.{bare}'
+                if (key, _unescape_ident(rule[1:-1])) not in live:
                     continue
                 owners.setdefault(dependent, []).append((model, field.name))
-        return owners
+        return owners, unresolved
 
     def _orphans(self, dependent, arms, rule_owners, using: str):
         """Live rows of *dependent* no owner still holds but an archived owner once did."""
@@ -106,12 +122,16 @@ class Command(BaseCommand):
         # a rule still owns what it points at. ``_deleted_at`` on an MTI child resolves to the
         # ancestor's column through the ORM -- the join the rule's arm spells out by hand.
         for owner_model, fk_name in arms:
-            live = (
-                owner_model._all_objects.using(using)
-                .filter(_deleted_at__isnull=True, **{f'{fk_name}__isnull': False})
-                .values(fk_name)
+            live = owner_model._all_objects.using(using).filter(
+                _deleted_at__isnull=True, **{f'{fk_name}__isnull': False}
             )
-            candidates = candidates.exclude(pk__in=live)
+            # The rule's target exclusion, in Python: an arm taking liveness from the
+            # *dependent's own* table would read a self-pointing row as its own live owner and
+            # spare it for ever. Excluded by the key, exactly as the rendered arm does.
+            owner_liveness_table = column_owner(owner_model, '_deleted_at')._meta.db_table
+            if owner_liveness_table == dependent._meta.db_table:
+                live = live.exclude(pk=F(fk_name))
+            candidates = candidates.exclude(pk__in=live.values(fk_name))
         was_owned = Q(pk__in=[])
         for owner_model, fk_name in rule_owners:
             was_owned |= Q(
@@ -129,7 +149,7 @@ class Command(BaseCommand):
         # green gate that swept nothing. Same validation as `makeguitarmigrations`.
         _generator.validate_app_labels(requested)
 
-        rule_owners = self._rule_carrying_owners(using)
+        rule_owners, unresolved = self._rule_carrying_owners(using)
         # The sparing half, deliberately wider than the stamping half above: ``owner_arms`` is
         # the very sweep the rule's own last-owner guard is built from, so an owner the
         # generator refused a rule still counts here -- it owns what it points at either way.
@@ -180,6 +200,10 @@ class Command(BaseCommand):
         )
         for line in findings:
             self.stdout.write(self.style.SUCCESS(line) if repair else self.style.WARNING(line))
+        # Before the gate, and on stderr: a relation this could not name was not swept, and a
+        # run that stayed silent about it would report a clean sweep of a table it skipped.
+        for line in unresolved:
+            self.stderr.write(self.style.WARNING(line))
 
         if findings and not repair:
             # A CommandError so this works as a CI gate; --repair turns the same finding into

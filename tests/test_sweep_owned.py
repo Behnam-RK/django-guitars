@@ -5,6 +5,7 @@ The leak is reproduced by dropping the sweep trigger, which is what such a datab
 from __future__ import annotations
 
 import re
+from unittest import mock
 
 import pytest
 from django.core.management import CommandError, call_command
@@ -13,6 +14,9 @@ from django.utils import timezone
 from io import StringIO
 
 from guitars.management.commands import sweepowned as sweepowned_module
+from guitars.management.commands.sweepowned import Command
+from guitars.management.enforcement.operations import _owned_rule_name
+from guitars.sql._identifiers import _unescape_ident
 from tests.crossapp_dependent.models import Shared
 from tests.crossapp_owner.models import Owner
 from tests.testapp.models import Album, Band, Ensemble, Foyer, Kiosk, Placard, PressKit, Rider
@@ -118,21 +122,31 @@ def test_the_sweep_leaves_a_dependent_no_owner_ever_held():
 
 
 @pytest.mark.django_db
-def test_the_sweep_reaches_a_chained_orphan_across_two_runs():
-    """Stamping a dependent can orphan its own dependents: ``Residency`` owns a ``Rider``
-    which owns a ``Stagehand``. Without the trigger the first hop leaks, and repairing it
-    exposes the second -- which is why an operator runs this to a fixpoint."""
+def test_the_sweep_reaches_a_chained_orphan():
+    """Stamping a dependent orphans its own: ``Residency`` owns a ``Rider`` owning a
+    ``Stagehand``, and each hop needs a statement archiving every owner or the rule stamps it
+    first. One run reaches both only because repair order is by label; the fixpoint is pinned."""
     _drop_sweep_triggers()
     stagehand = Stagehand.objects.create(name='Rigger')
-    rider = Rider.objects.create(clause='No brown M&Ms', stagehand=stagehand)
-    Residency.objects.create(venue_name='Massey Hall', rider=rider)
-    Residency.objects.create(venue_name='Hammersmith', rider=rider)
-    Residency.objects.filter(rider=rider).delete()
+    # Two riders on one stagehand, so archiving the riders is itself a last-owner decision
+    # the per-row rule cannot make -- the second hop is left to this command, not to the rule.
+    riders = [
+        Rider.objects.create(clause='No brown M&Ms', stagehand=stagehand),
+        Rider.objects.create(clause='Green room', stagehand=stagehand),
+    ]
+    for rider in riders:
+        Residency.objects.create(venue_name=f'{rider.clause} I', rider=rider)
+        Residency.objects.create(venue_name=f'{rider.clause} II', rider=rider)
+    Residency.objects.all().delete()  # one statement, every owner of every rider
+
+    assert Rider.objects.count() == 2  # the rule stamped neither hop
+    assert Stagehand.objects.filter(pk=stagehand.pk).exists()
 
     _sweep('--repair')
-    assert not Rider.objects.filter(pk=rider.pk).exists()
-    _sweep('--repair')
+
+    assert not Rider.objects.exists()
     assert not Stagehand.objects.filter(pk=stagehand.pk).exists()
+    assert 'Owned sweep complete.' in _sweep()  # and the run is a fixpoint
 
 
 @pytest.mark.django_db
@@ -161,21 +175,33 @@ def test_the_sweep_does_not_follow_a_relation_the_generator_refused():
     child = Placard.objects.create(caption='Child', parent=placard)
     child.delete()  # the refused relation: nothing stamps `placard`
 
-    assert 'Owned sweep complete.' in _sweep()
+    # The refusal is what has to be doing the work here, so the *other* gate is taken out of
+    # the way: the database is told it holds this rule. Without that, `pg_rules` alone drops
+    # the relation and the assertions below hold whether or not the refusals are honoured.
+    refused = _owned_rule_name(Placard._meta.db_table, Placard._meta.get_field('parent').column)
+    live = Command._owned_rules_in_database('default')
+    live.add((Placard._meta.db_table, _unescape_ident(refused[1:-1])))
+    with mock.patch.object(Command, '_owned_rules_in_database', staticmethod(lambda using: live)):
+        assert 'Owned sweep complete.' in _sweep()
+
     assert Placard.objects.filter(pk=placard.pk).exists()
 
 
 @pytest.mark.django_db
 def test_the_sweep_counts_an_archived_co_owner_on_another_table():
-    """The stamping half reads every rule-carrying relation, not only the one that went
-    last: a placard whose kiosk and foyer were archived by two separate statements is an
-    orphan through either, and one run finds it."""
+    """The stamping half reads every rule-carrying relation, not only the one that went last.
+    Two of each, deleted per table in one statement: with one owner apiece the rule stamps the
+    placard as the second goes, and the command is handed a row already archived."""
     _drop_sweep_triggers()
     placard = Placard.objects.create(caption='Closed Run')
-    kiosk = Kiosk.objects.create(label='Lobby', placard=placard)
-    foyer = Foyer.objects.create(label='Mezzanine', placard=placard)
-    Kiosk.objects.filter(pk=kiosk.pk).delete()
-    Foyer.objects.filter(pk=foyer.pk).delete()
+    Kiosk.objects.create(label='Lobby', placard=placard)
+    Kiosk.objects.create(label='Annex', placard=placard)
+    Foyer.objects.create(label='Mezzanine', placard=placard)
+    Foyer.objects.create(label='Balcony', placard=placard)
+    Kiosk.objects.filter(placard=placard).delete()  # one statement, both kiosks
+    Foyer.objects.filter(placard=placard).delete()  # one statement, both foyers
+
+    assert Placard.objects.filter(pk=placard.pk).exists()  # the rule stamped nothing
 
     _sweep('--repair')
     assert not Placard.objects.filter(pk=placard.pk).exists()
@@ -262,3 +288,64 @@ def test_repair_re_asks_the_predicate_against_an_owner_that_appeared_after_the_s
         sweepowned_module.timezone.now = real_now
 
     assert Placard.objects.filter(pk=placard.pk).exists()
+
+
+@pytest.mark.django_db
+def test_the_sweep_matches_an_owner_whose_db_table_is_self_quoted(monkeypatch):
+    """``pg_rules`` reports bare identifiers; a ``db_table`` may carry Django's own quoted form,
+    which this gate has to normalise. Compared raw it matches no rule, so every relation on that
+    owner table is dropped and the run reports a clean sweep: green, having done nothing."""
+    bare, _ = Command._rule_carrying_owners('default')
+    assert Kiosk in [owner for owner, _ in bare[Placard]]  # the control, on the plain name
+
+    monkeypatch.setattr(Kiosk._meta, 'db_table', f'"{Kiosk._meta.db_table}"')
+    quoted, unresolved = Command._rule_carrying_owners('default')
+
+    assert Kiosk in [owner for owner, _ in quoted[Placard]]
+    assert unresolved == []  # resolvable, so nothing is skipped and nothing is reported
+
+
+@pytest.mark.django_db
+def test_the_sweep_does_not_let_a_row_be_its_own_live_owner():
+    """The rule's target exclusion, re-asked in Python: an arm taking liveness from the
+    *dependent's own* table reads a self-pointing row as its own live owner and spares it for
+    ever. ``Placard.parent`` is such an arm -- refused a rule, but the sparing half is wider."""
+    _drop_sweep_triggers()
+    placard = Placard.objects.create(caption='Self-parented')
+    Placard.objects.filter(pk=placard.pk).update(parent=placard)  # its own parent
+    Kiosk.objects.create(label='Lobby', placard=placard)
+    Kiosk.objects.create(label='Annex', placard=placard)
+    Kiosk.objects.filter(placard=placard).delete()  # one statement, every rule-carrying owner
+
+    assert Placard.objects.filter(pk=placard.pk).exists()  # the rule stamped nothing
+
+    _sweep('--repair')
+
+    assert not Placard.objects.filter(pk=placard.pk).exists()
+
+
+@pytest.mark.django_db
+def test_the_sweep_names_a_relation_whose_table_it_cannot_spell(monkeypatch):
+    """A ``db_table`` with two schema-qualifying dots is one ``_split_qualified`` refuses.
+    Raising would take the whole report down over one relation, so the run skips it -- and
+    names it, a silent skip being a clean sweep of a table nothing swept."""
+    monkeypatch.setattr(Kiosk._meta, 'db_table', 'one.two.three')
+
+    owners, unresolved = Command._rule_carrying_owners('default')
+
+    assert Kiosk not in [owner for owner, _ in owners.get(Placard, ())]
+    assert any('testapp.Kiosk' in line for line in unresolved)
+    assert any('more than one schema-qualifying' in line for line in unresolved)
+
+
+@pytest.mark.django_db
+def test_the_sweep_reports_an_unspellable_relation_to_the_operator(monkeypatch):
+    """The other half: a skip the caller can see is worth nothing if the run does not say so.
+    Printed before the gate, so a report that raises still carries it."""
+    monkeypatch.setattr(
+        Command,
+        '_rule_carrying_owners',
+        classmethod(lambda cls, using: ({}, ['testapp.Kiosk -> testapp.Placard skipped: nope'])),
+    )
+
+    assert 'testapp.Kiosk -> testapp.Placard skipped: nope' in _sweep()

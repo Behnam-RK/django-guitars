@@ -163,6 +163,22 @@ _DROP_SOFT_DELETE_OWNED_OBJECT_RULE = """
 # rule. Reading the after image made a statement that archives an owner *and* moves its key
 # stamp the new target the rule never touched, and skip the old one it did.
 
+# The two transition tables correlate on the primary key, their only row identity, so a statement
+# rewriting a live owning row's key leaves the join unable to say which after-row that before-row
+# became -- and so unable to say whether it was archived. Refused rather than guessed.
+
+# Refused *narrowly*: the guard asks the ``UPDATE`` below's own question -- dependent still live,
+# no live owner, every co-owner arm -- over the vanished rows instead of the matched ones. Asking
+# less refused a statement whose dependent a co-owner still held, or was already archived.
+
+# Keeping the row and letting the post-statement ``NOT EXISTS`` decide was tried and rejected: it
+# stamps a target an owner merely *reassigned away from*, which neither the rule nor the matched
+# path stamps, so one corner of the sweep would archive on a reassignment and the rest not.
+
+# Out of scope, and undetectable here: a statement that *permutes* primary keys among rows leaves
+# every before-key present in the after image, so the guard sees no vanished row and the join
+# below pairs each before-row with another's after-image. There is no second row identity to ask.
+
 # Terminated ``$$;`` unlike the autofill template it mirrors: that is an operation by itself,
 # this is concatenated before its CREATE TRIGGER and an unterminated body swallows it. The
 # indentation lands the spliced arms at the depth they are written with.
@@ -174,6 +190,32 @@ _CREATE_SOFT_DELETE_OWNED_SWEEP_FUNCTION = """
     $$
     BEGIN
         IF COALESCE(current_setting('rules.hard_deletion', true), '') <> 'on' THEN
+            IF EXISTS (
+                SELECT 1
+                FROM guitars_owned_before AS guitars_before
+                JOIN {dependent_table} AS guitars_dependent
+                    ON guitars_dependent."{dependent_primary_key}" = guitars_before."{foreign_key}"
+                WHERE guitars_before._deleted_at IS NULL
+                  AND guitars_before."{foreign_key}" IS NOT NULL
+                  AND guitars_dependent._deleted_at IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM guitars_owned_after AS guitars_after
+                      WHERE guitars_after."{primary_key}" = guitars_before."{primary_key}"
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM {table} AS guitars_owner
+                      WHERE guitars_owner."{foreign_key}" = guitars_before."{foreign_key}"
+                        AND guitars_owner._deleted_at IS NULL
+                  ){guard_co_owner_guards}
+            ) THEN
+                RAISE EXCEPTION
+                    'guitars: a statement on % rewrote the primary key of a live owning row '
+                    'whose dependent is now held by no live owner. The owned sweep correlates '
+                    'its transition tables on the primary key, so it cannot tell whether that '
+                    'row was archived, and would leak the dependent permanently. Rewrite the '
+                    'key and archive the row in separate statements.', TG_TABLE_NAME
+                    USING ERRCODE = 'feature_not_supported';
+            END IF;
             UPDATE {dependent_table} AS guitars_dependent
             SET _deleted_at = NOW(){updated_at_assignment}
             FROM (

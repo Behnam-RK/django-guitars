@@ -2,6 +2,7 @@
 is exercised via the test app's committed migrations instead, since running it for real
 would scaffold a new file on disk; here it's scanning, idempotency, and SQL-building."""
 
+import re
 import types
 from io import StringIO
 
@@ -2655,6 +2656,13 @@ def test_the_sweep_name_clash_is_reported_on_the_name_alone():
     assert len(command._rule_name_clashes) == 1
     assert 'Owned sweep function shared is named by both' in command._rule_name_clashes[0]
 
+    # The name above is hand-fed, so nothing so far touches the sizing that makes the clash
+    # unreachable in practice. This is that half: the owner segment is the whole reason this
+    # family sizes one more than the rule's, and dropping it collides the ADR's own example.
+    assert operations_module._owned_sweep_name(
+        'testapp_kiosk', 'testapp_placard', 'placard_id'
+    ) != operations_module._owned_sweep_name('testapp_foyer', 'testapp_placard', 'placard_id')
+
 
 def test_the_sweep_under_adopt_drops_its_trigger_if_it_exists():
     """``--adopt`` is the one path that may not know whether the object is there. The rule
@@ -2672,11 +2680,15 @@ def test_the_sweep_under_adopt_drops_its_trigger_if_it_exists():
 
     assert sweeps
     for sweep in sweeps:
-        assert 'DROP TRIGGER IF EXISTS' in sweep
+        forward = sweep.split('reverse_sql')[0]
+        # The distinguishing pair: `--adopt` leads with the IF EXISTS drop, where the plain
+        # and replace forms lead with a bare `DROP TRIGGER` or with no drop at all.
+        assert 'DROP TRIGGER IF EXISTS' in forward
+        assert re.search(r'DROP TRIGGER(?! IF EXISTS)', forward) is None
         # The function is CREATE OR REPLACE either way -- DROP FUNCTION refuses while a
         # trigger depends on it, so only the reverse half carries one.
-        assert sweep.split('reverse_sql')[0].count('DROP FUNCTION') == 0
-        assert 'CREATE OR REPLACE FUNCTION' in sweep
+        assert forward.count('DROP FUNCTION') == 0
+        assert 'CREATE OR REPLACE FUNCTION' in forward
 
 
 def test_a_refused_relation_names_its_live_sweep_as_well_as_its_rule():

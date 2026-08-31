@@ -7,7 +7,8 @@ import re
 import pytest
 from django.apps import apps as django_apps
 from django.db import connection, models
-from django.db.models import CASCADE, DO_NOTHING, PROTECT, SET, SET_DEFAULT, SET_NULL
+from django.db.models import CASCADE, DO_NOTHING, F, PROTECT, SET, SET_DEFAULT, SET_NULL
+from django.db.utils import NotSupportedError
 from django.test.utils import isolate_apps
 from django.utils import timezone
 
@@ -563,6 +564,67 @@ def test_a_statement_that_moves_the_key_while_archiving_sweeps_the_key_it_held()
 
     assert not Placard.objects.filter(pk=held.pk).exists()  # the key it actually held
     assert Placard.objects.filter(pk=moved_to.pk).exists()  # never owned by a live row
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_statement_that_rewrites_a_live_owners_own_key_is_refused():
+    """A rewritten key leaves the sweep unable to say which after-row a before-row became, and
+    so whether it was archived: it silently missed the row and leaked the placard for ever.
+    Two owners, or the per-row rule stamps on its own ``old`` and the sweep decides nothing."""
+    placard = Placard.objects.create(caption='Held')
+    Kiosk.objects.create(label='Lobby', placard=placard)
+    Kiosk.objects.create(label='Mezzanine', placard=placard)
+
+    # One statement, both writes: every owner is archived and every owner's key moves.
+    with pytest.raises(NotSupportedError, match='rewrote the primary key of a live owning row'):
+        Kiosk._all_objects.filter(placard=placard).update(
+            id=F('id') + 1000, _deleted_at=timezone.now()
+        )
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_key_rewrite_that_leaves_the_dependent_owned_is_not_refused():
+    """The refusal is narrow: it fires only where the vanished row's target has no live owner
+    left, the one shape where correlating would have changed anything. A live owner keeps
+    pointing at the placard under its new key, so there is nothing the sweep needed to decide."""
+    placard = Placard.objects.create(caption='Held')
+    Kiosk.objects.create(label='Lobby', placard=placard)
+    Kiosk.objects.create(label='Mezzanine', placard=placard)
+
+    Kiosk._all_objects.filter(placard=placard).update(id=F('id') + 1000)  # live throughout
+
+    assert Placard.objects.filter(pk=placard.pk).exists()
+    assert Kiosk.objects.filter(placard=placard).count() == 2
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_key_rewrite_a_co_owner_on_another_table_covers_is_not_refused():
+    """The narrowness has to read the *co-owner arms*, not the declaring column alone. Every
+    kiosk is rewritten and archived, so that column is spent -- but a live foyer still holds
+    the placard, so the sweep would have stamped nothing and there is nothing to refuse."""
+    placard = Placard.objects.create(caption='Held')
+    Kiosk.objects.create(label='Lobby', placard=placard)
+    Kiosk.objects.create(label='Mezzanine', placard=placard)
+    Foyer.objects.create(label='Balcony', placard=placard)  # a co-owner arm, another table
+
+    Kiosk._all_objects.filter(placard=placard).update(id=F('id') + 1000, _deleted_at=timezone.now())
+
+    assert Placard.objects.filter(pk=placard.pk).exists()  # the foyer's arm spared it
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_key_rewrite_over_an_already_archived_dependent_is_not_refused():
+    """The other half of asking the ``UPDATE``'s own question: it stamps only a *live*
+    dependent, so a placard already archived is one the sweep would have skipped. Refusing
+    there aborts a statement to protect a no-op."""
+    placard = Placard.objects.create(caption='Gone')
+    Kiosk.objects.create(label='Lobby', placard=placard)
+    Kiosk.objects.create(label='Mezzanine', placard=placard)
+    Placard._all_objects.filter(pk=placard.pk).update(_deleted_at=timezone.now())
+
+    Kiosk._all_objects.filter(placard=placard).update(id=F('id') + 1000, _deleted_at=timezone.now())
+
+    assert not Placard.objects.filter(pk=placard.pk).exists()
 
 
 @pytest.mark.django_db

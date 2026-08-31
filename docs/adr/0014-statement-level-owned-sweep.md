@@ -88,8 +88,8 @@ A system check cannot see it either — the shape is a call pattern, not a decla
   one `UPDATE` archived is archived in Phase 1 and removed by Phase 2, not live straight to gone.
 - `sweepowned` reads with tenancy bypassed and needs a role that sees every tenant: through a
   policy a hidden live owner would manufacture an orphan, unrefusable in Python.
-- The transition tables correlate on the primary key, their only row identity, so a statement
-  writing an owner's **pk** while archiving it drops it from the join and the sweep misses it.
+- A statement rewriting a **live owning row's own pk**, leaving its target unowned, is **refused**
+  (`feature_not_supported`): the transition tables have no other row identity. Django never does.
 
 **Reversibility.** Low, as 0011 and 0012 describe: the SQL is inlined, so a database keeps what it
 was migrated with until a regeneration and a `migrate`, and dropping the family later leaves every

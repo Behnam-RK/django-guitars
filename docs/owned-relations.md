@@ -70,8 +70,8 @@ Two limits the guard does not cover on its own:
 
 - **Per statement — closed in 2.6.0.** A rule's action expands *before* the original update, so owners
   archived by one statement read as live to each other's guards and nothing ever stamped the target. Each
-  rule now carries an additive statement-level sweep, on the same key and refusals; `sweepowned` repairs
-  older databases. See [ADR 0014](adr/0014-statement-level-owned-sweep.md).
+  rule now carries an additive sweep, on the same key and refusals; `sweepowned` repairs older databases.
+  Rewriting a live owner's **own pk** to strand its target raises `feature_not_supported`. See [ADR 0014](adr/0014-statement-level-owned-sweep.md).
 - **Per visible row.** Every arm's `NOT EXISTS` is an ordinary `SELECT`, so a
   [tenant policy](tenancy.md) on the table it reads filters it: a live sibling owner in another
   tenant is invisible, the guard reads "last owner", and a still-owned row is stamped — the one place

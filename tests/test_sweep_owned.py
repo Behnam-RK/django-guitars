@@ -9,6 +9,7 @@ from unittest import mock
 
 import pytest
 from django.core.management import CommandError, call_command
+from django.core.management.color import color_style
 from django.db import connection
 from django.utils import timezone
 from io import StringIO
@@ -19,7 +20,8 @@ from guitars.management.enforcement.operations import _owned_rule_name
 from guitars.sql._identifiers import _unescape_ident
 from tests.crossapp_dependent.models import Shared
 from tests.crossapp_owner.models import Owner
-from tests.testapp.models import Album, Band, Ensemble, Foyer, Kiosk, Placard, PressKit, Rider
+from tests.testapp.models import Album, Awning, Band, Banner, Billboard, Ensemble, Foyer
+from tests.testapp.models import Kiosk, Placard, PressKit, Rider
 from tests.testapp.models import Residency, Stagehand
 
 
@@ -147,6 +149,70 @@ def test_the_sweep_reaches_a_chained_orphan():
     assert not Rider.objects.exists()
     assert not Stagehand.objects.filter(pk=stagehand.pk).exists()
     assert 'Owned sweep complete.' in _sweep()  # and the run is a fixpoint
+
+
+@pytest.mark.django_db
+def test_the_repair_runs_to_a_fixpoint_when_the_chain_sorts_against_it():
+    """``Residency``'s chain settles in one pass only because label order happens to agree with
+    ownership. ``Awning`` sorts *before* the ``Banner`` rows owning it: pass one spares it while
+    they are live, then archives them -- in one statement, so their rule decides nothing."""
+    _drop_sweep_triggers()
+    awning = Awning.objects.create(fabric='striped')
+    # Two owners at each hop, or the per-row rule settles that hop itself and the
+    # statement-level hole this command repairs is never reached.
+    for slogan in ('north', 'south'):
+        banner = Banner.objects.create(slogan=slogan, awning=awning)
+        Billboard.objects.create(label=f'{slogan} left', banner=banner)
+        Billboard.objects.create(label=f'{slogan} right', banner=banner)
+
+    Billboard.objects.all().delete()  # one statement, every owner of both banners
+
+    assert Banner.objects.count() == 2  # leaked, as a 2.5.x database is
+    assert Awning.objects.filter(pk=awning.pk).exists()
+
+    _sweep('--repair')
+
+    assert not Banner.objects.exists()
+    assert not Awning.objects.filter(pk=awning.pk).exists()  # the hop behind the walk
+    assert 'Owned sweep complete.' in _sweep()  # and the run really is a fixpoint
+
+
+@pytest.mark.django_db
+def test_the_heading_counts_tables_where_two_models_resolve_to_one(monkeypatch):
+    """The heading says "dependent table(s)", and ``checked`` is a set of tables -- so
+    counting per-model findings beside it reads "1 table checked, 2 with orphaned rows"."""
+    findings = {
+        ('testapp.One', 'shared_table'): ({1}, 0),
+        ('testapp.Two', 'shared_table'): ({2, 3}, 0),
+    }
+    monkeypatch.setattr(Command, '_sweep_pass', lambda *a, **k: (findings, {'shared_table'}))
+
+    out = StringIO()
+    with pytest.raises(CommandError) as raised:  # report-only is a gate and there are findings
+        call_command('sweepowned', stdout=out, stderr=out)
+
+    assert '1 dependent table(s) checked, 1 with orphaned rows' in out.getvalue()
+    # The gate says "table(s)" about the same run the heading does, so it has to count the same
+    # way: over the per-model keys it read "2 owned dependent table(s)" beside that "1".
+    assert '1 owned dependent table(s) hold rows' in str(raised.value)
+
+
+@pytest.mark.django_db
+def test_a_repair_that_does_not_settle_reports_rather_than_diagnosing_a_cycle(monkeypatch):
+    """Exhausting the pass bound says the run did not settle, not why. Depth beyond the bound
+    needs a rule cycle; fresh orphans arriving between passes need only a concurrent writer,
+    ordinary on the busy database this command is for. Naming a cycle sends them nowhere."""
+    monkeypatch.setattr(
+        Command, '_sweep_pass', lambda *a, **k: ({('testapp.Rider', 'x'): ({1}, 1)}, {'x'})
+    )
+
+    with pytest.raises(CommandError) as raised:
+        _sweep('--repair')
+
+    assert 'had not settled' in str(raised.value)
+    assert 'Re-run --repair' in str(raised.value)
+    # The cycle is named as one possibility among two, never as the finding.
+    assert 'if it never settles' in str(raised.value)
 
 
 @pytest.mark.django_db
@@ -349,3 +415,87 @@ def test_the_sweep_reports_an_unspellable_relation_to_the_operator(monkeypatch):
     )
 
     assert 'testapp.Kiosk -> testapp.Placard skipped: nope' in _sweep()
+
+
+@pytest.mark.django_db
+def test_a_scoped_run_says_it_settled_the_apps_it_was_given(band):
+    """The walk skips dependents outside the requested apps, so stamping one hop of a chain
+    that leaves them orphans the next and no later pass can see it. A bare "complete" claimed
+    a fixpoint over the database that a scoped run never went looking for."""
+    _drop_sweep_triggers()
+    kit = PressKit.objects.create(headline='Shared')
+    Album.objects.create(title='Hemispheres', band=band, press_kit=kit)
+    Album.objects.create(title='Permanent Waves', band=band, press_kit=kit)
+    Album.objects.filter(press_kit=kit).delete()
+
+    scoped = _sweep('testapp', '--repair')
+    unscoped = _sweep()
+
+    assert 'Owned sweep complete for testapp.' in scoped
+    assert 'Owned sweep complete.' in unscoped
+
+
+@pytest.mark.django_db
+def test_a_finding_this_run_did_not_stamp_is_not_reported_as_repaired(monkeypatch):
+    """The predicate is re-asked inside the repairing UPDATE, so an owner committed live in
+    between spares its dependent -- and a line styled off the run rather than the entry called
+    that a repair, leaving the body reading as done over a row nothing wrote to."""
+    monkeypatch.setattr(
+        Command,
+        '_sweep_pass',
+        lambda *a, **k: ({('testapp.Rider', 'testapp_rider'): ({1, 2, 3}, 0)}, {'testapp_rider'}),
+    )
+    style = color_style(force_color=True)
+    line = (
+        'testapp.Rider (testapp_rider): 3 row(s) live with no live owner and at least '
+        'one archived owner.'
+    )
+
+    out = StringIO()
+    call_command('sweepowned', '--repair', stdout=out, stderr=out, force_color=True)
+
+    assert style.WARNING(line) in out.getvalue()
+    assert style.SUCCESS(line) not in out.getvalue()
+    # Still exit 0: the re-ask spared those rows on purpose, so nothing is left to do.
+    assert '0 row(s) stamped.' in out.getvalue()
+
+
+@pytest.mark.django_db
+def test_a_row_re_found_by_a_later_pass_is_counted_once(monkeypatch):
+    """A row the re-asked predicate spares is found again by every later pass. Summing the
+    per-pass counts reported one such row once per pass -- and under ``SUCCESS`` styling, where
+    a second entry stamped something and kept the loop running."""
+    spared = ('testapp.Rider', 'testapp_rider')
+    stamper = ('testapp.Stagehand', 'testapp_stagehand')
+    passes = iter(
+        [
+            ({spared: ({1}, 0), stamper: ({7}, 1)}, {'testapp_rider', 'testapp_stagehand'}),
+            ({spared: ({1}, 0), stamper: ({8}, 1)}, {'testapp_rider', 'testapp_stagehand'}),
+            ({spared: ({1}, 0)}, {'testapp_rider'}),
+        ]
+    )
+    monkeypatch.setattr(Command, '_sweep_pass', lambda *a, **k: next(passes))
+
+    out = StringIO()
+    call_command('sweepowned', '--repair', stdout=out, stderr=out)
+
+    # One row, not the three passes' worth of it; and both of the stamper's rows, which really
+    # are distinct.
+    assert 'testapp.Rider (testapp_rider): 1 row(s) live' in out.getvalue()
+    assert 'testapp.Stagehand (testapp_stagehand): 2 row(s) live' in out.getvalue()
+
+
+@pytest.mark.django_db
+def test_a_scoped_run_that_does_not_settle_names_its_scope_as_a_cause(monkeypatch):
+    """The message an operator acts on. A chain of ownership leaving the requested apps is a
+    third cause beside the two it already names, and the pass count it prints is sized over
+    every dependent rather than the scoped walk's own."""
+    monkeypatch.setattr(
+        Command, '_sweep_pass', lambda *a, **k: ({('testapp.Rider', 'x'): ({1}, 1)}, {'x'})
+    )
+
+    with pytest.raises(CommandError) as raised:
+        _sweep('testapp', '--repair')
+
+    assert 'The owned sweep for testapp stamped' in str(raised.value)
+    assert 'a chain of ownership leaving the apps this run was scoped to' in str(raised.value)

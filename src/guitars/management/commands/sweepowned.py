@@ -141,6 +141,42 @@ class Command(BaseCommand):
             )
         return candidates.filter(was_owned)
 
+    def _sweep_pass(self, rule_owners, arms, requested, using, repair):
+        """One walk of every rule-carrying dependent: ``({(label, table): (pks, stamped)}, tables
+        looked at)``. Split out of :meth:`handle` so a repair can run it again -- stamping a
+        dependent can orphan what *it* owns, and the walk is by label, not by ownership."""
+        # Found and stamped together, per entry rather than per run: the re-asked predicate can
+        # spare every row a pass found, and a report line styled off the run's total would call
+        # that a repair.
+
+        # The pks themselves, not their count: a spared row is found again by every later pass,
+        # and adding counts reported one row as three. The caller unions them.
+        found: dict[tuple[str, str], tuple[set, int]] = {}
+        checked: set[str] = set()
+        for dependent, owners in sorted(rule_owners.items(), key=_by_label):
+            if requested and dependent._meta.app_label not in requested:
+                continue
+            dependent_table = dependent._meta.db_table
+            checked.add(dependent_table)
+            arm_pairs = [(arm.owner_model, arm.fk_name) for arm in arms.get(dependent_table, ())]
+            orphans = self._orphans(dependent, arm_pairs, owners, using)
+            pks = list(orphans.values_list('pk', flat=True))
+            if not pks:
+                continue
+            stamped = 0
+            if repair:
+                with transaction.atomic(using=using):
+                    # The predicate re-asked at UPDATE time, not the pks read before it:
+                    # a concurrent transaction committing a live owner in between would
+                    # otherwise have its dependent stamped on a verdict already stale.
+                    stamped = (
+                        self._orphans(dependent, arm_pairs, owners, using)
+                        .filter(pk__in=pks)
+                        .update(_deleted_at=timezone.now())
+                    )
+            found[dependent._meta.label, dependent_table] = (set(pks), stamped)
+        return found, checked
+
     def handle(self, *app_labels, **options):
         using = options['database']
         repair = options['repair']
@@ -155,64 +191,108 @@ class Command(BaseCommand):
         # generator refused a rule still counts here -- it owns what it points at either way.
         arms = owner_arms(django_apps.get_models())
 
-        findings: list[str] = []
-        repaired = 0
+        # ``{(label, table): (pks found, rows stamped)}`` rather than rendered lines, so a table
+        # yielding fresh orphans on a later pass is one entry rather than a second line. Keyed by
+        # model as the report line is; the heading counts tables.
+        findings: dict[tuple[str, str], tuple[set, int]] = {}
         # Tables, not models: the report says "table(s)", and two models can resolve to one.
         checked: set[str] = set()
+        # A pass repairs in model-label order, so a chain whose owner sorts *after* what it owns
+        # leaves a fresh orphan behind it. The trigger settles a chain inside the one statement.
+
+        # This command is for a database holding rules and no trigger, so it runs to a fixpoint
+        # here rather than making the operator re-run to one.
+        passes = max(len(rule_owners), 1) + 1
         # Tenancy bypassed: a policy hiding a live owner would manufacture an orphan and
         # stamp a still-owned row -- what the co-owner tenancy refusal prevents, unrefusable
         # here. Needs a role that sees every tenant; see docs/owned-relations.md.
+        settled = True
         with tenancy_bypassed():
-            for dependent, owners in sorted(rule_owners.items(), key=_by_label):
-                if requested and dependent._meta.app_label not in requested:
-                    continue
-                dependent_table = dependent._meta.db_table
-                checked.add(dependent_table)
-                arm_pairs = [
-                    (arm.owner_model, arm.fk_name) for arm in arms.get(dependent_table, ())
-                ]
-                orphans = self._orphans(dependent, arm_pairs, owners, using)
-                pks = list(orphans.values_list('pk', flat=True))
-                if not pks:
-                    continue
-                findings.append(
-                    f'{dependent._meta.label} ({dependent_table}): {len(pks)} row(s) live '
-                    f'with no live owner and at least one archived owner.'
-                )
-                if repair:
-                    with transaction.atomic(using=using):
-                        # The predicate re-asked at UPDATE time, not the pks read before it:
-                        # a concurrent transaction committing a live owner in between would
-                        # otherwise have its dependent stamped on a verdict already stale.
-                        repaired += (
-                            self._orphans(dependent, arm_pairs, owners, using)
-                            .filter(pk__in=pks)
-                            .update(_deleted_at=timezone.now())
-                        )
+            for _ in range(passes):
+                found, seen = self._sweep_pass(rule_owners, arms, requested, using, repair)
+                checked |= seen
+                # Unioned, not added: a row the re-asked predicate spared is found again by every
+                # later pass, and summing counts reported one such row as one per pass. ``stamped``
+                # does add up -- each pass stamps rows no earlier one did.
+                for entry, (pks, stamped) in found.items():
+                    was_pks, was_stamped = findings.get(entry, (set(), 0))
+                    findings[entry] = (was_pks | pks, was_stamped + stamped)
+                # Report-only describes the database as it stands, so a second look at an
+                # unchanged one would only repeat itself.
+                if not repair or not any(stamped for _, stamped in found.values()):
+                    break
+            else:
+                # Exhausting the bound says the run did not settle, not why: depth beyond it
+                # needs a cycle of ON UPDATE rules, while fresh orphans arriving between passes
+                # need only a concurrent writer -- ordinary on a busy database.
+
+                # Reported, not raised as a diagnosis: every pass committed real repairs, and
+                # naming a cycle the operator may not have would send them after nothing.
+                settled = False
+
+        # Tables, not models, and read once for both the heading and the gate below: the two
+        # say "table(s)" about the same run, and counting the per-model keys in one of them
+        # reported "1 dependent table(s) checked" beside "2 ... hold rows" for one table.
+        tables_with_findings = len({table for _, table in findings})
+        repaired = sum(stamped for _, stamped in findings.values())
 
         self.stdout.write(
             self.style.MIGRATE_HEADING(
                 f'Owned sweep on {connections[using].alias}: '
                 f'{len(checked)} dependent table(s) checked, '
-                f'{len(findings)} with orphaned rows'
+                f'{tables_with_findings} with orphaned rows'
                 + (f', {repaired} row(s) stamped.' if repair else '.')
             )
         )
-        for line in findings:
-            self.stdout.write(self.style.SUCCESS(line) if repair else self.style.WARNING(line))
+        for (label, table), (pks, stamped) in findings.items():
+            line = (
+                f'{label} ({table}): {len(pks)} row(s) live with no live owner and at least '
+                'one archived owner.'
+            )
+            # SUCCESS only where this run really stamped something for that entry: the re-asked
+            # predicate spares a row whose owner came back live in between, and calling that a
+            # repair would have the body read as done while nothing was written.
+            self.stdout.write(
+                self.style.SUCCESS(line) if repair and stamped else self.style.WARNING(line)
+            )
         # Before the gate, and on stderr: a relation this could not name was not swept, and a
         # run that stayed silent about it would report a clean sweep of a table it skipped.
         for line in unresolved:
             self.stderr.write(self.style.WARNING(line))
 
+        # A scoped run settles the apps it was given, never the database: the walk skips
+        # dependents outside them, so stamping one hop of a chain that leaves those apps
+        # orphans the next and no pass of this run can see it.
+        scope = f' for {", ".join(sorted(requested))}' if requested else ''
+
+        if not settled:
+            # Non-zero for the same reason the report-only gate is: the database is not in
+            # the state a clean run leaves it in, and the operator has something to do.
+
+            # Named on this path too, and not only on the success line: this is the message an
+            # operator acts on, and a scoped chain is a third cause beside the two below.
+
+            # The bound is sized over every dependent, not the scoped subset, so a scoped run
+            # reports more passes than its own walk needed.
+            leaving_scope = (
+                ' or for a chain of ownership leaving the apps this run was scoped to'
+                if requested
+                else ''
+            )
+            raise CommandError(
+                f'The owned sweep{scope} stamped {repaired} row(s) but had not settled after '
+                f'{passes} passes. Re-run --repair; if it never settles, check the database '
+                f'for a cycle of ON UPDATE rules, which the generator refuses but a database '
+                f'migrated before that refusal may still hold{leaving_scope}.'
+            )
         if findings and not repair:
             # A CommandError so this works as a CI gate; --repair turns the same finding into
             # a success, the rows having been dealt with.
             raise CommandError(
-                f'{len(findings)} owned dependent table(s) hold rows no owner still holds. '
-                f'Re-run with --repair to stamp them.'
+                f'{tables_with_findings} owned dependent table(s) hold rows no owner still '
+                f'holds. Re-run with --repair to stamp them.'
             )
-        self.stdout.write(self.style.SUCCESS('Owned sweep complete.'))
+        self.stdout.write(self.style.SUCCESS(f'Owned sweep complete{scope}.'))
 
 
 def _by_label(item) -> str:

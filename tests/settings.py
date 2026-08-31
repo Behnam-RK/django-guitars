@@ -24,6 +24,9 @@ DATABASES['pooled'] = {  # noqa: F405
 # MTI chain tenanted one app up. 'makemigrations_override'/'schema_qualified' self-install instead.
 INSTALLED_APPS = [  # noqa: F405
     *INSTALLED_APPS,  # noqa: F405
+    # Harness-only, and deliberately not in core/settings.py or the shipped wheel: it exists
+    # so 'testapp' can declare a GenericRelation, the one referring shape carrying no column.
+    'django.contrib.contenttypes',
     'tests.testapp',
     'tests.legacy_migrations',
     'tests.mti_incremental',

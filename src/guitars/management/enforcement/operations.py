@@ -39,6 +39,7 @@ from guitars.management.enforcement.headers import (
     HEADER_MTI_UPDATED_AT,
     HEADER_SOFT_DELETE,
     HEADER_SOFT_DELETE_OWNED,
+    HEADER_SOFT_DELETE_OWNED_SWEEP,
     HEADER_SOFT_DELETE_RELATED,
     HEADER_SOFT_DELETE_RELATED_VIA,
     HEADER_TENANT_AUTOFILL,
@@ -131,6 +132,26 @@ def _owned_rule_name(dependent_table: str, foreign_key: str) -> str:
     return _identifiers._safe_ident('_'.join(parts))
 
 
+def _owned_sweep_name(owner_table: str, dependent_table: str, foreign_key: str) -> str:
+    """The owned sweep's identifier, for both its function and its trigger. Sized like
+    :func:`_owned_rule_name` over one segment more: a rule is namespaced per table, a function
+    per schema, and two owner tables share a ``(dependent, fk)`` pair -- see the comment."""
+    # ``Kiosk`` and ``Foyer`` both own ``Placard`` through ``placard_id``. Under the rule's
+    # spelling the second CREATE FUNCTION replaces the first's body with a predicate reading
+    # the wrong owner table. Both schemas folded in for the reason the stem folds one.
+    owner_schema, bare_owner = _identifiers._split_qualified('table', owner_table)
+    schema, bare_table = _identifiers._split_qualified('table', dependent_table)
+    parts = [
+        'soft_delete_owned_sweep',
+        *([] if owner_schema is None else [_sized(owner_schema)]),
+        _sized(bare_owner),
+        *([] if schema is None else [_sized(schema)]),
+        _sized(bare_table),
+        _sized(foreign_key),
+    ]
+    return _identifiers._safe_ident('_'.join(parts))
+
+
 def _rule_relation_label(relation: tuple) -> str:
     """A relation as prose for a clash report, phrased like the headers: the other table and
     the column, never which of the two holds it -- the cascade family reads the column off the
@@ -153,6 +174,9 @@ class OperationsMixin:
         _skipped_rule_notes: list[str]
         _rule_name_clashes: list[str]
         _claimed_rule_names: dict[tuple[str, str], tuple]
+        #: Keyed on the name alone, unlike the above: a sweep's function is namespaced per
+        #: schema, so two owner tables can collide on one where their rules cannot.
+        _claimed_sweep_names: dict[str, tuple]
         trigger_function_dependency: tuple[str, str] | None
         parent_trigger_function_dependency: tuple[str, str] | None
         tenant_autofill_dependencies: dict[str, tuple[str, str]]
@@ -792,19 +816,39 @@ class OperationsMixin:
             refs.append(ref)
 
     def _refuse_owned(self, key: tuple[str, str, str] | None, message: str) -> None:
-        """Record an owned-rule refusal, escalating where a rule for *key* is already recorded:
-        refusing emits nothing, so the stale rule stays live and wrong under a green
+        """Record an owned-rule refusal, escalating where anything for *key* is already
+        recorded: refusing emits nothing, so what is live stays live and wrong under a green
         ``--check``, and no command retires it. See ADR 0012."""
         self._skipped_rule_notes.append(message)
-        if key is not None and key in self.existing.soft_delete_owned:
-            dependent_table, owner_table, foreign_key = key
-            self._refusals_over_live_rules.append(
-                f"Owned rule on '{dependent_table}' owned by '{owner_table}' via "
-                f"'{foreign_key}' is refused but already exists in this project's migrations. "
-                'It is still live in any migrated database and no longer correct. Drop it by '
-                f'hand: DROP RULE {_owned_rule_name(dependent_table, foreign_key)} ON '
-                f'{_identifiers._quote_table(owner_table)};'
+        if key is None:
+            return
+        # Both halves, or an operator told to drop the rule leaves the 2.6.0 sweep stamping
+        # the very rows the refusal exists to spare -- and a sweep can outlive its rule, the
+        # two being separate operations with separate identities.
+        recorded = [
+            existing
+            for existing in (
+                self.existing.soft_delete_owned,
+                self.existing.soft_delete_owned_sweep,
             )
+            if key in existing
+        ]
+        if not recorded:
+            return
+        dependent_table, owner_table, foreign_key = key
+        table = _identifiers._quote_table(owner_table)
+        drops = []
+        if key in self.existing.soft_delete_owned:
+            drops.append(f'DROP RULE {_owned_rule_name(dependent_table, foreign_key)} ON {table};')
+        if key in self.existing.soft_delete_owned_sweep:
+            sweep = _owned_sweep_name(owner_table, dependent_table, foreign_key)
+            drops.append(f'DROP TRIGGER {sweep} ON {table}; DROP FUNCTION {sweep}();')
+        self._refusals_over_live_rules.append(
+            f"Owned enforcement on '{dependent_table}' owned by '{owner_table}' via "
+            f"'{foreign_key}' is refused but already exists in this project's migrations. "
+            'It is still live in any migrated database and no longer correct. Drop it by '
+            f'hand: {" ".join(drops)}'
+        )
 
     @staticmethod
     def _cycle_warning(kind: str, subject: str, fires_on: str, updates: str) -> str:
@@ -904,6 +948,20 @@ class OperationsMixin:
                 'column at all -- one model holding a key to both an MTI parent and its child, '
                 'which resolve to one owner table -- renaming cannot help: point both keys at '
                 'one level of the chain, or cascade one of the two in Python.'
+            )
+
+    def _claim_sweep_function_name(self, name: str, relation: tuple) -> None:
+        """:meth:`_claim_rule_name`'s equivalent, keyed on the name **alone**: a function is
+        namespaced per schema, so two relations reaching one name have the second overwrite
+        the first's body, leaving one table's trigger running the other's predicate."""
+        claimed = self._claimed_sweep_names.setdefault(name, relation)
+        if claimed != relation:
+            self._rule_name_clashes.append(
+                f'Owned sweep function {name} is named by both '
+                f'{_rule_relation_label(claimed)} and {_rule_relation_label(relation)}. '
+                'A function is namespaced per schema, so the second replaces the first and '
+                "one of the two tables' triggers would run the other's predicate. Rename a "
+                'column or a table so the two names differ.'
             )
 
     def _cascade_operations(self, model: type[models.Model], *, adopt: bool = False) -> list[str]:
@@ -1199,7 +1257,128 @@ class OperationsMixin:
                 reverse,
                 is_adopt=adopt,
             )
+            self._append_owned_sweep(
+                ops,
+                key=key,
+                dependent=dependent,
+                co_owners=co_owners,
+                owner_table=owner_table,
+                header_owner_table=header_owner_table,
+                ident_owner_table=ident_owner_table,
+                ident_owner_pk=ident_owner_pk,
+                ident_foreign_key=ident_foreign_key,
+                foreign_key=fk_field.column,
+                adopt=adopt,
+            )
         return ops
+
+    def _append_owned_sweep(
+        self,
+        ops: list[str],
+        *,
+        key: tuple[str, str, str],
+        dependent: type[models.Model],
+        co_owners: list[OwnerArm],
+        owner_table: str,
+        header_owner_table: str,
+        ident_owner_table: str,
+        ident_owner_pk: str,
+        ident_foreign_key: str,
+        foreign_key: str,
+        adopt: bool,
+    ) -> None:
+        """The statement-level companion to the rule just emitted (ADR 0014), appended from
+        inside :meth:`_owned_operations` after every refusal that loop applies and against the
+        same *key* -- so which relations carry a sweep *is* which carry a rule."""
+        # No object refs of its own: CREATE TRIGGER names only the table it fires on, and
+        # plpgsql does not resolve a body at CREATE FUNCTION time, so nothing here is a
+        # parse-time reference. The rule's refs, recorded above, order the runtime case.
+        dependent_table = key[0]
+        name = _owned_sweep_name(owner_table, dependent_table, foreign_key)
+        slots = {
+            'function': name,
+            'trigger': name,
+            'table': ident_owner_table,
+            'dependent_table': _identifiers._quote_table(dependent_table),
+            'dependent_primary_key': _identifiers._escape_ident(
+                cast(str, dependent._meta.pk.column)
+            ),
+            'primary_key': ident_owner_pk,
+            'foreign_key': ident_foreign_key,
+            # Stamped here rather than left to the dependent's own trigger: that one carries
+            # ``WHEN (pg_trigger_depth() = 0)`` and this UPDATE runs at depth 1, so without
+            # this the column moves on the rule's path and not on this one.
+            'updated_at_assignment': (
+                _soft_delete._SOFT_DELETE_OWNED_SWEEP_UPDATED_AT
+                if owns_column(dependent, '_updated_at')
+                else ''
+            ),
+            # The same rendered arms the rule carries, correlated against this form's alias
+            # instead of ``old`` -- a plpgsql record variable a table alias may not shadow.
+            'co_owner_guards': self._owned_co_owner_guards(
+                co_owners,
+                owner_table,
+                ident_owner_pk,
+                ident_foreign_key,
+                dependent_table,
+                _identifiers._escape_ident(cast(str, dependent._meta.pk.column)),
+                owner_row='guitars_archived',
+            ),
+            # The same arms again for the pk-rewrite guard, which asks the UPDATE's question
+            # over the *vanished* rows: asking it without them refused a statement whose
+            # dependent a co-owner on another column, or another table, still held.
+            'guard_co_owner_guards': self._owned_co_owner_guards(
+                co_owners,
+                owner_table,
+                ident_owner_pk,
+                ident_foreign_key,
+                dependent_table,
+                _identifiers._escape_ident(cast(str, dependent._meta.pk.column)),
+                owner_row='guitars_before',
+            ),
+        }
+        # Refused rather than escaped, as the autofill slots refuse it: an identifier admits
+        # '$', so a db_table like 'a$$b' would close this template's dollar quoting early and
+        # the generated migration would fail `migrate` with a bare syntax error.
+        for slot, rendered in slots.items():
+            if '$$' in rendered:
+                # No key: ``_refuse_owned``'s escalation would name the *rule* the loop above
+                # just emitted. Only the sweep is refused, so only a recorded sweep is stale,
+                # and that is escalated on its own below.
+                self._refuse_owned(
+                    None,
+                    f"Owned sweep for '{owner_table}.{foreign_key}' -> '{dependent_table}' "
+                    f'skipped: the {slot} {rendered!r} contains "$$", which closes the dollar '
+                    f'quoting this trigger function depends on -- the generated migration '
+                    f'would not apply. Set a db_table / db_column without it.',
+                )
+                if key in self.existing.soft_delete_owned_sweep:
+                    self._refusals_over_live_rules.append(
+                        f"Owned sweep on '{dependent_table}' owned by '{owner_table}' via "
+                        f"'{foreign_key}' is refused but already exists in this project's "
+                        'migrations. It is still live in any migrated database and running a '
+                        f'stale predicate. Drop it by hand: DROP TRIGGER {name} ON '
+                        f'{ident_owner_table}; DROP FUNCTION {name}();'
+                    )
+                return
+        # Claimed only once it is really emitted: a refused sweep holding its name would
+        # report a clash against the one relation that does reach it.
+        self._claim_sweep_function_name(name, key)
+        self._append_if_stale(
+            ops,
+            self.existing.soft_delete_owned_sweep,
+            key,
+            HEADER_SOFT_DELETE_OWNED_SWEEP.format(
+                dependent_table=_identifiers._escape_ident(dependent_table),
+                table=header_owner_table,
+                foreign_key=ident_foreign_key,
+            ),
+            _soft_delete._CREATE_SOFT_DELETE_OWNED_SWEEP.format(**slots),
+            _soft_delete._DROP_SOFT_DELETE_OWNED_SWEEP.format(**slots),
+            replace=_soft_delete._REPLACE_SOFT_DELETE_OWNED_SWEEP.format(**slots),
+            adopt=_soft_delete._ADOPT_SOFT_DELETE_OWNED_SWEEP.format(**slots),
+            is_adopt=adopt,
+        )
 
     def _co_owner_arms(
         self, dependent_table: str, owner_table: str, fk_column: str
@@ -1241,10 +1420,13 @@ class OperationsMixin:
         ident_declared_foreign_key: str,
         dependent_table: str,
         ident_dependent_pk: str,
+        owner_row: str = 'old',
     ) -> str:
         """The rendered co-owner arms, or ``''`` where the dependent is owned from exactly one
         place -- which is what makes that case byte-identical to 2.3.0. Aliases are numbered
         from 1, arm 0 keeping the literal ``guitars_owner`` the template spells out."""
+        # *owner_row* names the row each arm reads the target's key off; defaulting to ``old``
+        # keeps every rule's SQL, and its ``[SQL:...]``, where 2.4.0 left it.
         arms: list[str] = []
         for position, arm in enumerate(co_owners, start=1):
             alias = f'guitars_owner_{position}'
@@ -1258,7 +1440,7 @@ class OperationsMixin:
                 # own live co-owner, or one owning the target through two of its columns holds
                 # the target alive forever.
                 self_exclusion = _soft_delete._SOFT_DELETE_OWNED_CO_OWNER_SELF_EXCLUSION.format(
-                    alias=excluded_alias, primary_key=ident_owner_pk
+                    alias=excluded_alias, primary_key=ident_owner_pk, owner_row=owner_row
                 )
             elif excluded == dependent_table:
                 # An arm taking liveness from the dependent's own table -- a target owning
@@ -1268,6 +1450,7 @@ class OperationsMixin:
                     alias=excluded_alias,
                     primary_key=ident_dependent_pk,
                     foreign_key=ident_declared_foreign_key,
+                    owner_row=owner_row,
                 )
             else:
                 # No row on any other table is going away in this statement.
@@ -1278,6 +1461,7 @@ class OperationsMixin:
                 'foreign_key': _identifiers._escape_ident(arm.fk_column),
                 'declared_foreign_key': ident_declared_foreign_key,
                 'self_exclusion': self_exclusion,
+                'owner_row': owner_row,
             }
             if arm.root_table is None:
                 arms.append(_soft_delete._SOFT_DELETE_OWNED_CO_OWNER_GUARD.format(**shared))

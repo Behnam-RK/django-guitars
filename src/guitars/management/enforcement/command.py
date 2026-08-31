@@ -86,6 +86,7 @@ class Command(OperationsMixin, BaseCommand):
         # no ``--check`` failure -- an app with no migrations of its own is legitimate.
         self._unresolved_reference_notes: list[str] = []
         self._claimed_rule_names: dict[tuple[str, str], tuple] = {}
+        self._claimed_sweep_names: dict[str, tuple] = {}
         # Tables tenancy discovery could not cover, with the reason. Also surfaced.
         self._tenancy_notes: list[str] = []
 

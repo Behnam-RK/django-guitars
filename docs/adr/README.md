@@ -21,3 +21,4 @@ New ADR? Start from [`template.md`](template.md).
 | [`0011`](0011-owner-side-soft-delete-ownership.md) | why soft-delete ownership is a `ForeignKey` subclass rather than a model attribute, and why the last-owner guard is emitted unconditionally (2.3.0) |
 | [`0012`](0012-cross-owner-last-owner-guard.md) | why the last-owner guard carries one arm per owning column across the whole registry, and why that is not a statement-level trigger (2.4.0) |
 | [`0013`](0013-cross-app-migration-dependency-edges.md) | why a generated migration now depends on what its rules name, why the edge points at the creating migration rather than the app leaf, and why `--check` fails on a missing one (2.5.0) |
+| [`0014`](0014-statement-level-owned-sweep.md) | why each owned rule is now paired with a statement-level trigger, why that is additive rather than a replacement, and why the repair command exists beside it (2.6.0) |

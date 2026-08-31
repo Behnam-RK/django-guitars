@@ -59,19 +59,19 @@ still-referenced row fails the deferred constraint at `COMMIT`. Collection runs 
 row spared by a reference itself collected later is picked up later; a `CASCADE` referrer never
 counts, going *with* the row, discounted by **row** rather than relation and at any depth. Queryset
 `hard_delete()` walks neither reverse-FK children nor owned relations. Narrower **per row**, not
-absolutely: the batch being gone by construction, a target the per-statement limit below left *live*
-is still removed — straight to gone, never archived.
+absolutely: the batch being gone by construction, it removes a target the rule merely *archived*.
 
 One thing collection does **not** reach: a `GenericRelation` on an owned target. No foreign-key
 constraint, so it cannot fail at `COMMIT` and rightly does not hold the row back — but nothing
 removes it either: only Phase 1's `Collector` walks `_meta.private_fields`, and an owned row is
 soft-deleted by a *rule*. Delete through the target, which runs the `Collector`.
 
-Two limits the guard does not cover, both by construction:
+Two limits the guard does not cover on its own:
 
-- **Per statement.** PostgreSQL runs an `ON UPDATE` rule's action *before* the original update, so
-  every owner soft-deleted by one statement still reads as live to the others' guards:
-  `Album.objects.filter(press_kit=kit).delete()` leaves `kit` alive. One at a time stamps it.
+- **Per statement — closed in 2.6.0.** A rule's action expands *before* the original update, so owners
+  archived by one statement read as live to each other's guards and nothing ever stamped the target. Each
+  rule now carries an additive sweep, on the same key and refusals; `sweepowned` repairs older databases.
+  Rewriting a live owner's **own pk** to strand its target raises `feature_not_supported`. See [ADR 0014](adr/0014-statement-level-owned-sweep.md).
 - **Per visible row.** Every arm's `NOT EXISTS` is an ordinary `SELECT`, so a
   [tenant policy](tenancy.md) on the table it reads filters it: a live sibling owner in another
   tenant is invisible, the guard reads "last owner", and a still-owned row is stamped — the one place

@@ -126,6 +126,16 @@ settings the enforcement generator reads:
 | `--require-force` | Fail on a table without `FORCE ROW LEVEL SECURITY`. |
 | `--require-match` | Fail on a policy whose predicate no longer matches the models. |
 
+**`sweepowned [app_label ...]`** — repairs owned dependents left live under dead
+owners by the per-statement hole closed in 2.6.0 (see
+[`owned-relations.md`](owned-relations.md)). Scoped by the *dependent's* app.
+Reads owners with tenancy bypassed, so it needs a role that sees every tenant,
+and follows only relations this database actually holds an owned rule for.
+| Flag | Effect |
+| --- | --- |
+| `--database ALIAS` | Database alias to sweep (default `"default"`). |
+| `--repair` | Stamp the rows found. Without it the command reports and exits non-zero, so it works as a CI gate. |
+
 **`makemigrations [app_label ...]`** — Django's own command, overridden to also
 run `makeguitarmigrations` after the schema migrations (unless
 `GUITARS_AUTO_MAKE_MIGRATIONS = False`, or `--empty`/`--dry-run` is passed).

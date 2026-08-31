@@ -31,6 +31,12 @@ _BASELINE = {
     '_RE_SOFT_DELETE_OWNED': re.compile(
         r'# Soft Delete Owned Rule on "([^"]+)" that is owned by "([^"]+)" via "([^"]+)"!'
     ),
+    # Born derived in 2.6.0, baselined in the naive spelling for the same reason as its
+    # rule sibling above -- and because the two headers differ by one token, so the corpus
+    # is where "these scanners do not read each other's operations" is proved on real files.
+    '_RE_SOFT_DELETE_OWNED_SWEEP': re.compile(
+        r'# Soft Delete Owned Sweep on "([^"]+)" that is owned by "([^"]+)" via "([^"]+)"!'
+    ),
     '_RE_MTI_UPDATED_AT': re.compile(r'# MTI Updated at Trigger on "([^"]+)" table'),
     '_RE_MTI_SOFT_DELETE': re.compile(r'# MTI Soft Delete Rule on "([^"]+)" table'),
     '_RE_TENANT_POLICY': re.compile(

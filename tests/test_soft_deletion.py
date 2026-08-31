@@ -366,3 +366,21 @@ class TestTheHardDeletionSwitchCannotLeak:
         band.hard_delete()
 
         assert not Band._all_objects.filter(pk=pk).exists()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_second_hard_delete_still_reaches_an_archived_generic_child():
+    """``bulk_related_objects`` reads through Django's own unfiltered ``_base_manager``, never
+    the ``LiveManager`` that is ``_default_manager`` -- so a generic child an earlier
+    ``delete()`` already archived is still collectable, as ``_rows`` guarantees for the rest."""
+    signboard = Signboard.objects.create(caption='Farewell')
+    scribble = Scribble.objects.create(text='sold out', content_object=signboard)
+    pk = signboard.pk  # Django clears it on delete, as ``hard_delete`` saves it for
+
+    signboard.delete()  # Phase 1's work on its own: both archived, neither row removed
+    assert Scribble._archives.filter(pk=scribble.pk).exists()
+
+    Signboard._all_objects.get(pk=pk).hard_delete()
+
+    assert not Signboard._all_objects.filter(pk=pk).exists()
+    assert not Scribble._all_objects.filter(pk=scribble.pk).exists()

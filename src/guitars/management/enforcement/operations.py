@@ -13,7 +13,7 @@ from django.db import models
 from django.db.migrations.loader import MigrationLoader
 
 from guitars import sql
-from guitars.checks import orphaned_soft_delete_ancestors
+from guitars.checks import refuses_soft_delete_rule
 from guitars.introspection import (
     OwnerArm,
     column_owner,
@@ -454,14 +454,18 @@ class OperationsMixin:
             # --- soft-delete rule: own table vs. MTI redirect-to-owner --- No replace/adopt
             # form: created OR REPLACE, since an instant without one is an instant where
             # DELETE destroys rows.
-            orphan_ancestors = orphaned_soft_delete_ancestors([model])
+
+            # Asked of the column's owner, so a *descendant* of a refused model is refused with
+            # it: it declares nothing itself, and the redirect rule below is ``DO INSTEAD`` --
+            # the same row-keeping, one table further down, dangling at COMMIT just the same.
+            orphan_ancestors = refuses_soft_delete_rule(model)
             if orphan_ancestors:
                 # Re-asked here rather than trusted from ``guitars.E003``: ``--skip-checks``
                 # reaches the generator, and emitting the rule anyway is what makes the shape
                 # abort at COMMIT -- the child's row is kept while the ancestor's is removed.
-                for _, parent in orphan_ancestors:
+                for owner, parent in orphan_ancestors:
                     self._skipped_rule_notes.append(
-                        f"Soft delete rule on '{table}' skipped: '{model.__name__}' declares "
+                        f"Soft delete rule on '{table}' skipped: '{owner.__name__}' declares "
                         f'_deleted_at on its own table while its multi-table-inheritance '
                         f"ancestor '{parent._meta.db_table}' declares none, so the rule would "
                         f"keep this row while the ancestor's unguarded DELETE removes the row "

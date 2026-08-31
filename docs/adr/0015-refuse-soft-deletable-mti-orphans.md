@@ -29,8 +29,8 @@ exactly that shape as a fixture and found it undeletable.
 ## Decision
 
 **Refuse the shape.** `guitars.E003` reports it at `manage.py check`, and the generator re-asks
-the same predicate (`checks.orphaned_soft_delete_ancestors`) and emits no soft-delete rule,
-naming the model on stderr.
+the same question of the column's *owner* (`checks.refuses_soft_delete_rule`, see Consequences)
+and emits no soft-delete rule, naming the model on stderr.
 
 - **An error, not a warning.** The row does not merely go unstamped: the statement aborts, and no
   runtime path in the kit can spare it. A warning would leave a project shipping a model nobody
@@ -75,6 +75,12 @@ dropped rather than shipped.
   rule by hand is what makes the two agree, and the shape has to be removed either way.
 - A project already running this shape gets a hard `check` failure on upgrade. It was already
   unable to delete those rows, so nothing that worked stops working.
+- **The generator's refusal is asked of the column's *owner*, not of the model in front of it**,
+  so a concrete descendant of a refused model is refused with it. Such a descendant declares
+  nothing itself, so it would otherwise fall through to the MTI redirect rule — `DO INSTEAD`, the
+  same row-keeping the refusal exists to withhold, dangling at `COMMIT` one table further down.
+  `guitars.E003` still reports the *declaring* model alone: one finding per root cause, and
+  making that ancestor soft-deletable fixes every descendant with it.
 - `_updated_at` on an MTI ancestor is now unreachable from the owned sweep by construction,
   which is what lets ADR 0014 state the sweep stamps only the dependent's own table.
 - The kit still has no way to make `_deleted_at` and `_updated_at` live on different tables.

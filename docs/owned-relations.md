@@ -62,15 +62,15 @@ absolutely: the batch being gone by construction, it removes a target the rule m
 
 A `GenericRelation` is the one referring shape with no key column. It cannot fail at `COMMIT`, so it rightly never
 holds a row back — and before 2.7.0 nothing removed it either: only Phase 1's `Collector` walked
-`_meta.private_fields`, leaving the child archived and pointing at a gone primary key. Phase 2 walks them too now,
-duck-typed on `bulk_related_objects` as that `Collector` is.
+`_meta.private_fields`, leaving the child archived and pointing at a gone primary key. Phase 2 walks them too now.
 
 Two limits the guard does not cover on its own:
 
 - **Per statement — closed in 2.6.0.** A rule's action expands *before* the original update, so owners archived by
   one statement read as live to each other's guards and nothing ever stamped the target. Each rule now carries an
   additive sweep, on the same key and refusals; `sweepowned` repairs older databases, and `--repair` runs to a
-  fixpoint since 2.7.0. Rewriting a live owner's **own pk** to strand its target raises `feature_not_supported`;
+  fixpoint since 2.7.0 — over the apps it was given, never the database, a scoped walk skipping the next hop of a
+  chain that leaves them. Rewriting a live owner's **own pk** to strand its target raises `feature_not_supported`;
   permuting pks among owners is out of scope. See [ADR 0014](adr/0014-statement-level-owned-sweep.md).
 - **Per visible row.** Every arm's `NOT EXISTS` is an ordinary `SELECT`, so a
   [tenant policy](tenancy.md) on the table it reads filters it: a live sibling owner in another

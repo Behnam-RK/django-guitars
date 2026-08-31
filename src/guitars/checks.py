@@ -8,12 +8,13 @@ from django.apps import apps as django_apps
 from django.core.checks import Error, register
 from django.db import models
 
-from guitars.introspection import owns_column
+from guitars.introspection import column_owner, has_column, owns_column
 
 
 __all__ = [
     'ORPHAN_ANCESTOR_ID',
     'check_soft_deletable_mti_children_have_a_soft_deletable_ancestor',
+    'refuses_soft_delete_rule',
     'register_checks',
 ]
 
@@ -33,8 +34,8 @@ def orphaned_soft_delete_ancestors(
     candidates: list[type[models.Model]],
 ) -> list[tuple[type[models.Model], type[models.Model]]]:
     """``(child, ancestor)`` for every concrete MTI child declaring ``_deleted_at`` on its own
-    table under an ancestor that has none. Shared with the generator, which re-asks it:
-    ``--skip-checks`` reaches the generator and ``hard_delete()`` runs no checks at all."""
+    table under an ancestor that has none -- the *declaring* model alone, one finding per root
+    cause; :func:`refuses_soft_delete_rule` is what covers its descendants."""
     found = []
     for model in candidates:
         if not model._meta.parents or not owns_column(model, '_deleted_at'):
@@ -44,6 +45,24 @@ def orphaned_soft_delete_ancestors(
         # ancestor lacks it. Filtering per parent would be a branch nothing can take.
         found.extend((model, parent) for parent in model._meta.parents)
     return found
+
+
+def refuses_soft_delete_rule(
+    model: type[models.Model],
+) -> list[tuple[type[models.Model], type[models.Model]]]:
+    """``(owner, ancestor)`` for every reason *model* must get no soft-delete rule of any kind
+    -- the generator's own question, re-asked rather than trusted from ``guitars.E003``, which
+    ``--skip-checks`` walks straight past and ``hard_delete()`` never runs at all."""
+    # Asked of the column's **owner**, not of *model*: a concrete child of a refused model
+    # inherits ``_deleted_at``, so it declares nothing of its own and
+    # ``orphaned_soft_delete_ancestors`` passes it over.
+
+    # It would then fall through to the MTI redirect rule -- ``DO INSTEAD``, keeping exactly
+    # the row the refusal exists to let go, its parent-link dangling at ``COMMIT`` all the
+    # same, one table further down.
+    if not has_column(model, '_deleted_at'):
+        return []
+    return orphaned_soft_delete_ancestors([column_owner(model, '_deleted_at')])
 
 
 def check_soft_deletable_mti_children_have_a_soft_deletable_ancestor(

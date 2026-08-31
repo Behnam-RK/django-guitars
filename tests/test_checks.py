@@ -9,7 +9,7 @@ from guitars.checks import (
     ORPHAN_ANCESTOR_ID,
     check_soft_deletable_mti_children_have_a_soft_deletable_ancestor as _check,
 )
-from guitars.checks import orphaned_soft_delete_ancestors
+from guitars.checks import orphaned_soft_delete_ancestors, refuses_soft_delete_rule
 from guitars.management.enforcement.command import Command
 from guitars.models import DutarModel, SetarModel, SoftDeletableModel
 from tests.testapp.models import Arena, Placard, SpotlitPlacard, Venue
@@ -150,3 +150,60 @@ def test_the_generator_refuses_the_rule_rather_than_trusting_the_check():
     assert not emits_a_rule
     assert any('testapp_litgantry' in note for note in command._skipped_rule_notes)
     assert any('aborting at COMMIT' in note for note in command._skipped_rule_notes)
+
+
+def test_the_refusal_reaches_a_descendant_of_the_refused_model():
+    """A concrete child of a refused model declares nothing itself, so the check passes it over
+    -- and it would fall through to the MTI redirect rule, ``DO INSTEAD``, keeping exactly the
+    row the refusal lets go and dangling at COMMIT one table further down."""
+    command = Command()
+    command._skipped_rule_notes.clear()
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Pylon(DutarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class LitPylon(Pylon, SoftDeletableModel):
+            class Meta(SoftDeletableModel.Meta):
+                app_label = 'testapp'
+
+        class NeonPylon(LitPylon):
+            class Meta(SoftDeletableModel.Meta):
+                app_label = 'testapp'
+
+        rendered = ' '.join(command._build_operations(_Config(Pylon, LitPylon, NeonPylon)))
+        return (
+            'MTI Soft Delete Rule on "testapp_neonpylon"' in rendered,
+            orphaned_soft_delete_ancestors([NeonPylon]),
+            [owner.__name__ for owner, _ in refuses_soft_delete_rule(NeonPylon)],
+        )
+
+    emits_a_redirect_rule, declares_the_column, refused_for = _build()
+
+    assert not emits_a_redirect_rule
+    # The check names the *declaring* model alone -- one finding per root cause, and making
+    # that ancestor soft-deletable fixes the descendant with it. The generator asks the wider
+    # question, since ``--skip-checks`` is the path it exists to cover.
+    assert declares_the_column == []
+    assert refused_for == ['LitPylon']
+    assert any(
+        'testapp_neonpylon' in note and 'LitPylon' in note
+        for note in command._skipped_rule_notes
+    )
+
+
+def test_a_model_with_no_deleted_at_is_refused_nothing():
+    """``refuses_soft_delete_rule`` is asked of every model the generator walks, most of which
+    have no ``_deleted_at`` to resolve an owner for."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Turnstile(DutarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        return refuses_soft_delete_rule(Turnstile)
+
+    assert _build() == []

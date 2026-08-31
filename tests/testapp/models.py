@@ -560,6 +560,13 @@ class Scribble(SetarModel):
     was archived and then left behind pointing at a primary key nothing holds."""
 
     text = CharField(max_length=100)
+    # ``CASCADE`` because that is what Django writes for a content-type key, and this is the
+    # shape a consumer copies -- but it is the rule-less Collector cascade ``Merch`` avoids:
+    # ``django_content_type`` carries no rule of ours.
+
+    # So ``remove_stale_contenttypes`` (or any ``ContentType`` delete) has this row kept by its
+    # own soft-delete rule while the row it points at really goes, and the statement aborts at
+    # ``COMMIT``. Reach for ``PROTECT`` if that matters more to you than the convention.
     content_type = ForeignKey('contenttypes.ContentType', on_delete=CASCADE)
     object_id = PositiveBigIntegerField()
     content_object = GenericForeignKey('content_type', 'object_id')

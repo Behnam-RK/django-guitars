@@ -44,12 +44,12 @@ Django deletes child-before-parent, so the parent's own rule no-ops via its `_de
 NULL` guard — cascades fire exactly once, at any depth. `cursor.rowcount` describes the
 *substituted* `UPDATE`, not the `DELETE`.
 
-The **inverse** shape — a child declaring `_deleted_at` while its concrete ancestor
-has none — is **refused** ([`guitars.E003`](adr/0015-refuse-soft-deletable-mti-orphans.md),
-2.7.0): the child's rule would keep its row while the ancestor's unguarded `DELETE`
-removes what it points at. Refusing means no rule at all, so `.delete()` then destroys
-the chain rather than aborting — the check is an `Error` for that reason, and
-`--skip-checks` walks past it.
+The **inverse** shape — a child declaring `_deleted_at` while its concrete ancestor has
+none — is **refused** ([`guitars.E003`](adr/0015-refuse-soft-deletable-mti-orphans.md),
+2.7.0): the child's rule keeps its row while the ancestor's unguarded `DELETE` removes
+what it points at. No rule at all means `.delete()` destroys the chain rather than
+aborting — hence an `Error`, which `--skip-checks` walks past. A concrete descendant is
+refused with it; `E003` names the declaring model alone, whose fix covers them all.
 
 **`_updated_at` — a parent-propagating trigger.** A child-only `QuerySet.update()` touches
 only the child table, so the owner's `_updated_at` would go stale without one:

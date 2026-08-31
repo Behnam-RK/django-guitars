@@ -129,8 +129,10 @@ settings the enforcement generator reads:
 A model declaring `_deleted_at` on its own table under a multi-table-inheritance
 ancestor that has none is refused (`guitars.E003`): its rule would keep the child
 row while the ancestor's unguarded `DELETE` removes what that row points at. The
-generator re-asks the same question and emits no rule, so `.delete()` then destroys
-the chain — the check is an `Error` for that reason. See
+generator re-asks the same question — of the column's *owner*, so a concrete
+descendant is refused with it rather than getting the same `DO INSTEAD` one table
+down — and emits no rule, so `.delete()` then destroys the chain: the check is an
+`Error` for that reason. See
 [ADR 0015](adr/0015-refuse-soft-deletable-mti-orphans.md).
 
 **`sweepowned [app_label ...]`** — repairs owned dependents left live under dead

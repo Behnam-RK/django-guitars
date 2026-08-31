@@ -15,42 +15,40 @@ dependent. ADR 0011 recorded this as an accepted limit and ADR 0012 re-affirmed 
 **fails safe**". Issue #40, from the consumer whose `bundle.pdp_display`/`shop.default_pdp_display`
 pair motivated 0012, asked for it to be closed. Two things in the report change the weighing:
 
-- **The hole is permanent, not deferred.** Once the last owner is archived nothing will ever stamp
-  the dependent again. "Fails safe" holds of the *direction* — a leaked live row rather than an
-  archived owned one — but the state is wrong for ever, and a dependent mirroring an external
-  resource leaves that side unreclaimed.
-- **Ordinary code walks into it.** `QuerySet.delete()` is how Django deletes, and nothing at the
-  declaration site distinguishes it from a loop. `Collector` also batches by model on its own, so a
-  cascade from a third model reaches the same statement without anyone writing a queryset delete.
+- **The hole is permanent, not deferred.** Once the last owner is archived nothing ever stamps the
+  dependent again. "Fails safe" holds of the *direction* — a leaked live row rather than an archived
+  owned one — but the state is wrong for ever, and a dependent mirroring an external resource leaves
+  that side unreclaimed.
+- **Ordinary code walks into it.** `QuerySet.delete()` is how Django deletes, nothing at the
+  declaration site tells it from a loop, and `Collector` batches by model on its own, so a third
+  model's cascade reaches the same statement with nobody writing a queryset delete.
 
 ## Decision
 
 **Each owned rule is paired with an `AFTER UPDATE ... FOR EACH STATEMENT` trigger** re-asking the
 same arms once the statement has settled, over an `OLD TABLE`/`NEW TABLE` transition-table join.
 
-- **Additive, never a replacement.** A statement that archives owners never creates one, so the
-  rule stamps a strict subset of what the sweep does and whichever runs first the other's
-  `_deleted_at IS NULL` makes it a no-op — nothing retired, so 0012's missing machinery is moot.
-- **Emitted from inside `_owned_operations`' own loop**, on the same key and after every refusal
-  that loop applies, so which relations carry a sweep is not a second answer — it *is* the rule's,
-  and `_rule_update_edges`, `rule_update_cycle_edges`, `owned_tenancy_refusals` and `hard_delete()`
-  are untouched. That owned edges would leave that graph was 0012's strongest objection.
+- **Additive, never a replacement.** A statement archiving owners creates none, so the rule stamps a
+  strict subset of the sweep and whichever runs first the other's `_deleted_at IS NULL` makes it a
+  no-op — nothing retired, so 0012's missing rule-retirement machinery is moot.
+- **Emitted from inside `_owned_operations`' own loop**, on the same key and after every refusal it
+  applies, so which relations carry a sweep *is* the rule's answer — `_rule_update_edges`,
+  `rule_update_cycle_edges`, `owned_tenancy_refusals` and `hard_delete()` untouched, and owned edges
+  leaving that graph was 0012's strongest objection.
 - **The arms are spliced in verbatim**, the archived owners aliased into a subquery the templates
   read as `{owner_row}` — the rule passes the literal `old`, so every existing rule still renders
-  byte-identically and no `[SQL:…]` identity moves. The alias may not itself *be* `old`, a plpgsql
-  record variable PostgreSQL will not let it shadow. It selects the **before** image, so the key it
-  reads is `old`'s: off the after image, archiving an owner *and* moving its key in one statement
-  stamped the newly-pointed-at row, skipped the held one, and broke the subset.
+  byte-identically and no `[SQL:…]` identity moves. The alias may not *be* `old`, a plpgsql record
+  variable PostgreSQL will not let it shadow. It selects the **before** image, so the key it reads
+  is `old`'s: off the after image, archiving an owner *and* moving its key stamped the new target,
+  skipped the held one, and broke the subset.
 - **No `WHEN (pg_trigger_depth() = 0)`**, unlike the `updated_at` trigger it mirrors: the sweep's
   `UPDATE` must fire the dependent's sweep in turn, or a chain stops a hop short. Recursion ends on
   `_deleted_at IS NULL`, and a cycle is refused a rule — so a trigger — before either. Running at
   depth 1 is also why it stamps `_updated_at` itself: that trigger's `WHEN` suppresses it there.
 - **The function's name sizes one segment more than the rule's:** a rule is namespaced per table, a
   function per schema, so `Kiosk`/`Foyer` sharing `(Placard, placard_id)` would collide in a body.
-- **No cross-app dependency edges of its own.** `CREATE TRIGGER` names only the table it fires on
-  and PL/pgSQL resolves no function body at `CREATE FUNCTION` time, so nothing here is the
-  parse-time reference [ADR 0013](0013-cross-app-migration-dependency-edges.md) exists for; the
-  rule's refs, recorded for the same relation in one pass, order the runtime case anyway.
+- **No cross-app dependency edges of its own.** `CREATE TRIGGER` names only its own table and
+  PL/pgSQL resolves no body at `CREATE FUNCTION` time, so nothing here is a parse-time reference ([ADR 0013](0013-cross-app-migration-dependency-edges.md)); the rule's refs order the runtime case.
 - **`sweepowned` repairs what is already lost**, the trigger reaching no database that leaked
   before it. It follows no refused relation, and none the database holds no rule for — what the
   generator would emit *today* is the wrong question. Its predicate is re-asked inside the `UPDATE`,
@@ -76,23 +74,26 @@ pre-2.6.0 database wrong with no way back.
 ## Consequences
 
 **Accepted costs.**
-- A new operation family: header, derived scanner, container, name family, corpus baseline — the
-  bulk of the change, smaller than 0012 estimated: the owned SQL templates were private already.
-- One `CREATE FUNCTION` and `CREATE TRIGGER` per owned relation, plus a statement-level trigger
-  per `UPDATE` on an owner table, matching nothing where the rule already stamped the row.
+- A new operation family: header, scanner, container, name family, corpus baseline — the bulk of
+  the change, smaller than 0012 estimated: the owned SQL templates were private already.
+- One `CREATE FUNCTION`/`CREATE TRIGGER` per owned relation, and a statement-level trigger per `UPDATE` on an owner table, matching nothing where the rule already stamped.
 - A `db_table` or column containing `$$` is **refused**, not escaped: it closes the body's dollar
-  quoting and `migrate` would fail on a syntax error. The sweep alone is skipped, the rule beside
-  it untouched, so only a sweep already recorded is named to drop by hand.
+  quoting and `migrate` would fail. Only the sweep is skipped, so only a recorded one is named to
+  drop by hand.
 - `hard_delete()`'s behaviour is unchanged, its *intermediate* state is not: a target whose owners
   one `UPDATE` archived is archived in Phase 1 and removed by Phase 2, not live straight to gone.
-- `sweepowned` reads with tenancy bypassed and needs a role that sees every tenant: through a
-  policy a hidden live owner would manufacture an orphan, unrefusable in Python.
+  `sweepowned` needs a role seeing every tenant, a policy hiding a live owner manufacturing an
+  orphan Python cannot refuse.
 - A statement rewriting a **live owning row's own pk**, leaving its target unowned, is **refused**
   (`feature_not_supported`): the transition tables have no other row identity. Django never does.
+- A statement that **permutes** primary keys among owning rows is out of scope and undetectable:
+  every before-key is still in the after image, so the guard sees no vanished row and the join
+  pairs each before-row with another's. `QuerySet.update()` rejects `pk=`, so this too is raw SQL.
+- `_updated_at` is stamped only where the dependent's **own** table holds it. The one shape putting
+  it on an MTI ancestor is refused outright since 2.7.0 ([ADR 0015](0015-refuse-soft-deletable-mti-orphans.md)), so the sweep never meets one.
 
-**Reversibility.** Low, as 0011 and 0012 describe: the SQL is inlined, so a database keeps what it
-was migrated with until a regeneration and a `migrate`, and dropping the family later leaves every
-migrated project's triggers live, no command retiring one.
+**Reversibility.** Low, as 0011 and 0012 describe: the SQL is inlined, so a database keeps what it was
+migrated with until a regeneration and a `migrate`, and dropping the family leaves every migrated project's triggers live, no command retiring one.
 
 ## Related
 

@@ -21,21 +21,18 @@ class Orchestra(Ensemble):          # its own table
 
 ## Why it needs special handling at all
 
-`_updated_at` and `_deleted_at` physically live on the **ancestor that
-declares them** — the child's table has neither column, so a rule/trigger
-referencing them there is invalid SQL, and `hasattr(Child, "_deleted_at")` is
-`True` and useless, a question about Python attributes, not columns.
+`_updated_at` and `_deleted_at` physically live on the **ancestor that declares them** — the
+child's table has neither column, so a rule/trigger referencing them there is invalid SQL, and
+`hasattr(Child, "_deleted_at")` is `True` and useless: Python attributes, not columns.
 
-Everything below resolves the **owner** — the concrete model whose physical
-table declares the column — via `model._meta.get_field(name).model` (not
-*parent*: the column may live two tables up). Every table in an MTI chain
-shares one primary-key **value** via a `OneToOneField(parent_link=True)`,
-a correlated `WHERE owner_pk = child_pk`.
+Everything below resolves the **owner** — the concrete model whose physical table declares
+the column — via `model._meta.get_field(name).model` (not *parent*: the column may live two
+tables up). Every table in a chain shares one primary-key **value** via a
+`OneToOneField(parent_link=True)`, a correlated `WHERE owner_pk = child_pk`.
 
 ## What each child table gets
 
-**Soft deletion — a redirect rule** preserves the child row and stamps the
-**owner**:
+**Soft deletion — a redirect rule** preserves the child row and stamps the **owner**:
 
 ```sql
 CREATE RULE soft_delete AS ON DELETE TO <child>
@@ -43,13 +40,19 @@ CREATE RULE soft_delete AS ON DELETE TO <child>
                 WHERE <owner_pk> = old.<child_pk> AND _deleted_at IS NULL);
 ```
 
-Django deletes child-before-parent, so the parent's own rule no-ops via its
-`_deleted_at IS NULL` guard — cascades fire exactly once, at any depth.
-`cursor.rowcount` describes the *substituted* `UPDATE`, not the `DELETE`.
+Django deletes child-before-parent, so the parent's own rule no-ops via its `_deleted_at IS
+NULL` guard — cascades fire exactly once, at any depth. `cursor.rowcount` describes the
+*substituted* `UPDATE`, not the `DELETE`.
 
-**`_updated_at` — a parent-propagating trigger.** A child-only
-`QuerySet.update()` touches only the child table, so the owner's
-`_updated_at` would go stale without one:
+The **inverse** shape — a child declaring `_deleted_at` while its concrete ancestor
+has none — is **refused** ([`guitars.E003`](adr/0015-refuse-soft-deletable-mti-orphans.md),
+2.7.0): the child's rule would keep its row while the ancestor's unguarded `DELETE`
+removes what it points at. Refusing means no rule at all, so `.delete()` then destroys
+the chain rather than aborting — the check is an `Error` for that reason, and
+`--skip-checks` walks past it.
+
+**`_updated_at` — a parent-propagating trigger.** A child-only `QuerySet.update()` touches
+only the child table, so the owner's `_updated_at` would go stale without one:
 
 ```sql
 CREATE TRIGGER updated_at_trigger AFTER UPDATE ON <child>
@@ -58,15 +61,14 @@ CREATE TRIGGER updated_at_trigger AFTER UPDATE ON <child>
 ```
 
 `FOR EACH STATEMENT` (not per row) and `pg_trigger_depth() = 0` (no re-entry).
-Schema-qualified `db_table` is supported: the function takes the parent's
-schema/table as two separate arguments (`%I` can't render a two-part name)
-and still understands the older three-argument form, frozen per-trigger at
-`CREATE TRIGGER` time. See `tests/test_schema_qualified.py`. The own-table
-(non-MTI) trigger has the same constraint via `search_path`: a table outside
-the default (`"$user", public`) needs it included to find its own row.
+Schema-qualified `db_table` is supported: the function takes the parent's schema and table as
+two arguments (`%I` can't render a two-part name) and still understands the older
+three-argument form, frozen per-trigger at `CREATE TRIGGER` time — see
+`tests/test_schema_qualified.py`. The own-table (non-MTI) trigger has the same constraint via
+`search_path`: a table outside the default (`"$user", public`) needs it to find its own row.
 
-**Tenancy — an owner-join policy**, correlated to the owner rather than
-relying on the ancestor's policy:
+**Tenancy — an owner-join policy**, correlated to the owner rather than relying on the
+ancestor's policy:
 
 ```sql
 EXISTS (SELECT 1 FROM <owner> AS o
@@ -74,26 +76,24 @@ EXISTS (SELECT 1 FROM <owner> AS o
           AND o.<tenant_col>::text = ANY(…))
 ```
 
-"Every query joins the parent" is false, which is why `set_parent_updated_at`
-exists, reached the other way. See [ADR 0003](adr/0003-mti-owner-join-policy.md).
+"Every query joins the parent" is false, which is why `set_parent_updated_at` exists,
+reached the other way. See [ADR 0003](adr/0003-mti-owner-join-policy.md).
 
 ## Cascades and hard deletion
 
-- **Cascades *into* an MTI child** attach to the target's **owner** table
-  (the FK column holds the shared PK); the parent-link itself is skipped as
-  structural, already handled by the redirect rule — an FK reached *through*
-  MTI is the same physical column.
-- **`hard_delete()`** DFS from the MTI **root** at the instance level (the
-  parent-link reverse relation is itself `CASCADE`), collecting every table
-  in the chain child-first; at the queryset level it deletes the whole chain
-  leaf-to-root by shared PK, leaving no orphaned ancestor row.
+- **Cascades *into* an MTI child** attach to the target's **owner** table (the FK column
+  holds the shared PK); the parent-link itself is skipped as structural, already handled by
+  the redirect rule — an FK reached *through* MTI is the same physical column.
+- **`hard_delete()`** DFS from the MTI **root** at the instance level (the parent-link
+  reverse relation is itself `CASCADE`), collecting every table in the chain child-first; at
+  the queryset level it deletes the whole chain leaf-to-root by shared PK.
 - **Known limitation:** a *cascade* FK on a child's own table while `_deleted_at`
   lives farther up isn't supported — it warns instead of emitting broken SQL. An
   [`OwningForeignKey`](owned-relations.md#mti) gets no rule either, but is read.
 
-`tests/testapp/models.py` carries `Ensemble → Orchestra → ChamberOrchestra`
-(untenanted) and `Tour → WorldTour → StadiumTour` (tenanted, owner-join two
-tables up); `tests/test_mti.py`/`tests/test_tenancy_models.py` exercise them.
+`tests/testapp/models.py` carries `Ensemble → Orchestra → ChamberOrchestra` (untenanted)
+and `Tour → WorldTour → StadiumTour` (tenanted, owner-join two tables up);
+`tests/test_mti.py`/`tests/test_tenancy_models.py` exercise them.
 
 ## Related
 

@@ -17,8 +17,8 @@ neither covered nor refused. The generator emitted a *plain* rule on the child, 
 really removed the row the surviving child points at. The statement then aborts at `COMMIT`:
 
 ```
-update or delete on table "app_parent" violates foreign key constraint
-"app_child_parent_ptr_id_… _fk_app_parent_id" on table "app_child"
+update or delete on table "testapp_marquee" violates foreign key constraint
+"testapp_neonmarquee_marquee_ptr_id_87f804c2_fk_testapp_m" on table "testapp_neonmarquee"
 ```
 
 Nothing reached this before 2.7.0 because the ladder hands out `_deleted_at` and `_updated_at`
@@ -60,6 +60,19 @@ dropped rather than shipped.
 
 ## Consequences
 
+- **The failure direction moves from aborting to destroying, and `guitars.E003` is the only thing
+  holding it.** Refusing means no rule on the child's table, so `Collector`'s two `DELETE`s both
+  execute and the whole chain goes — where before 2.7.0 the statement aborted and lost nothing.
+  The check is an `Error`, so `manage.py check`, `migrate` and `runserver` all refuse to start
+  while such a model exists; `--skip-checks` walks past that, and so does any code path that never
+  runs checks. This is the one place in the kit where a refusal fails toward destroying data, and
+  it is accepted only because the shape cannot be *made* to work without the new operation family
+  below, and because nothing that previously succeeded starts failing.
+- It is also **asymmetric between a fresh and an incrementally-migrated database**, which is what
+  [ADR 0006](0006-inline-generated-migration-sql.md) otherwise exists to prevent: no command
+  retires a rule, so a project that already migrated keeps the old rule and goes on aborting,
+  while a fresh `migrate` of the identical history gets no rule and destroys. Dropping the live
+  rule by hand is what makes the two agree, and the shape has to be removed either way.
 - A project already running this shape gets a hard `check` failure on upgrade. It was already
   unable to delete those rows, so nothing that worked stops working.
 - `_updated_at` on an MTI ancestor is now unreachable from the owned sweep by construction,

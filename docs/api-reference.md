@@ -126,6 +126,13 @@ settings the enforcement generator reads:
 | `--require-force` | Fail on a table without `FORCE ROW LEVEL SECURITY`. |
 | `--require-match` | Fail on a policy whose predicate no longer matches the models. |
 
+A model declaring `_deleted_at` on its own table under a multi-table-inheritance
+ancestor that has none is refused (`guitars.E003`): its rule would keep the child
+row while the ancestor's unguarded `DELETE` removes what that row points at. The
+generator re-asks the same question and emits no rule, so `.delete()` then destroys
+the chain — the check is an `Error` for that reason. See
+[ADR 0015](adr/0015-refuse-soft-deletable-mti-orphans.md).
+
 **`sweepowned [app_label ...]`** — repairs owned dependents left live under dead
 owners by the per-statement hole closed in 2.6.0 (see
 [`owned-relations.md`](owned-relations.md)). Scoped by the *dependent's* app.

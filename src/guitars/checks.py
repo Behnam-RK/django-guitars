@@ -8,7 +8,7 @@ from django.apps import apps as django_apps
 from django.core.checks import Error, register
 from django.db import models
 
-from guitars.introspection import has_column, owns_column
+from guitars.introspection import owns_column
 
 
 __all__ = [
@@ -39,9 +39,10 @@ def orphaned_soft_delete_ancestors(
     for model in candidates:
         if not model._meta.parents or not owns_column(model, '_deleted_at'):
             continue
-        for parent in model._meta.parents:
-            if not has_column(parent, '_deleted_at'):
-                found.append((model, parent))
+        # No parent of such a model can carry ``_deleted_at`` itself: Django rejects a local
+        # field clashing with a base's, at any depth, so owning it locally already means every
+        # ancestor lacks it. Filtering per parent would be a branch nothing can take.
+        found.extend((model, parent) for parent in model._meta.parents)
     return found
 
 

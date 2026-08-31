@@ -508,16 +508,22 @@ class SoftDeletableModel(Model):
 
                 # Duck-typed on ``bulk_related_objects``, as that ``Collector`` is, so nothing
                 # here imports ``contenttypes`` -- an app a consumer need not have installed.
-                instances = None
-                for private in model._meta.private_fields:
-                    if not hasattr(private, 'bulk_related_objects'):
-                        continue
-                    if instances is None:
-                        instances = list(_rows(model, using).filter(pk__in=new_pks))
-                    generic_pks = set(
-                        private.bulk_related_objects(instances, using).values_list('pk', flat=True)
-                    )
-                    _collect(mti_root(private.related_model), generic_pks)
+                generic = [
+                    private
+                    for private in model._meta.private_fields
+                    if hasattr(private, 'bulk_related_objects')
+                ]
+                if generic:
+                    # Read once for the whole set rather than per relation: the rows are the
+                    # same either way, and this is the only place the walk needs instances.
+                    instances = list(_rows(model, using).filter(pk__in=new_pks))
+                    for private in generic:
+                        generic_pks = set(
+                            private.bulk_related_objects(instances, using).values_list(
+                                'pk', flat=True
+                            )
+                        )
+                        _collect(mti_root(private.related_model), generic_pks)
                 if model not in model_order:
                     model_order.append(model)
 

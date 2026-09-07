@@ -3,6 +3,7 @@ A shape it emits a rule for anyway is worse than one it refuses: the rule keeps 
 row while the ancestor's unguarded DELETE removes what that row points at."""
 
 from django.core.checks import registry
+from django.db.models import AutoField, Model
 from django.test.utils import isolate_apps
 
 from guitars.checks import (
@@ -189,8 +190,7 @@ def test_the_refusal_reaches_a_descendant_of_the_refused_model():
     assert declares_the_column == []
     assert refused_for == ['LitPylon']
     assert any(
-        'testapp_neonpylon' in note and 'LitPylon' in note
-        for note in command._skipped_rule_notes
+        'testapp_neonpylon' in note and 'LitPylon' in note for note in command._skipped_rule_notes
     )
 
 
@@ -207,3 +207,122 @@ def test_a_model_with_no_deleted_at_is_refused_nothing():
         return refuses_soft_delete_rule(Turnstile)
 
     assert _build() == []
+
+
+def test_a_child_joining_a_soft_deletable_parent_to_a_plain_one_is_an_error():
+    """Two concrete parents: the child *inherits* ``_deleted_at`` from one and still sits over
+    the other, which ``Collector`` deletes unguarded all the same. Owning the column is the
+    special case; carrying it over a plain parent is the shape."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        # Two concrete parents need distinct primary keys and no shared metadata columns,
+        # which is why the plain side is a bare ``Model`` here rather than a ``DutarModel``.
+        class Plinth(Model):
+            plinth_id = AutoField(primary_key=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Statue(SetarModel):
+            statue_id = AutoField(primary_key=True)
+
+            class Meta(SetarModel.Meta):
+                app_label = 'testapp'
+
+        class MountedStatue(Plinth, Statue):
+            class Meta:  # not SetarModel.Meta: its index names a column not local here
+                app_label = 'testapp'
+
+        assert MountedStatue.check() == []  # Django itself takes the shape
+        errors = _check([_Config(MountedStatue)])
+        return (
+            [(e.id, e.obj is MountedStatue, Plinth._meta.label in e.msg) for e in errors],
+            any(Statue._meta.label in e.msg for e in errors),  # the soft-deletable side is fine
+            [
+                (child.__name__, parent.__name__)
+                for child, parent in refuses_soft_delete_rule(MountedStatue)
+            ],
+            'inherits _deleted_at' in errors[0].hint and 'abstract' in errors[0].hint,
+        )
+
+    assert _build() == (
+        [(ORPHAN_ANCESTOR_ID, True, True)],
+        False,
+        [('MountedStatue', 'Plinth')],
+        True,
+    )
+
+
+def test_the_generator_refuses_the_joining_shape_and_its_descendant():
+    """Both halves passed this shape over: the check gated on *owning* the column, and the
+    generator asked only the column's owner, which has no plain parent. The redirect rule it
+    then emitted keeps the child's row while the plain parent's DELETE removes what it points at."""
+    command = Command()
+    command._skipped_rule_notes.clear()
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Pedestal(Model):
+            pedestal_id = AutoField(primary_key=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Bust(SetarModel):
+            bust_id = AutoField(primary_key=True)
+
+            class Meta(SetarModel.Meta):
+                app_label = 'testapp'
+
+        class MountedBust(Pedestal, Bust):
+            class Meta:  # not SetarModel.Meta: its index names a column not local here
+                app_label = 'testapp'
+
+        class GildedBust(MountedBust):
+            class Meta:  # not SetarModel.Meta: its index names a column not local here
+                app_label = 'testapp'
+
+        rendered = ' '.join(
+            command._build_operations(_Config(Pedestal, Bust, MountedBust, GildedBust))
+        )
+        return (
+            'MTI Soft Delete Rule on "testapp_mountedbust"' in rendered,
+            'MTI Soft Delete Rule on "testapp_gildedbust"' in rendered,
+            'Soft Delete Rule on "testapp_bust"' in rendered,  # the healthy parent keeps its own
+        )
+
+    assert _build() == (False, False, True)
+    assert any(
+        'testapp_gildedbust' in note and 'MountedBust' in note
+        for note in command._skipped_rule_notes
+    )
+
+
+def test_the_hint_names_the_root_of_the_chain_rather_than_the_next_hop():
+    """Making the immediate parent soft-deletable under a plain grandparent moves the orphan up
+    one table and earns a second E003; the hint has to name the move that ends it."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Footing(DutarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Column(Footing):
+            class Meta:
+                app_label = 'testapp'
+
+        class LitColumn(Column, SoftDeletableModel):
+            class Meta(SoftDeletableModel.Meta):
+                app_label = 'testapp'
+
+        (error,) = _check([_Config(LitColumn)])
+        return (
+            Column._meta.label in error.msg,  # the parent it meets is still what the message names
+            Footing._meta.label in error.hint,
+            f"'{Column._meta.label}' soft-deletable" in error.hint,
+            LitColumn._meta.label in error.hint,  # and the declaration to drop
+        )
+
+    assert _build() == (True, True, False, True)

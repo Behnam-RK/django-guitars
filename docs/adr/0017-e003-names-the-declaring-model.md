@@ -6,10 +6,11 @@
 
 ## Context
 
-[ADR 0015](0015-refuse-soft-deletable-mti-orphans.md) refuses a model declaring `_deleted_at` on
-its own table under a concrete MTI ancestor that has none. As first written, both halves of the
-refusal asked the same question — `orphaned_soft_delete_ancestors`, which gates on
-`owns_column(model, '_deleted_at')`.
+[ADR 0015](0015-refuse-soft-deletable-mti-orphans.md) refuses a model carrying `_deleted_at`
+over a concrete MTI parent that has none. As first written, both halves of the refusal asked the
+same question — `orphaned_soft_delete_ancestors`, which gated on `owns_column(model,
+'_deleted_at')` (now `has_column`, so a child joining a soft-deletable parent to a plain one
+counts too — it inherits the column and still sits over the plain table).
 
 That gate names only the model that *declares* the column. A concrete child of such a model
 inherits `_deleted_at`, so `owns_column` is false, the predicate passes it over, and it fell
@@ -21,9 +22,9 @@ its own parent-link, one table further down than the shape 0015 describes.
 ## Decision
 
 **Split the two questions.** The generator asks `checks.refuses_soft_delete_rule(model)`, which
-re-asks `orphaned_soft_delete_ancestors` of `column_owner(model, '_deleted_at')` rather than of
-the model in front of it, so a descendant is refused with its declaring ancestor. `guitars.E003`
-keeps asking the narrow question and reports the **declaring model alone**.
+re-asks `orphaned_soft_delete_ancestors` of the model *and every ancestor* (`_meta.get_parent_list()`)
+rather than of the model alone, so a descendant is refused with the ancestor that meets the plain
+parent. `guitars.E003` keeps asking the narrow question and reports **that model alone**.
 
 ## Why
 
@@ -38,7 +39,7 @@ soft-deletable. That fixes every descendant at once. Reporting `Neon` as well wo
 findings for a single root cause and invite fixing them one at a time — which for a descendant
 means declaring `_deleted_at` on *it*, creating a second orphan rather than resolving the first.
 
-The generator's stderr note names the *owner*, not the model whose rule was skipped, so an
+The generator's stderr note names the skipped table *and* the owner declaring the column, so an
 operator who reaches the generator without the check still gets pointed at the same fix.
 
 ## Consequences

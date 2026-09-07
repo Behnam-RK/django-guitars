@@ -455,9 +455,9 @@ class OperationsMixin:
             # form: created OR REPLACE, since an instant without one is an instant where
             # DELETE destroys rows.
 
-            # Asked of the column's owner, so a *descendant* of a refused model is refused with
-            # it: it declares nothing itself, and the redirect rule below is ``DO INSTEAD`` --
-            # the same row-keeping, one table further down, dangling at COMMIT just the same.
+            # Asked of the whole chain above, so a *descendant* of a refused model is refused
+            # with it: it meets no plain parent itself, and the redirect rule below is ``DO
+            # INSTEAD`` -- the same row-keeping, one table further down, dangling at COMMIT.
             orphan_ancestors = refuses_soft_delete_rule(model)
             if orphan_ancestors:
                 # Re-asked here rather than trusted from ``guitars.E003``: ``--skip-checks``
@@ -465,11 +465,11 @@ class OperationsMixin:
                 # abort at COMMIT -- the child's row is kept while the ancestor's is removed.
                 for owner, parent in orphan_ancestors:
                     self._skipped_rule_notes.append(
-                        f"Soft delete rule on '{table}' skipped: '{owner.__name__}' declares "
-                        f'_deleted_at on its own table while its multi-table-inheritance '
-                        f"ancestor '{parent._meta.db_table}' declares none, so the rule would "
-                        f"keep this row while the ancestor's unguarded DELETE removes the row "
-                        f'it points at, aborting at COMMIT. Make the ancestor soft-deletable.'
+                        f"Soft delete rule on '{table}' skipped: '{owner.__name__}' carries "
+                        f'_deleted_at while its multi-table-inheritance ancestor '
+                        f"'{parent._meta.db_table}' declares none, so the rule would keep this "
+                        f"row while the ancestor's unguarded DELETE removes the row it points "
+                        f'at, aborting at COMMIT. See guitars.E003 for the fix.'
                     )
             elif owns_column(model, '_deleted_at'):
                 qualified_table = _identifiers._quote_table(table)

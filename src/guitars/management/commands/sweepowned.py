@@ -280,7 +280,7 @@ class Command(BaseCommand):
                 else ''
             )
             raise CommandError(
-                f'The owned sweep{scope} stamped {repaired} row(s) but had not settled after '
+                f'The owned sweep{scope} stamped {repaired} row(s) but did not settle after '
                 f'{passes} passes. Re-run --repair; if it never settles, check the database '
                 f'for a cycle of ON UPDATE rules, which the generator refuses but a database '
                 f'migrated before that refusal may still hold{leaving_scope}.'

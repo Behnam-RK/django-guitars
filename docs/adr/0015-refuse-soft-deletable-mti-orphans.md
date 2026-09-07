@@ -11,8 +11,8 @@ covers that with two rules: a model owning `_deleted_at` gets a soft-delete rule
 table, and a child inheriting the column gets the **redirect** rule, which stamps the ancestor
 instead. Both assume the column lives at or above the level being deleted.
 
-The inverse shape — a child declaring `_deleted_at` while its concrete ancestor has none — was
-neither covered nor refused. The generator emitted a *plain* rule on the child, so the child's
+The inverse shape — a child carrying `_deleted_at`, declared on its own table or inherited from
+a second concrete parent, while a concrete ancestor has none — was neither covered nor refused. The generator emitted a *plain* rule on the child, so the child's
 `DELETE` became an `UPDATE` and its row survived, while the ancestor's `DELETE` met no rule and
 really removed the row the surviving child points at. The statement then aborts at `COMMIT`:
 
@@ -68,22 +68,26 @@ dropped rather than shipped.
   runs checks. This is the one place in the kit where a refusal fails toward destroying data, and
   it is accepted only because the shape cannot be *made* to work without the new operation family
   below, and because nothing that previously succeeded starts failing.
-- It is also **asymmetric between a fresh and an incrementally-migrated database**, which is what
-  [ADR 0006](0006-inline-generated-migration-sql.md) otherwise exists to prevent: no command
-  retires a rule, so a project that already migrated keeps the old rule and goes on aborting,
-  while a fresh `migrate` of the identical history gets no rule and destroys. Dropping the live
-  rule by hand is what makes the two agree, and the shape has to be removed either way.
+- It destroys only where **no migration in the history ever created the rule** — a shape first
+  generated under 2.7.0 with `--skip-checks`. A project that generated the rule before 2.7.0 keeps
+  it: the generator emits no `DROP` for a rule it now refuses, and the old migration carries its
+  SQL inline ([ADR 0006](0006-inline-generated-migration-sql.md)), so a fresh `migrate` of that
+  history recreates the same rule and aborts exactly as the incrementally-migrated database does.
+  The two agree either way; the shape has to be removed either way.
 - A project already running this shape gets a hard `check` failure on upgrade. It was already
   unable to delete those rows, so nothing that worked stops working.
-- **The generator's refusal is asked of the column's *owner*, not of the model in front of it**,
-  so a concrete descendant of a refused model is refused with it. Such a descendant declares
-  nothing itself, so it would otherwise fall through to the MTI redirect rule — `DO INSTEAD`, the
+- **The generator's refusal is asked of the whole chain above the model, not of the model alone**,
+  so a concrete descendant of a refused model is refused with it. Such a descendant meets no plain
+  parent itself, so it would otherwise fall through to the MTI redirect rule — `DO INSTEAD`, the
   same row-keeping the refusal exists to withhold, dangling at `COMMIT` one table further down.
-  `guitars.E003` still reports the *declaring* model alone: one finding per root cause, and
-  making that ancestor soft-deletable fixes every descendant with it.
+  `guitars.E003` still reports only the model where the column first meets a plain direct parent
+  — declaring it, or joining a soft-deletable parent to a plain one (found in review: gating on
+  `owns_column` passed the second over, and the generator gave it the redirect rule). One finding
+  per root cause, and the hint names the chain's root: making the next hop soft-deletable under a
+  plain grandparent only moves the orphan up one table.
 - `_updated_at` on an MTI ancestor is now unreachable from the owned sweep by construction,
   which is what lets ADR 0014 state the sweep stamps only the dependent's own table.
-- The kit still has no way to make `_deleted_at` and `_updated_at` live on different tables.
+- The kit still has no way to put `_deleted_at` on a table *below* the one holding `_updated_at`.
   That is a limitation of the ladder, recorded here rather than worked around.
 
 ## Related

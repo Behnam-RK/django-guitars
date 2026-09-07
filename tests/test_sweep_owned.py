@@ -209,7 +209,7 @@ def test_a_repair_that_does_not_settle_reports_rather_than_diagnosing_a_cycle(mo
     with pytest.raises(CommandError) as raised:
         _sweep('--repair')
 
-    assert 'had not settled' in str(raised.value)
+    assert 'did not settle' in str(raised.value)
     assert 'Re-run --repair' in str(raised.value)
     # The cycle is named as one possibility among two, never as the finding.
     assert 'if it never settles' in str(raised.value)

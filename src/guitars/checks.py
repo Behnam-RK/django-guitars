@@ -74,9 +74,15 @@ def refuses_soft_delete_rule(
 def _hint(child: type[models.Model], parent: type[models.Model]) -> str:
     """Name the move that resolves the chain, not the next hop of it: making the immediate
     parent soft-deletable under a plain grandparent only moves the orphan up one table."""
-    # Every plain root above *parent*, not ``mti_root``'s first: a diamond of two plain roots can
-    # give only one of them the column, the other then meeting it as the join shape below.
-    roots = [m for m in (parent, *parent._meta.get_parent_list()) if not m._meta.parents]
+    # Every plain root above *child*, not only above this *parent* and not ``mti_root``'s first:
+    # two plain roots -- a diamond, or two direct parents -- can give only one of them the column,
+    # the other then meeting it as the join shape below. Ordered and deduplicated by ``dict``.
+    plain = [p for p in child._meta.parents if not has_column(p, '_deleted_at')]
+    roots = list(
+        dict.fromkeys(
+            m for p in plain for m in (p, *p._meta.get_parent_list()) if not m._meta.parents
+        )
+    )
     named = ', '.join(f"'{root._meta.label}'" for root in roots)
     if owns_column(child, '_deleted_at') and len(roots) == 1:
         return (

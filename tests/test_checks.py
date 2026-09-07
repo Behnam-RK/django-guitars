@@ -161,6 +161,8 @@ def test_the_generator_refuses_the_rule_rather_than_trusting_the_check():
     assert not emits_a_rule
     assert any('testapp_litgantry' in note for note in command._skipped_rule_notes)
     assert any('aborting at COMMIT' in note for note in command._skipped_rule_notes)
+    # The --skip-checks operator is the one reader for whom the live outcome is destruction.
+    assert any('destroys the chain' in note for note in command._skipped_rule_notes)
 
 
 def test_the_refusal_reaches_a_descendant_of_the_refused_model():
@@ -372,7 +374,45 @@ def test_the_hint_over_a_diamond_of_plain_roots_says_restructure_rather_than_nam
         return (
             Beam._meta.label in error.hint and Post._meta.label in error.hint,
             'Make the plain side abstract' in error.hint,
-            "Make 'testapp.beam' soft-deletable" in error.hint,
+            "Make 'testapp.Beam' soft-deletable" in error.hint,  # the label keeps its case
         )
 
     assert _build() == (True, True, False)
+
+
+def test_the_hint_over_two_direct_plain_parents_names_both_and_says_restructure():
+    """The V one hop lower than the diamond: the roots are the child's own parents. Read off the
+    one parent in each ``(child, parent)`` finding, the hint named a single root per finding and
+    following either walked into the join shape."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Rail(Model):
+            rail_id = AutoField(primary_key=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Stile(Model):
+            stile_id = AutoField(primary_key=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class LitGate(Rail, Stile, SoftDeletableModel):
+            class Meta(SoftDeletableModel.Meta):
+                app_label = 'testapp'
+
+        errors = _check([_Config(LitGate)])
+        return len(errors), [
+            (
+                Rail._meta.label in e.hint and Stile._meta.label in e.hint,
+                'Make the plain side abstract' in e.hint,
+                'soft-deletable (SetarModel' in e.hint,
+            )
+            for e in errors
+        ]
+
+    count, hints = _build()
+    assert count == 2  # one finding per plain parent it sits over
+    assert hints == [(True, True, False)] * 2

@@ -467,9 +467,10 @@ class OperationsMixin:
                     self._skipped_rule_notes.append(
                         f"Soft delete rule on '{table}' skipped: '{owner.__name__}' carries "
                         f'_deleted_at while its multi-table-inheritance ancestor '
-                        f"'{parent._meta.db_table}' declares none, so the rule would keep this "
-                        f"row while the ancestor's unguarded DELETE removes the row it points "
-                        f'at, aborting at COMMIT. See guitars.E003 for the fix.'
+                        f"'{parent._meta.db_table}' declares none: a rule would keep this row "
+                        f"while the ancestor's unguarded DELETE removes the row it points at, "
+                        f'aborting at COMMIT, and without one a delete destroys the chain. See '
+                        f'guitars.E003 for the fix.'
                     )
             elif owns_column(model, '_deleted_at'):
                 qualified_table = _identifiers._quote_table(table)

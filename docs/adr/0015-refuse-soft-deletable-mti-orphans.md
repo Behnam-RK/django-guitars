@@ -34,9 +34,9 @@ exactly that shape as a fixture and found it undeletable.
 the same question of the whole chain above a model (`checks.refuses_soft_delete_rule`, see
 Consequences) and emits no soft-delete rule, naming the model on stderr.
 
-- **An error, not a warning.** The row does not merely go unstamped: the statement aborts, and no
-  runtime path in the kit can spare it. A warning would leave a project shipping a model nobody
-  can delete.
+- **An error, not a warning.** The row does not merely go unstamped: with a rule the statement
+  aborts, and with none — what the refusal leaves — a delete destroys the chain, and no runtime
+  path in the kit spares it either way. A warning would leave a project shipping that model.
 - **Re-asked by the generator**, as `OwningForeignKey`'s own checks are, for the reason
   [ADR 0011](0011-owner-side-soft-delete-ownership.md) gives: `--skip-checks` reaches the
   generator and `hard_delete()` runs no checks at all.
@@ -85,8 +85,8 @@ dropped rather than shipped.
   `guitars.E003` still reports only the model where the column first meets a plain direct parent
   — declaring it, or joining a soft-deletable parent to a plain one (found in review: gating on
   `owns_column` passed the second over, and the generator gave it the redirect rule). One finding
-  per root cause, and the hint names the chain's root: making the next hop soft-deletable under a
-  plain grandparent only moves the orphan up one table.
+  per plain parent it sits over, and the hint names every plain root — or says restructure where
+  there are two — since making the next hop soft-deletable only moves the orphan up one table.
 - `_updated_at` on an MTI ancestor is now unreachable from the owned sweep by construction,
   which is what lets ADR 0014 state the sweep stamps only the dependent's own table.
 - The kit still has no way to put `_deleted_at` on a table *below* the one holding `_updated_at`.

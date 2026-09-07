@@ -8,7 +8,7 @@ from django.apps import apps as django_apps
 from django.core.checks import Error, register
 from django.db import models
 
-from guitars.introspection import column_owner, has_column, mti_root, owns_column
+from guitars.introspection import column_owner, has_column, owns_column
 
 
 __all__ = [
@@ -74,20 +74,29 @@ def refuses_soft_delete_rule(
 def _hint(child: type[models.Model], parent: type[models.Model]) -> str:
     """Name the move that resolves the chain, not the next hop of it: making the immediate
     parent soft-deletable under a plain grandparent only moves the orphan up one table."""
-    root = mti_root(parent)
-    if owns_column(child, '_deleted_at'):
+    # Every plain root above *parent*, not ``mti_root``'s first: a diamond of two plain roots can
+    # give only one of them the column, the other then meeting it as the join shape below.
+    roots = [m for m in (parent, *parent._meta.get_parent_list()) if not m._meta.parents]
+    named = ', '.join(f"'{root._meta.label}'" for root in roots)
+    if owns_column(child, '_deleted_at') and len(roots) == 1:
         return (
-            f"Make '{root._meta.label}' soft-deletable (SetarModel or the SoftDeletableModel "
-            f"mixin) and drop '{child._meta.label}'s own declaration, so _deleted_at lives on "
-            f'the root and every table below it gets the MTI redirect rule.'
+            f'Make {named} soft-deletable (SetarModel or the SoftDeletableModel mixin) and drop '
+            f"'{child._meta.label}'s own declaration, so _deleted_at lives on the root and every "
+            f'table below it gets the MTI redirect rule.'
         )
-    # Inherited from another parent: a second base cannot carry it too, since Django refuses a
-    # field reaching a model from two bases, so this chain has to be restructured.
-    owner = column_owner(child, '_deleted_at')
+    # A second base cannot carry the column too, Django refusing a field that reaches a model
+    # from two bases, so this chain has to be restructured rather than extended.
+    if owns_column(child, '_deleted_at'):
+        carried = f"'{child._meta.label}' sits over {len(roots)} plain roots ({named})"
+    else:
+        owner = column_owner(child, '_deleted_at')
+        carried = (
+            f"'{child._meta.label}' inherits _deleted_at from '{owner._meta.label}', and {named} "
+            f'cannot be made soft-deletable as well'
+        )
     return (
-        f"'{child._meta.label}' inherits _deleted_at from '{owner._meta.label}', and "
-        f"'{root._meta.label}' cannot be made soft-deletable as well, a field reaching a model "
-        f"from two bases being a clash. Make '{root._meta.label}' abstract, or drop one parent."
+        f'{carried}, a field reaching a model from two bases being a clash. Make the plain '
+        f'side abstract, or drop one parent.'
     )
 
 
@@ -97,15 +106,16 @@ def check_soft_deletable_mti_children_have_a_soft_deletable_ancestor(
     """Django's ``Collector`` issues one ``DELETE`` per table in an MTI chain. A child
     carrying ``_deleted_at`` keeps its row through its rule, while the ancestor, having no
     column to stamp, gets no rule and is really deleted."""
-    # An error rather than a warning: the row does not merely go unstamped, the statement
-    # aborts at COMMIT on the child's own parent-link constraint. Nothing is recoverable
-    # from it at runtime, and no code path in the kit can spare it.
+    # An error rather than a warning: with a rule the statement aborts at COMMIT on the child's
+    # own parent-link constraint, and without one -- which is what the refusal leaves -- the
+    # chain is destroyed. Nothing at runtime spares it either way, so it must not start.
     return [
         Error(
             f"'{child._meta.label}' carries _deleted_at while its multi-table-inheritance "
-            f"ancestor '{parent._meta.label}' declares none, so deleting one aborts at COMMIT: "
-            f"the child's soft-delete rule keeps its row while the ancestor's DELETE, which no "
-            f'rule guards, removes the row that row points at.',
+            f"ancestor '{parent._meta.label}' declares none, so it gets no soft-delete rule: "
+            f"with one, a delete aborted at COMMIT (the rule kept the child's row while the "
+            f"ancestor's unguarded DELETE removed what it points at); without one, .delete() "
+            f'destroys the chain.',
             hint=_hint(child, parent),
             obj=child,
             id=ORPHAN_ANCESTOR_ID,

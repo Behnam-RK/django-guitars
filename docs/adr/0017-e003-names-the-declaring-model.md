@@ -1,4 +1,4 @@
-# 0017 — E003 names the declaring model; the generator refuses its descendants
+# 0017 — E003 names one model per root cause; the generator refuses its descendants
 
 - **Status:** accepted — implemented in 2.7.0
 - **Affects:** `guitars.checks`, `makeguitarmigrations`, [ADR 0015](0015-refuse-soft-deletable-mti-orphans.md)
@@ -34,13 +34,13 @@ The generator emits SQL per model, so it has to decide about `Neon` specifically
 safe answer is "no rule", since every rule shape available to `Neon` keeps a row the ancestor's
 unguarded `DELETE` removes.
 
-The check talks to an operator, and there is one thing for them to do: make the ancestor
-soft-deletable. That fixes every descendant at once. Reporting `Neon` as well would print n
-findings for a single root cause and invite fixing them one at a time — which for a descendant
-means declaring `_deleted_at` on *it*, creating a second orphan rather than resolving the first.
+The check talks to an operator, and the move is at the root of the chain — make it
+soft-deletable, or where two plain roots meet, restructure — which the hint names and which
+fixes every descendant at once. Reporting `Neon` as well would print n findings for a single
+root cause and invite reading each as its own problem.
 
-The generator's stderr note names the skipped table *and* the owner declaring the column, so an
-operator who reaches the generator without the check still gets pointed at the same fix.
+The generator's stderr note names the skipped table *and* the model meeting the plain parent, so
+an operator who reaches the generator without the check is pointed at the same chain.
 
 ## Consequences
 

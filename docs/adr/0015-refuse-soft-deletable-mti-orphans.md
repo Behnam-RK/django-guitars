@@ -12,9 +12,11 @@ table, and a child inheriting the column gets the **redirect** rule, which stamp
 instead. Both assume the column lives at or above the level being deleted.
 
 The inverse shape — a child carrying `_deleted_at`, declared on its own table or inherited from
-a second concrete parent, while a concrete ancestor has none — was neither covered nor refused. The generator emitted a *plain* rule on the child, so the child's
-`DELETE` became an `UPDATE` and its row survived, while the ancestor's `DELETE` met no rule and
-really removed the row the surviving child points at. The statement then aborts at `COMMIT`:
+a second concrete parent, while a concrete ancestor has none — was neither covered nor refused.
+The generator emitted a rule on the child — plain where it declared the column, the MTI redirect
+where it inherited it — so the child's `DELETE` became an `UPDATE` and its row survived, while
+the ancestor's `DELETE` met no rule and really removed the row the surviving child points at.
+The statement then aborts at `COMMIT`:
 
 ```
 update or delete on table "testapp_marquee" violates foreign key constraint
@@ -29,8 +31,8 @@ exactly that shape as a fixture and found it undeletable.
 ## Decision
 
 **Refuse the shape.** `guitars.E003` reports it at `manage.py check`, and the generator re-asks
-the same question of the column's *owner* (`checks.refuses_soft_delete_rule`, see Consequences)
-and emits no soft-delete rule, naming the model on stderr.
+the same question of the whole chain above a model (`checks.refuses_soft_delete_rule`, see
+Consequences) and emits no soft-delete rule, naming the model on stderr.
 
 - **An error, not a warning.** The row does not merely go unstamped: the statement aborts, and no
   runtime path in the kit can spare it. A warning would leave a project shipping a model nobody

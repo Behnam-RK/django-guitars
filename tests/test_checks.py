@@ -46,9 +46,19 @@ def test_a_soft_deletable_child_under_a_plain_ancestor_is_an_error():
         # Through an app-config stub: ``isolate_apps`` gives the models their own registry,
         # so the check's default ``django_apps.get_models()`` never sees them.
         errors = _check([_Config(NeonMarquee)])
-        return [(e.id, e.obj is NeonMarquee, Marquee._meta.label in e.msg) for e in errors]
+        return [
+            # The message states the 2.7.0 direction, not the pre-2.7.0 one: refused means no
+            # rule, and no rule destroys, where the rule it once got only aborted.
+            (
+                e.id,
+                e.obj is NeonMarquee,
+                Marquee._meta.label in e.msg,
+                'destroys the chain' in e.msg,
+            )
+            for e in errors
+        ]
 
-    assert _build() == [(ORPHAN_ANCESTOR_ID, True, True)]
+    assert _build() == [(ORPHAN_ANCESTOR_ID, True, True, True)]
 
 
 def test_the_error_names_the_ancestor_to_make_soft_deletable():
@@ -243,7 +253,10 @@ def test_a_child_joining_a_soft_deletable_parent_to_a_plain_one_is_an_error():
                 (child.__name__, parent.__name__)
                 for child, parent in refuses_soft_delete_rule(MountedStatue)
             ],
-            'inherits _deleted_at' in errors[0].hint and 'abstract' in errors[0].hint,
+            # Guarded, so the unfixed predicate reports an empty list rather than an IndexError.
+            bool(errors)
+            and 'inherits _deleted_at' in errors[0].hint
+            and 'abstract' in errors[0].hint,
         )
 
     assert _build() == (
@@ -326,3 +339,40 @@ def test_the_hint_names_the_root_of_the_chain_rather_than_the_next_hop():
         )
 
     assert _build() == (True, True, False, True)
+
+
+def test_the_hint_over_a_diamond_of_plain_roots_says_restructure_rather_than_naming_one():
+    """``mti_root`` follows one parent. A declaring child over a parent with *two* plain roots
+    cannot give both the column -- a field reaching a model from two bases is a clash -- so
+    naming one root sends the operator straight into the join shape this check also refuses."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Beam(Model):
+            beam_id = AutoField(primary_key=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Post(Model):
+            post_id = AutoField(primary_key=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Frame(Beam, Post):
+            class Meta:
+                app_label = 'testapp'
+
+        class LitFrame(Frame, SoftDeletableModel):
+            class Meta(SoftDeletableModel.Meta):
+                app_label = 'testapp'
+
+        (error,) = _check([_Config(LitFrame)])
+        return (
+            Beam._meta.label in error.hint and Post._meta.label in error.hint,
+            'Make the plain side abstract' in error.hint,
+            "Make 'testapp.beam' soft-deletable" in error.hint,
+        )
+
+    assert _build() == (True, True, False)

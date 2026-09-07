@@ -24,4 +24,4 @@ New ADR? Start from [`template.md`](template.md).
 | [`0014`](0014-statement-level-owned-sweep.md) | why each owned rule is now paired with a statement-level trigger, why that is additive rather than a replacement, and why the repair command exists beside it (2.6.0) |
 | [`0015`](0015-refuse-soft-deletable-mti-orphans.md) | why a model declaring `_deleted_at` under a plain MTI ancestor is refused rather than supported, and why the refusal is an error (2.7.0) |
 | [`0016`](0016-generic-relation-collection-scope.md) | why `hard_delete()` takes a generic child wherever the row it points at is going, rather than matching what Phase 1's `Collector` archived (2.7.0) |
-| [`0017`](0017-e003-names-the-declaring-model.md) | why `guitars.E003` reports only the model declaring `_deleted_at` while the generator refuses its MTI descendants too (2.7.0) |
+| [`0017`](0017-e003-names-the-declaring-model.md) | why `guitars.E003` reports only the model where `_deleted_at` meets a plain MTI parent while the generator refuses its descendants too (2.7.0) |

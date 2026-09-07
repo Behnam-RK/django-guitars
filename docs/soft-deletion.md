@@ -44,31 +44,31 @@ article.hard_delete()                            # this row, CASCADE children, o
 Article._all_objects.filter(...).hard_delete()   # in bulk
 ```
 
-`hard_delete()` opts out of the rule by setting a transaction-local session
-variable every rule tests: `SELECT set_config('rules.hard_deletion', 'on', TRUE)`.
+`hard_delete()` opts out by setting a transaction-local session variable every rule tests: `SELECT set_config('rules.hard_deletion', 'on', TRUE)`.
 
 **Every rule guard is written `<> 'on'`, never `= 'off'`.** A session variable
 never set reads as `NULL`, but one set transaction-locally and then *rolled
-back* reads as the **empty string** — a placeholder Postgres leaves rather
-than removing. `= 'off'` would match neither, silently stopping the rule.
-The blast radius is the *connection*: with any pool, one rolled-back
-`hard_delete()` turns every later `.delete()` there into a real delete.
+back* reads as the **empty string** — a placeholder Postgres leaves rather than
+removing, so `= 'off'` would match neither and silently stop the rule. The blast
+radius is the *connection*: with any pool, one rolled-back `hard_delete()` turns
+every later `.delete()` there into a real delete.
 
-> **If your database was migrated before 1.0.0** it still carries the old
-> guard. Regenerate via `makeguitarmigrations`/`makemigrations` then
-> `migrate`; `--check` fails until you do. See [Migrations](migrations.md).
-> **Do not** fix this by reversing the enforcement migration: `reverse_sql`
-> *drops* the rules, and `migrate <app> <previous>` unapplies later ones too.
+> **If your database was migrated before 1.0.0** it still carries the old guard.
+> Regenerate via `makeguitarmigrations`/`makemigrations` then `migrate`;
+> `--check` fails until you do. See [Migrations](migrations.md). **Do not** fix
+> this by reversing the enforcement migration: `reverse_sql` *drops* the rules,
+> and `migrate <app> <previous>` unapplies later ones too.
 
 **Instance-level `hard_delete()` is two-phase:** soft-delete first (so cascade
 rules fire), then DFS-collect `CASCADE` children through `_all_objects` and
-hard-delete child-first — Django's `CASCADE` is Python-level (`Collector`),
-not `ON DELETE CASCADE`, so a raw parent `DELETE` would fail the FK check. An
-owned row goes the other way — *after* its owner, which still references it.
+hard-delete child-first — Django's `CASCADE` is Python-level (`Collector`), not
+`ON DELETE CASCADE`, so a raw parent `DELETE` would fail the FK check. An owned
+row goes the other way — *after* its owner, which still references it.
+`GenericRelation` children come from `_meta.private_fields` (2.7.0), holding
+nothing back: no key column, so no constraint to fail.
 
 Queryset-level `hard_delete()` is blunter: it deletes matched rows (and, for
-MTI, the whole table chain) but does **not** walk reverse-FK children or owned
-relations.
+MTI, the whole chain) but walks no reverse-FK children and no owned relations.
 
 ## Managers and the base manager
 

@@ -1,3 +1,4 @@
+from django.contrib.contenttypes.fields import GenericForeignKey, GenericRelation
 from django.db.models import (
     CASCADE,
     DO_NOTHING,
@@ -6,6 +7,7 @@ from django.db.models import (
     ForeignKey,
     IntegerField,
     ManyToManyField,
+    PositiveBigIntegerField,
 )
 from django.utils.functional import cached_property
 
@@ -500,3 +502,74 @@ class Foyer(SetarModel):
 
     def __str__(self) -> str:
         return self.label
+
+
+class Awning(SetarModel):
+    """The deep end of a chain of ownership that sorts *against* the repair order: ``Banner``
+    owns this, ``Billboard`` owns the banner, and ``testapp.Awning`` sorts first, so one pass
+    over the dependents by label spares it and then archives its owners behind it."""
+
+    fabric = CharField(max_length=100)
+
+    def __str__(self) -> str:
+        return self.fabric
+
+
+class Banner(SetarModel):
+    """The middle hop. Two of these on one ``Awning`` is what leaves the awning to the command
+    rather than the rule: one statement archiving both means neither rule sees a last owner."""
+
+    slogan = CharField(max_length=100)
+    awning = OwningForeignKey(
+        Awning, on_delete=DO_NOTHING, null=True, blank=True, related_name='banners'
+    )
+
+    def __str__(self) -> str:
+        return self.slogan
+
+
+class Billboard(SetarModel):
+    """The top of the chain, and the statement the sweep exists for: two of these on one
+    ``Banner``, deleted together, archive both owners while each rule arm still reads the
+    other as live."""
+
+    label = CharField(max_length=100)
+    banner = OwningForeignKey(
+        Banner, on_delete=DO_NOTHING, null=True, blank=True, related_name='billboards'
+    )
+
+    def __str__(self) -> str:
+        return self.label
+
+
+class Signboard(SetarModel):
+    """Carries a ``GenericRelation``. Its children point at it through a content-type and an
+    object id rather than a key column, so no constraint ties them to it -- which is why they
+    never hold it back, and why the collecting half has to find them some other way."""
+
+    caption = CharField(max_length=100)
+    scribbles = GenericRelation('Scribble')
+
+    def __str__(self) -> str:
+        return self.caption
+
+
+class Scribble(SetarModel):
+    """The generic child. Phase 1's ``Collector`` walks ``_meta.private_fields`` and reaches
+    it; Phase 2's own walk reads key columns, of which this has none, so before 2.7.0 the row
+    was archived and then left behind pointing at a primary key nothing holds."""
+
+    text = CharField(max_length=100)
+    # ``CASCADE`` because that is what Django writes for a content-type key, and this is the
+    # shape a consumer copies -- but it is the rule-less Collector cascade ``Merch`` avoids:
+    # ``django_content_type`` carries no rule of ours.
+
+    # So ``remove_stale_contenttypes`` (or any ``ContentType`` delete) has this row kept by its
+    # own soft-delete rule while the row it points at really goes, and the statement aborts at
+    # ``COMMIT``. Reach for ``PROTECT`` if that matters more to you than the convention.
+    content_type = ForeignKey('contenttypes.ContentType', on_delete=CASCADE)
+    object_id = PositiveBigIntegerField()
+    content_object = GenericForeignKey('content_type', 'object_id')
+
+    def __str__(self) -> str:
+        return self.text

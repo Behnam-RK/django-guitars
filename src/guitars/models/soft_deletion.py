@@ -132,11 +132,21 @@ def _key_values(field: Field, pks: set, using: str | None) -> dict:
 
 def _referring_relations(model: type[Model]) -> list:
     """Every reverse relation with a *column* pointing at *model* -- the one walk ``_collect``
-    and :func:`_still_referenced` share, so what is collected and what holds a row back cannot
-    disagree. ``include_hidden``: a ``related_name='+'`` key dangles too."""
+    and :func:`_still_referenced` share for the rows that can hold each other back.
+    ``include_hidden``: a ``related_name='+'`` key dangles too."""
     # ``ManyToOneRel`` (``OneToOneRel`` and the parent-link with it) is exactly the reverse of a
     # ForeignKey -- the only rel whose ``attname`` is the key column both callers read. An m2m
-    # reverse owns none; a ``GenericRelation`` neither dangles nor gets collected -- see the doc.
+    # reverse owns none.
+
+    # A ``GenericRelation`` cannot dangle, having no column to dangle by; ``_collect`` walks
+    # ``_meta.private_fields`` separately to take those along -- see the doc.
+
+    # Which is why the two walks are no longer identical: what ``_collect`` takes there,
+    # :func:`_cascade_closure` does not model, so they can disagree.
+
+    # Only ever toward sparing, though -- a generic child holds nothing back, so a closure
+    # counting a referrer collection will in fact remove can only leave an owned target
+    # archived rather than removed.
     return [
         relation
         for relation in model._meta.get_fields(include_hidden=True)
@@ -496,6 +506,36 @@ class SoftDeletableModel(Model):
                         else mti_root(related_model),
                         child_pks,
                     )
+                # A ``GenericRelation`` lives in ``_meta.private_fields`` and owns no key column,
+                # so ``_referring_relations`` cannot see it -- and must not: with no constraint to
+                # fail at ``COMMIT`` it never holds a row back.
+
+                # Collected all the same, or the child is left pointing at a primary key nothing
+                # holds. Taken wherever the row it points at is going, which is every level this
+                # walk reaches -- sparing happens in ``_owned_targets``, before a group is built.
+
+                # Wider than Phase 1 by that rule, not equal to it: ``Collector`` returns before
+                # its own ``private_fields`` walk when it collects an MTI *ancestor*, and an
+                # owned target is stamped by the rule, which runs no ``Collector`` at all.
+
+                # Duck-typed on ``bulk_related_objects``, as that ``Collector`` is, so nothing
+                # here imports ``contenttypes`` -- an app a consumer need not have installed.
+                generic = [
+                    private
+                    for private in model._meta.private_fields
+                    if hasattr(private, 'bulk_related_objects')
+                ]
+                if generic:
+                    # Read once for the whole set rather than per relation: the rows are the
+                    # same either way, and this is the only place the walk needs instances.
+                    instances = list(_rows(model, using).filter(pk__in=new_pks))
+                    for private in generic:
+                        generic_pks = set(
+                            private.bulk_related_objects(instances, using).values_list(
+                                'pk', flat=True
+                            )
+                        )
+                        _collect(mti_root(private.related_model), generic_pks)
                 if model not in model_order:
                     model_order.append(model)
 

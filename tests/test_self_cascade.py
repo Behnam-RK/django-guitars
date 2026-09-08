@@ -4,6 +4,9 @@ table it fires on is rejected at rewrite time, taking *every* ``UPDATE`` to that
 
 import pytest
 from django.db import connection
+from django.db.models import F
+from django.db.utils import NotSupportedError
+from django.utils import timezone
 
 from guitars.tenancy import tenancy_bypassed, tenant
 from tests.testapp.models import Label, Rack, Riser, Setlist, SetlistEntry, Troupe
@@ -222,17 +225,20 @@ def test_the_trigger_exists_on_the_table_and_the_rule_does_not(db):
 
 
 def test_an_owned_sweep_fires_from_inside_the_self_cascade_trigger(db):
-    """The one arrangement where the two statement-level families meet: ``Rack`` is a tree that
-    also *owns* a ``Riser``, so its table carries both. The trigger reaches the child rack at
-    depth 1, and that level's owned rule and sweep must still archive the riser it holds."""
+    """Where the two statement-level families meet, in the shape needing the **sweep** and not
+    the rule beside it: two child racks share one riser, so the trigger archives both owners in
+    one depth-1 ``UPDATE`` and each reads the other as live to the rule's last-owner guard."""
+    # One owner per riser would not do: the rule's NOT EXISTS excludes the archiving row
+    # itself, so it stamps a solely-owned riser unaided and dropping the sweep changes nothing.
+    shared = Riser.objects.create(height='shared')
     root = Rack.objects.create(label='root', riser=Riser.objects.create(height='root-riser'))
-    Rack.objects.create(label='child', parent=root, riser=Riser.objects.create(height='deep'))
+    Rack.objects.create(label='c1', parent=root, riser=shared)
+    Rack.objects.create(label='c2', parent=root, riser=shared)
 
     _raw_delete_from('testapp_rack', root.pk)
 
-    assert _archived(Rack) == {'root', 'child'}
-    # 'deep' is the one that matters: it is owned by a rack the *trigger* archived.
-    assert _archived(Riser) == {'root-riser', 'deep'}
+    assert _archived(Rack) == {'root', 'c1', 'c2'}
+    assert _archived(Riser) == {'root-riser', 'shared'}
 
 
 def test_a_tenanted_tree_cascades_within_the_scope(tenanted_trees):
@@ -265,3 +271,26 @@ def test_a_tenanted_tree_cannot_archive_another_tenants_child(tenanted_trees):
 
     with tenancy_bypassed():
         assert Troupe._all_objects.get(pk=b.child.pk)._deleted_at is None
+
+
+def test_a_key_rewrite_on_a_parent_with_live_children_is_refused(db):
+    """A statement that rewrites a live parent's primary key leaves the trigger unable to say
+    which after-row it became, and so whether it was archived -- it would silently leak the
+    whole subtree. The owned sweep refuses the same ambiguity, so this one does too."""
+    root = Setlist.objects.create(title='root')
+    Setlist.objects.create(title='child', parent=root)
+
+    with pytest.raises(NotSupportedError, match='rewrote the primary key of a live row'):
+        Setlist._all_objects.filter(pk=root.pk).update(
+            id=F('id') + 1000, _deleted_at=timezone.now()
+        )
+
+
+def test_a_key_rewrite_on_a_parent_with_no_live_children_is_not_refused(db):
+    """The refusal is narrow: with nothing live below it, there is no subtree to leak and so
+    nothing the trigger needed to decide. A leaf re-keys and archives in one statement."""
+    leaf = Setlist.objects.create(title='leaf')
+
+    Setlist._all_objects.filter(pk=leaf.pk).update(id=F('id') + 1000, _deleted_at=timezone.now())
+
+    assert _archived(Setlist) == {'leaf'}

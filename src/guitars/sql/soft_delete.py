@@ -292,9 +292,13 @@ _ADOPT_SOFT_DELETE_OWNED_SWEEP = (
 # Self keys only -- a multi-table cycle has no stable choice of edge. See ADR 0018. ----
 
 
-# The body's EXISTS guard **terminates** the recursion, not merely cheapens it: a statement
-# trigger fires on an UPDATE matching zero rows, so without it this function's own no-op UPDATE
-# re-fires it forever. It asks the UPDATE's own predicate, the archived *transition*.
+# Guard one refuses what guard two cannot see: a live row with live children whose key this
+# statement rewrote has no after-image to match, so archiving it is indistinguishable from a
+# re-key and the subtree would leak in silence. The owned sweep refuses the same ambiguity.
+
+# Guard two **terminates** the recursion rather than merely cheapening it: a statement trigger
+# fires on an UPDATE matching zero rows, so without it this function's own no-op UPDATE re-fires
+# it forever. It asks the UPDATE's own predicate, the archived transition.
 _CREATE_SOFT_DELETE_SELF_CASCADE_FUNCTION = """
     CREATE OR REPLACE FUNCTION {function}()
        RETURNS TRIGGER
@@ -302,6 +306,28 @@ _CREATE_SOFT_DELETE_SELF_CASCADE_FUNCTION = """
     AS
     $$
     BEGIN
+        IF COALESCE(current_setting('rules.hard_deletion', true), '') <> 'on' THEN
+            IF EXISTS (
+                SELECT 1
+                FROM guitars_self_before AS guitars_before
+                JOIN {table} AS guitars_child
+                    ON guitars_child."{foreign_key}" = guitars_before."{primary_key}"
+                WHERE guitars_before._deleted_at IS NULL
+                  AND guitars_child._deleted_at IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM guitars_self_after AS guitars_after
+                      WHERE guitars_after."{primary_key}" = guitars_before."{primary_key}"
+                  )
+            ) THEN
+                RAISE EXCEPTION
+                    'guitars: a statement on % rewrote the primary key of a live row that has '
+                    'live children. The self cascade trigger correlates its transition tables '
+                    'on the primary key, so it cannot tell whether that row was archived, and '
+                    'would leak the whole subtree permanently. Rewrite the key and archive the '
+                    'row in separate statements.', TG_TABLE_NAME
+                    USING ERRCODE = 'feature_not_supported';
+            END IF;
+        END IF;
         IF COALESCE(current_setting('rules.hard_deletion', true), '') <> 'on'
            AND EXISTS (
                SELECT 1

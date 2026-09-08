@@ -46,7 +46,8 @@ the whole archive rolls back, so a too-deep tree is a visible error, never a hal
 **`AFTER UPDATE`, not `AFTER UPDATE OF _deleted_at`.** The column list was the intended shape, a
 tree being written far oftener than archived. PostgreSQL refuses it — *transition tables cannot be
 specified for triggers with column lists* — and those tables are the mechanism, so the cheap test
-moved into the body: it returns unless some row's `_deleted_at` is non-null in the new image.
+moved into the body: it returns unless a row's `_deleted_at` flipped from null in this statement,
+the `UPDATE`'s own predicate.
 
 **Under tenancy it behaves like the cascade rules, not like the owned family.** The child `UPDATE`
 runs under the invoker's row-level security, so a child the scope cannot see stays live. That is
@@ -61,34 +62,30 @@ the tests run as could not create such a function against a table it does not ow
   self-referential `CASCADE` key it finds. A Python fallback prescribed by the old docs becomes
   redundant rather than wrong: it re-archives rows the trigger already stamped, and
   `_deleted_at IS NULL` makes that a no-op.
-- `_updated_at` splits in two, and `tests/test_self_cascade.py` pins both halves. The **tree
-  rows** always get it, from an assignment spliced into the trigger's own `UPDATE`, for the
-  sweep's reason: that `UPDATE` runs at trigger depth ≥ 1, where `updated_at_trigger`'s
-  `WHEN (pg_trigger_depth() = 0)` suppresses it. An ordinary **cascade child** gets one only
-  where its level was reached by a single collector statement rather than by the trigger. So
-  `.delete()` on a root stamps every child — Django's collector names all three levels at depth
-  0 and each cascade rule expands there too — while a raw or bulk archive of the same tree
-  stamps only the root's own children, the deeper rules firing from inside the trigger at depth
-  1. **The same logical archive, a different outcome per caller**, which is the kind of
-  divergence this kit exists to remove, so state it rather than bury it. Accepted anyway:
-  closing it means splicing `_updated_at` into the cascade rule's action, which moves the
-  `[SQL:...]` identity of every cascade rule in every consuming project — too much for a
-  timestamp on an already-archived row.
+- `_updated_at` splits in two, and `tests/test_self_cascade.py` pins both halves. **Tree rows**
+  always get it, from an assignment spliced into the trigger's own `UPDATE`, for the sweep's
+  reason: that `UPDATE` runs at depth ≥ 1, where `updated_at_trigger`'s `WHEN` suppresses it. An
+  ordinary **cascade child** gets one only where its level was reached by one collector statement
+  rather than by the trigger — `.delete()` stamps every child, a raw or bulk archive only the
+  root's own. **The same archive, a different outcome per caller**, which is the divergence this
+  kit exists to remove, so it is stated rather than buried. Accepted for the reason below.
 - The trigger's `UPDATE` fires the table's other `ON UPDATE` cascade rules for each level, so a
-  tree's ordinary children cascade with it rather than being stranded below the first level.
-- **No repair command, deliberately.** A pre-2.8.0 database has no rule for the shape, so every
-  raw or bulk archive of a tree root there left live children under an archived parent. The
-  refusal was documented from 0.x and said to cascade in Python: a consumer either did and has
-  no leak, or did not and has one this kit never claimed to prevent. Repair needs no command —
-  archive the children of every archived parent, to a fixpoint.
-- The name sizes every variable segment (`soft_delete_self_cascade_<n>_<schema>_<n>_<table>_<n>_<fk>`)
-  for the owned family's reason: nothing predates it, so there was no boundary left to guess at.
-  A distinct prefix keeps it from meeting the other three families at all.
-- No cross-app dependency edges. `CREATE TRIGGER` names only the table it fires on, plpgsql does
-  not resolve a body at `CREATE FUNCTION` time, and the table is the declaring app's own.
-- `introspection._rule_update_edges` keeps the `(T, T)` self edge. It describes rules, and an
-  *owned* rule on the same shape must still be refused through it; the cascade emitter routes the
-  self key to the trigger before consulting that set.
+  tree's ordinary children cascade with it rather than stranding below the first level.
+- **A primary-key rewrite on a live parent with live children is refused**, with the owned
+  sweep's error class. Correlation is on the key, so a moved key leaves no after-image to match
+  and an archive becomes indistinguishable from a re-key, leaking the subtree in silence.
+  Django's foreign keys are `DEFERRABLE INITIALLY DEFERRED`, so the shape is reachable. Narrow:
+  a parent with nothing live below it re-keys and archives in one statement uncomplainingly.
+- **No repair command, deliberately.** A pre-2.8.0 database has no rule for the shape, so a raw
+  or bulk archive of a tree root there left live children under an archived parent. The refusal
+  was documented from 0.x and said to cascade in Python, and repair needs no command: archive
+  the children of every archived parent, to a fixpoint.
+- The name sizes every variable segment for the owned family's reason — nothing predates it, so
+  no boundary was left to guess at — and a distinct prefix keeps it clear of the other three.
+- No cross-app dependency edges: `CREATE TRIGGER` names only its own table, and plpgsql resolves
+  no body at `CREATE FUNCTION` time.
+- `introspection._rule_update_edges` keeps the `(T, T)` self edge, describing *rules*, so an owned
+  rule on the shape stays refused; the emitter routes the self key out before consulting it.
 
 ## Alternatives rejected
 
@@ -96,5 +93,6 @@ the tests run as could not create such a function against a table it does not ow
   recorded here as available should a consumer ever present a multi-table cycle worth the cost.
 - **Keep the Python fallback as the answer.** It is correct only through the ORM, which is the one
   guarantee this kit exists to stop relying on.
-- **Stamp `_updated_at` from inside the cascade rule.** It would move the `[SQL:...]` identity of
-  every cascade rule in every consuming project, to fix something that measured as not broken.
+- **Stamp `_updated_at` from inside the cascade rule.** It is the only way to close the
+  caller-dependent gap above, and it moves the `[SQL:...]` identity of every cascade rule in
+  every consuming project — too much for a timestamp on a row that is already archived.

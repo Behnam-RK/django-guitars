@@ -80,6 +80,30 @@ BEGIN
         EXECUTE format('DROP POLICY IF EXISTS %I ON %s', guitars_row.name, guitars_row.fires_on);
     END LOOP;
 
+    -- Row-level security is a table *flag*, not an object ``pg_depend`` reaches: dropping the
+    -- last ``tenant_scope`` off a FORCEd table would leave it returning no rows to anyone, the
+    -- owner included, silently and irreversibly. Torn down in ``drop_table_rls``'s order --
+    -- NO FORCE before DISABLE, so the table is never forced-but-disabled.
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_policy AS guitars_policy
+        WHERE guitars_policy.polrelid = guitars_target
+          AND guitars_policy.polname = '{policy}'
+    ) AND EXISTS (
+        SELECT 1 FROM pg_class AS guitars_rel
+        WHERE guitars_rel.oid = guitars_target AND guitars_rel.relrowsecurity
+    ) THEN
+        EXECUTE format('ALTER TABLE %s NO FORCE ROW LEVEL SECURITY', guitars_target);
+        EXECUTE format('ALTER TABLE %s DISABLE ROW LEVEL SECURITY', guitars_target);
+        FOR guitars_row IN
+            SELECT guitars_policy.polname AS name
+            FROM pg_policy AS guitars_policy
+            WHERE guitars_policy.polrelid = guitars_target
+              AND guitars_policy.polname LIKE 'rls\\_exempt\\_%'
+        LOOP
+            EXECUTE format('DROP POLICY IF EXISTS %I ON %s', guitars_row.name, guitars_target);
+        END LOOP;
+    END IF;
+
     IF NOT {scoped_to_column} THEN
         FOR guitars_row IN
             SELECT guitars_trigger.tgname AS name

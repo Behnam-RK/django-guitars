@@ -819,10 +819,12 @@ class OperationsMixin:
                     foreign_key=_identifiers._escape_ident(column),
                 )
                 if column is not None
-                # No identifiers interpolated: this is a SQL *string literal*, and the quoted
-                # forms escape ``"`` but not ``'`` -- a db_table carrying one would break the
-                # literal, and one carrying the dollar tag would close the quoting.
-                else _soft_delete._REFUSE_RECREATING_RETIRED_RULE
+                # Passed as ``RAISE`` arguments, not interpolated into the literal: the quoted
+                # forms escape ``"`` but not ``'``, so a db_table carrying one would break it.
+                else _soft_delete._REFUSE_RECREATING_RETIRED_RULE.format(
+                    literal_rule_name=_identifiers._quote_literal(rule_name),
+                    literal_table=_identifiers._quote_literal(owner_table),
+                )
             )
             header = (
                 HEADER_SOFT_DELETE_RELATED_RETIRED.format(
@@ -846,7 +848,12 @@ class OperationsMixin:
                 header,
                 drop,
                 reverse,
-                emit=self._drop_prior_rules(ident_owner_table, [rule_name]) if adopt else drop,
+                # Where a rename already made ``drop`` all-``IF EXISTS`` over every
+                # spelling, that *is* the adopt form -- overriding it would leave adopt
+                # strictly weaker than the plain path in the one case the old name is live.
+                emit=self._drop_prior_rules(ident_owner_table, [rule_name])
+                if adopt and not self._renamed(related_table)
+                else drop,
             )
             operations.append(source)
         return operations
@@ -1187,10 +1194,15 @@ class OperationsMixin:
         return any(table in self.existing.renamed_tables for table in tables)
 
     def _prior_names(self, table: str) -> list[str]:
-        """Every name *table* held before, oldest first, empty where it was never renamed. All
-        of them, because a generation between two renames left an object under the
-        intermediate one and only dropping each leaves a single object behind."""
-        return self.existing.renamed_tables.get(table, [])
+        """Every *dead* name *table* held before, oldest first: all of them, a generation
+        between two renames having left an object under the intermediate one."""
+        # Filtered here, not in the chain the scan needs whole: a freed name retaken by a
+        # later ``CreateModel`` must not be dropped, but must still translate -- emptying the
+        # chain leaves the renamed table uncovered, so the plain CREATE collides after all.
+        hosting = self._table_app_labels()
+        return [
+            name for name in self.existing.renamed_tables.get(table, []) if name not in hosting
+        ]
 
     def _claim_rule_name(self, table: str, rule_name: str, relation: tuple) -> None:
         """Record that *relation* -- ``(other_table, table, foreign_key)``, the column **always**

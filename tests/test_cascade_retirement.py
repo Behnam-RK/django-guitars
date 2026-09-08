@@ -87,7 +87,10 @@ def test_a_key_whose_column_cannot_be_recovered_refuses_to_be_reversed(command):
 
     assert 'DROP RULE "soft_delete_related_testapp_genre" ON "testapp_band"' in operation
     assert 'RAISE EXCEPTION' in operation
-    assert 'could not' in operation
+    # The rule and its table are named, so a consumer hitting this on a rollback can trace it
+    # -- passed as RAISE arguments rather than interpolated, which a quote would break.
+    assert 'soft_delete_related_testapp_genre' in operation.split('RAISE EXCEPTION')[1]
+    assert "'testapp_band'" in operation
 
 
 def test_a_key_naming_an_unmapped_table_is_named_rather_than_retired(command):
@@ -198,3 +201,22 @@ def test_the_adopt_form_says_if_exists(command):
 
     assert 'DROP RULE "soft_delete_related_testapp_album"' in plain
     assert 'DROP RULE IF EXISTS "soft_delete_related_testapp_album"' in adopted
+
+
+def test_adopt_keeps_the_prior_name_drops_a_rename_added(command):
+    """``--adopt`` swaps in an ``IF EXISTS`` drop of the current name, which would be strictly
+    weaker than the plain path where a rename already made that path all-``IF EXISTS`` over
+    every spelling. Where the old name is the live one, adopt has to keep them."""
+    command.existing.renamed_tables['testapp_callbacks'] = ['testapp_encore']
+    command.existing.soft_delete_related[('testapp_callbacks', 'testapp_band', None)] = 'abc'
+
+    (operation,) = [
+        candidate
+        for candidate in command._retired_cascade_operations(
+            apps.get_app_config('testapp'), adopt=True
+        )
+        if candidate.startswith('# Soft Delete Related Rule retired')
+    ]
+
+    assert 'DROP RULE IF EXISTS "soft_delete_related_testapp_encore"' in operation
+    assert 'DROP RULE IF EXISTS "soft_delete_related_testapp_callbacks"' in operation

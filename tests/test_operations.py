@@ -366,3 +366,28 @@ def test_a_mixed_case_db_table_resolves(db):
     with connection.cursor() as cursor:
         cursor.execute("SELECT count(*) FROM pg_rules WHERE tablename = 'MixedCase'")
         assert cursor.fetchone()[0] == 0
+
+
+def test_retiring_the_last_tenant_policy_takes_row_level_security_down_with_it(db):
+    """Row-level security is a table *flag*, not an object `pg_depend` reaches. Dropping the
+    last `tenant_scope` off a FORCEd table would leave it returning no rows to anyone, the
+    owner included, silently and irreversibly."""
+    with connection.cursor() as cursor:
+        cursor.execute(
+            'SELECT relrowsecurity, relforcerowsecurity FROM pg_class '
+            "WHERE oid = 'testapp_troupe'::regclass"
+        )
+        assert cursor.fetchone() == (True, True)
+
+    _apply(RetireEnforcement('testapp_troupe', column='label_id'))
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            'SELECT relrowsecurity, relforcerowsecurity FROM pg_class '
+            "WHERE oid = 'testapp_troupe'::regclass"
+        )
+        assert cursor.fetchone() == (False, False)
+        cursor.execute(
+            "SELECT count(*) FROM pg_policy WHERE polrelid = 'testapp_troupe'::regclass"
+        )
+        assert cursor.fetchone()[0] == 0

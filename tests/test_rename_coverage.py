@@ -254,32 +254,17 @@ def test_adopt_after_a_rename_drops_the_old_name_too():
     )
 
 
-def test_a_prior_name_back_in_use_as_a_live_table_is_dropped_from_the_chain(loader, monkeypatch):
-    """``RenameModel(Foo -> Baz)`` and later ``CreateModel(Foo)`` puts a freed name back in
-    service. Translating it would delete the live table's coverage and have the next run drop a
-    rule still doing its job, so only dead names stay in the chain."""
-    assert graph.renamed_tables(loader, 'testapp')['testapp_callbacks'] == [
-        'testapp_encore',
-        'testapp_callback',
-    ]
+def test_a_prior_name_back_in_use_as_a_live_table_is_never_dropped():
+    """A freed name retaken by a later ``CreateModel`` must not be dropped -- but the chain
+    keeps it, because the scan needs every spelling to translate. Filter the chain instead and
+    the renamed table reads as uncovered, so the plain ``CREATE`` collides after all."""
+    command = Command()
+    command.existing.renamed_tables['testapp_setlist'] = ['testapp_gone', 'testapp_genre']
 
-    # The same history with the freed name back in use: it leaves the chain, and a chain left
-    # empty leaves the map altogether.
-    monkeypatch.setattr(
-        graph, '_live_tables', lambda _loader: {'testapp_encore', 'testapp_callback'}
-    )
-
-    assert 'testapp_callbacks' not in graph.renamed_tables(loader, 'testapp')
-
-
-def test_the_live_table_set_is_read_off_the_final_state(loader):
-    """What the filter above asks. A table the history renamed away is not in it; one still
-    declared is, whatever app declares it."""
-    live = graph._live_tables(loader)
-
-    assert 'testapp_setlist' in live
-    assert 'testapp_callbacks' in live
-    assert 'testapp_encore' not in live
+    # ``testapp_genre`` is a live table, so no drop names it; ``testapp_gone`` is not.
+    assert command._prior_names('testapp_setlist') == ['testapp_gone']
+    # And the chain itself is untouched, so the translation still has every spelling.
+    assert command.existing.renamed_tables['testapp_setlist'] == ['testapp_gone', 'testapp_genre']
 
 
 def test_a_tuple_key_is_re_keyed_across_a_rename():

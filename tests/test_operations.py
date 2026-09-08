@@ -404,3 +404,26 @@ def test_the_operations_public_surface_is_frozen():
     # Its signature is frozen too: a migration writes both arguments by keyword.
     written = RetireEnforcement('t', column='c').deconstruct()[2]
     assert set(written) <= {'table', 'column'}
+
+
+def test_a_consumers_own_row_level_security_is_left_enabled(db):
+    """The teardown above is gated on having dropped *our* policy, not merely on none being
+    left. A consumer who enabled row-level security themselves, with their own policies and
+    none of ours, keeps it -- disabling it would be a silent downgrade on an irreversible step."""
+    with connection.cursor() as cursor:
+        cursor.execute('ALTER TABLE testapp_setlistentry ENABLE ROW LEVEL SECURITY')
+        cursor.execute('ALTER TABLE testapp_setlistentry FORCE ROW LEVEL SECURITY')
+        cursor.execute('CREATE POLICY zz_consumer ON testapp_setlistentry USING (true)')
+
+    _apply(RetireEnforcement('testapp_setlistentry', column='setlist_id'))
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            'SELECT relrowsecurity, relforcerowsecurity FROM pg_class '
+            "WHERE oid = 'testapp_setlistentry'::regclass"
+        )
+        assert cursor.fetchone() == (True, True)
+        cursor.execute(
+            "SELECT polname FROM pg_policy WHERE polrelid = 'testapp_setlistentry'::regclass"
+        )
+        assert [row[0] for row in cursor.fetchall()] == ['zz_consumer']

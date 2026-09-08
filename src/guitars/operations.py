@@ -27,6 +27,7 @@ DECLARE
     guitars_target regclass := to_regclass({table});
     guitars_column smallint;
     guitars_row record;
+    guitars_dropped_ours boolean := false;
 BEGIN
     IF guitars_target IS NULL THEN
         RAISE EXCEPTION
@@ -78,19 +79,21 @@ BEGIN
           AND guitars_policy.polname = '{policy}'
     LOOP
         EXECUTE format('DROP POLICY IF EXISTS %I ON %s', guitars_row.name, guitars_row.fires_on);
+        guitars_dropped_ours := true;
     END LOOP;
 
     -- Row-level security is a table *flag*, not an object ``pg_depend`` reaches: dropping the
     -- last ``tenant_scope`` off a FORCEd table would leave it returning no rows to anyone, the
     -- owner included, silently and irreversibly. Torn down in ``drop_table_rls``'s order --
     -- NO FORCE before DISABLE, so the table is never forced-but-disabled.
-    IF NOT EXISTS (
+
+    -- Gated on having dropped *our* policy just now, not merely on none being left: a consumer
+    -- who enabled row-level security themselves, with their own policies and none of ours, must
+    -- keep it. Disabling that would be a silent security downgrade on an irreversible step.
+    IF guitars_dropped_ours AND NOT EXISTS (
         SELECT 1 FROM pg_policy AS guitars_policy
         WHERE guitars_policy.polrelid = guitars_target
           AND guitars_policy.polname = '{policy}'
-    ) AND EXISTS (
-        SELECT 1 FROM pg_class AS guitars_rel
-        WHERE guitars_rel.oid = guitars_target AND guitars_rel.relrowsecurity
     ) THEN
         EXECUTE format('ALTER TABLE %s NO FORCE ROW LEVEL SECURITY', guitars_target);
         EXECUTE format('ALTER TABLE %s DISABLE ROW LEVEL SECURITY', guitars_target);

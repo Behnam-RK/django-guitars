@@ -616,6 +616,65 @@ def test_self_cascade_operation_replaces_a_recorded_but_stale_trigger():
     assert 'CREATE TRIGGER "soft_delete_self_cascade_12_testapp_band_9_parent_id"' in blob
 
 
+def _self_cascade_dollar_command(recorded: bool):
+    """A tree whose ``db_table`` carries ``$$``, built for the two refusal branches below."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class DollarTree(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+                db_table = 'testapp_dollar$$tree'
+
+        class _SelfFKField:
+            column = 'parent_id'
+            model = DollarTree
+            remote_field = types.SimpleNamespace(parent_link=False)
+
+        command = Command()
+        command._skipped_rule_notes.clear()
+        command._refusals_over_live_rules.clear()
+        command.existing.soft_delete_self_cascade.clear()
+        if recorded:
+            command.existing.soft_delete_self_cascade[('testapp_dollar$$tree', 'parent_id')] = (
+                'deadbeefcafe'
+            )
+        command.reverse_relations_mapping[DollarTree] = {(DollarTree, _SelfFKField(), CASCADE)}
+        return command, command._cascade_operations(DollarTree)
+
+    return _build()
+
+
+def test_a_self_cascade_refused_for_dollar_quoting_emits_nothing_and_escalates_nothing():
+    """An identifier admits ``$``, and a ``db_table`` holding ``$$`` would close the dollar
+    quoting the trigger function depends on -- so the operation is refused rather than escaped,
+    the generated migration otherwise failing `migrate` with a bare syntax error."""
+    command, ops = _self_cascade_dollar_command(recorded=False)
+
+    assert ops == []
+    assert len(command._skipped_rule_notes) == 1
+    assert 'Self cascade trigger' in command._skipped_rule_notes[0]
+    assert '"$$"' in command._skipped_rule_notes[0]
+    # Nothing recorded, so nothing is live to warn about, and the name was never claimed.
+    assert command._refusals_over_live_rules == []
+    assert command._claimed_sweep_names == {}
+
+
+def test_a_self_cascade_refused_for_dollar_quoting_escalates_over_its_own_live_trigger():
+    """The same refusal against a key this project already recorded: the trigger is live in
+    every migrated database and this run will not replace it, so the operator is told which
+    two objects to drop by hand rather than left with `--check` green over it."""
+    command, ops = _self_cascade_dollar_command(recorded=True)
+
+    assert ops == []
+    assert len(command._refusals_over_live_rules) == 1
+    escalation = command._refusals_over_live_rules[0]
+    assert "Self cascade trigger on 'testapp_dollar$$tree' via 'parent_id'" in escalation
+    # Both halves named: the trigger alone leaves the function behind.
+    assert 'DROP TRIGGER' in escalation
+    assert 'DROP FUNCTION' in escalation
+
+
 def test_self_cascade_operation_under_adopt_drops_if_exists_first():
     """``--adopt`` is the one path where existence is *unknown*, so the one path that may say
     IF EXISTS. The function stays CREATE OR REPLACE: DROP FUNCTION refuses while a trigger

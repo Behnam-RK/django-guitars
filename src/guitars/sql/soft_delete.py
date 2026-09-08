@@ -452,3 +452,30 @@ CREATE_MTI_SOFT_DELETE_RULE = """
 DROP_MTI_SOFT_DELETE_RULE = """
     DROP RULE soft_delete ON {child_table};
 """
+
+# ---- Rename forms. PostgreSQL carries an object with its table, so a name-bearing one survives
+# a rename under the name the *old* table gave it while the CREATE below mints a new one. ``IF
+# EXISTS`` because a project that never applied the old coverage has nothing to drop. ----
+
+_RENAME_SOFT_DELETE_OWNED_SWEEP = (
+    """
+    DROP TRIGGER IF EXISTS {old_trigger} ON {table};
+    DROP FUNCTION IF EXISTS {old_function}();
+"""
+    + _CREATE_SOFT_DELETE_OWNED_SWEEP
+)
+
+_RENAME_SOFT_DELETE_SELF_CASCADE = (
+    """
+    DROP TRIGGER IF EXISTS {old_trigger} ON {table};
+    DROP FUNCTION IF EXISTS {old_function}();
+"""
+    + _CREATE_SOFT_DELETE_SELF_CASCADE
+)
+
+#: Prepended to a rule's ``CREATE OR REPLACE``: that alone would leave the carried-over rule
+#: live beside the new one, both cascading, which is a duplicate rather than a failure -- but a
+#: duplicate nothing later retires.
+_DROP_RENAMED_RULE = """
+    DROP RULE IF EXISTS {old_rule_name} ON {table};
+"""

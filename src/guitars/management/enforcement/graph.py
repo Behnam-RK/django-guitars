@@ -194,3 +194,69 @@ def retired_enforcement(
         if retirements:
             found[name] = retirements
     return found
+
+
+def renamed_tables(loader: MigrationLoader, app_label: str) -> dict[str, str]:
+    """``new db_table -> the one it was renamed from``, for every ``RenameModel`` and
+    ``AlterModelTable`` in *app_label*'s history, chained so a table renamed twice maps to its
+    original. Empty, and cheap, for the apps that never renamed one."""
+    ordered = _app_migrations_in_order(loader, app_label)
+    interesting = [
+        name
+        for name in ordered
+        if (app_label, name) in loader.disk_migrations
+        and any(
+            _renaming(operation)
+            for operation in loader.disk_migrations[app_label, name].operations
+        )
+    ]
+    if not interesting:
+        return {}
+
+    # Resolved through Django's own migration state rather than by re-deriving its naming
+    # rules: an explicit ``db_table`` survives a ``RenameModel`` untouched, and an
+    # ``AlterModelTable`` moves a table with no model rename at all.
+    renames: dict[str, str] = {}
+    for name in interesting:
+        before = _tables_by_model(loader, app_label, ordered, upto=name, inclusive=False)
+        after = _tables_by_model(loader, app_label, ordered, upto=name, inclusive=True)
+        for operation in loader.disk_migrations[app_label, name].operations:
+            for old_model, new_model in _renaming(operation):
+                # Read per *operation*, not by diffing the two states: a ``RenameModel``
+                # changes the model name too, so the same table appears under two different
+                # keys and a diff sees a model gone and another arrived.
+                old_table, new_table = before.get(old_model), after.get(new_model)
+                if old_table and new_table and old_table != new_table:
+                    # Chained, so a table renamed twice answers with the name its coverage was
+                    # recorded under, which is the first one.
+                    renames[new_table] = renames.pop(old_table, old_table)
+    return renames
+
+
+def _renaming(operation) -> list[tuple[str, str]]:
+    """``(old model name, new model name)`` for an operation that can move a table, lowercased
+    as the migration state keys them. Unwrapped for :func:`_establishes`' reason."""
+    if isinstance(operation, SeparateDatabaseAndState):
+        return [
+            pair
+            for inner in (*operation.database_operations, *operation.state_operations)
+            for pair in _renaming(inner)
+        ]
+    if isinstance(operation, RenameModel):
+        return [(operation.old_name_lower, operation.new_name_lower)]
+    if isinstance(operation, AlterModelTable):
+        return [(operation.name_lower, operation.name_lower)]
+    return []
+
+
+def _tables_by_model(
+    loader: MigrationLoader, app_label: str, ordered: list[str], *, upto: str, inclusive: bool
+) -> dict[str, str]:
+    """``model name -> db_table`` for *app_label* as of *upto*, read off the migration state."""
+    index = ordered.index(upto) + (1 if inclusive else 0)
+    state = loader.project_state([(app_label, ordered[index - 1])] if index else [])
+    return {
+        model_name: model_state.options.get('db_table') or f'{label}_{model_name}'
+        for (label, model_name), model_state in state.models.items()
+        if label == app_label
+    }

@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, NamedTuple
 from django.apps import apps as django_apps
 
 from guitars.management import _generator
-from guitars.management.enforcement.graph import retired_enforcement
+from guitars.management.enforcement.graph import renamed_tables, retired_enforcement
 from guitars.management.enforcement.headers import (
     _RE_MTI_SOFT_DELETE,
     _RE_MTI_UPDATED_AT,
@@ -89,6 +89,9 @@ class ExistingOperations(NamedTuple):
     #: Retirement breaks the file-level ``[DIGEST:...]`` guard's assumption that an operation set
     #: never recurs -- retire, then re-adopt -- so these apps rely on the per-operation guards.
     retirement_apps: set[str]
+    #: ``new db_table -> the one it was renamed from``, for the families whose object name
+    #: embeds a table: their carried-over object still answers to the old name.
+    renamed_tables: dict[str, str]
     #: Function name -> the migration defining it, and that migration's ``[SQL:...]`` digest.
     #: Dicts rather than the singletons below because autofill is one function per
     #: ``(column, GUC)`` pair -- normally one, but a hand-rolled manager can add more.
@@ -131,6 +134,30 @@ def _subtract_retired(
         return
     for recorded in whole_table.values():
         recorded.pop(table, None)
+
+
+def _translate_renamed(renames: dict[str, str], recorded: dict | set) -> None:
+    """Re-key *recorded* from the table names a rename left behind onto the ones in use now."""
+    # PostgreSQL carries an object with its table, so after a rename it is still there while the
+    # coverage asserting it is filed under the old name -- the new name then reads as uncovered
+    # and the plain CREATE collides. Re-keyed, each family's own replace path fires instead.
+    old_to_new = {old: new for new, old in renames.items()}
+    if isinstance(recorded, set):
+        for old in old_to_new.keys() & recorded:
+            recorded.discard(old)
+            recorded.add(old_to_new[old])
+        return
+    for key in list(recorded):
+        moved = (
+            old_to_new.get(key)
+            if isinstance(key, str)
+            else tuple(old_to_new.get(part, part) for part in key)
+        )
+        if moved is not None and moved != key:
+            # ``setdefault``: a key already recorded under the new name was written after the
+            # rename and is the current answer, so the stale one never displaces it.
+            recorded.setdefault(moved, recorded[key])
+            del recorded[key]
 
 
 def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingOperations:
@@ -357,6 +384,31 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
                 for m in _RE_TENANT_FORCE.finditer(content)
             )
 
+    # One map across every local app: a cascade rule's key names two tables, and they can
+    # belong to different apps, so translating per app would leave half a key behind.
+    renames: dict[str, str] = {}
+    for app in django_apps.get_app_configs():
+        if _generator.is_local(app):
+            renames.update(renamed_tables(_ensure_loader(), app.label))
+    if renames:
+        for recorded in (
+            existing_triggers,
+            existing_soft_deletes,
+            existing_soft_delete_related,
+            existing_soft_delete_owned,
+            existing_soft_delete_owned_sweep,
+            existing_soft_delete_self_cascade,
+            existing_mti_triggers,
+            existing_mti_soft_deletes,
+            existing_tenant_autofill,
+            existing_tenant_policies,
+            existing_policy_identities,
+            existing_policy_sql,
+            existing_policy_force,
+            existing_tenant_forces,
+        ):
+            _translate_renamed(renames, recorded)
+
     return ExistingOperations(
         triggers=existing_triggers,
         soft_deletes=existing_soft_deletes,
@@ -373,6 +425,7 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
         tenant_forces=existing_tenant_forces,
         tenant_autofill=existing_tenant_autofill,
         retirement_apps=retirement_apps,
+        renamed_tables=renames,
         tenant_autofill_function_dependencies=autofill_function_deps,
         tenant_autofill_function_sql=autofill_function_sql,
         existing_digests=dict(existing_digests),

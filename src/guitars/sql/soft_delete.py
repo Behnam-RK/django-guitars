@@ -473,6 +473,25 @@ _RENAME_SOFT_DELETE_SELF_CASCADE = (
     + _CREATE_SOFT_DELETE_SELF_CASCADE
 )
 
+# The adopt forms of the two above. ``--adopt`` is the path where the database's state is
+# *unknown*, so it must drop the new name as well as the one a rename left behind -- either or
+# neither may be there.
+_ADOPT_RENAME_SOFT_DELETE_SELF_CASCADE = (
+    """
+    DROP TRIGGER IF EXISTS {old_trigger} ON {table};
+    DROP FUNCTION IF EXISTS {old_function}();
+"""
+    + _ADOPT_SOFT_DELETE_SELF_CASCADE
+)
+
+_ADOPT_RENAME_SOFT_DELETE_OWNED_SWEEP = (
+    """
+    DROP TRIGGER IF EXISTS {old_trigger} ON {table};
+    DROP FUNCTION IF EXISTS {old_function}();
+"""
+    + _ADOPT_SOFT_DELETE_OWNED_SWEEP
+)
+
 #: Prepended to a rule's ``CREATE OR REPLACE``: that alone would leave the carried-over rule
 #: live beside the new one, both cascading, which is a duplicate rather than a failure -- but a
 #: duplicate nothing later retires.

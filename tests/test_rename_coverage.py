@@ -180,3 +180,52 @@ def test_a_key_already_recorded_under_the_new_name_wins():
     scanning._translate_renamed({'testapp_new': 'testapp_old'}, recorded)
 
     assert recorded == {'testapp_new': 'current'}
+
+
+def test_retiring_a_rule_on_a_renamed_table_drops_both_names():
+    """A retirement names the rule after the child's table, but a rename left the live one
+    under the old name -- and ``DROP RULE`` has no ``IF EXISTS``, so the wrong name fails
+    ``migrate``. Which is live depends on ordering, so both are dropped, both ``IF EXISTS``."""
+    command = Command()
+    command.existing.soft_delete_related.clear()
+    command.existing.renamed_tables['testapp_callbacks'] = 'testapp_encore'
+    command.existing.soft_delete_related[('testapp_callbacks', 'testapp_band', None)] = 'abc'
+
+    (operation,) = [
+        candidate
+        for candidate in command._retired_cascade_operations(apps.get_app_config('testapp'))
+        if candidate.startswith('# Soft Delete Related Rule retired')
+    ]
+
+    assert 'DROP RULE IF EXISTS "soft_delete_related_testapp_encore" ON "testapp_band"' in (
+        operation
+    )
+    assert 'DROP RULE IF EXISTS "soft_delete_related_testapp_callbacks" ON "testapp_band"' in (
+        operation
+    )
+    # And never the bare form, which is what fails on a name nothing has.
+    assert 'DROP RULE "soft_delete_related' not in operation
+    # Retired, so not also *named*: both its tables map.
+    assert command._unmapped_cascade_notes() == []
+
+
+def test_adopt_after_a_rename_drops_the_old_name_too():
+    """``--adopt`` is the path where the database's state is unknown, so it drops the current
+    name ``IF EXISTS``. After a rename the object may equally be under the old one, and
+    dropping only the new leaves the carried-over trigger live beside the new one."""
+    command = Command()
+    command.existing.renamed_tables['testapp_setlist'] = 'testapp_oldtree'
+    command.existing.soft_delete_self_cascade[('testapp_setlist', 'parent_id')] = 'stale00000000'
+
+    (operation,) = [
+        candidate
+        for candidate in command._build_operations(apps.get_app_config('testapp'), adopt=True)
+        if candidate.startswith('# Soft Delete Self Cascade Trigger on "testapp_setlist"')
+    ]
+
+    assert 'DROP TRIGGER IF EXISTS "soft_delete_self_cascade_15_testapp_oldtree_9_parent_id"' in (
+        operation
+    )
+    assert 'DROP TRIGGER IF EXISTS "soft_delete_self_cascade_15_testapp_setlist_9_parent_id"' in (
+        operation
+    )

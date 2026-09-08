@@ -24,8 +24,10 @@ decision rather than a new mechanism.
 
 ## Decision
 
-Emit a statement-level `AFTER UPDATE` trigger, with `OLD`/`NEW` transition tables, for every
-self-referential `CASCADE` foreign key. Its function archives the children of every row whose
+Emit a statement-level `AFTER UPDATE` trigger, with `OLD`/`NEW` transition tables, for a
+self-referential `CASCADE` foreign key **whose table is the one owning `_deleted_at`**. A self
+key declared on an MTI *child* whose `_deleted_at` lives on an ancestor gets neither this
+trigger nor a rule, as before this ADR — the same gap the flat cascade rule has there. Its function archives the children of every row whose
 `_deleted_at` flipped from null in this statement.
 
 **Self-referential only.** A cycle through two or more tables stays refused. Converting *any one*
@@ -64,13 +66,15 @@ as could not create such a function against a table it does not own.
   self-referential `CASCADE` key it finds. A Python fallback prescribed by the old docs becomes
   redundant rather than wrong: it re-archives rows the trigger already stamped, and
   `_deleted_at IS NULL` makes that a no-op.
-- `_updated_at` **is** stamped on every row the archive touches, and `tests/test_self_cascade.py`
-  asserts it. The tree rows get it from an assignment spliced into the trigger's own `UPDATE`,
-  for the sweep's reason — that `UPDATE` runs at trigger depth ≥ 1, where `updated_at_trigger`'s
-  `WHEN (pg_trigger_depth() = 0)` suppresses it. The ordinary cascade children of each archived
-  level get it from their own trigger. The second half was expected to be a gap and measured not
-  to be; it is asserted rather than reasoned about, so a future PostgreSQL that changes it is
-  caught here.
+- `_updated_at` splits in two, and `tests/test_self_cascade.py` pins both halves. The **tree
+  rows** get it from an assignment spliced into the trigger's own `UPDATE`, for the sweep's
+  reason: that `UPDATE` runs at trigger depth ≥ 1, where `updated_at_trigger`'s
+  `WHEN (pg_trigger_depth() = 0)` suppresses it. The ordinary **cascade children of every level
+  below the first** do **not** get one — that rule fires from inside the trigger at depth 1 and
+  sets only `_deleted_at`, so only the root's own children, archived by the original depth-0
+  statement, are stamped. An accepted gap, as this ADR's plan expected. Closing it means
+  splicing `_updated_at` into the cascade rule's action, which moves the `[SQL:...]` identity of
+  every cascade rule in every consuming project — too much for a timestamp on an archived row.
 - The trigger's `UPDATE` fires the table's other `ON UPDATE` cascade rules for each level, so a
   tree's ordinary children cascade with it rather than being stranded below the first level.
 - The name sizes every variable segment (`soft_delete_self_cascade_<n>_<schema>_<n>_<table>_<n>_<fk>`)

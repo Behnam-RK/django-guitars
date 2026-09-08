@@ -292,9 +292,9 @@ _ADOPT_SOFT_DELETE_OWNED_SWEEP = (
 # Self keys only -- a multi-table cycle has no stable choice of edge. See ADR 0018. ----
 
 
-# ``AFTER UPDATE OF _deleted_at`` was the intent, a tree being written far oftener than archived,
-# but PostgreSQL refuses a column list beside transition tables -- the mechanism itself. So the
-# guard below asks it in the body: no row non-null in the new image, no walk of the tree.
+# The body's EXISTS guard **terminates** the recursion rather than merely cheapening it: a
+# statement trigger fires on an UPDATE matching zero rows, so without it this function's own
+# no-op UPDATE re-fires it until the stack blows. Do not move it into the join.
 _CREATE_SOFT_DELETE_SELF_CASCADE_FUNCTION = """
     CREATE OR REPLACE FUNCTION {function}()
        RETURNS TRIGGER

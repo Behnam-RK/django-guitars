@@ -1100,9 +1100,9 @@ class OperationsMixin:
         """The statement-level trigger a self-referential CASCADE FK takes in place of the rule
         the loop above emits (ADR 0018). Appended from inside :meth:`_cascade_operations`, after
         the same refusals -- so which self keys carry a trigger *is* which would carry a rule."""
-        # No object refs: CREATE TRIGGER names only the table it fires on, plpgsql resolves no
-        # body at CREATE FUNCTION time, and that one table is this app's own -- so unlike a
-        # cascade rule there is nothing here that can cross an app at all.
+        # No object refs: CREATE TRIGGER names only the table it fires on and plpgsql resolves
+        # no body at CREATE FUNCTION time. A proxy or MTI parent elsewhere can still move that
+        # table out of this app -- as it can a cascade rule, which emits no owner edge either.
         name = _self_cascade_name(owner_table, foreign_key)
         ident_foreign_key = _identifiers._escape_ident(foreign_key)
         slots = {
@@ -1686,8 +1686,8 @@ class OperationsMixin:
                 # naming the parent's app" a promise this check can actually verify: the two
                 # must agree on both which FKs count and which dedupe key each one uses.
 
-                # Self keys dropped: that trigger fires on the declaring model's own table,
-                # so it lands in the app being scanned and leaves a scoped run no gap.
+                # Self keys dropped: that trigger lands in the app being scanned, so a scoped
+                # run has nothing to report for it that this note's cascade-rule gap covers.
                 candidates, _self_cascades = self._cascade_candidates(model, table)
                 for related_model, fk_field, is_primary in candidates:
                     if model_app_label.get(related_model) not in requested:

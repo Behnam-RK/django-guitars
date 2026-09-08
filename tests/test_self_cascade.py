@@ -26,11 +26,23 @@ def _archived(model) -> set[str]:
     return {getattr(row, field) for row in model._all_objects.all() if row._deleted_at is not None}
 
 
+def _raw_delete(pk: int) -> None:
+    """Archive one row without Django's collector, which is the only way to see this trigger
+    work: ``.delete()`` walks the subtree in Python and names every level in one statement, so
+    the rule archives the lot at depth 0 and the trigger matches nothing."""
+    # Verified rather than argued: with every archive test on the ORM path, dropping the
+    # trigger left all nine of them green. On this path four of them fail.
+    with connection.cursor() as cursor:
+        cursor.execute('DELETE FROM testapp_setlist WHERE id = %s', [pk])
+
+
 def test_archiving_a_root_archives_every_descendant(tree):
-    """The whole point: one statement, and the trigger re-fires itself for each level down."""
+    """The whole point: one statement naming only the root, and the trigger re-fires itself
+    for each level down. Raw, so the collector cannot archive the subtree first -- see
+    :func:`_raw_delete`."""
     root, _middle, _leaf = tree
 
-    Setlist.objects.filter(pk=root.pk).delete()
+    _raw_delete(root.pk)
 
     assert _archived(Setlist) == {'root', 'middle', 'leaf'}
 
@@ -41,29 +53,47 @@ def test_archiving_a_root_reaches_the_cascade_children_of_every_level(tree):
     trigger would archive the tree and strand every child hanging below the first level."""
     root, _middle, _leaf = tree
 
-    Setlist.objects.filter(pk=root.pk).delete()
+    _raw_delete(root.pk)
 
     assert _archived(SetlistEntry) == {'root-song', 'middle-song', 'leaf-song'}
 
 
-def test_every_archived_row_has_its_updated_at_stamped(tree):
-    """``_updated_at`` is stamped on every row the archive touches: tree rows by the assignment
-    spliced into the trigger's own ``UPDATE``, cascade children by their own trigger. Asserted,
-    not reasoned about -- it is the half of the archive no single mechanism owns."""
-    # Against ``NOW()``, not against the value before the delete: ``NOW()`` is the *transaction*
-    # timestamp, so every enforcement object here stamps one instant, and that instant precedes
-    # the Python-side timestamps the rows were created with. "Newer than before" tests nothing.
+def test_the_tree_rows_are_stamped_and_the_deeper_cascade_children_are_not(transactional_db):
+    """The archive's ``_updated_at`` splits in two and this pins both halves: tree rows stamped
+    by the trigger's own spliced ``UPDATE``, cascade children below the first level **not** --
+    their rule fires at depth 1, where ``updated_at_trigger``'s ``WHEN`` suppresses it."""
+    # ``transactional_db`` because ``NOW()`` is the *transaction* timestamp: under one
+    # surrounding transaction the rows are created at the very instant the enforcement later
+    # stamps, and every comparison below holds whether or not anything stamped anything.
+    root = Setlist.objects.create(title='root')
+    middle = Setlist.objects.create(title='middle', parent=root)
+    leaf = Setlist.objects.create(title='leaf', parent=middle)
+    for node in (root, middle, leaf):
+        SetlistEntry.objects.create(song=f'{node.title}-song', setlist=node)
+    before = {row.pk: row._updated_at for row in Setlist._all_objects.all()}
+    entries_before = {row.song: row._updated_at for row in SetlistEntry._all_objects.all()}
+
+    _raw_delete(root.pk)
+
+    for row in Setlist._all_objects.all():
+        assert row._updated_at > before[row.pk], f'{row.title} kept a stale _updated_at'
+    moved = {
+        row.song: row._updated_at > entries_before[row.song]
+        for row in SetlistEntry._all_objects.all()
+    }
+    assert moved == {'root-song': True, 'middle-song': False, 'leaf-song': False}
+
+
+def test_the_orm_delete_path_archives_the_tree_through_the_collector(tree):
+    """``.delete()`` reaches the same end state by another road: the collector names every
+    level in one statement, so the tree archives whether or not the trigger fires. Kept as the
+    path an application takes, asserted as the collector's result -- see :func:`_raw_delete`."""
     root, _middle, _leaf = tree
-    with connection.cursor() as cursor:
-        cursor.execute('SELECT NOW()')
-        now = cursor.fetchone()[0]
 
     Setlist.objects.filter(pk=root.pk).delete()
 
-    for row in Setlist._all_objects.all():
-        assert row._updated_at == now, f'{row.title} kept a stale _updated_at'
-    for row in SetlistEntry._all_objects.all():
-        assert row._updated_at == now, f'{row.song} kept a stale _updated_at'
+    assert _archived(Setlist) == {'root', 'middle', 'leaf'}
+    assert _archived(SetlistEntry) == {'root-song', 'middle-song', 'leaf-song'}
 
 
 def test_archiving_a_leaf_touches_nothing_above_it(tree):

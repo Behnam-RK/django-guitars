@@ -52,7 +52,7 @@ class TestAGoodDatabasePasses:
         assert 'audit passed' in output
         # The count is part of the assertion: "passed" over zero tables is the failure mode
         # a deploy gate has to be incapable of.
-        assert '12 table(s) expected, 12 enforced' in output
+        assert '13 table(s) expected, 13 enforced' in output
 
     def test_force_is_already_on_everywhere(self, db):
         """``GUITARS_RLS_FORCE`` defaults to True, so the strict gate passes out of the box
@@ -538,7 +538,7 @@ class TestAPolicyThatNoLongerMatchesTheModels:
             assert 'audit passed' in output
             assert 'not by the scope the models describe' in output
             # Still not counted as enforced: it is protected by the wrong scope.
-            assert '11 enforced' in output
+            assert '12 enforced' in output
         finally:
             _execute(
                 sql.drop_tenant_policy(table=table),
@@ -606,7 +606,7 @@ class TestAPolicyThatNoLongerMatchesTheModels:
             assert 'not by the scope the models describe' in output
             assert 'bypasses it' in output
             # Seven expected tables, one of them unhealthy for two reasons -> six enforced.
-            assert '11 enforced' in output
+            assert '12 enforced' in output
             assert '1 enabled without FORCE' in output
             assert '1 not matching the models' in output
         finally:

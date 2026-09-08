@@ -287,6 +287,138 @@ _ADOPT_SOFT_DELETE_OWNED_SWEEP = (
     + _CREATE_SOFT_DELETE_OWNED_SWEEP
 )
 
+# ---- Self-referential cascade: a trigger where the family above is a rule. A rule updating the
+# table it fires on is rewritten into itself and PostgreSQL rejects **every** ``UPDATE`` there.
+# Self keys only -- a multi-table cycle has no stable choice of edge. See ADR 0018. ----
+
+
+# Guard one refuses what guard two cannot see: a row archived under a key this statement also
+# rewrote has no before-image to match, so a live child at *either* key -- the old one, or the
+# new one it was re-parented onto -- would leak in silence.
+
+# Gated on an archive having happened, so a plain re-key never raises. Narrower than the owned
+# sweep's, which fires on the ambiguity alone: the parity is in the error class, not the reach.
+
+# Guard two **terminates** the recursion rather than merely cheapening it: a statement trigger
+# fires on an UPDATE matching zero rows, so without it this function's own no-op UPDATE re-fires
+# it forever. It asks the UPDATE's own predicate, the archived transition.
+_CREATE_SOFT_DELETE_SELF_CASCADE_FUNCTION = """
+    CREATE OR REPLACE FUNCTION {function}()
+       RETURNS TRIGGER
+       LANGUAGE PLPGSQL
+    AS
+    $$
+    BEGIN
+        IF COALESCE(current_setting('rules.hard_deletion', true), '') <> 'on' THEN
+            IF EXISTS (
+                SELECT 1
+                FROM guitars_self_after AS guitars_after
+                WHERE guitars_after._deleted_at IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM guitars_self_before AS guitars_before
+                      WHERE guitars_before."{primary_key}" = guitars_after."{primary_key}"
+                  )
+                  AND EXISTS (
+                      SELECT 1 FROM {table} AS guitars_child
+                      WHERE guitars_child._deleted_at IS NULL
+                        AND (
+                            guitars_child."{foreign_key}" = guitars_after."{primary_key}"
+                            OR guitars_child."{foreign_key}" IN (
+                                SELECT guitars_vanished."{primary_key}"
+                                FROM guitars_self_before AS guitars_vanished
+                                WHERE guitars_vanished._deleted_at IS NULL
+                                  AND NOT EXISTS (
+                                      SELECT 1 FROM guitars_self_after AS guitars_kept
+                                      WHERE guitars_kept."{primary_key}"
+                                          = guitars_vanished."{primary_key}"
+                                  )
+                            )
+                        )
+                  )
+            ) THEN
+                RAISE EXCEPTION
+                    'guitars: a statement on % archived a row whose primary key it also '
+                    'rewrote, and a live child is left holding one of the two keys. The self '
+                    'cascade trigger correlates its transition tables on the primary key, so '
+                    'it cannot tell which before-row that archived row was, and would leak the '
+                    'whole subtree permanently. Rewrite the key and archive the row in '
+                    'separate statements.', TG_TABLE_NAME
+                    USING ERRCODE = 'feature_not_supported';
+            END IF;
+        END IF;
+        IF COALESCE(current_setting('rules.hard_deletion', true), '') <> 'on'
+           AND EXISTS (
+               SELECT 1
+               FROM guitars_self_before AS guitars_before
+               JOIN guitars_self_after AS guitars_after
+                   ON guitars_after."{primary_key}" = guitars_before."{primary_key}"
+               WHERE guitars_before._deleted_at IS NULL
+                 AND guitars_after._deleted_at IS NOT NULL
+           ) THEN
+            UPDATE {table} AS guitars_child
+            SET _deleted_at = NOW(){updated_at_assignment}
+            FROM (
+                SELECT guitars_before."{primary_key}" AS guitars_key
+                FROM guitars_self_before AS guitars_before
+                JOIN guitars_self_after AS guitars_after
+                    ON guitars_after."{primary_key}" = guitars_before."{primary_key}"
+                WHERE guitars_before._deleted_at IS NULL
+                  AND guitars_after._deleted_at IS NOT NULL
+            ) AS guitars_archived
+            WHERE guitars_child."{foreign_key}" = guitars_archived.guitars_key
+              AND guitars_child._deleted_at IS NULL;
+        END IF;
+        RETURN NULL;
+    END;
+    $$;
+"""
+
+#: Spliced for the sweep's reason: this UPDATE runs at trigger depth >= 1, where
+#: ``updated_at_trigger``'s ``WHEN`` suppresses it, so the column would otherwise move on a
+#: top-level archive and not on the cascaded one. A slot: a model may carry no ``_updated_at``.
+_SOFT_DELETE_SELF_CASCADE_UPDATED_AT = ', _updated_at = NOW()'
+
+_DROP_SOFT_DELETE_SELF_CASCADE_FUNCTION = """
+    DROP FUNCTION {function}();
+"""
+
+# No ``WHEN (pg_trigger_depth() = 0)``: here the trigger re-fires *itself*, its own UPDATE being
+# another statement on this table, which is how the next level down is reached. Recursion ends
+# where a level archives nothing. Depth is bounded by ``max_stack_depth``, one frame per level.
+_CREATE_SOFT_DELETE_SELF_CASCADE_TRIGGER = """
+    CREATE TRIGGER {trigger}
+        AFTER UPDATE ON {table}
+        REFERENCING OLD TABLE AS guitars_self_before NEW TABLE AS guitars_self_after
+        FOR EACH STATEMENT
+        EXECUTE FUNCTION {function}();
+"""
+
+_DROP_SOFT_DELETE_SELF_CASCADE_TRIGGER = """
+    DROP TRIGGER {trigger} ON {table};
+"""
+
+# The owned sweep's four forms, for its reasons: IF EXISTS is a knowledge claim, so only --adopt
+# says it, and the function stays CREATE OR REPLACE everywhere -- DROP FUNCTION refuses while a
+# trigger depends on it, and CASCADE would take that trigger with it.
+_CREATE_SOFT_DELETE_SELF_CASCADE = (
+    _CREATE_SOFT_DELETE_SELF_CASCADE_FUNCTION + _CREATE_SOFT_DELETE_SELF_CASCADE_TRIGGER
+)
+
+_DROP_SOFT_DELETE_SELF_CASCADE = (
+    _DROP_SOFT_DELETE_SELF_CASCADE_TRIGGER + _DROP_SOFT_DELETE_SELF_CASCADE_FUNCTION
+)
+
+_REPLACE_SOFT_DELETE_SELF_CASCADE = (
+    _DROP_SOFT_DELETE_SELF_CASCADE_TRIGGER + _CREATE_SOFT_DELETE_SELF_CASCADE
+)
+
+_ADOPT_SOFT_DELETE_SELF_CASCADE = (
+    """
+    DROP TRIGGER IF EXISTS {trigger} ON {table};
+"""
+    + _CREATE_SOFT_DELETE_SELF_CASCADE
+)
+
 # ---- MTI soft-delete rule: preserves the child row, marks the owning ancestor instead.
 # ``_deleted_at IS NULL`` makes it idempotent across the per-table DELETEs Django issues
 # for an MTI chain, so the owner's cascade rules fire exactly once. ----

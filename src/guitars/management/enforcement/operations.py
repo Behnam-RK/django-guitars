@@ -43,6 +43,7 @@ from guitars.management.enforcement.headers import (
     HEADER_SOFT_DELETE_OWNED_SWEEP,
     HEADER_SOFT_DELETE_RELATED,
     HEADER_SOFT_DELETE_RELATED_VIA,
+    HEADER_SOFT_DELETE_SELF_CASCADE,
     HEADER_TENANT_AUTOFILL,
     HEADER_TENANT_AUTOFILL_RETIRED,
     HEADER_TENANT_FORCE,
@@ -146,6 +147,23 @@ def _owned_sweep_name(owner_table: str, dependent_table: str, foreign_key: str) 
         'soft_delete_owned_sweep',
         *([] if owner_schema is None else [_sized(owner_schema)]),
         _sized(bare_owner),
+        *([] if schema is None else [_sized(schema)]),
+        _sized(bare_table),
+        _sized(foreign_key),
+    ]
+    return _identifiers._safe_ident('_'.join(parts))
+
+
+def _self_cascade_name(table: str, foreign_key: str) -> str:
+    """The self-cascade trigger's identifier, for both its trigger and its function. Sized
+    like :func:`_owned_rule_name`, and over the same segments: the table the key points at is
+    the table the trigger fires on, so unlike the sweep there is no second table to fold in."""
+    # Sized for :func:`_owned_rule_name`'s reason, not the frozen cascade family's: nothing
+    # predates 2.8.0 here either, so the name was free to be built with no boundary to guess
+    # at. The distinct prefix is what keeps it from meeting any of the other three families.
+    schema, bare_table = _identifiers._split_qualified('table', table)
+    parts = [
+        'soft_delete_self_cascade',
         *([] if schema is None else [_sized(schema)]),
         _sized(bare_table),
         _sized(foreign_key),
@@ -899,12 +917,13 @@ class OperationsMixin:
 
     def _cascade_candidates(
         self, model: type[models.Model], owner_table: str
-    ) -> list[tuple[type[models.Model], models.ForeignKey, bool]]:
-        """CASCADE FKs pointing at *model*, flagged whether each is the *primary* one for
-        its related_table -- the first in sorted order, keeping the historical plain form so
-        an already-migrated project's lone cascade rule is never re-emitted."""
+    ) -> tuple[list[tuple[type[models.Model], models.ForeignKey, bool]], list[models.ForeignKey]]:
+        """CASCADE FKs pointing at *model*: the ones taking a **rule**, flagged whether each is
+        the *primary* one for its related_table (the first in sorted order, keeping the historical
+        plain form), and the self-referential ones taking a **trigger** instead (ADR 0018)."""
         seen_related_tables: set[str] = set()
         candidates: list[tuple[type[models.Model], models.ForeignKey, bool]] = []
+        self_cascades: list[models.ForeignKey] = []
         for related_model, fk_field, on_delete in sorted(
             self.reverse_relations_mapping[model],
             key=lambda t: (t[0]._meta.db_table, t[1].column),
@@ -915,16 +934,11 @@ class OperationsMixin:
             if not self._is_cascade_candidate(related_model, fk_field, on_delete):
                 continue
             related_table = related_model._meta.db_table
-            # A rule whose action updates the table it fires on is rewritten into itself, and
-            # PostgreSQL then refuses *every* UPDATE there -- a plain save() included -- at
-            # rewrite time, so the WHERE guard never runs. A self-referential CASCADE FK.
+            # A self key takes a trigger (ADR 0018): a rule updating the table it fires on is
+            # rewritten into itself, and PostgreSQL then refuses *every* UPDATE there. Routed
+            # before the cycle check, which still holds this edge for the owned family.
             if related_table == owner_table:
-                self._skipped_rule_notes.append(
-                    f"Cascade rule for '{related_table}' -> '{owner_table}' skipped: the rule "
-                    'would update the same table it fires on, which PostgreSQL rejects as '
-                    'infinite rule recursion on every UPDATE to that table. A self-referential '
-                    'CASCADE foreign key has to be cascaded in Python.'
-                )
+                self_cascades.append(fk_field)
                 continue
             # The same rejection one hop further out: two tables whose rules update each
             # other are rewritten into each other. Checked against the whole-registry graph,
@@ -950,7 +964,7 @@ class OperationsMixin:
             is_primary = related_table not in seen_related_tables
             seen_related_tables.add(related_table)
             candidates.append((related_model, fk_field, is_primary))
-        return candidates
+        return candidates, self_cascades
 
     def _claim_rule_name(self, table: str, rule_name: str, relation: tuple) -> None:
         """Record that *relation* -- ``(other_table, table, foreign_key)``, the column **always**
@@ -969,14 +983,16 @@ class OperationsMixin:
                 'one level of the chain, or cascade one of the two in Python.'
             )
 
-    def _claim_sweep_function_name(self, name: str, relation: tuple) -> None:
+    def _claim_sweep_function_name(
+        self, name: str, relation: tuple, *, kind: str = 'Owned sweep'
+    ) -> None:
         """:meth:`_claim_rule_name`'s equivalent, keyed on the name **alone**: a function is
-        namespaced per schema, so two relations reaching one name have the second overwrite
-        the first's body, leaving one table's trigger running the other's predicate."""
+        namespaced per schema, so the second of two relations reaching one name overwrites the
+        first's body. One registry across families, which makes disjointness a checked claim."""
         claimed = self._claimed_sweep_names.setdefault(name, relation)
         if claimed != relation:
             self._rule_name_clashes.append(
-                f'Owned sweep function {name} is named by both '
+                f'{kind} function {name} is named by both '
                 f'{_rule_relation_label(claimed)} and {_rule_relation_label(relation)}. '
                 'A function is namespaced per schema, so the second replaces the first and '
                 "one of the two tables' triggers would run the other's predicate. Rename a "
@@ -998,7 +1014,8 @@ class OperationsMixin:
         header_owner_table = _identifiers._escape_ident(owner_table)
 
         ops: list[str] = []
-        for related_model, fk_field, is_primary in self._cascade_candidates(model, owner_table):
+        candidates, self_cascades = self._cascade_candidates(model, owner_table)
+        for related_model, fk_field, is_primary in candidates:
             related_table = related_model._meta.db_table
             # SQL body uses _quote_table/_escape_ident throughout; the header's
             # `{table}`/`{related_table}` slots need the same _escape_ident treatment for
@@ -1055,7 +1072,92 @@ class OperationsMixin:
                 reverse,
                 is_adopt=adopt,
             )
+        for fk_field in self_cascades:
+            self._self_cascade_operation(
+                ops,
+                owner=owner,
+                owner_table=owner_table,
+                header_owner_table=header_owner_table,
+                ident_owner_table=ident_owner_table,
+                ident_owner_pk=ident_owner_pk,
+                foreign_key=fk_field.column,
+                adopt=adopt,
+            )
         return ops
+
+    def _self_cascade_operation(
+        self,
+        ops: list[str],
+        *,
+        owner: type[models.Model],
+        owner_table: str,
+        header_owner_table: str,
+        ident_owner_table: str,
+        ident_owner_pk: str,
+        foreign_key: str,
+        adopt: bool,
+    ) -> None:
+        """The statement-level trigger a self-referential CASCADE FK takes in place of the rule
+        the loop above emits (ADR 0018). Appended from inside :meth:`_cascade_operations`, after
+        the same refusals -- so which self keys carry a trigger *is* which would carry a rule."""
+        # No object refs: CREATE TRIGGER names only the table it fires on and plpgsql resolves
+        # no body at CREATE FUNCTION time. A proxy cannot relocate it (``_is_cascade_candidate``
+        # drops the proxy-declared side) and an MTI child never reaches this branch at all.
+        name = _self_cascade_name(owner_table, foreign_key)
+        ident_foreign_key = _identifiers._escape_ident(foreign_key)
+        slots = {
+            'function': name,
+            'trigger': name,
+            'table': ident_owner_table,
+            'primary_key': ident_owner_pk,
+            'foreign_key': ident_foreign_key,
+            # The sweep's reason: this UPDATE runs at trigger depth >= 1, where
+            # ``updated_at_trigger``'s ``WHEN`` suppresses it. Conditional because a model can
+            # carry ``_deleted_at`` with no ``_updated_at`` -- not the MTI shape, E003 refuses it.
+            'updated_at_assignment': (
+                _soft_delete._SOFT_DELETE_SELF_CASCADE_UPDATED_AT
+                if owns_column(owner, '_updated_at')
+                else ''
+            ),
+        }
+        key = (owner_table, foreign_key)
+        # Refused rather than escaped, exactly as the owned sweep refuses it: an identifier
+        # admits '$', so a db_table like 'a$$b' would close this template's dollar quoting
+        # early and the generated migration would fail `migrate` with a bare syntax error.
+        for slot, rendered in slots.items():
+            if '$$' in rendered:
+                self._skipped_rule_notes.append(
+                    f"Self cascade trigger for '{owner_table}.{foreign_key}' skipped: the "
+                    f'{slot} {rendered!r} contains "$$", which closes the dollar quoting this '
+                    f'trigger function depends on -- the generated migration would not apply. '
+                    f'Set a db_table / db_column without it.'
+                )
+                if key in self.existing.soft_delete_self_cascade:
+                    self._refusals_over_live_rules.append(
+                        f"Self cascade trigger on '{owner_table}' via '{foreign_key}' is "
+                        "refused but already exists in this project's migrations. It is still "
+                        'live in any migrated database. Drop it by hand: DROP TRIGGER '
+                        f'{name} ON {ident_owner_table}; DROP FUNCTION {name}();'
+                    )
+                return
+        # Claimed only once it is really emitted, as the sweep's name is: a refused trigger
+        # holding its name would report a clash against the one relation that does reach it.
+        self._claim_sweep_function_name(
+            name, (owner_table, owner_table, foreign_key), kind='Self cascade trigger'
+        )
+        self._append_if_stale(
+            ops,
+            self.existing.soft_delete_self_cascade,
+            key,
+            HEADER_SOFT_DELETE_SELF_CASCADE.format(
+                table=header_owner_table, foreign_key=ident_foreign_key
+            ),
+            _soft_delete._CREATE_SOFT_DELETE_SELF_CASCADE.format(**slots),
+            _soft_delete._DROP_SOFT_DELETE_SELF_CASCADE.format(**slots),
+            replace=_soft_delete._REPLACE_SOFT_DELETE_SELF_CASCADE.format(**slots),
+            adopt=_soft_delete._ADOPT_SOFT_DELETE_SELF_CASCADE.format(**slots),
+            is_adopt=adopt,
+        )
 
     @staticmethod
     def _is_owned_candidate(model: type[models.Model], fk_field: models.Field) -> bool:
@@ -1583,7 +1685,11 @@ class OperationsMixin:
                 # Shared with _cascade_operations, which is what makes "closed by a later run
                 # naming the parent's app" a promise this check can actually verify: the two
                 # must agree on both which FKs count and which dedupe key each one uses.
-                for related_model, fk_field, is_primary in self._cascade_candidates(model, table):
+
+                # Self keys dropped: that trigger lands in the app being scanned, so a scoped
+                # run has nothing to report for it that this note's cascade-rule gap covers.
+                candidates, _self_cascades = self._cascade_candidates(model, table)
+                for related_model, fk_field, is_primary in candidates:
                     if model_app_label.get(related_model) not in requested:
                         continue
                     related_table = related_model._meta.db_table

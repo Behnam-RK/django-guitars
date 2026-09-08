@@ -19,6 +19,7 @@ from guitars.management.enforcement.headers import (
     _RE_SOFT_DELETE_OWNED,
     _RE_SOFT_DELETE_OWNED_SWEEP,
     _RE_SOFT_DELETE_RELATED,
+    _RE_SOFT_DELETE_SELF_CASCADE,
     _RE_TENANT_AUTOFILL,
     _RE_TENANT_AUTOFILL_FUNCTION,
     _RE_TENANT_AUTOFILL_RETIRED,
@@ -59,6 +60,10 @@ class ExistingOperations(NamedTuple):
     #: own operation with its own ``[SQL:...]``: a rule already recorded must not read as a
     #: sweep already recorded, or upgrading projects never receive one. See ADR 0014.
     soft_delete_owned_sweep: dict[tuple[str, str, str], str | None]
+    #: Keyed on (table, foreign_key) -- one table, not two, a self-referential CASCADE FK
+    #: firing on the table it points at. Its own dict for the sweep's reason: a cascade *rule*
+    #: already recorded must not read as a trigger recorded. See ADR 0018.
+    soft_delete_self_cascade: dict[tuple[str, str], str | None]
     mti_triggers: dict[str, str | None]
     mti_soft_deletes: dict[str, str | None]
     tenant_policies: set[str]
@@ -109,6 +114,7 @@ def scan_existing_operations() -> ExistingOperations:
     existing_soft_delete_related: dict[tuple[str, str, str | None], str | None] = {}
     existing_soft_delete_owned: dict[tuple[str, str, str], str | None] = {}
     existing_soft_delete_owned_sweep: dict[tuple[str, str, str], str | None] = {}
+    existing_soft_delete_self_cascade: dict[tuple[str, str], str | None] = {}
     existing_mti_triggers: dict[str, str | None] = {}
     existing_mti_soft_deletes: dict[str, str | None] = {}
     existing_tenant_autofill: dict[tuple[str, str], str | None] = {}
@@ -150,6 +156,14 @@ def scan_existing_operations() -> ExistingOperations:
                 _identifiers._unescape_ident(m.group(1)),
                 _identifiers._unescape_ident(m.group(2)),
                 _identifiers._unescape_ident(m.group(3)),
+            ),
+        ),
+        (
+            _RE_SOFT_DELETE_SELF_CASCADE,
+            existing_soft_delete_self_cascade,
+            lambda m: (
+                _identifiers._unescape_ident(m.group(1)),
+                _identifiers._unescape_ident(m.group(2)),
             ),
         ),
         (
@@ -260,6 +274,7 @@ def scan_existing_operations() -> ExistingOperations:
         soft_delete_related=existing_soft_delete_related,
         soft_delete_owned=existing_soft_delete_owned,
         soft_delete_owned_sweep=existing_soft_delete_owned_sweep,
+        soft_delete_self_cascade=existing_soft_delete_self_cascade,
         mti_triggers=existing_mti_triggers,
         mti_soft_deletes=existing_mti_soft_deletes,
         tenant_policies=existing_tenant_policies,

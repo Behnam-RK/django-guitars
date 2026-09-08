@@ -573,3 +573,62 @@ class Scribble(SetarModel):
 
     def __str__(self) -> str:
         return self.text
+
+
+class Setlist(SetarModel):
+    """A tree: a self-referential ``CASCADE`` key, taking a statement-level trigger where every
+    other cascade takes a rule (ADR 0018). A rule cannot exist here -- updating the table it
+    fires on, it is rejected at rewrite time, bricking every ``UPDATE`` including ``save()``."""
+
+    title = CharField(max_length=100)
+    parent = ForeignKey('self', on_delete=CASCADE, null=True, blank=True, related_name='children')
+
+    def __str__(self) -> str:
+        return self.title
+
+
+class SetlistEntry(SetarModel):
+    """An ordinary cascade child of the tree above, so both families meet in one archive: the
+    trigger walks the levels, and each level's own ``UPDATE`` fires *this* relation's cascade
+    rule. What that leaves ``_updated_at`` doing is pinned by ``tests/test_self_cascade.py``."""
+
+    song = CharField(max_length=100)
+    setlist = ForeignKey(Setlist, on_delete=CASCADE, related_name='entries')
+
+    def __str__(self) -> str:
+        return self.song
+
+
+class Riser(SetarModel):
+    """The owned target the rack below holds, so one table can carry both statement-level
+    families at once."""
+
+    height = CharField(max_length=50)
+
+    def __str__(self) -> str:
+        return self.height
+
+
+class Rack(SetarModel):
+    """A tree that also *owns* something: its table carries the self-cascade trigger and an
+    owned sweep together, and the sweep therefore fires from inside the trigger's depth-1
+    ``UPDATE`` -- the one arrangement neither family had ever met the other in."""
+
+    label = CharField(max_length=100)
+    parent = ForeignKey('self', on_delete=CASCADE, null=True, blank=True, related_name='children')
+    riser = OwningForeignKey(Riser, on_delete=DO_NOTHING, null=True, blank=True)
+
+    def __str__(self) -> str:
+        return self.label
+
+
+class Troupe(GuitarModel):
+    """A tenanted tree. ADR 0018 claims the trigger's child ``UPDATE`` runs under the invoker's
+    row-level security and so fails safe, leaking a live row rather than archiving a hidden
+    one. Transition tables are not RLS-filtered, so that claim is worth measuring."""
+
+    name = CharField(max_length=100)
+    parent = ForeignKey('self', on_delete=CASCADE, null=True, blank=True, related_name='children')
+
+    def __str__(self) -> str:
+        return self.name

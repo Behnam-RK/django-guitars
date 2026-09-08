@@ -41,6 +41,13 @@ HEADER_SOFT_DELETE_OWNED_SWEEP = (
     'via "{foreign_key}"!'
 )
 
+# A self-referential CASCADE FK, taking a trigger where every other cascade takes a rule
+# (ADR 0018). "Self Cascade Trigger" shares no token with the three above, so no scanner
+# reads one as another's. One table slot: the trigger fires on the table its key points at.
+HEADER_SOFT_DELETE_SELF_CASCADE = (
+    '# Soft Delete Self Cascade Trigger on "{table}" via "{foreign_key}"!'
+)
+
 # --- Multi-table inheritance (MTI) operations ---
 
 HEADER_PARENT_TRIGGER_FUNCTION = '# Define function for MTI parent updated at triggers!'
@@ -103,6 +110,9 @@ _RE_SOFT_DELETE_OWNED = _derive_scanner(HEADER_SOFT_DELETE_OWNED)
 # Derivable for the same reason, and disjoint from the above on the literal token after
 # "Owned" -- neither header can be read as the other's.
 _RE_SOFT_DELETE_OWNED_SWEEP = _derive_scanner(HEADER_SOFT_DELETE_OWNED_SWEEP)
+# Derivable too, and disjoint from all three above on "Self": no header of another
+# family carries that token, so nothing reads a self-cascade record as a rule.
+_RE_SOFT_DELETE_SELF_CASCADE = _derive_scanner(HEADER_SOFT_DELETE_SELF_CASCADE)
 _RE_TENANT_FORCE = _derive_scanner(HEADER_TENANT_FORCE)
 _RE_TENANT_AUTOFILL_FUNCTION = _derive_scanner(HEADER_TENANT_AUTOFILL_FUNCTION)
 # Derived, and deliberately NOT fused with _RE_TENANT_AUTOFILL the way _RE_TENANT_POLICY

@@ -84,6 +84,7 @@ class TestWhichTablesAreCovered:
             'testapp_tenniscourt',
             'testapp_tour',
             'testapp_track',
+            'testapp_troupe',
             'testapp_worldtour',
         }
 

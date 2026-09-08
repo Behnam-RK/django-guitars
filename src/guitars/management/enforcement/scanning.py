@@ -20,6 +20,7 @@ from guitars.management.enforcement.headers import (
     _RE_SOFT_DELETE_OWNED,
     _RE_SOFT_DELETE_OWNED_SWEEP,
     _RE_SOFT_DELETE_RELATED,
+    _RE_SOFT_DELETE_RELATED_RETIRED,
     _RE_SOFT_DELETE_SELF_CASCADE,
     _RE_TENANT_AUTOFILL,
     _RE_TENANT_AUTOFILL_FUNCTION,
@@ -84,10 +85,10 @@ class ExistingOperations(NamedTuple):
     #: trigger operation, and the one field this scan *subtracts* from: a retired key must
     #: read as absent, not recorded. The pair because one table can carry several triggers.
     tenant_autofill: dict[tuple[str, str], str | None]
-    #: App labels whose history contains a retirement header. Retirement breaks the file-level
-    #: ``[DIGEST:...]`` guard's assumption that an operation set never recurs -- retire, then
-    #: re-adopt -- so these apps rely on the per-operation guards alone.
-    autofill_retirement_apps: set[str]
+    #: App labels whose history contains a retirement header, of **either** retiring family.
+    #: Retirement breaks the file-level ``[DIGEST:...]`` guard's assumption that an operation set
+    #: never recurs -- retire, then re-adopt -- so these apps rely on the per-operation guards.
+    retirement_apps: set[str]
     #: Function name -> the migration defining it, and that migration's ``[SQL:...]`` digest.
     #: Dicts rather than the singletons below because autofill is one function per
     #: ``(column, GUC)`` pair -- normally one, but a hand-rolled manager can add more.
@@ -150,7 +151,7 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
     existing_mti_triggers: dict[str, str | None] = {}
     existing_mti_soft_deletes: dict[str, str | None] = {}
     existing_tenant_autofill: dict[tuple[str, str], str | None] = {}
-    autofill_retirement_apps: set[str] = set()
+    retirement_apps: set[str] = set()
     # (regex, dict, key_fn) for every plain "finditer, record by key" scan -- the
     # singleton-function and tenant-policy/force blocks below don't fit this shape.
     # Every group is _unescape_ident'd, undoing operations.py's doubled '"'.
@@ -306,13 +307,30 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
                 existing_tenant_autofill[_autofill_key(match)] = _recorded_sql_identity(
                     content, match
                 )
+            # After ``scan_table`` recorded this file's create headers, so retire-then-create
+            # inside one migration reads as the create -- the order the emitter writes them in.
+            cascade_retirements = list(_RE_SOFT_DELETE_RELATED_RETIRED.finditer(content))
+            for match in cascade_retirements:
+                existing_soft_delete_related.pop(
+                    (
+                        _identifiers._unescape_ident(match.group(1)),
+                        _identifiers._unescape_ident(match.group(2)),
+                        _identifiers._unescape_ident(match.group('foreign_key'))
+                        if match.group('foreign_key') is not None
+                        else None,
+                    ),
+                    None,
+                )
+            if cascade_retirements:
+                retirement_apps.add(app.label)
+
             retirements = list(_RE_TENANT_AUTOFILL_RETIRED.finditer(content))
             for match in retirements:
                 existing_tenant_autofill.pop(_autofill_key(match), None)
             if retirements:
                 # Recorded per app, not per key: this is what tells `_generate_stage` its
                 # file-level digest guard can no longer assume operation sets never recur.
-                autofill_retirement_apps.add(app.label)
+                retirement_apps.add(app.label)
 
             policy_matches = list(_RE_TENANT_POLICY.finditer(content))
             unforced_in_file = unforced_policy_tables(content, policy_matches)
@@ -354,7 +372,7 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
         unforced_policies={table for table, unforced in existing_policy_force.items() if unforced},
         tenant_forces=existing_tenant_forces,
         tenant_autofill=existing_tenant_autofill,
-        autofill_retirement_apps=autofill_retirement_apps,
+        retirement_apps=retirement_apps,
         tenant_autofill_function_dependencies=autofill_function_deps,
         tenant_autofill_function_sql=autofill_function_sql,
         existing_digests=dict(existing_digests),

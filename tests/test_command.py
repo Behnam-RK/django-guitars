@@ -1116,6 +1116,9 @@ def test_handle_skips_app_when_digest_already_exists(monkeypatch):
     # trigger-function-migration check also goes through) is untouched.
     operations = command._build_operations(apps.get_app_config('testapp'))
     command.existing.existing_digests['testapp'] = {_generator.digest_of(operations)}
+    # The real testapp history carries a cascade retirement, which waives this very guard, so
+    # the app has to be put back to "only ever added" for the guard to be what is under test.
+    command.existing.retirement_apps.discard('testapp')
     created: list[str] = []
     monkeypatch.setattr(
         _generator, 'create_empty_migration_file', lambda *a, **k: created.append(1)
@@ -1671,6 +1674,8 @@ def test_force_rls_stage_skips_an_operation_set_already_written(monkeypatch):
     # The exact digest the FORCE stage will compute for 'testapp', recorded ahead of time.
     force_operations = command._tenant_force_operations(apps.get_app_config('testapp'))
     command.existing.existing_digests['testapp'] = {_generator.digest_of(force_operations)}
+    # As above: testapp's real history retires a cascade rule, which waives this guard.
+    command.existing.retirement_apps.discard('testapp')
 
     command.handle(check_only=False, force_rls=True)
 

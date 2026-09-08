@@ -632,3 +632,15 @@ class Troupe(GuitarModel):
 
     def __str__(self) -> str:
         return self.name
+
+
+class Encore(SetarModel):
+    """A cascade child whose key is relaxed a migration later, so the committed corpus carries
+    a real ``Soft Delete Related Rule retired`` header for the scanners to be proved against.
+    Declared ``SET_NULL`` here; migration 0047 wrote the rule while it was still ``CASCADE``."""
+
+    song = CharField(max_length=100)
+    band = ForeignKey(Band, on_delete=SET_NULL, null=True, blank=True, related_name='encores')
+
+    def __str__(self) -> str:
+        return self.song

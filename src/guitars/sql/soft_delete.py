@@ -287,6 +287,21 @@ _ADOPT_SOFT_DELETE_OWNED_SWEEP = (
     + _CREATE_SOFT_DELETE_OWNED_SWEEP
 )
 
+# A retired rule whose column is unrecoverable -- the primary form's key never spelled it, and
+# the field is gone -- gets this as its ``reverse_sql``. Refusing loudly beats a silent no-op
+# that would leave history claiming a rule the database does not have.
+_REFUSE_RECREATING_RETIRED_RULE = """
+    DO $guitars_retired$
+    BEGIN
+        RAISE EXCEPTION
+            'guitars: rule {rule_name} on {table} was retired by a migration that could not '
+            'record which column it read, so this rollback cannot recreate it. Restore the '
+            'foreign key in the models and run makeguitarmigrations.'
+            USING ERRCODE = 'feature_not_supported';
+    END;
+    $guitars_retired$;
+"""
+
 # ---- Self-referential cascade: a trigger where the family above is a rule. A rule updating the
 # table it fires on is rewritten into itself and PostgreSQL rejects **every** ``UPDATE`` there.
 # Self keys only -- a multi-table cycle has no stable choice of edge. See ADR 0018. ----

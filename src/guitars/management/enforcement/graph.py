@@ -196,10 +196,9 @@ def retired_enforcement(
     return found
 
 
-def renamed_tables(loader: MigrationLoader, app_label: str) -> dict[str, str]:
-    """``new db_table -> the one it was renamed from``, for every ``RenameModel`` and
-    ``AlterModelTable`` in *app_label*'s history, chained so a table renamed twice maps to its
-    original. Empty, and cheap, for the apps that never renamed one."""
+def renamed_tables(loader: MigrationLoader, app_label: str) -> dict[str, list[str]]:
+    """``current db_table -> every name it held before, oldest first``, for the renames in
+    *app_label*'s history. Empty, and cheap, for the apps that never renamed one."""
     ordered = _app_migrations_in_order(loader, app_label)
     interesting = [
         name
@@ -216,20 +215,21 @@ def renamed_tables(loader: MigrationLoader, app_label: str) -> dict[str, str]:
     # Resolved through Django's own migration state rather than by re-deriving its naming
     # rules: an explicit ``db_table`` survives a ``RenameModel`` untouched, and an
     # ``AlterModelTable`` moves a table with no model rename at all.
-    renames: dict[str, str] = {}
+    renames: dict[str, list[str]] = {}
     for name in interesting:
         before = _tables_by_model(loader, app_label, ordered, upto=name, inclusive=False)
         after = _tables_by_model(loader, app_label, ordered, upto=name, inclusive=True)
         for operation in loader.disk_migrations[app_label, name].operations:
             for old_model, new_model in _renaming(operation):
                 # Read per *operation*, not by diffing the two states: a ``RenameModel``
-                # changes the model name too, so the same table appears under two different
-                # keys and a diff sees a model gone and another arrived.
+                # changes the model name too, so the same table appears under two keys and a
+                # diff sees one model gone and another arrived.
                 old_table, new_table = before.get(old_model), after.get(new_model)
                 if old_table and new_table and old_table != new_table:
-                    # Chained, so a table renamed twice answers with the name its coverage was
-                    # recorded under, which is the first one.
-                    renames[new_table] = renames.pop(old_table, old_table)
+                    # **Every** prior name, not just the first. A generation that ran between
+                    # two renames left an object named after the intermediate table, and only
+                    # dropping each of them leaves one object behind. See ADR 0019.
+                    renames[new_table] = [*renames.pop(old_table, []), old_table]
     return renames
 
 

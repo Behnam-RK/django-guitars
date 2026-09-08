@@ -799,14 +799,14 @@ class OperationsMixin:
                 rule_name=rule_name, table=ident_owner_table
             )
             if self._renamed(related_table):
-                # Which name is live depends on whether a run emitted the rename-aware create
-                # before the key stopped being required, and this cannot tell. Both, ``IF
-                # EXISTS``, is right either way; a bare DROP of the wrong one fails ``migrate``.
-                old_rule_name = _related_rule_name(self._was(related_table), via)
-                drop = _soft_delete._DROP_RENAMED_RULE.format(
-                    old_rule_name=old_rule_name, table=ident_owner_table
-                ) + _soft_delete._DROP_RENAMED_RULE.format(
-                    old_rule_name=rule_name, table=ident_owner_table
+                # Which spelling is live depends on when a generation last ran, so every one
+                # goes, ``IF EXISTS``. A bare DROP of a name nothing has fails ``migrate``.
+                drop = self._drop_prior_rules(
+                    ident_owner_table,
+                    [
+                        _related_rule_name(name, via)
+                        for name in (*self._prior_names(related_table), related_table)
+                    ],
                 )
             column = self._retired_cascade_column(key, models_by_table)
             owner = models_by_table[owner_table]
@@ -1115,61 +1115,73 @@ class OperationsMixin:
             candidates.append((related_model, fk_field, is_primary))
         return candidates, self_cascades
 
-    def _self_cascade_adopt(self, slots: dict, owner_table: str, foreign_key: str) -> str:
-        """The adopt form, which is the path where the database's state is unknown -- so where a
-        rename moved the name, both it and the current one have to be dropped."""
-        if not self._renamed(owner_table):
-            return _soft_delete._ADOPT_SOFT_DELETE_SELF_CASCADE.format(**slots)
-        old_name = _self_cascade_name(self._was(owner_table), foreign_key)
-        return _soft_delete._ADOPT_RENAME_SOFT_DELETE_SELF_CASCADE.format(
-            old_trigger=old_name, old_function=old_name, **slots
+    @staticmethod
+    def _drop_prior_rules(table: str, names: list[str]) -> str:
+        """``DROP RULE IF EXISTS`` for each name a rename left behind. Without it the
+        carried-over rule stays live beside the new one, both cascading, neither retired."""
+        return ''.join(
+            _soft_delete._DROP_RENAMED_RULE.format(old_rule_name=name, table=table)
+            for name in names
         )
 
-    def _owned_sweep_adopt(
-        self, slots: dict, owner_table: str, dependent_table: str, foreign_key: str
+    @staticmethod
+    def _drop_prior_triggers(slots: dict, names: list[str]) -> str:
+        """``DROP TRIGGER``/``DROP FUNCTION IF EXISTS`` for each name a rename left behind."""
+        return ''.join(
+            _soft_delete._DROP_RENAMED_TRIGGER.format(
+                old_trigger=name, old_function=name, table=slots['table']
+            )
+            for name in names
+        )
+
+    def _owned_sweep_form(
+        self,
+        slots: dict,
+        owner_table: str,
+        dependent_table: str,
+        foreign_key: str,
+        *,
+        unrenamed: str,
     ) -> str:
-        """:meth:`_self_cascade_adopt` for the sweep, whose name folds in two tables."""
+        """:meth:`_self_cascade_form` for the sweep, whose name folds in **two** tables --
+        either of which a rename can have moved, and each through its own chain."""
         if not self._renamed(owner_table, dependent_table):
-            return _soft_delete._ADOPT_SOFT_DELETE_OWNED_SWEEP.format(**slots)
-        old_name = _owned_sweep_name(
-            self._was(owner_table), self._was(dependent_table), foreign_key
-        )
-        return _soft_delete._ADOPT_RENAME_SOFT_DELETE_OWNED_SWEEP.format(
-            old_trigger=old_name, old_function=old_name, **slots
-        )
+            return unrenamed.format(**slots)
+        owners = [owner_table, *self._prior_names(owner_table)]
+        dependents = [dependent_table, *self._prior_names(dependent_table)]
+        names = [
+            _owned_sweep_name(owner, dependent, foreign_key)
+            for owner in owners
+            for dependent in dependents
+            if (owner, dependent) != (owner_table, dependent_table)
+        ]
+        return self._drop_prior_triggers(
+            slots, names
+        ) + _soft_delete._ADOPT_SOFT_DELETE_OWNED_SWEEP.format(**slots)
 
-    def _owned_sweep_replace(
-        self, slots: dict, owner_table: str, dependent_table: str, foreign_key: str
+    def _self_cascade_form(
+        self, slots: dict, owner_table: str, foreign_key: str, *, unrenamed: str
     ) -> str:
-        """:meth:`_self_cascade_replace` for the sweep, whose name folds in **two** tables --
-        either of which a rename can have moved."""
-        if not self._renamed(owner_table, dependent_table):
-            return _soft_delete._REPLACE_SOFT_DELETE_OWNED_SWEEP.format(**slots)
-        old_name = _owned_sweep_name(
-            self._was(owner_table), self._was(dependent_table), foreign_key
-        )
-        return _soft_delete._RENAME_SOFT_DELETE_OWNED_SWEEP.format(
-            old_trigger=old_name, old_function=old_name, **slots
-        )
-
-    def _self_cascade_replace(self, slots: dict, owner_table: str, foreign_key: str) -> str:
-        """The replace form, taking the rename into account: the live trigger answers to the
-        name the *old* table gave it, so dropping the new one would fail on a name nothing has."""
+        """The replace or adopt form, *unrenamed* being which applies when no rename moved the
+        table. Where one did, every prior name goes and the adopt body drops the current one
+        ``IF EXISTS`` on top -- which spelling is live depends on when a generation last ran."""
         if not self._renamed(owner_table):
-            return _soft_delete._REPLACE_SOFT_DELETE_SELF_CASCADE.format(**slots)
-        old_name = _self_cascade_name(self._was(owner_table), foreign_key)
-        return _soft_delete._RENAME_SOFT_DELETE_SELF_CASCADE.format(
-            old_trigger=old_name, old_function=old_name, **slots
-        )
+            return unrenamed.format(**slots)
+        return self._drop_prior_triggers(
+            slots,
+            [_self_cascade_name(name, foreign_key) for name in self._prior_names(owner_table)],
+        ) + _soft_delete._ADOPT_SOFT_DELETE_SELF_CASCADE.format(**slots)
 
     def _renamed(self, *tables: str) -> bool:
         """Whether any of *tables* is one a rename moved coverage onto. The families whose
         object name embeds a table have to drop the old name as well as create the new."""
         return any(table in self.existing.renamed_tables for table in tables)
 
-    def _was(self, table: str) -> str:
-        """*table*'s name before the rename, or *table* where it was never renamed."""
-        return self.existing.renamed_tables.get(table, table)
+    def _prior_names(self, table: str) -> list[str]:
+        """Every name *table* held before, oldest first, empty where it was never renamed. All
+        of them, because a generation between two renames left an object under the
+        intermediate one and only dropping each leaves a single object behind."""
+        return self.existing.renamed_tables.get(table, [])
 
     def _claim_rule_name(self, table: str, rule_name: str, relation: tuple) -> None:
         """Record that *relation* -- ``(other_table, table, foreign_key)``, the column **always**
@@ -1270,11 +1282,12 @@ class OperationsMixin:
             replace = forward
             if self._renamed(related_table):
                 replace = (
-                    _soft_delete._DROP_RENAMED_RULE.format(
-                        old_rule_name=_related_rule_name(self._was(related_table), fk_field.column)
-                        if not is_primary
-                        else _related_rule_name(self._was(related_table)),
-                        table=ident_owner_table,
+                    self._drop_prior_rules(
+                        ident_owner_table,
+                        [
+                            _related_rule_name(name, None if is_primary else fk_field.column)
+                            for name in self._prior_names(related_table)
+                        ],
                     )
                     + forward
                 )
@@ -1373,8 +1386,18 @@ class OperationsMixin:
             ),
             _soft_delete._CREATE_SOFT_DELETE_SELF_CASCADE.format(**slots),
             _soft_delete._DROP_SOFT_DELETE_SELF_CASCADE.format(**slots),
-            replace=self._self_cascade_replace(slots, owner_table, foreign_key),
-            adopt=self._self_cascade_adopt(slots, owner_table, foreign_key),
+            replace=self._self_cascade_form(
+                slots,
+                owner_table,
+                foreign_key,
+                unrenamed=_soft_delete._REPLACE_SOFT_DELETE_SELF_CASCADE,
+            ),
+            adopt=self._self_cascade_form(
+                slots,
+                owner_table,
+                foreign_key,
+                unrenamed=_soft_delete._ADOPT_SOFT_DELETE_SELF_CASCADE,
+            ),
             is_adopt=adopt,
         )
 
@@ -1588,6 +1611,21 @@ class OperationsMixin:
             reverse = _soft_delete._DROP_SOFT_DELETE_OWNED_OBJECT_RULE.format(
                 rule_name=rule_name, table=ident_owner_table
             )
+            # The owned rule's name embeds the *dependent's* table, so a rename there leaves
+            # the carried-over rule live beside the new one -- both cascading, neither retired,
+            # and the stale one frozen at the old predicate.
+            owned_replace = forward
+            if self._renamed(dependent_table):
+                owned_replace = (
+                    self._drop_prior_rules(
+                        ident_owner_table,
+                        [
+                            _owned_rule_name(name, fk_field.column)
+                            for name in self._prior_names(dependent_table)
+                        ],
+                    )
+                    + forward
+                )
             self._append_if_stale(
                 ops,
                 self.existing.soft_delete_owned,
@@ -1596,6 +1634,8 @@ class OperationsMixin:
                 forward,
                 reverse,
                 is_adopt=adopt,
+                replace=owned_replace,
+                adopt=owned_replace,
             )
             self._append_owned_sweep(
                 ops,
@@ -1715,8 +1755,20 @@ class OperationsMixin:
             ),
             _soft_delete._CREATE_SOFT_DELETE_OWNED_SWEEP.format(**slots),
             _soft_delete._DROP_SOFT_DELETE_OWNED_SWEEP.format(**slots),
-            replace=self._owned_sweep_replace(slots, owner_table, dependent_table, foreign_key),
-            adopt=self._owned_sweep_adopt(slots, owner_table, dependent_table, foreign_key),
+            replace=self._owned_sweep_form(
+                slots,
+                owner_table,
+                dependent_table,
+                foreign_key,
+                unrenamed=_soft_delete._REPLACE_SOFT_DELETE_OWNED_SWEEP,
+            ),
+            adopt=self._owned_sweep_form(
+                slots,
+                owner_table,
+                dependent_table,
+                foreign_key,
+                unrenamed=_soft_delete._ADOPT_SOFT_DELETE_OWNED_SWEEP,
+            ),
             is_adopt=adopt,
         )
 

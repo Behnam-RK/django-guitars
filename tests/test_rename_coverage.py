@@ -24,7 +24,9 @@ def loader():
 def test_a_rename_model_is_read_off_the_migration_state(loader):
     """Chained: 0051 renamed the model, 0053 gave it a ``db_table``, and 0055 renamed it again
     without moving the table. The answer is the name coverage was first recorded under."""
-    assert graph.renamed_tables(loader, 'testapp') == {'testapp_callbacks': 'testapp_encore'}
+    assert graph.renamed_tables(loader, 'testapp') == {
+        'testapp_callbacks': ['testapp_encore', 'testapp_callback']
+    }
 
 
 def test_an_app_that_never_renamed_anything_answers_empty(loader):
@@ -41,7 +43,10 @@ def test_coverage_recorded_under_the_old_name_is_read_under_the_new_one():
     assert 'testapp_callbacks' in existing.triggers
     assert 'testapp_callbacks' in existing.soft_deletes
     assert 'testapp_encore' not in existing.triggers
-    assert existing.renamed_tables['testapp_callbacks'] == 'testapp_encore'
+    assert existing.renamed_tables['testapp_callbacks'] == [
+        'testapp_encore',
+        'testapp_callback',
+    ]
 
 
 def test_the_renamed_table_gets_the_replace_form_not_a_plain_create():
@@ -76,7 +81,7 @@ def test_a_second_run_emits_nothing_for_the_renamed_table():
 # --- The families whose object name embeds a table ------------------------------------------
 
 
-def _self_cascade_for(renamed_from: str | None) -> str:
+def _self_cascade_for(renamed_from: list[str] | None) -> str:
     """The self-cascade operation for ``testapp_setlist``, optionally pretending its table was
     renamed and its coverage translated -- which is what the scan leaves behind."""
     command = Command()
@@ -94,14 +99,13 @@ def _self_cascade_for(renamed_from: str | None) -> str:
 def test_a_renamed_table_drops_the_trigger_under_its_old_name():
     """The name folds the table in, so the carried-over trigger answers to the *old* one.
     Dropping the new name would fail on a name nothing has, which is a broken ``migrate``."""
-    operation = _self_cascade_for('testapp_oldtree')
+    operation = _self_cascade_for(['testapp_oldtree'])
 
-    assert 'DROP TRIGGER IF EXISTS "soft_delete_self_cascade_15_testapp_oldtree_9_parent_id"' in (
-        operation
-    )
-    assert 'DROP FUNCTION IF EXISTS "soft_delete_self_cascade_15_testapp_oldtree_9_parent_id"' in (
-        operation
-    )
+    old = 'soft_delete_self_cascade_15_testapp_oldtree_9_parent_id'
+    assert f'DROP TRIGGER IF EXISTS "{old}"' in operation
+    assert f'DROP FUNCTION IF EXISTS "{old}"' in operation
+    # And the current name too: which spelling is live depends on when a generation last ran.
+    assert 'DROP TRIGGER IF EXISTS "soft_delete_self_cascade_15_testapp_setlist' in operation
     assert 'CREATE TRIGGER "soft_delete_self_cascade_15_testapp_setlist_9_parent_id"' in operation
 
 
@@ -117,7 +121,7 @@ def test_an_unrenamed_table_keeps_the_plain_replace_form():
 def test_a_renamed_owned_sweep_drops_both_of_its_tables_old_names():
     """The sweep's name folds in **two** tables, either of which a rename can have moved."""
     command = Command()
-    command.existing.renamed_tables['testapp_rack'] = 'testapp_oldrack'
+    command.existing.renamed_tables['testapp_rack'] = ['testapp_oldrack']
     key = ('testapp_riser', 'testapp_rack', 'riser_id')
     command.existing.soft_delete_owned_sweep[key] = 'stale00000000'
 
@@ -131,11 +135,30 @@ def test_a_renamed_owned_sweep_drops_both_of_its_tables_old_names():
     assert 'CREATE TRIGGER "soft_delete_owned_sweep_12_testapp_rack' in operation
 
 
+def test_a_renamed_owned_target_drops_the_rule_it_left_behind():
+    """The owned rule's name embeds the *dependent's* table, so a rename there leaves the
+    carried-over rule live beside the new one -- both cascading, neither retired, and the stale
+    one frozen at the old predicate. Claimed by `docs/migrations.md` and the changelog."""
+    command = Command()
+    command.existing.renamed_tables['testapp_riser'] = ['testapp_oldriser']
+    key = ('testapp_riser', 'testapp_rack', 'riser_id')
+    command.existing.soft_delete_owned[key] = 'stale00000000'
+
+    (operation,) = [
+        candidate
+        for candidate in command._build_operations(apps.get_app_config('testapp'))
+        if candidate.startswith('# Soft Delete Owned Rule on "testapp_riser"')
+    ]
+
+    assert 'DROP RULE IF EXISTS "soft_delete_owned_16_testapp_oldriser_8_riser_id"' in operation
+    assert 'CREATE OR REPLACE RULE "soft_delete_owned_13_testapp_riser_8_riser_id"' in operation
+
+
 def test_a_renamed_cascade_child_drops_the_rule_it_left_behind():
     """A cascade rule is named after the child's table, so a rename leaves the carried-over
     rule live beside the new one -- both cascading, and nothing later retires either."""
     command = Command()
-    command.existing.renamed_tables['testapp_album'] = 'testapp_oldalbum'
+    command.existing.renamed_tables['testapp_album'] = ['testapp_oldalbum']
     command.existing.soft_delete_related[('testapp_album', 'testapp_band', None)] = 'stale00000'
 
     (operation,) = [
@@ -167,7 +190,7 @@ def test_the_translation_handles_a_set_as_well_as_a_mapping():
     the translation has to move a member rather than re-key an entry."""
     policies = {'testapp_old', 'testapp_untouched'}
 
-    scanning._translate_renamed({'testapp_new': 'testapp_old'}, policies)
+    scanning._translate_renamed({'testapp_new': ['testapp_old']}, policies)
 
     assert policies == {'testapp_new', 'testapp_untouched'}
 
@@ -177,7 +200,7 @@ def test_a_key_already_recorded_under_the_new_name_wins():
     the old name never displaces it."""
     recorded = {'testapp_new': 'current', 'testapp_old': 'stale'}
 
-    scanning._translate_renamed({'testapp_new': 'testapp_old'}, recorded)
+    scanning._translate_renamed({'testapp_new': ['testapp_old']}, recorded)
 
     assert recorded == {'testapp_new': 'current'}
 
@@ -188,7 +211,7 @@ def test_retiring_a_rule_on_a_renamed_table_drops_both_names():
     ``migrate``. Which is live depends on ordering, so both are dropped, both ``IF EXISTS``."""
     command = Command()
     command.existing.soft_delete_related.clear()
-    command.existing.renamed_tables['testapp_callbacks'] = 'testapp_encore'
+    command.existing.renamed_tables['testapp_callbacks'] = ['testapp_encore']
     command.existing.soft_delete_related[('testapp_callbacks', 'testapp_band', None)] = 'abc'
 
     (operation,) = [
@@ -214,7 +237,7 @@ def test_adopt_after_a_rename_drops_the_old_name_too():
     name ``IF EXISTS``. After a rename the object may equally be under the old one, and
     dropping only the new leaves the carried-over trigger live beside the new one."""
     command = Command()
-    command.existing.renamed_tables['testapp_setlist'] = 'testapp_oldtree'
+    command.existing.renamed_tables['testapp_setlist'] = ['testapp_oldtree']
     command.existing.soft_delete_self_cascade[('testapp_setlist', 'parent_id')] = 'stale00000000'
 
     (operation,) = [

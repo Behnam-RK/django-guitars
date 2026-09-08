@@ -12,6 +12,7 @@ from django.db.migrations.exceptions import IrreversibleError
 from django.db.migrations.operations.base import Operation
 
 from guitars.sql import _identifiers
+from guitars.sql import policy as _policy
 
 
 __all__ = ['RetireEnforcement']
@@ -23,10 +24,31 @@ __all__ = ['RetireEnforcement']
 _RETIRE_SQL = """
 DO ${tag}$
 DECLARE
-    guitars_target regclass := {table}::regclass;
-    guitars_column smallint := {column};
+    guitars_target regclass := to_regclass({table});
+    guitars_column smallint;
     guitars_row record;
 BEGIN
+    IF guitars_target IS NULL THEN
+        RAISE EXCEPTION
+            'guitars: RetireEnforcement names no table %. Nothing was dropped.', {table}
+            USING ERRCODE = 'undefined_table';
+    END IF;
+
+    IF {scoped_to_column} THEN
+        SELECT guitars_attr.attnum INTO guitars_column
+        FROM pg_attribute AS guitars_attr
+        WHERE guitars_attr.attrelid = guitars_target
+          AND guitars_attr.attname = {column}
+          AND NOT guitars_attr.attisdropped;
+        IF guitars_column IS NULL THEN
+            RAISE EXCEPTION
+                'guitars: RetireEnforcement names no column % on %. Place it *before* the '
+                'operation that removes the column, not after. Nothing was dropped.',
+                {column}, guitars_target
+                USING ERRCODE = 'undefined_column';
+        END IF;
+    END IF;
+
     FOR guitars_row IN
         SELECT DISTINCT guitars_rule.rulename AS name,
                guitars_on.oid::regclass AS fires_on
@@ -37,8 +59,8 @@ BEGIN
         JOIN pg_class AS guitars_on ON guitars_on.oid = guitars_rule.ev_class
         WHERE guitars_dep.refclassid = 'pg_class'::regclass
           AND guitars_dep.refobjid = guitars_target
-          AND (guitars_column IS NULL OR guitars_dep.refobjsubid = guitars_column)
-          AND guitars_rule.rulename <> '_RETURN'
+          AND (NOT {scoped_to_column} OR guitars_dep.refobjsubid = guitars_column)
+          AND guitars_rule.rulename LIKE 'soft\\_delete%'
     LOOP
         EXECUTE format('DROP RULE IF EXISTS %I ON %s', guitars_row.name, guitars_row.fires_on);
     END LOOP;
@@ -52,52 +74,43 @@ BEGIN
            AND guitars_dep.classid = 'pg_policy'::regclass
         WHERE guitars_dep.refclassid = 'pg_class'::regclass
           AND guitars_dep.refobjid = guitars_target
-          AND (guitars_column IS NULL OR guitars_dep.refobjsubid = guitars_column)
+          AND (NOT {scoped_to_column} OR guitars_dep.refobjsubid = guitars_column)
+          AND guitars_policy.polname = '{policy}'
     LOOP
         EXECUTE format('DROP POLICY IF EXISTS %I ON %s', guitars_row.name, guitars_row.fires_on);
     END LOOP;
 
-    IF guitars_column IS NULL THEN
+    IF NOT {scoped_to_column} THEN
         FOR guitars_row IN
             SELECT guitars_trigger.tgname AS name
             FROM pg_trigger AS guitars_trigger
             WHERE guitars_trigger.tgrelid = guitars_target
               AND NOT guitars_trigger.tgisinternal
+              AND guitars_trigger.tgparentid = 0
+              AND (
+                  guitars_trigger.tgname = 'updated_at_trigger'
+                  OR guitars_trigger.tgname LIKE 'soft\\_delete\\_self\\_cascade%'
+                  OR guitars_trigger.tgname LIKE 'soft\\_delete\\_owned\\_sweep%'
+                  OR guitars_trigger.tgname LIKE 'guitars\\_fill%'
+              )
         LOOP
             EXECUTE format('DROP TRIGGER IF EXISTS %I ON %s', guitars_row.name, guitars_target);
-        END LOOP;
-
-        FOR guitars_row IN
-            SELECT guitars_policy.polname AS name
-            FROM pg_policy AS guitars_policy
-            WHERE guitars_policy.polrelid = guitars_target
-        LOOP
-            EXECUTE format('DROP POLICY IF EXISTS %I ON %s', guitars_row.name, guitars_target);
         END LOOP;
     END IF;
 END;
 ${tag}$;
 """
 
-#: Resolves the column to its ``attnum``, which is what ``pg_depend.refobjsubid`` holds.
-#: ``attisdropped`` excluded: a dropped column keeps its ``attnum``, and matching one would
-#: retire objects for a column nobody asked about.
-_COLUMN_ATTNUM = (
-    '(SELECT guitars_attr.attnum FROM pg_attribute AS guitars_attr '
-    'WHERE guitars_attr.attrelid = guitars_target AND guitars_attr.attname = {column} '
-    'AND NOT guitars_attr.attisdropped)'
-)
-
-#: The dollar-quoting tag. An identifier may contain ``$``, so a table or column spelling that
-#: closes this tag is refused at construction rather than escaped -- the same call the enforcement
-#: generator makes about ``$$`` in a ``db_table``.
 _TAG = 'guitars_retire'
 
 
 class RetireEnforcement(Operation):
-    """Drop the enforcement objects depending on *table*, or on one *column* of it. Nothing in
-    this kit retires an object on its own, so removing a column a rule names makes
-    ``RemoveField`` fail with ``rule ... depends on column``. See ``docs/migrations.md``."""
+    """Drop **this kit's** enforcement objects depending on *table*, or on one *column* of it.
+    Nothing here retires one on its own, so removing a column a rule names makes ``RemoveField``
+    fail with ``rule ... depends on column``. See ``docs/migrations.md``."""
+
+    # Matched by name as well as by dependency, so a consumer's own rule, trigger or policy is
+    # never taken: this operation is irreversible, and what it drops it cannot put back.
 
     # Place it **before** the schema operation that would otherwise fail:
     #     RetireEnforcement('shop_order', column='archived_at'),
@@ -128,19 +141,19 @@ class RetireEnforcement(Operation):
         beside it; this one is a database-only step."""
 
     def database_forwards(self, app_label, schema_editor, from_state, to_state) -> None:  # noqa: ARG002
-        column = (
-            'NULL::smallint'
-            if self.column is None
-            else _COLUMN_ATTNUM.format(column=_identifiers._quote_literal(self.column))
-        )
-        # ``params=None``, as ``RunSQL`` passes for the kit's other bodies: this SQL is a
-        # plpgsql ``DO`` block whose ``format('%I ...')`` calls would otherwise be read by
-        # psycopg as its own placeholders and rejected.
+        # ``to_regclass`` over the *quoted* spelling, not a bare literal: ``'MyTable'::regclass``
+        # resolves ``mytable`` and a name with a space raises, while ``_quote_table`` produces
+        # the form the rest of the kit writes -- and refuses a spelling it cannot.
+
+        # ``params=None``, as ``RunSQL`` passes for the kit's other bodies: the ``format('%I')``
+        # calls below would otherwise be read by psycopg as its own placeholders.
         schema_editor.execute(
             _RETIRE_SQL.format(
                 tag=_TAG,
-                table=_identifiers._quote_literal(self.table),
-                column=column,
+                table=_identifiers._quote_literal(_identifiers._quote_table(self.table)),
+                column=_identifiers._quote_literal(self.column or ''),
+                scoped_to_column='false' if self.column is None else 'true',
+                policy=_policy.TENANT_POLICY,
             ),
             params=None,
         )

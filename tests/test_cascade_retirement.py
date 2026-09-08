@@ -23,8 +23,8 @@ def command():
     return built
 
 
-def _retirements(built: Command) -> list[str]:
-    app = apps.get_app_config('testapp')
+def _retirements(built: Command, app: str = 'testapp') -> list[str]:
+    app = apps.get_app_config(app)
     return [
         operation
         for operation in built._retired_cascade_operations(app)
@@ -40,7 +40,14 @@ def test_a_relaxed_key_is_retired_with_a_reverse_that_recreates_it(command):
     (operation,) = _retirements(command)
 
     assert 'retired on "testapp_callbacks" that is related to "testapp_band"!' in operation
-    assert 'DROP RULE "soft_delete_related_testapp_callbacks" ON "testapp_band"' in operation
+    # ``testapp_callbacks`` really was renamed (0051, 0053), so the drop takes every spelling
+    # the rule may carry -- the unrenamed, bare-``DROP RULE`` branch is covered below.
+    assert 'DROP RULE IF EXISTS "soft_delete_related_testapp_encore" ON "testapp_band"' in (
+        operation
+    )
+    assert 'DROP RULE IF EXISTS "soft_delete_related_testapp_callbacks" ON "testapp_band"' in (
+        operation
+    )
     # The reverse rebuilds the rule, column and all -- recovered from the relaxed field.
     assert 'CREATE OR REPLACE RULE "soft_delete_related_testapp_callbacks"' in operation
     assert '"band_id" = old."id"' in operation
@@ -56,7 +63,19 @@ def test_the_via_form_keeps_its_own_header_and_column(command):
     (operation,) = _retirements(command)
 
     assert 'via "band_id"!' in operation
-    assert 'DROP RULE "soft_delete_related_testapp_callbacks_band_id" ON "testapp_band"' in operation
+    assert 'DROP RULE IF EXISTS "soft_delete_related_testapp_callbacks_band_id" ON ' in operation
+
+
+def test_an_unrenamed_key_is_dropped_by_name_without_if_exists(command):
+    """The other branch. Nothing renamed ``testapp_album``, so the recorded key is evidence the
+    rule is there under exactly that name and the bare form is right -- ``IF EXISTS`` would
+    hide a database that had already diverged."""
+    command.existing.soft_delete_related[('testapp_album', 'testapp_genre', None)] = 'abc'
+
+    (operation,) = _retirements(command, app='testapp')
+
+    assert 'DROP RULE "soft_delete_related_testapp_album" ON "testapp_genre"' in operation
+    assert 'IF EXISTS' not in operation
 
 
 def test_a_key_whose_column_cannot_be_recovered_refuses_to_be_reversed(command):

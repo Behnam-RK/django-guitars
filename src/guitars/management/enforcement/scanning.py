@@ -89,9 +89,10 @@ class ExistingOperations(NamedTuple):
     #: Retirement breaks the file-level ``[DIGEST:...]`` guard's assumption that an operation set
     #: never recurs -- retire, then re-adopt -- so these apps rely on the per-operation guards.
     retirement_apps: set[str]
-    #: ``new db_table -> the one it was renamed from``, for the families whose object name
-    #: embeds a table: their carried-over object still answers to the old name.
-    renamed_tables: dict[str, str]
+    #: ``current db_table -> every name it held before, oldest first``. The families whose
+    #: object name embeds a table have to drop each of them: a generation between two renames
+    #: left an object under the intermediate name.
+    renamed_tables: dict[str, list[str]]
     #: Function name -> the migration defining it, and that migration's ``[SQL:...]`` digest.
     #: Dicts rather than the singletons below because autofill is one function per
     #: ``(column, GUC)`` pair -- normally one, but a hand-rolled manager can add more.
@@ -136,12 +137,12 @@ def _subtract_retired(
         recorded.pop(table, None)
 
 
-def _translate_renamed(renames: dict[str, str], recorded: dict | set) -> None:
+def _translate_renamed(renames: dict[str, list[str]], recorded: dict | set) -> None:
     """Re-key *recorded* from the table names a rename left behind onto the ones in use now."""
     # PostgreSQL carries an object with its table, so after a rename it is still there while the
     # coverage asserting it is filed under the old name -- the new name then reads as uncovered
     # and the plain CREATE collides. Re-keyed, each family's own replace path fires instead.
-    old_to_new = {old: new for new, old in renames.items()}
+    old_to_new = {old: new for new, priors in renames.items() for old in priors}
     if isinstance(recorded, set):
         for old in old_to_new.keys() & recorded:
             recorded.discard(old)
@@ -260,6 +261,7 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
     autofill_function_deps: dict[str, tuple[str, str]] = {}
     autofill_function_sql: dict[str, str | None] = {}
     built_loader = loader
+    _pending_renames: dict[str, list[str]] = {}
 
     def _ensure_loader() -> MigrationLoader:
         """The caller's loader, or one built once here. Building imports every migration module
@@ -290,18 +292,30 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
     }
 
     for app in django_apps.get_app_configs():
+        if _generator.is_local(app):
+            _pending_renames.update(renamed_tables(_ensure_loader(), app.label))
+
+    for app in django_apps.get_app_configs():
         if not _generator.is_local(app):
             continue
         retired = retired_enforcement(_ensure_loader(), app.label)
+        # A retirement names the table as spelled *now*, while the keys it must subtract may
+        # still be filed under a name a rename left behind -- the post-pass would then move the
+        # old key back over the hole and a dropped object would read as covered.
+        spellings = {
+            table: [table, *_pending_renames.get(table, [])]
+            for table, _ in [pair for pairs in retired.values() for pair in pairs]
+        }
         for path, content in _generator.iter_migration_files(app):
             # Before this file's headers, not after: an operation retiring a key and a header
             # re-asserting it in the same migration means the migration re-asserts it.
             for table, column in retired.get(path.stem, ()):
-                _subtract_retired(table, column, keyed_families, whole_table_families)
-                if column is None:
-                    existing_tenant_policies.discard(table)
-                    for key in [k for k in existing_tenant_autofill if k[0] == table]:
-                        del existing_tenant_autofill[key]
+                for spelling in spellings[table]:
+                    _subtract_retired(spelling, column, keyed_families, whole_table_families)
+                    if column is None:
+                        existing_tenant_policies.discard(spelling)
+                        for key in [k for k in existing_tenant_autofill if k[0] == spelling]:
+                            del existing_tenant_autofill[key]
 
             digest_match = _generator.RE_DIGEST.search(content.split('\n', 1)[0])
             if digest_match:
@@ -386,10 +400,7 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
 
     # One map across every local app: a cascade rule's key names two tables, and they can
     # belong to different apps, so translating per app would leave half a key behind.
-    renames: dict[str, str] = {}
-    for app in django_apps.get_app_configs():
-        if _generator.is_local(app):
-            renames.update(renamed_tables(_ensure_loader(), app.label))
+    renames = _pending_renames
     if renames:
         for recorded in (
             existing_triggers,

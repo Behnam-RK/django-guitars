@@ -1201,6 +1201,12 @@ class OperationsMixin:
         # later ``CreateModel`` must not be dropped, but must still translate -- emptying the
         # chain leaves the renamed table uncovered, so the plain CREATE collides after all.
 
+        chain = self.existing.renamed_tables.get(table, [])
+        if not chain:
+            # The overwhelming common case, and the reason the registry sweep below is not
+            # cached: a project that renamed nothing never reaches it at all.
+            return []
+
         # Asked of the **whole** registry rather than ``LOCAL_APPS``: a name retaken by a model
         # this generator never writes for is no less live, and dropping its objects no less wrong.
         live = {
@@ -1208,7 +1214,7 @@ class OperationsMixin:
             for app in django_apps.get_app_configs()
             for model in app.get_models()
         }
-        return [name for name in self.existing.renamed_tables.get(table, []) if name not in live]
+        return [name for name in chain if name not in live]
 
     def _claim_rule_name(self, table: str, rule_name: str, relation: tuple) -> None:
         """Record that *relation* -- ``(other_table, table, foreign_key)``, the column **always**

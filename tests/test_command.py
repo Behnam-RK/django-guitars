@@ -1575,7 +1575,7 @@ def test_tenant_policy_operations_are_emitted_for_uncovered_tables():
     # One per policy-eligible table, and none for the multi-hop model -- asserted directly
     # rather than left implied by the count, which every new tenanted test model shifts.
     assert not any('testapp_review' in header for header in headers)
-    assert len(headers) == 12
+    assert len(headers) == 13
     # The CREATE form, not the replacement: there was no policy to replace.
     assert not any('replaced' in header for header in headers)
 

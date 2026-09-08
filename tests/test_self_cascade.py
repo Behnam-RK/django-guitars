@@ -5,7 +5,8 @@ table it fires on is rejected at rewrite time, taking *every* ``UPDATE`` to that
 import pytest
 from django.db import connection
 
-from tests.testapp.models import Setlist, SetlistEntry
+from guitars.tenancy import tenancy_bypassed, tenant
+from tests.testapp.models import Label, Rack, Riser, Setlist, SetlistEntry, Troupe
 
 
 @pytest.fixture
@@ -21,8 +22,27 @@ def tree(db):
     return root, middle, leaf
 
 
+@pytest.fixture
+def tenanted_trees(db):
+    """Two tenants, each with a two-level ``Troupe`` tree, for the RLS assertions below."""
+    import types
+
+    out = []
+    for name in ('a', 'b'):
+        label = Label.objects.create(name=f'label-{name}')
+        with tenant(label=label):
+            root = Troupe.objects.create(name=f'{name}-root')
+            child = Troupe.objects.create(name=f'{name}-child', parent=root)
+        out.append(types.SimpleNamespace(label=label, root=root, child=child))
+    return tuple(out)
+
+
+#: The human-readable field each model in this module is identified by in an assertion.
+_LABEL_FIELD = {Setlist: 'title', SetlistEntry: 'song', Rack: 'label', Riser: 'height'}
+
+
 def _archived(model) -> set[str]:
-    field = 'title' if model is Setlist else 'song'
+    field = _LABEL_FIELD[model]
     return {getattr(row, field) for row in model._all_objects.all() if row._deleted_at is not None}
 
 
@@ -32,8 +52,14 @@ def _raw_delete(pk: int) -> None:
     the rule archives the lot at depth 0 and the trigger matches nothing."""
     # Verified rather than argued: with every archive test on the ORM path, dropping the
     # trigger left all nine of them green. On this path four of them fail.
+    _raw_delete_from('testapp_setlist', pk)
+
+
+def _raw_delete_from(table: str, pk: int) -> None:
+    """:func:`_raw_delete` for any of this module's tables. The name is a literal from the
+    call site, never user input, so the interpolation is the only way to parameterise it."""
     with connection.cursor() as cursor:
-        cursor.execute('DELETE FROM testapp_setlist WHERE id = %s', [pk])
+        cursor.execute(f'DELETE FROM {table} WHERE id = %s', [pk])  # noqa: S608
 
 
 def test_archiving_a_root_archives_every_descendant(tree):
@@ -193,3 +219,49 @@ def test_the_trigger_exists_on_the_table_and_the_rule_does_not(db):
     assert 'soft_delete_related_testapp_setlist' not in rules
     # The ordinary cascade to the entry table is untouched by any of this.
     assert 'soft_delete_related_testapp_setlistentry' in rules
+
+
+def test_an_owned_sweep_fires_from_inside_the_self_cascade_trigger(db):
+    """The one arrangement where the two statement-level families meet: ``Rack`` is a tree that
+    also *owns* a ``Riser``, so its table carries both. The trigger reaches the child rack at
+    depth 1, and that level's owned rule and sweep must still archive the riser it holds."""
+    root = Rack.objects.create(label='root', riser=Riser.objects.create(height='root-riser'))
+    Rack.objects.create(label='child', parent=root, riser=Riser.objects.create(height='deep'))
+
+    _raw_delete_from('testapp_rack', root.pk)
+
+    assert _archived(Rack) == {'root', 'child'}
+    # 'deep' is the one that matters: it is owned by a rack the *trigger* archived.
+    assert _archived(Riser) == {'root-riser', 'deep'}
+
+
+def test_a_tenanted_tree_cascades_within_the_scope(tenanted_trees):
+    """ADR 0018 claims parity with the cascade rules under tenancy. Transition tables are not
+    RLS-filtered, so the in-scope half is worth measuring rather than reasoning about."""
+    a, _b = tenanted_trees
+
+    with tenant(label=a.label):
+        _raw_delete_from('testapp_troupe', a.root.pk)
+
+    with tenancy_bypassed():
+        assert {row.name for row in Troupe._all_objects.all() if row._deleted_at} == {
+            'a-root',
+            'a-child',
+        }
+
+
+def test_a_tenanted_tree_cannot_archive_another_tenants_child(tenanted_trees):
+    """The direction the ADR commits to: a child the active scope cannot see is **left live**,
+    never archived. Not vacuous -- the same archive under ``tenancy_bypassed()`` *does* take
+    the cross-tenant child, so the policy is what holds it, not an absence of reach."""
+    a, b = tenanted_trees
+    # b's child is reparented under a's root with tenancy bypassed -- the cross-tenant row a
+    # scoped archive must not touch. Only the policy stands between them.
+    with tenancy_bypassed():
+        Troupe._all_objects.filter(pk=b.child.pk).update(parent_id=a.root.pk)
+
+    with tenant(label=a.label):
+        _raw_delete_from('testapp_troupe', a.root.pk)
+
+    with tenancy_bypassed():
+        assert Troupe._all_objects.get(pk=b.child.pk)._deleted_at is None

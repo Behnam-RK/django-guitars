@@ -292,9 +292,9 @@ _ADOPT_SOFT_DELETE_OWNED_SWEEP = (
 # Self keys only -- a multi-table cycle has no stable choice of edge. See ADR 0018. ----
 
 
-# The body's EXISTS guard **terminates** the recursion rather than merely cheapening it: a
-# statement trigger fires on an UPDATE matching zero rows, so without it this function's own
-# no-op UPDATE re-fires it until the stack blows. Do not move it into the join.
+# The body's EXISTS guard **terminates** the recursion, not merely cheapens it: a statement
+# trigger fires on an UPDATE matching zero rows, so without it this function's own no-op UPDATE
+# re-fires it forever. It asks the UPDATE's own predicate, the archived *transition*.
 _CREATE_SOFT_DELETE_SELF_CASCADE_FUNCTION = """
     CREATE OR REPLACE FUNCTION {function}()
        RETURNS TRIGGER
@@ -304,8 +304,12 @@ _CREATE_SOFT_DELETE_SELF_CASCADE_FUNCTION = """
     BEGIN
         IF COALESCE(current_setting('rules.hard_deletion', true), '') <> 'on'
            AND EXISTS (
-               SELECT 1 FROM guitars_self_after AS guitars_after
-               WHERE guitars_after._deleted_at IS NOT NULL
+               SELECT 1
+               FROM guitars_self_before AS guitars_before
+               JOIN guitars_self_after AS guitars_after
+                   ON guitars_after."{primary_key}" = guitars_before."{primary_key}"
+               WHERE guitars_before._deleted_at IS NULL
+                 AND guitars_after._deleted_at IS NOT NULL
            ) THEN
             UPDATE {table} AS guitars_child
             SET _deleted_at = NOW(){updated_at_assignment}

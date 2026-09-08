@@ -160,3 +160,37 @@ def resolve_dependencies(
         elif resolved not in edges:
             edges.append(resolved)
     return edges, unresolved
+
+
+def retired_enforcement(
+    loader: MigrationLoader, app_label: str
+) -> dict[str, list[tuple[str, str | None]]]:
+    """``migration name -> [(table, column), ...]`` for every ``RetireEnforcement`` *app_label*
+    has written. Read off the **loaded operations**: a regex over Python call syntax misses
+    keyword and quoting variants, and gives no ordering against the headers the scan reads."""
+    # Deferred: ``guitars.operations`` is a public module a consumer's migration imports, and
+    # nothing in the generator should pay for it on a run that meets no retirement.
+    from guitars.operations import RetireEnforcement  # noqa: PLC0415 - see the comment above
+
+    def _retirements(operation) -> list[tuple[str, str | None]]:
+        # Unwrapped for ``_establishes``' reason: this is the standard idiom for a change the
+        # database already has, and a hand-tuned squash carries it.
+        if isinstance(operation, SeparateDatabaseAndState):
+            return [
+                retirement
+                for inner in (*operation.database_operations, *operation.state_operations)
+                for retirement in _retirements(inner)
+            ]
+        if isinstance(operation, RetireEnforcement):
+            return [(operation.table, operation.column)]
+        return []
+
+    found: dict[str, list[tuple[str, str | None]]] = {}
+    for name in _app_migrations_in_order(loader, app_label):
+        migration = loader.disk_migrations.get((app_label, name))
+        if migration is None:
+            continue
+        retirements = [r for operation in migration.operations for r in _retirements(operation)]
+        if retirements:
+            found[name] = retirements
+    return found

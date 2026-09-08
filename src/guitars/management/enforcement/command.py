@@ -123,7 +123,10 @@ class Command(OperationsMixin, BaseCommand):
         in ``__init__``: Django constructs a ``Command()`` for ``--help`` and the registry,
         neither needing a filesystem scan of every local app's migrations."""
         if self._existing is None:
-            self._existing = scan_existing_operations()
+            # This command's own cached loader: the scan reads ``RetireEnforcement`` off
+            # loaded operations, and building a second loader would import every migration
+            # module in the project twice.
+            self._existing = scan_existing_operations(self._migration_loader())
             self.trigger_function_dependency = self._existing.trigger_function_dependency
             self.parent_trigger_function_dependency = (
                 self._existing.parent_trigger_function_dependency

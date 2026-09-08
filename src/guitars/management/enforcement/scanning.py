@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, NamedTuple
 from django.apps import apps as django_apps
 
 from guitars.management import _generator
+from guitars.management.enforcement.graph import retired_enforcement
 from guitars.management.enforcement.headers import (
     _RE_MTI_SOFT_DELETE,
     _RE_MTI_UPDATED_AT,
@@ -40,6 +41,8 @@ from guitars.sql import _identifiers
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from django.db.migrations.loader import MigrationLoader
 
 
 class ExistingOperations(NamedTuple):
@@ -103,9 +106,38 @@ class ExistingOperations(NamedTuple):
     parent_trigger_function_sql: str | None
 
 
-def scan_existing_operations() -> ExistingOperations:
-    """Scan every local app's migration files for enforcement operations already written --
-    by comment header, so a partially covered app receives exactly what it lacks."""
+def _subtract_retired(
+    table: str,
+    column: str | None,
+    keyed: dict[str, dict],
+    whole_table: dict[str, dict],
+) -> None:
+    """Forget what a ``RetireEnforcement`` dropped, so a later run re-emits what the models
+    still call for. *keyed* spell a table **and** a column, so a column form can match them;
+    *whole_table* are keyed on a table alone and only the whole-table form reaches them."""
+    for recorded in keyed.values():
+        # ``k[-1] is None`` is the cascade family's *primary* form, whose key drops the column
+        # as the historical rule name does, so a column retirement takes it unseen: over-
+        # subtracting costs a re-emitted CREATE OR REPLACE, under-subtracting hides a drop.
+        matches = [
+            k
+            for k in recorded
+            if k[0] == table and (column is None or k[-1] == column or k[-1] is None)
+        ]
+        for key in matches:
+            del recorded[key]
+    if column is not None:
+        return
+    for recorded in whole_table.values():
+        recorded.pop(table, None)
+
+
+def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingOperations:
+    """Scan every local app's migration files for enforcement operations already written, by
+    comment header, so a partially covered app receives exactly what it lacks."""
+    # *loader* is the caller's cached one. A retirement is read off loaded operations, so one
+    # is built here when none is given -- never twice, and never for a project with none.
+
     # Table (or table pair) -> the [SQL:...] digest of its most recent operation.
     # Last write wins throughout, which is only the currently-applied answer because
     # _generator.iter_migration_files yields in filename order -- see its docstring.
@@ -199,11 +231,50 @@ def scan_existing_operations() -> ExistingOperations:
     parent_trigger_function_sql: str | None = None
     autofill_function_deps: dict[str, tuple[str, str]] = {}
     autofill_function_sql: dict[str, str | None] = {}
+    built_loader = loader
+
+    def _ensure_loader() -> MigrationLoader:
+        """The caller's loader, or one built once here. Building imports every migration module
+        in the project, so it is never built twice and never at all for a project with none."""
+        nonlocal built_loader
+        if built_loader is None:
+            from django.db.migrations.loader import (  # noqa: PLC0415 - see the docstring
+                MigrationLoader as _Loader,
+            )
+
+            built_loader = _Loader(None, ignore_no_migrations=True)
+        return built_loader
+
+    # The families a column-scoped retirement can name, and the ones only a whole-table one
+    # reaches. Both hold live references to the dicts above, so a subtraction is seen by the
+    # rest of the scan -- which is the point: a later migration re-recording a key wins again.
+    keyed_families = {
+        'soft_delete_related': existing_soft_delete_related,
+        'soft_delete_owned': existing_soft_delete_owned,
+        'soft_delete_owned_sweep': existing_soft_delete_owned_sweep,
+        'soft_delete_self_cascade': existing_soft_delete_self_cascade,
+    }
+    whole_table_families = {
+        'triggers': existing_triggers,
+        'soft_deletes': existing_soft_deletes,
+        'mti_triggers': existing_mti_triggers,
+        'mti_soft_deletes': existing_mti_soft_deletes,
+    }
 
     for app in django_apps.get_app_configs():
         if not _generator.is_local(app):
             continue
+        retired = retired_enforcement(_ensure_loader(), app.label)
         for path, content in _generator.iter_migration_files(app):
+            # Before this file's headers, not after: an operation retiring a key and a header
+            # re-asserting it in the same migration means the migration re-asserts it.
+            for table, column in retired.get(path.stem, ()):
+                _subtract_retired(table, column, keyed_families, whole_table_families)
+                if column is None:
+                    existing_tenant_policies.discard(table)
+                    for key in [k for k in existing_tenant_autofill if k[0] == table]:
+                        del existing_tenant_autofill[key]
+
             digest_match = _generator.RE_DIGEST.search(content.split('\n', 1)[0])
             if digest_match:
                 existing_digests[app.label].add(digest_match.group('digest'))

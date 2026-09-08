@@ -165,7 +165,7 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
     """Scan every local app's migration files for enforcement operations already written, by
     comment header, so a partially covered app receives exactly what it lacks."""
     # *loader* is the caller's cached one. A retirement is read off loaded operations, so one
-    # is built here when none is given -- never twice, and never for a project with none.
+    # is built here when none is given, and at most once for the whole scan.
 
     # Table (or table pair) -> the [SQL:...] digest of its most recent operation.
     # Last write wins throughout, which is only the currently-applied answer because
@@ -265,7 +265,7 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
 
     def _ensure_loader() -> MigrationLoader:
         """The caller's loader, or one built once here. Building imports every migration module
-        in the project, so it is never built twice and never at all for a project with none."""
+        in the project, so it is built at most once for the whole scan."""
         nonlocal built_loader
         if built_loader is None:
             from django.db.migrations.loader import (  # noqa: PLC0415 - see the docstring

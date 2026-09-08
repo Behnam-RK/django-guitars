@@ -819,9 +819,10 @@ class OperationsMixin:
                     foreign_key=_identifiers._escape_ident(column),
                 )
                 if column is not None
-                else _soft_delete._REFUSE_RECREATING_RETIRED_RULE.format(
-                    rule_name=rule_name, table=ident_owner_table
-                )
+                # No identifiers interpolated: this is a SQL *string literal*, and the quoted
+                # forms escape ``"`` but not ``'`` -- a db_table carrying one would break the
+                # literal, and one carrying the dollar tag would close the quoting.
+                else _soft_delete._REFUSE_RECREATING_RETIRED_RULE
             )
             header = (
                 HEADER_SOFT_DELETE_RELATED_RETIRED.format(
@@ -838,7 +839,15 @@ class OperationsMixin:
             # Not ``_append_if_stale``, for ``_retired_autofill_operations``' reason: the set
             # difference above is the whole idempotency mechanism, and "recorded digest differs
             # -> replace" means nothing for a drop.
-            source, _ = _operation(header, drop, reverse, emit=drop if not adopt else drop)
+
+            # ``--adopt`` is honest about not knowing what the database holds, so it is the one
+            # path that may say ``IF EXISTS``, the swap the autofill retirement also makes.
+            source, _ = _operation(
+                header,
+                drop,
+                reverse,
+                emit=self._drop_prior_rules(ident_owner_table, [rule_name]) if adopt else drop,
+            )
             operations.append(source)
         return operations
 
@@ -1635,7 +1644,6 @@ class OperationsMixin:
                 reverse,
                 is_adopt=adopt,
                 replace=owned_replace,
-                adopt=owned_replace,
             )
             self._append_owned_sweep(
                 ops,

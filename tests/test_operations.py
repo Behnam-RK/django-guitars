@@ -3,7 +3,7 @@ its own, so an author removing a column a rule names has to say so: these pin wh
 ``RetireEnforcement`` drops, what it leaves, and that it refuses to be reversed."""
 
 import pytest
-from django.db import connection
+from django.db import connection, transaction
 from django.db.migrations.exceptions import IrreversibleError
 from django.db.migrations import Migration
 from django.db.migrations.loader import MigrationLoader
@@ -292,3 +292,77 @@ def test_retiring_a_tenanted_table_forgets_its_policy_and_autofill(monkeypatch):
     assert not any(table == 'testapp_troupe' for table, _function in existing.tenant_autofill)
     # A sibling tenanted table is untouched.
     assert 'testapp_release' in existing.tenant_policies
+
+
+# --- The guards, each of which was deletable with the suite green ---------------------------
+
+
+def test_an_unresolvable_column_refuses_rather_than_dropping_the_whole_table(db):
+    """The escalation this guard exists for: with no `RAISE`, the attnum lookup returns NULL,
+    every ``scoped_to_column`` test reads as the whole-table path, and a typo -- or the
+    operation placed *after* its `RemoveField` -- silently drops the table's every object."""
+    # A savepoint, so the aborted transaction the RAISE leaves behind does not stop the
+    # assertion below from reading the catalogue.
+    with pytest.raises(Exception, match='names no column'), transaction.atomic():
+        _apply(RetireEnforcement('testapp_setlistentry', column='no_such_column'))
+
+    # Nothing went with it.
+    assert _objects('testapp_setlistentry') == (['soft_delete'], ['updated_at_trigger'])
+
+
+def test_a_table_that_does_not_exist_refuses(db):
+    """A typo in the table name is a mistake, not a no-op: silence there would read as a
+    retirement that happened."""
+    with pytest.raises(Exception, match='names no table'), transaction.atomic():
+        _apply(RetireEnforcement('testapp_no_such_table'))
+
+
+def test_a_consumers_own_trigger_and_policy_survive_the_whole_table_form(db):
+    """This operation is irreversible, so it takes only what this kit mints. A consumer object
+    blocking the same change is the consumer's to drop -- and putting one back is not something
+    the generator knows how to do."""
+    with connection.cursor() as cursor:
+        cursor.execute(
+            'CREATE TRIGGER zz_consumer_audit AFTER INSERT ON testapp_setlistentry '
+            "FOR EACH STATEMENT EXECUTE FUNCTION set_updated_at('id')"
+        )
+        cursor.execute('ALTER TABLE testapp_setlistentry ENABLE ROW LEVEL SECURITY')
+        cursor.execute('CREATE POLICY zz_consumer_policy ON testapp_setlistentry USING (true)')
+
+    _apply(RetireEnforcement('testapp_setlistentry'))
+
+    assert _objects('testapp_setlistentry') == ([], ['zz_consumer_audit'])
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT polname FROM pg_policy WHERE polrelid = 'testapp_setlistentry'::regclass"
+        )
+        assert [row[0] for row in cursor.fetchall()] == ['zz_consumer_policy']
+
+
+def test_a_consumers_own_rule_survives_the_column_form(db):
+    """The rule loop is filtered by name too, for the same reason. It means a consumer rule
+    naming the column still blocks their `RemoveField`, which is theirs to resolve."""
+    with connection.cursor() as cursor:
+        cursor.execute(
+            'CREATE RULE zz_consumer_rule AS ON UPDATE TO testapp_setlistentry '
+            'DO ALSO SELECT 1 WHERE new.setlist_id IS NOT NULL'
+        )
+
+    _apply(RetireEnforcement('testapp_setlistentry', column='setlist_id'))
+
+    assert 'zz_consumer_rule' in _objects('testapp_setlistentry')[0]
+
+
+def test_a_mixed_case_db_table_resolves(db):
+    """``'MyTable'::regclass`` resolves ``mytable``; the operation goes through
+    ``to_regclass`` over the quoted spelling the rest of the kit writes."""
+    with connection.cursor() as cursor:
+        cursor.execute('CREATE TABLE "MixedCase" (id serial primary key)')
+        cursor.execute('CREATE RULE soft_delete_related_probe AS ON UPDATE TO "MixedCase" '
+                       'DO ALSO SELECT 1')
+
+    _apply(RetireEnforcement('MixedCase'))
+
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT count(*) FROM pg_rules WHERE tablename = 'MixedCase'")
+        assert cursor.fetchone()[0] == 0

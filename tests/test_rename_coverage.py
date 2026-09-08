@@ -252,3 +252,108 @@ def test_adopt_after_a_rename_drops_the_old_name_too():
     assert 'DROP TRIGGER IF EXISTS "soft_delete_self_cascade_15_testapp_setlist_9_parent_id"' in (
         operation
     )
+
+
+def test_a_prior_name_back_in_use_as_a_live_table_is_dropped_from_the_chain(loader, monkeypatch):
+    """``RenameModel(Foo -> Baz)`` and later ``CreateModel(Foo)`` puts a freed name back in
+    service. Translating it would delete the live table's coverage and have the next run drop a
+    rule still doing its job, so only dead names stay in the chain."""
+    assert graph.renamed_tables(loader, 'testapp')['testapp_callbacks'] == [
+        'testapp_encore',
+        'testapp_callback',
+    ]
+
+    # The same history with the freed name back in use: it leaves the chain, and a chain left
+    # empty leaves the map altogether.
+    monkeypatch.setattr(
+        graph, '_live_tables', lambda _loader: {'testapp_encore', 'testapp_callback'}
+    )
+
+    assert 'testapp_callbacks' not in graph.renamed_tables(loader, 'testapp')
+
+
+def test_the_live_table_set_is_read_off_the_final_state(loader):
+    """What the filter above asks. A table the history renamed away is not in it; one still
+    declared is, whatever app declares it."""
+    live = graph._live_tables(loader)
+
+    assert 'testapp_setlist' in live
+    assert 'testapp_callbacks' in live
+    assert 'testapp_encore' not in live
+
+
+def test_a_tuple_key_is_re_keyed_across_a_rename():
+    """The cascade, owned, sweep, self-cascade and autofill families are all keyed on tuples,
+    and the corpus cannot prove they translate -- its one renamed table had its cascade key
+    retired before the rename."""
+    recorded = {
+        ('testapp_old', 'testapp_owner', None): 'a',
+        ('testapp_dep', 'testapp_old', 'fk_id'): 'b',
+        ('testapp_untouched', 'testapp_owner', None): 'c',
+    }
+
+    scanning._translate_renamed({'testapp_new': ['testapp_old']}, recorded)
+
+    assert recorded == {
+        ('testapp_new', 'testapp_owner', None): 'a',
+        ('testapp_dep', 'testapp_new', 'fk_id'): 'b',
+        ('testapp_untouched', 'testapp_owner', None): 'c',
+    }
+
+
+def test_the_sweep_drops_the_dependents_prior_names_as_well_as_the_owners():
+    """The sweep's name folds in two tables, so a rename of *either* leaves an object behind.
+    The owner side was covered; this is the dependent side."""
+    command = Command()
+    command.existing.renamed_tables['testapp_riser'] = ['testapp_oldriser']
+    command.existing.soft_delete_owned_sweep[('testapp_riser', 'testapp_rack', 'riser_id')] = 'x'
+
+    (operation,) = [
+        candidate
+        for candidate in command._build_operations(apps.get_app_config('testapp'))
+        if candidate.startswith('# Soft Delete Owned Sweep on "testapp_riser"')
+    ]
+
+    assert 'DROP TRIGGER IF EXISTS "soft_delete_owned_sweep_12_testapp_rack_16_testapp_o' in (
+        operation
+    )
+
+
+def test_a_retirement_subtracts_under_every_spelling_of_a_renamed_table(monkeypatch):
+    """A retirement names the table as spelled *now*, while the key it must subtract may still
+    be filed under a name a rename left behind. Without the prior spellings the post-pass moves
+    the old key back over the hole and a dropped object reads as covered, ``--check`` green."""
+    real = graph.retired_enforcement
+    monkeypatch.setattr(
+        scanning,
+        'retired_enforcement',
+        lambda ldr, app: {'0056_rename_encore_deleted_at_refrain_deleted_at_and_more': [
+            ('testapp_callbacks', None)
+        ]}
+        if app == 'testapp'
+        else real(ldr, app),
+    )
+
+    existing = scan_existing_operations()
+
+    # Recorded in 0048 under `testapp_encore`; the retirement names `testapp_callbacks`.
+    assert 'testapp_callbacks' not in existing.soft_deletes
+    assert 'testapp_encore' not in existing.soft_deletes
+
+
+def test_the_required_key_sweep_runs_without_reporting(monkeypatch):
+    """``_cascade_key_maps`` walks every local model, including apps a scoped run was never
+    asked about. It passes ``report=False`` so their misconfigurations are not reported here --
+    asserted at the call site, since testing the parameter alone leaves the wiring free."""
+    command = Command()
+    seen: list[bool] = []
+    real = Command._cascade_candidates
+
+    def _spy(self, model, owner_table, *, report=True):
+        seen.append(report)
+        return real(self, model, owner_table, report=report)
+
+    monkeypatch.setattr(Command, '_cascade_candidates', _spy)
+    command._cascade_key_maps()
+
+    assert seen and not any(seen)

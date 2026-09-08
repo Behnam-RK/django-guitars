@@ -294,9 +294,9 @@ _REFUSE_RECREATING_RETIRED_RULE = """
     DO $guitars_retired$
     BEGIN
         RAISE EXCEPTION
-            'guitars: rule {rule_name} on {table} was retired by a migration that could not '
-            'record which column it read, so this rollback cannot recreate it. Restore the '
-            'foreign key in the models and run makeguitarmigrations.'
+            'guitars: a retired rule on this table cannot be recreated -- the migration that '
+            'dropped it could not record which column it read. Restore the foreign key in the '
+            'models and run makeguitarmigrations.'
             USING ERRCODE = 'feature_not_supported';
     END;
     $guitars_retired$;

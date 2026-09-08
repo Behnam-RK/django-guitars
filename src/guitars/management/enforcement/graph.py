@@ -228,9 +228,27 @@ def renamed_tables(loader: MigrationLoader, app_label: str) -> dict[str, list[st
                 if old_table and new_table and old_table != new_table:
                     # **Every** prior name, not just the first. A generation that ran between
                     # two renames left an object named after the intermediate table, and only
-                    # dropping each of them leaves one object behind. See ADR 0019.
+                    # dropping each leaves one object behind. See ``docs/migrations.md``.
                     renames[new_table] = [*renames.pop(old_table, []), old_table]
-    return renames
+
+    # A name a rename freed can be taken by a *new* table -- ``RenameModel(Foo -> Baz)`` and
+    # later ``CreateModel(Foo)``. Its coverage is live and its objects are in service, so
+    # translating it onto Baz would delete one and drop the other. Only dead names qualify.
+    live = _live_tables(loader)
+    return {
+        new: [name for name in priors if name not in live]
+        for new, priors in renames.items()
+        if [name for name in priors if name not in live]
+    }
+
+
+def _live_tables(loader: MigrationLoader) -> set[str]:
+    """Every ``db_table`` the project's final migration state still has, across all apps."""
+    state = loader.project_state()
+    return {
+        model_state.options.get('db_table') or f'{label}_{model_name}'
+        for (label, model_name), model_state in state.models.items()
+    }
 
 
 def _renaming(operation) -> list[tuple[str, str]]:

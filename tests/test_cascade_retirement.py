@@ -168,3 +168,33 @@ def test_the_silent_sweep_meets_a_cycle_and_says_nothing():
 
     assert _build(report=False) == []
     assert 'cycle' in _build(report=True)[0]
+
+
+def test_the_retirement_reaches_a_real_generation(command):
+    """Wired, not merely written: every other test here calls ``_retired_cascade_operations``
+    directly, so the branch's headline feature could be unhooked from ``_build_operations``
+    without a single failure."""
+    command.existing.soft_delete_related[('testapp_album', 'testapp_genre', None)] = 'abc'
+
+    retired = [
+        operation
+        for operation in command._build_operations(apps.get_app_config('testapp'))
+        if operation.startswith('# Soft Delete Related Rule retired')
+    ]
+
+    assert len(retired) == 1
+    assert 'DROP RULE "soft_delete_related_testapp_album" ON "testapp_genre"' in retired[0]
+
+
+def test_the_adopt_form_says_if_exists(command):
+    """``--adopt`` is honest about not knowing what the database holds, so it is the one path
+    that may assert ``IF EXISTS`` -- the swap the autofill retirement beside it already makes.
+    Without it a rule already dropped by hand fails ``migrate``."""
+    command.existing.soft_delete_related[('testapp_album', 'testapp_genre', None)] = 'abc'
+    app = apps.get_app_config('testapp')
+
+    plain = command._retired_cascade_operations(app)[0]
+    adopted = command._retired_cascade_operations(app, adopt=True)[0]
+
+    assert 'DROP RULE "soft_delete_related_testapp_album"' in plain
+    assert 'DROP RULE IF EXISTS "soft_delete_related_testapp_album"' in adopted

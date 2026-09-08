@@ -391,3 +391,16 @@ def test_retiring_the_last_tenant_policy_takes_row_level_security_down_with_it(d
             "SELECT count(*) FROM pg_policy WHERE polrelid = 'testapp_troupe'::regclass"
         )
         assert cursor.fetchone()[0] == 0
+
+
+def test_the_operations_public_surface_is_frozen():
+    """As frozen as ``guitars.sql``'s names and more brittle: a consumer's migration imports
+    it by that path and an operation, unlike enforcement SQL, cannot be inlined -- so a rename
+    ships green here and breaks ``migrate`` there."""
+    import guitars.operations  # noqa: PLC0415 - the module under test, imported by path
+
+    assert guitars.operations.__all__ == ['RetireEnforcement']
+    assert guitars.operations.RetireEnforcement.__name__ == 'RetireEnforcement'
+    # Its signature is frozen too: a migration writes both arguments by keyword.
+    written = RetireEnforcement('t', column='c').deconstruct()[2]
+    assert set(written) <= {'table', 'column'}

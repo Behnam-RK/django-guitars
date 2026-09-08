@@ -280,7 +280,7 @@ def test_a_key_rewrite_on_a_parent_with_live_children_is_refused(db):
     root = Setlist.objects.create(title='root')
     Setlist.objects.create(title='child', parent=root)
 
-    with pytest.raises(NotSupportedError, match='rewrote the primary key of a live row'):
+    with pytest.raises(NotSupportedError, match='archived a row whose primary key it also'):
         Setlist._all_objects.filter(pk=root.pk).update(
             id=F('id') + 1000, _deleted_at=timezone.now()
         )
@@ -294,3 +294,44 @@ def test_a_key_rewrite_on_a_parent_with_no_live_children_is_not_refused(db):
     Setlist._all_objects.filter(pk=leaf.pk).update(id=F('id') + 1000, _deleted_at=timezone.now())
 
     assert _archived(Setlist) == {'leaf'}
+
+
+def test_a_key_rewrite_that_archives_nothing_is_not_refused(db):
+    """The guard is gated on an archive having happened, so renumbering keys never raises --
+    that being the first half of the two-statement pattern the refusal itself prescribes."""
+    # The children move with the key. Leaving one behind on the old key is the other shape a
+    # gate-less guard would refuse, but it cannot be tested: the tree is then inconsistent at
+    # ``COMMIT``, and the deferred foreign key rejects it whatever this trigger decides.
+    root = Setlist.objects.create(title='root')
+    child = Setlist.objects.create(title='child', parent=root)
+    new_key = root.pk + 1000
+
+    with connection.cursor() as cursor:
+        cursor.execute('SET CONSTRAINTS ALL DEFERRED')
+        cursor.execute(
+            'UPDATE testapp_setlist SET id = CASE WHEN id = %s THEN %s ELSE id END, '
+            'parent_id = CASE WHEN id = %s THEN %s ELSE parent_id END WHERE id IN (%s, %s)',
+            [root.pk, new_key, child.pk, new_key, root.pk, child.pk],
+        )
+
+    assert _archived(Setlist) == set()
+
+
+def test_a_key_rewrite_that_reparents_its_children_is_still_refused(db):
+    """The arm that matters most, and the one a guard reading only the *old* key misses: moving
+    the children onto the new key in the same statement empties the old one, so nothing looks
+    orphaned there while the subtree is just as unreachable."""
+    root = Setlist.objects.create(title='root')
+    child = Setlist.objects.create(title='child', parent=root)
+    new_key = root.pk + 1000
+
+    with pytest.raises(NotSupportedError, match='archived a row whose primary key it also'):
+        with connection.cursor() as cursor:
+            cursor.execute('SET CONSTRAINTS ALL DEFERRED')
+            cursor.execute(
+                'UPDATE testapp_setlist SET id = CASE WHEN id = %s THEN %s ELSE id END, '
+                'parent_id = CASE WHEN id = %s THEN %s ELSE parent_id END, '
+                '_deleted_at = CASE WHEN id = %s THEN NOW() ELSE _deleted_at END '
+                'WHERE id IN (%s, %s)',
+                [root.pk, new_key, child.pk, new_key, root.pk, root.pk, child.pk],
+            )

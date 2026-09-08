@@ -71,11 +71,13 @@ the tests run as could not create such a function against a table it does not ow
   kit exists to remove, so it is stated rather than buried. Accepted for the reason below.
 - The trigger's `UPDATE` fires the table's other `ON UPDATE` cascade rules for each level, so a
   tree's ordinary children cascade with it rather than stranding below the first level.
-- **A primary-key rewrite on a live parent with live children is refused**, with the owned
-  sweep's error class. Correlation is on the key, so a moved key leaves no after-image to match
-  and an archive becomes indistinguishable from a re-key, leaking the subtree in silence.
-  Django's foreign keys are `DEFERRABLE INITIALLY DEFERRED`, so the shape is reachable. Narrow:
-  a parent with nothing live below it re-keys and archives in one statement uncomplainingly.
+- **Archiving a row whose key the same statement rewrote is refused**, in the owned sweep's
+  error class though not at its reach: the sweep fires on the ambiguity alone, this one only
+  once an archive has happened, so renumbering keys never raises. Correlation is on the key, so
+  such a row has no before-image to match and a live child at *either* key — the old one, or
+  the new one it was re-parented onto — would leak in silence. Django's foreign keys are
+  `DEFERRABLE INITIALLY DEFERRED`, so the shape is reachable. A parent with nothing live below
+  it re-keys and archives in one statement uncomplainingly.
 - **No repair command, deliberately.** A pre-2.8.0 database has no rule for the shape, so a raw
   or bulk archive of a tree root there left live children under an archived parent. The refusal
   was documented from 0.x and said to cascade in Python, and repair needs no command: archive

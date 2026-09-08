@@ -292,9 +292,12 @@ _ADOPT_SOFT_DELETE_OWNED_SWEEP = (
 # Self keys only -- a multi-table cycle has no stable choice of edge. See ADR 0018. ----
 
 
-# Guard one refuses what guard two cannot see: a live row with live children whose key this
-# statement rewrote has no after-image to match, so archiving it is indistinguishable from a
-# re-key and the subtree would leak in silence. The owned sweep refuses the same ambiguity.
+# Guard one refuses what guard two cannot see: a row archived under a key this statement also
+# rewrote has no before-image to match, so a live child at *either* key -- the old one, or the
+# new one it was re-parented onto -- would leak in silence.
+
+# Gated on an archive having happened, so a plain re-key never raises. Narrower than the owned
+# sweep's, which fires on the ambiguity alone: the parity is in the error class, not the reach.
 
 # Guard two **terminates** the recursion rather than merely cheapening it: a statement trigger
 # fires on an UPDATE matching zero rows, so without it this function's own no-op UPDATE re-fires
@@ -309,22 +312,37 @@ _CREATE_SOFT_DELETE_SELF_CASCADE_FUNCTION = """
         IF COALESCE(current_setting('rules.hard_deletion', true), '') <> 'on' THEN
             IF EXISTS (
                 SELECT 1
-                FROM guitars_self_before AS guitars_before
-                JOIN {table} AS guitars_child
-                    ON guitars_child."{foreign_key}" = guitars_before."{primary_key}"
-                WHERE guitars_before._deleted_at IS NULL
-                  AND guitars_child._deleted_at IS NULL
+                FROM guitars_self_after AS guitars_after
+                WHERE guitars_after._deleted_at IS NOT NULL
                   AND NOT EXISTS (
-                      SELECT 1 FROM guitars_self_after AS guitars_after
-                      WHERE guitars_after."{primary_key}" = guitars_before."{primary_key}"
+                      SELECT 1 FROM guitars_self_before AS guitars_before
+                      WHERE guitars_before."{primary_key}" = guitars_after."{primary_key}"
+                  )
+                  AND EXISTS (
+                      SELECT 1 FROM {table} AS guitars_child
+                      WHERE guitars_child._deleted_at IS NULL
+                        AND (
+                            guitars_child."{foreign_key}" = guitars_after."{primary_key}"
+                            OR guitars_child."{foreign_key}" IN (
+                                SELECT guitars_vanished."{primary_key}"
+                                FROM guitars_self_before AS guitars_vanished
+                                WHERE guitars_vanished._deleted_at IS NULL
+                                  AND NOT EXISTS (
+                                      SELECT 1 FROM guitars_self_after AS guitars_kept
+                                      WHERE guitars_kept."{primary_key}"
+                                          = guitars_vanished."{primary_key}"
+                                  )
+                            )
+                        )
                   )
             ) THEN
                 RAISE EXCEPTION
-                    'guitars: a statement on % rewrote the primary key of a live row that has '
-                    'live children. The self cascade trigger correlates its transition tables '
-                    'on the primary key, so it cannot tell whether that row was archived, and '
-                    'would leak the whole subtree permanently. Rewrite the key and archive the '
-                    'row in separate statements.', TG_TABLE_NAME
+                    'guitars: a statement on % archived a row whose primary key it also '
+                    'rewrote, and a live child is left holding one of the two keys. The self '
+                    'cascade trigger correlates its transition tables on the primary key, so '
+                    'it cannot tell which before-row that archived row was, and would leak the '
+                    'whole subtree permanently. Rewrite the key and archive the row in '
+                    'separate statements.', TG_TABLE_NAME
                     USING ERRCODE = 'feature_not_supported';
             END IF;
         END IF;

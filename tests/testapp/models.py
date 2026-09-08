@@ -573,3 +573,27 @@ class Scribble(SetarModel):
 
     def __str__(self) -> str:
         return self.text
+
+
+class Setlist(SetarModel):
+    """A tree: a self-referential ``CASCADE`` key, taking a statement-level trigger where every
+    other cascade takes a rule (ADR 0018). A rule cannot exist here -- updating the table it
+    fires on, it is rejected at rewrite time, bricking every ``UPDATE`` including ``save()``."""
+
+    title = CharField(max_length=100)
+    parent = ForeignKey('self', on_delete=CASCADE, null=True, blank=True, related_name='children')
+
+    def __str__(self) -> str:
+        return self.title
+
+
+class SetlistEntry(SetarModel):
+    """An ordinary cascade child of the tree above, so both families meet in one archive: the
+    trigger walks the levels, and each level's own ``UPDATE`` fires *this* relation's cascade
+    rule. What that leaves ``_updated_at`` doing is pinned by ``tests/test_self_cascade.py``."""
+
+    song = CharField(max_length=100)
+    setlist = ForeignKey(Setlist, on_delete=CASCADE, related_name='entries')
+
+    def __str__(self) -> str:
+        return self.song

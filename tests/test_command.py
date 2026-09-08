@@ -537,13 +537,14 @@ def test_owned_operations_under_adopt_stay_a_plain_create_or_replace():
     assert 'DROP RULE IF EXISTS' not in blob
 
 
-def test_cascade_operation_refuses_a_self_referential_cascade_foreign_key():
-    """A tree (`parent = ForeignKey('self', CASCADE)`). The rule would read ON UPDATE TO t
-    DO ALSO UPDATE t, which PostgreSQL rejects at rewrite time -- bricking *every* UPDATE on
-    the table, a plain ``save()`` included, with `migrate` having reported success."""
+def test_cascade_operation_emits_a_trigger_for_a_self_referential_cascade_foreign_key():
+    """A tree (`parent = ForeignKey('self', CASCADE)`). A *rule* would read ON UPDATE TO t DO
+    ALSO UPDATE t, which PostgreSQL rejects at rewrite time, bricking every UPDATE on the table.
+    A statement-level trigger takes no part in rewriting, so this shape cascades (ADR 0018)."""
     command = Command()
     command._skipped_rule_notes.clear()
     command.existing.soft_delete_related.clear()
+    command.existing.soft_delete_self_cascade.clear()
 
     class _SelfReferentialFKField:
         column = 'parent_id'
@@ -552,11 +553,92 @@ def test_cascade_operation_refuses_a_self_referential_cascade_foreign_key():
 
     command.reverse_relations_mapping[Band] = {(Band, _SelfReferentialFKField(), CASCADE)}
 
-    ops = command._cascade_operations(Band)
+    blob = '\n'.join(command._cascade_operations(Band))
 
-    assert ops == []
-    assert len(command._skipped_rule_notes) == 1
-    assert 'infinite rule recursion' in command._skipped_rule_notes[0]
+    # The refusal this test used to assert is gone: a self key is no longer a skip.
+    assert command._skipped_rule_notes == []
+    assert '# Soft Delete Self Cascade Trigger on "testapp_band" via "parent_id"!' in blob
+    assert 'CREATE TRIGGER "soft_delete_self_cascade_12_testapp_band_9_parent_id"' in blob
+    # Plain AFTER UPDATE, not ``AFTER UPDATE OF _deleted_at``: PostgreSQL refuses a column
+    # list beside transition tables, and the transition tables are the mechanism.
+    assert 'AFTER UPDATE ON "testapp_band"' in blob
+    assert 'REFERENCING OLD TABLE AS guitars_self_before' in blob
+    # No rule of any kind for this relation -- that is the whole point of the family.
+    assert 'CREATE OR REPLACE RULE' not in blob
+
+
+def test_self_cascade_operation_is_idempotent_across_two_runs():
+    """A run reading its own output back must emit nothing: the header, its ``[SQL:...]``
+    identity and the ``(table, foreign_key)`` dedupe key all have to agree."""
+    command = Command()
+    command.existing.soft_delete_related.clear()
+    command.existing.soft_delete_self_cascade.clear()
+
+    class _SelfReferentialFKField:
+        column = 'parent_id'
+        model = Band
+        remote_field = types.SimpleNamespace(parent_link=False)
+
+    command.reverse_relations_mapping[Band] = {(Band, _SelfReferentialFKField(), CASCADE)}
+
+    blob = '\n'.join(command._cascade_operations(Band))
+    for match in headers_module._RE_SOFT_DELETE_SELF_CASCADE.finditer(blob):
+        key = (
+            _identifiers._unescape_ident(match.group(1)),
+            _identifiers._unescape_ident(match.group(2)),
+        )
+        command.existing.soft_delete_self_cascade[key] = identity_module._recorded_sql_identity(
+            blob, match
+        )
+
+    assert command._cascade_operations(Band) == []
+
+
+def test_self_cascade_operation_replaces_a_recorded_but_stale_trigger():
+    """A recorded key whose ``[SQL:...]`` does not match re-emits in the *replace* form: DROP
+    TRIGGER then CREATE, no IF EXISTS, the recorded digest having proved it is there."""
+    command = Command()
+    command.existing.soft_delete_related.clear()
+    command.existing.soft_delete_self_cascade.clear()
+    command.existing.soft_delete_self_cascade[('testapp_band', 'parent_id')] = 'stale00000000'
+
+    class _SelfReferentialFKField:
+        column = 'parent_id'
+        model = Band
+        remote_field = types.SimpleNamespace(parent_link=False)
+
+    command.reverse_relations_mapping[Band] = {(Band, _SelfReferentialFKField(), CASCADE)}
+
+    blob = '\n'.join(command._cascade_operations(Band))
+
+    assert 'DROP TRIGGER "soft_delete_self_cascade_12_testapp_band_9_parent_id"' in blob
+    assert 'DROP TRIGGER IF EXISTS' not in blob
+    assert 'CREATE TRIGGER "soft_delete_self_cascade_12_testapp_band_9_parent_id"' in blob
+
+
+def test_self_cascade_operation_under_adopt_drops_if_exists_first():
+    """``--adopt`` is the one path where existence is *unknown*, so the one path that may say
+    IF EXISTS. The function stays CREATE OR REPLACE: DROP FUNCTION refuses while a trigger
+    depends on it, and CASCADE would take that trigger with it."""
+    command = Command()
+    command.existing.soft_delete_related.clear()
+    command.existing.soft_delete_self_cascade.clear()
+
+    class _SelfReferentialFKField:
+        column = 'parent_id'
+        model = Band
+        remote_field = types.SimpleNamespace(parent_link=False)
+
+    command.reverse_relations_mapping[Band] = {(Band, _SelfReferentialFKField(), CASCADE)}
+
+    blob = '\n'.join(command._cascade_operations(Band, adopt=True))
+
+    assert 'DROP TRIGGER IF EXISTS "soft_delete_self_cascade_12_testapp_band_9_parent_id"' in blob
+    assert 'CREATE OR REPLACE FUNCTION' in blob
+    # The lone DROP FUNCTION belongs to reverse_sql, which follows the whole forward body:
+    # the adopt path itself drops only the trigger.
+    assert blob.count('DROP FUNCTION') == 1
+    assert blob.index('CREATE TRIGGER') < blob.index('DROP FUNCTION')
 
 
 def test_constructing_the_command_does_not_touch_the_filesystem(monkeypatch):

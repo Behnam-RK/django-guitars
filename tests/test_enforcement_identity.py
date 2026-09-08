@@ -56,6 +56,11 @@ HEADER_SCANNERS = [
         {'dependent_table': 'shop_label', 'table': 'shop_order', 'foreign_key': 'label_id'},
     ),
     (
+        headers_module.HEADER_SOFT_DELETE_SELF_CASCADE,
+        headers_module._RE_SOFT_DELETE_SELF_CASCADE,
+        {'table': 'shop_order', 'foreign_key': 'parent_id'},
+    ),
+    (
         headers_module.HEADER_MTI_UPDATED_AT,
         headers_module._RE_MTI_UPDATED_AT,
         {'child_table': 'shop_giftorder', 'parent_table': 'shop_order'},

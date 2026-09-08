@@ -37,6 +37,12 @@ _BASELINE = {
     '_RE_SOFT_DELETE_OWNED_SWEEP': re.compile(
         r'# Soft Delete Owned Sweep on "([^"]+)" that is owned by "([^"]+)" via "([^"]+)"!'
     ),
+    # Born derived in 2.8.0, baselined naively for its siblings' reason -- and because it is
+    # the one family whose header must not read as any of the three above, which the corpus
+    # (carrying all four on real files) is where that gets proved rather than argued.
+    '_RE_SOFT_DELETE_SELF_CASCADE': re.compile(
+        r'# Soft Delete Self Cascade Trigger on "([^"]+)" via "([^"]+)"!'
+    ),
     '_RE_MTI_UPDATED_AT': re.compile(r'# MTI Updated at Trigger on "([^"]+)" table'),
     '_RE_MTI_SOFT_DELETE': re.compile(r'# MTI Soft Delete Rule on "([^"]+)" table'),
     '_RE_TENANT_POLICY': re.compile(

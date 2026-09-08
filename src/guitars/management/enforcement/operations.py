@@ -1101,8 +1101,8 @@ class OperationsMixin:
         the loop above emits (ADR 0018). Appended from inside :meth:`_cascade_operations`, after
         the same refusals -- so which self keys carry a trigger *is* which would carry a rule."""
         # No object refs: CREATE TRIGGER names only the table it fires on and plpgsql resolves
-        # no body at CREATE FUNCTION time. A proxy or MTI parent elsewhere can still move that
-        # table out of this app -- as it can a cascade rule, which emits no owner edge either.
+        # no body at CREATE FUNCTION time. A proxy cannot relocate it (``_is_cascade_candidate``
+        # drops the proxy-declared side) and an MTI child never reaches this branch at all.
         name = _self_cascade_name(owner_table, foreign_key)
         ident_foreign_key = _identifiers._escape_ident(foreign_key)
         slots = {
@@ -1112,8 +1112,8 @@ class OperationsMixin:
             'primary_key': ident_owner_pk,
             'foreign_key': ident_foreign_key,
             # The sweep's reason: this UPDATE runs at trigger depth >= 1, where
-            # ``updated_at_trigger``'s ``WHEN`` suppresses it. Conditional because an MTI
-            # ancestor can hold the column, and this must not write one off its own table.
+            # ``updated_at_trigger``'s ``WHEN`` suppresses it. Conditional because a model can
+            # carry ``_deleted_at`` with no ``_updated_at`` -- not the MTI shape, E003 refuses it.
             'updated_at_assignment': (
                 _soft_delete._SOFT_DELETE_SELF_CASCADE_UPDATED_AT
                 if owns_column(owner, '_updated_at')

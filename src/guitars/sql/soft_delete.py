@@ -327,7 +327,7 @@ _CREATE_SOFT_DELETE_SELF_CASCADE_FUNCTION = """
 
 #: Spliced for the sweep's reason: this UPDATE runs at trigger depth >= 1, where
 #: ``updated_at_trigger``'s ``WHEN`` suppresses it, so the column would otherwise move on a
-#: top-level archive and not on the cascaded one. A slot, since an MTI ancestor can own it.
+#: top-level archive and not on the cascaded one. A slot: a model may carry no ``_updated_at``.
 _SOFT_DELETE_SELF_CASCADE_UPDATED_AT = ', _updated_at = NOW()'
 
 _DROP_SOFT_DELETE_SELF_CASCADE_FUNCTION = """

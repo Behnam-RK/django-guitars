@@ -96,6 +96,26 @@ def test_the_orm_delete_path_archives_the_tree_through_the_collector(tree):
     assert _archived(SetlistEntry) == {'root-song', 'middle-song', 'leaf-song'}
 
 
+def test_the_orm_path_stamps_the_cascade_children_the_raw_path_leaves_stale(transactional_db):
+    """The other half of the split: the gap is not "below the first level" but "reached by the
+    trigger rather than by one collector statement". The collector names every level at depth 0,
+    so every child is stamped here -- the same archive, a different outcome per caller."""
+    root = Setlist.objects.create(title='root')
+    middle = Setlist.objects.create(title='middle', parent=root)
+    leaf = Setlist.objects.create(title='leaf', parent=middle)
+    for node in (root, middle, leaf):
+        SetlistEntry.objects.create(song=f'{node.title}-song', setlist=node)
+    before = {row.song: row._updated_at for row in SetlistEntry._all_objects.all()}
+
+    Setlist.objects.filter(pk=root.pk).delete()
+
+    moved = {
+        row.song: row._updated_at > before[row.song]
+        for row in SetlistEntry._all_objects.all()
+    }
+    assert moved == {'root-song': True, 'middle-song': True, 'leaf-song': True}
+
+
 def test_archiving_a_leaf_touches_nothing_above_it(tree):
     """The cascade runs one way. A leaf has no children, so the trigger's UPDATE matches no
     row and the recursion stops on the first pass."""
@@ -131,15 +151,18 @@ def test_a_bulk_update_of_an_unrelated_column_archives_nothing(tree):
     assert _archived(Setlist) == set()
 
 
-def test_restoring_a_parent_restores_nothing_below_it(tree):
-    """The trigger reads the transition from live to archived only. Clearing ``_deleted_at``
-    is the opposite transition and matches nothing, so an un-archive is never a cascade."""
-    root, _middle, _leaf = tree
-    Setlist.objects.filter(pk=root.pk).delete()
+def test_restoring_a_parent_cascades_nothing_either_way(tree):
+    """The trigger reads the live-to-archived transition only, so an un-archive is never a
+    cascade. Children left **live** under an archived parent on purpose: with them already
+    archived, a trigger firing on either direction would find nothing to touch and still pass."""
+    root, middle, leaf = tree
+    _raw_delete(root.pk)
+    Setlist._all_objects.filter(pk__in=[middle.pk, leaf.pk]).update(_deleted_at=None)
+    assert _archived(Setlist) == {'root'}
 
     Setlist._all_objects.filter(pk=root.pk).update(_deleted_at=None)
 
-    assert _archived(Setlist) == {'middle', 'leaf'}
+    assert _archived(Setlist) == set()
 
 
 def test_hard_delete_on_the_root_really_removes_the_tree(tree):

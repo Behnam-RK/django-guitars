@@ -26,3 +26,4 @@ New ADR? Start from [`template.md`](template.md).
 | [`0016`](0016-generic-relation-collection-scope.md) | why `hard_delete()` takes a generic child wherever the row it points at is going, rather than matching what Phase 1's `Collector` archived (2.7.0) |
 | [`0017`](0017-e003-names-the-declaring-model.md) | why `guitars.E003` reports only the model where `_deleted_at` meets a plain MTI parent while the generator refuses its descendants too (2.7.0) |
 | [`0018`](0018-self-referential-cascade-trigger.md) | why a self-referential `CASCADE` key now takes a statement-level trigger where every other cascade takes a rule, why multi-table cycles stay refused, and why the trigger fires on every `UPDATE` (2.8.0) |
+| [`0019`](0019-migration-lifecycle-objects.md) | why a rename carries coverage forward with every prior name, why retirement needs positive evidence, and why `RetireEnforcement` drops only what this kit mints (2.9.0) |

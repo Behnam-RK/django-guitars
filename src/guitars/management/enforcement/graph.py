@@ -228,7 +228,7 @@ def renamed_tables(loader: MigrationLoader, app_label: str) -> dict[str, list[st
                 if old_table and new_table and old_table != new_table:
                     # **Every** prior name, not just the first. A generation that ran between
                     # two renames left an object named after the intermediate table, and only
-                    # dropping each leaves one object behind. See ``docs/migrations.md``.
+                    # dropping each leaves one object behind. See ADR 0019.
                     renames[new_table] = [*renames.pop(old_table, []), old_table]
     return renames
 

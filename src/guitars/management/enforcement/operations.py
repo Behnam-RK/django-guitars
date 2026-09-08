@@ -1189,9 +1189,10 @@ class OperationsMixin:
         ) + _soft_delete._ADOPT_SOFT_DELETE_SELF_CASCADE.format(**slots)
 
     def _renamed(self, *tables: str) -> bool:
-        """Whether any of *tables* is one a rename moved coverage onto. The families whose
-        object name embeds a table have to drop the old name as well as create the new."""
-        return any(table in self.existing.renamed_tables for table in tables)
+        """Whether any of *tables* has a prior name still worth dropping. Asked of
+        :meth:`_prior_names`, not of the chain: with nothing left to drop the strict form is
+        honest, and an ``IF EXISTS`` on a known answer would hide a diverged database."""
+        return any(self._prior_names(table) for table in tables)
 
     def _prior_names(self, table: str) -> list[str]:
         """Every *dead* name *table* held before, oldest first: all of them, a generation
@@ -1199,10 +1200,15 @@ class OperationsMixin:
         # Filtered here, not in the chain the scan needs whole: a freed name retaken by a
         # later ``CreateModel`` must not be dropped, but must still translate -- emptying the
         # chain leaves the renamed table uncovered, so the plain CREATE collides after all.
-        hosting = self._table_app_labels()
-        return [
-            name for name in self.existing.renamed_tables.get(table, []) if name not in hosting
-        ]
+
+        # Asked of the **whole** registry rather than ``LOCAL_APPS``: a name retaken by a model
+        # this generator never writes for is no less live, and dropping its objects no less wrong.
+        live = {
+            model._meta.db_table
+            for app in django_apps.get_app_configs()
+            for model in app.get_models()
+        }
+        return [name for name in self.existing.renamed_tables.get(table, []) if name not in live]
 
     def _claim_rule_name(self, table: str, rule_name: str, relation: tuple) -> None:
         """Record that *relation* -- ``(other_table, table, foreign_key)``, the column **always**

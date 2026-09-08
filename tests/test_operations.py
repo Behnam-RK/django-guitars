@@ -427,3 +427,34 @@ def test_a_consumers_own_row_level_security_is_left_enabled(db):
             "SELECT polname FROM pg_policy WHERE polrelid = 'testapp_setlistentry'::regclass"
         )
         assert [row[0] for row in cursor.fetchall()] == ['zz_consumer']
+
+
+def test_the_teardown_reaches_every_table_it_stripped_not_just_the_target(db):
+    """An MTI child's tenant policy is filed against the ancestor's column, so retiring the
+    ancestor drops the children's policies while the *target* stays the ancestor. Keyed on the
+    target, the children were left FORCEd with no policy -- returning no rows to anyone."""
+    tables = ('testapp_tour', 'testapp_worldtour', 'testapp_stadiumtour')
+
+    def rls():
+        with connection.cursor() as cursor:
+            return [
+                (
+                    table,
+                    *_row(cursor, table),
+                )
+                for table in tables
+            ]
+
+    def _row(cursor, table):
+        cursor.execute(
+            'SELECT relrowsecurity, (SELECT count(*) FROM pg_policy WHERE polrelid = c.oid) '
+            'FROM pg_class c WHERE c.oid = %s::regclass',
+            [table],
+        )
+        return cursor.fetchone()
+
+    assert all(enabled and policies for _t, enabled, policies in rls())
+
+    _apply(RetireEnforcement('testapp_tour'))
+
+    assert all(not enabled and not policies for _t, enabled, policies in rls())

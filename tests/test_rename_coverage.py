@@ -342,3 +342,31 @@ def test_the_required_key_sweep_runs_without_reporting(monkeypatch):
     command._cascade_key_maps()
 
     assert seen and not any(seen)
+
+
+def test_a_chain_with_nothing_left_to_drop_keeps_the_strict_form():
+    """A chain whose every prior name has been retaken by a live table leaves nothing to drop,
+    so the plain path must stay strict. ``IF EXISTS`` where the answer is known would hide a
+    diverged database, which is the rule `CLAUDE.md` states about the adopt forms."""
+    command = Command()
+    command.existing.renamed_tables['testapp_setlist'] = ['testapp_genre']
+    command.existing.soft_delete_self_cascade[('testapp_setlist', 'parent_id')] = 'stale0000'
+
+    assert command._prior_names('testapp_setlist') == []
+    assert command._renamed('testapp_setlist') is False
+
+    (operation,) = [
+        candidate
+        for candidate in command._build_operations(apps.get_app_config('testapp'))
+        if candidate.startswith('# Soft Delete Self Cascade Trigger on "testapp_setlist"')
+    ]
+    assert 'DROP TRIGGER IF EXISTS' not in operation
+
+
+def test_liveness_is_asked_of_the_whole_registry_not_just_local_apps():
+    """A name retaken by a model outside ``LOCAL_APPS`` is no less live, and dropping its
+    objects no less wrong -- ``_table_app_labels`` would have called it dead."""
+    command = Command()
+    command.existing.renamed_tables['testapp_setlist'] = ['django_content_type', 'testapp_gone']
+
+    assert command._prior_names('testapp_setlist') == ['testapp_gone']

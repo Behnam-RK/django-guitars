@@ -27,7 +27,8 @@ DECLARE
     guitars_target regclass := to_regclass({table});
     guitars_column smallint;
     guitars_row record;
-    guitars_dropped_ours boolean := false;
+    guitars_ours_tables oid[] := ARRAY[]::oid[];
+    guitars_stripped regclass;
 BEGIN
     IF guitars_target IS NULL THEN
         RAISE EXCEPTION
@@ -79,7 +80,7 @@ BEGIN
           AND guitars_policy.polname = '{policy}'
     LOOP
         EXECUTE format('DROP POLICY IF EXISTS %I ON %s', guitars_row.name, guitars_row.fires_on);
-        guitars_dropped_ours := true;
+        guitars_ours_tables := guitars_ours_tables || guitars_row.fires_on::oid;
     END LOOP;
 
     -- Row-level security is a table *flag*, not an object ``pg_depend`` reaches: dropping the
@@ -87,25 +88,29 @@ BEGIN
     -- owner included, silently and irreversibly. Torn down in ``drop_table_rls``'s order --
     -- NO FORCE before DISABLE, so the table is never forced-but-disabled.
 
-    -- Gated on having dropped *our* policy just now, not merely on none being left: a consumer
-    -- who enabled row-level security themselves, with their own policies and none of ours, must
-    -- keep it. Disabling that would be a silent security downgrade on an irreversible step.
-    IF guitars_dropped_ours AND NOT EXISTS (
-        SELECT 1 FROM pg_policy AS guitars_policy
-        WHERE guitars_policy.polrelid = guitars_target
-          AND guitars_policy.polname = '{policy}'
-    ) THEN
-        EXECUTE format('ALTER TABLE %s NO FORCE ROW LEVEL SECURITY', guitars_target);
-        EXECUTE format('ALTER TABLE %s DISABLE ROW LEVEL SECURITY', guitars_target);
+    -- Per table we actually stripped, not per *target*: a tenant policy is filed against the
+    -- column it reads, so an MTI child's lives on the ancestor -- the loop above drops it from
+    -- the child while the target is the ancestor. Keyed on the target instead, the children are
+    -- left FORCEd with no policy and the ancestor is disabled without having lost one.
+    FOR guitars_stripped IN
+        SELECT DISTINCT guitars_oid::regclass FROM unnest(guitars_ours_tables) AS guitars_oid
+    LOOP
+        CONTINUE WHEN EXISTS (
+            SELECT 1 FROM pg_policy AS guitars_policy
+            WHERE guitars_policy.polrelid = guitars_stripped
+              AND guitars_policy.polname = '{policy}'
+        );
+        EXECUTE format('ALTER TABLE %s NO FORCE ROW LEVEL SECURITY', guitars_stripped);
+        EXECUTE format('ALTER TABLE %s DISABLE ROW LEVEL SECURITY', guitars_stripped);
         FOR guitars_row IN
             SELECT guitars_policy.polname AS name
             FROM pg_policy AS guitars_policy
-            WHERE guitars_policy.polrelid = guitars_target
+            WHERE guitars_policy.polrelid = guitars_stripped
               AND guitars_policy.polname LIKE 'rls\\_exempt\\_%'
         LOOP
-            EXECUTE format('DROP POLICY IF EXISTS %I ON %s', guitars_row.name, guitars_target);
+            EXECUTE format('DROP POLICY IF EXISTS %I ON %s', guitars_row.name, guitars_stripped);
         END LOOP;
-    END IF;
+    END LOOP;
 
     IF NOT {scoped_to_column} THEN
         FOR guitars_row IN

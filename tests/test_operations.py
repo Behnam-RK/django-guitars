@@ -458,3 +458,35 @@ def test_the_teardown_reaches_every_table_it_stripped_not_just_the_target(db):
     _apply(RetireEnforcement('testapp_tour'))
 
     assert all(not enabled and not policies for _t, enabled, policies in rls())
+
+
+def test_a_consumer_policy_alongside_ours_keeps_row_level_security_up(db):
+    """The gate asks whether *any* policy survives, not whether one of ours does. A table
+    carrying a consumer's policy beside ours would otherwise be disabled, leaving theirs listed
+    in ``pg_policy`` enforcing nothing -- a silent read-authorization downgrade."""
+    with connection.cursor() as cursor:
+        cursor.execute('CREATE POLICY zz_consumer ON testapp_troupe USING (true)')
+
+    _apply(RetireEnforcement('testapp_troupe', column='label_id'))
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            'SELECT relrowsecurity, relforcerowsecurity FROM pg_class '
+            "WHERE oid = 'testapp_troupe'::regclass"
+        )
+        assert cursor.fetchone() == (True, True)
+        cursor.execute("SELECT polname FROM pg_policy WHERE polrelid = 'testapp_troupe'::regclass")
+        assert [row[0] for row in cursor.fetchall()] == ['zz_consumer']
+
+
+def test_a_column_retirement_forgets_the_tenant_policy_too(monkeypatch):
+    """The SQL drops a tenant policy on **either** path -- it is filed against the column it
+    reads. Forgetting it only on the whole-table path leaves the scan reporting a policy the
+    database no longer has, so nothing is re-emitted and tenancy is off with ``--check`` green."""
+    _retire_at(monkeypatch, '0056_rename_encore_deleted_at_refrain_deleted_at_and_more',
+               'testapp_troupe', 'label_id')
+
+    existing = scan_existing_operations()
+
+    assert 'testapp_troupe' not in existing.tenant_policies
+    assert 'testapp_troupe' not in existing.tenant_policy_sql

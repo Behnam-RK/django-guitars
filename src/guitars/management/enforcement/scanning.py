@@ -142,7 +142,13 @@ def _translate_renamed(renames: dict[str, list[str]], recorded: dict | set) -> N
     # PostgreSQL carries an object with its table, so after a rename it is still there while the
     # coverage asserting it is filed under the old name -- the new name then reads as uncovered
     # and the plain CREATE collides. Re-keyed, each family's own replace path fires instead.
-    old_to_new = {old: new for new, priors in renames.items() for old in priors}
+
+    # Skipped where the old name is *live*: a freed name retaken by a later ``CreateModel``
+    # would have its own coverage moved onto the new table and deleted, which never converges.
+    live = {
+        model._meta.db_table for app in django_apps.get_app_configs() for model in app.get_models()
+    }
+    old_to_new = {old: new for new, priors in renames.items() for old in priors if old not in live}
     if isinstance(recorded, set):
         for old in old_to_new.keys() & recorded:
             recorded.discard(old)
@@ -312,8 +318,16 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
             for table, column in retired.get(path.stem, ()):
                 for spelling in spellings[table]:
                     _subtract_retired(spelling, column, keyed_families, whole_table_families)
+                    # A tenant policy is dropped on **either** path -- it is filed against the
+                    # column it reads, so a column form takes it too. Forgetting it only on the
+                    # whole-table path leaves tenancy off with ``--check`` green.
+                    existing_tenant_policies.discard(spelling)
+                    existing_policy_identities.pop(spelling, None)
+                    existing_policy_sql.pop(spelling, None)
+                    existing_policy_force.pop(spelling, None)
+                    existing_tenant_forces.discard(spelling)
                     if column is None:
-                        existing_tenant_policies.discard(spelling)
+                        # The trigger loop really is whole-table-only, so autofill is too.
                         for key in [k for k in existing_tenant_autofill if k[0] == spelling]:
                             del existing_tenant_autofill[key]
 

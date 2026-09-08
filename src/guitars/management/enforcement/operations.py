@@ -767,6 +767,9 @@ class OperationsMixin:
         related_model = models_by_table.get(key[0])
         if related_model is None:  # pragma: no cover - the caller checks hosting first
             return None
+        # Not filtered to cascade candidates: the relaxed field is the one that stopped being
+        # one, and is the common case. So the net is wide, and where it catches more than one
+        # the reverse refuses -- guessing rebuilds the rule on a column it never read.
         columns = sorted(
             field.column
             for field in related_model._meta.local_fields
@@ -774,7 +777,7 @@ class OperationsMixin:
             and has_column(field.related_model, '_deleted_at')
             and column_owner(field.related_model, '_deleted_at')._meta.db_table == key[1]
         )
-        return columns[0] if columns else None
+        return columns[0] if len(columns) == 1 else None
 
     def _retired_cascade_operations(self, app: AppConfig, *, adopt: bool = False) -> list[str]:
         """Drop cascade rules *app*'s tables record but the models no longer call for -- a

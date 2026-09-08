@@ -95,13 +95,7 @@ BEGIN
     FOR guitars_stripped IN
         SELECT DISTINCT guitars_oid::regclass FROM unnest(guitars_ours_tables) AS guitars_oid
     LOOP
-        CONTINUE WHEN EXISTS (
-            SELECT 1 FROM pg_policy AS guitars_policy
-            WHERE guitars_policy.polrelid = guitars_stripped
-              AND guitars_policy.polname = '{policy}'
-        );
-        EXECUTE format('ALTER TABLE %s NO FORCE ROW LEVEL SECURITY', guitars_stripped);
-        EXECUTE format('ALTER TABLE %s DISABLE ROW LEVEL SECURITY', guitars_stripped);
+        -- Our exemptions go first: they are ours, and they must not be what keeps the flag up.
         FOR guitars_row IN
             SELECT guitars_policy.polname AS name
             FROM pg_policy AS guitars_policy
@@ -110,6 +104,16 @@ BEGIN
         LOOP
             EXECUTE format('DROP POLICY IF EXISTS %I ON %s', guitars_row.name, guitars_stripped);
         END LOOP;
+
+        -- Any policy left at all, ours or a consumer's, keeps row-level security up. Asking
+        -- only about ``tenant_scope`` would disable the flag on a table carrying a consumer
+        -- policy beside ours, leaving theirs listed in ``pg_policy`` enforcing nothing.
+        CONTINUE WHEN EXISTS (
+            SELECT 1 FROM pg_policy AS guitars_policy
+            WHERE guitars_policy.polrelid = guitars_stripped
+        );
+        EXECUTE format('ALTER TABLE %s NO FORCE ROW LEVEL SECURITY', guitars_stripped);
+        EXECUTE format('ALTER TABLE %s DISABLE ROW LEVEL SECURITY', guitars_stripped);
     END LOOP;
 
     IF NOT {scoped_to_column} THEN

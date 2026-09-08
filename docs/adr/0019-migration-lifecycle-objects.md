@@ -45,16 +45,17 @@ flag, so `migrate` refuses before running anything, and what it drops is written
 generator. That is exactly why it is filtered by name as well as by dependency: a consumer's own
 rule, trigger or policy is never taken, and one blocking the same change is the consumer's to
 drop. It refuses on a table that does not exist and on a column that does not resolve — without
-that, a typo or the operation placed *after* its `RemoveField` silently escalated a one-column
-retirement into dropping everything on the table.
+that, a typo or the operation placed *after* its `RemoveField` read as a retirement that had
+happened while the unresolved column matched nothing at all.
 
 **Row-level security is torn down per table stripped.** It is a table *flag*, not an object
 `pg_depend` reaches, so dropping the last `tenant_scope` off a FORCEd table leaves it returning
 no rows to anyone, the owner included. A tenant policy is filed against the column it reads, so
 an MTI child's lives on the ancestor: retiring the ancestor drops the *children's* policies while
 the target stays the ancestor. Keyed on the target, two tables of three were left invisible.
-Gated on having dropped one of ours from that table, so a consumer who secured their own table
-keeps it.
+Gated on having dropped one of ours from that table, and skipped while *any* policy survives:
+a consumer who secured their own table keeps it, and so does one whose policy merely sits
+beside ours.
 
 ## Consequences
 

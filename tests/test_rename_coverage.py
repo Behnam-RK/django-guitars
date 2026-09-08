@@ -370,3 +370,37 @@ def test_liveness_is_asked_of_the_whole_registry_not_just_local_apps():
     command.existing.renamed_tables['testapp_setlist'] = ['django_content_type', 'testapp_gone']
 
     assert command._prior_names('testapp_setlist') == ['testapp_gone']
+
+
+def test_a_freed_name_retaken_by_a_live_table_keeps_its_own_coverage():
+    """Round 2 filtered the *drop* side. The translation moved the old key unconditionally and
+    deleted it, so a header written for the retaken name **after** the rename was destroyed --
+    which never converges, the generator re-emitting a colliding CREATE on every run."""
+    recorded = {'testapp_refrain': 'y', 'testapp_setlist': 'x'}
+
+    # ``testapp_setlist`` is a live table, so its coverage is its own and must not move.
+    scanning._translate_renamed({'testapp_refrain': ['testapp_setlist']}, recorded)
+
+    assert recorded == {'testapp_refrain': 'y', 'testapp_setlist': 'x'}
+
+
+def test_an_ambiguous_retired_column_refuses_rather_than_guessing():
+    """Which of two foreign keys to one owner the rule read is unknowable once the key is
+    relaxed, so the reverse refuses. Guessing rebuilds the rule on a column it never read --
+    ``Album`` holds both ``band_id`` and ``producer_id`` to ``testapp_band``."""
+    from tests.testapp.models import Album  # noqa: PLC0415 - a fixture, not a dependency
+
+    command = Command()
+    key = ('testapp_album', 'testapp_band', None)
+
+    assert command._retired_cascade_column(key, {'testapp_album': Album}) is None
+    # One key to the owner is unambiguous, and is the relaxed-field case the reverse exists for.
+    assert command._retired_cascade_column(
+        ('testapp_refrain', 'testapp_band', None), {'testapp_refrain': _refrain()}
+    ) == 'band_id'
+
+
+def _refrain():
+    from tests.testapp.models import Refrain  # noqa: PLC0415 - a fixture, not a dependency
+
+    return Refrain

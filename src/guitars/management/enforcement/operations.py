@@ -868,8 +868,8 @@ class OperationsMixin:
 
     def _orphaned_mti_notes(self) -> list[str]:
         """Recorded MTI operations no local model calls for -- through 2.9.0 a **proxy** earned
-        them, naming its own table as parent. Such a migration has never applied anywhere, so
-        nothing is live to retire: the file is the problem, and a file cannot be repaired."""
+        them, naming its own table as parent, and a model flattened out of inheritance leaves
+        the same record. Named rather than retired: the two want different repairs."""
         hosting = self._table_app_labels()
         required_triggers = set()
         required_soft_deletes = set()
@@ -883,23 +883,38 @@ class OperationsMixin:
                     required_soft_deletes.add(model._meta.db_table)
 
         notes: list[str] = []
-        for kind, recorded, required in (
-            ('MTI Updated at Trigger', self.existing.mti_triggers, required_triggers),
-            ('MTI Soft Delete Rule', self.existing.mti_soft_deletes, required_soft_deletes),
+        for kind, column, inert, recorded, required in (
+            (
+                'MTI Updated at Trigger',
+                '_updated_at',
+                'PostgreSQL refuses a second trigger of one name on a table, so that migration '
+                'aborted and left nothing behind',
+                self.existing.mti_triggers,
+                required_triggers,
+            ),
+            (
+                'MTI Soft Delete Rule',
+                '_deleted_at',
+                'PostgreSQL dedupes a rule on its name per table, so it only ever replaced the '
+                "concrete model's own rule with a byte-identical one",
+                self.existing.mti_soft_deletes,
+                required_soft_deletes,
+            ),
         ):
             for table in sorted(set(recorded) - required):
                 # Positive evidence, 2.9.0's rule: a table mapping to nothing is a deleted
                 # model on one reading and a scoped run on another, and stays silent. A hosted
-                # table whose model does not call for the operation is the proxy case.
+                # table whose model does not call for the operation is the shape below.
                 if table not in hosting:
                     continue
                 notes.append(
-                    f"{kind} on '{table}' is recorded but no local model reaches that column "
-                    f'through an ancestor -- a proxy model earned it before 2.9.1, naming its '
-                    f'own table as its parent. That migration cannot apply (PostgreSQL '
-                    f'refuses a second trigger of one name on a table), so nothing is live to '
-                    f'retire and no database can be carrying it. Delete the operation from '
-                    f'the migration that writes it; this command cannot repair a file.'
+                    f"{kind} on '{table}' is recorded, but no local model reaches {column} "
+                    f'through an ancestor. Two shapes reach this and they want different '
+                    f'repairs. A proxy model earned the operation before 2.9.1, naming its own '
+                    f'table as its parent: {inert}, so delete the operation from the migration '
+                    f'that writes it. A model flattened out of inheritance leaves the same '
+                    f'record with the object live: drop that one by hand too. This command '
+                    f'cannot repair a file, and does not guess between the two.'
                 )
         return notes
 

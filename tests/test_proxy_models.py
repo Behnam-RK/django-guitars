@@ -133,8 +133,9 @@ def test_a_proxy_of_an_mti_child_adds_nothing_and_leaves_the_child_alone(mti_chi
 
 
 def test_a_recorded_mti_key_nothing_requires_is_named():
-    """Nothing can be retired -- the migration never applied, so no database holds the object
-    -- but the file stays broken, and the generator cannot repair a file. So it says so."""
+    """The generator cannot repair a file, so it says which file and what to do to it. Both
+    readings are named: a proxy left nothing live, a flattened model left the object live, and
+    the record they leave is identical -- so the note refuses to guess between them."""
     command = Command()
     # ``testapp_band`` is a plain model's table: hosted, and no model reaches a column through
     # an ancestor there. That is exactly the shape a proxy left behind.
@@ -143,8 +144,28 @@ def test_a_recorded_mti_key_nothing_requires_is_named():
     (note,) = command._orphaned_mti_notes()
 
     assert "MTI Updated at Trigger on 'testapp_band' is recorded" in note
-    assert 'a proxy model earned it before 2.9.1' in note
-    assert 'Delete the operation from the migration' in note
+    assert 'A proxy model earned the operation before 2.9.1' in note
+    assert 'delete the operation from the migration' in note
+    assert 'flattened out of inheritance' in note
+    assert 'does not guess' in note
+
+
+def test_each_family_is_told_why_its_own_shape_left_nothing_live():
+    """The two halves are inert for different reasons, and one shared sentence was wrong for
+    one of them: a duplicate *rule* is deduped and applies, only a duplicate *trigger* aborts
+    the migration. Saying the trigger's reason over the rule would misreport what is live."""
+    command = Command()
+    command.existing.mti_triggers['testapp_band'] = 'abc'
+    command.existing.mti_soft_deletes['testapp_band'] = 'abc'
+
+    trigger, rule = command._orphaned_mti_notes()
+
+    assert 'MTI Soft Delete Rule' in rule
+    assert 'dedupes a rule on its name per table' in rule
+    assert '_deleted_at' in rule
+    assert 'MTI Updated at Trigger' in trigger
+    assert 'refuses a second trigger of one name' in trigger
+    assert '_updated_at' in trigger
 
 
 def test_a_recorded_mti_key_on_an_unmapped_table_stays_silent():

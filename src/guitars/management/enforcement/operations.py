@@ -406,6 +406,11 @@ class OperationsMixin:
         deferred: list[str] = []
 
         for model in app.get_models():
+            # A proxy owns no table, so every operation it earns is one its concrete model
+            # already has -- keyed on the same ``db_table``, so it collides rather than adds.
+            # Filtered as ``_table_app_labels`` filters it, and as the tenancy walk does.
+            if model._meta.proxy:
+                continue
             table = model._meta.db_table
             # The *column*, not the field name -- they agree for a plain `id` pk, but a
             # `OneToOneField(primary_key=True)` pk (name `owner`, column `owner_id`) would
@@ -767,6 +772,10 @@ class OperationsMixin:
         related_model = models_by_table.get(key[0])
         if related_model is None:  # pragma: no cover - the caller checks hosting first
             return None
+        # A proxy binds the same table and may reach the map first, from an app registered
+        # earlier. Its ``local_fields`` are empty, so the scan below would recover nothing and
+        # the reverse would refuse where it could have rebuilt the rule.
+        related_model = related_model._meta.concrete_model or related_model
         # Not filtered to cascade candidates: the relaxed field is the one that stopped being
         # one, and is the common case. So the net is wide, and where it catches more than one
         # the reverse refuses -- guessing rebuilds the rule on a column it never read.
@@ -860,6 +869,100 @@ class OperationsMixin:
             )
             operations.append(source)
         return operations
+
+    def _orphaned_mti_notes(self) -> list[str]:
+        """Recorded MTI operations no local model calls for -- through 2.9.0 a **proxy** over a
+        model owning the column earned them, naming its own table as parent, and a model
+        flattened out of inheritance leaves the same record. Named, not retired: repairs differ."""
+        # Blind by construction to a proxy over a *real* MTI child: it recorded the very key
+        # the child still requires, so the difference is empty. That one is read off the file
+        # instead, by ``_duplicated_mti_notes``, which needs no difference to see it.
+        hosting = self._table_app_labels()
+        # A name a rename freed and a later model retook. The scan leaves the record under the
+        # freed name while that name is live, and the object went with the table -- so it is
+        # the rename's, not an orphan, and naming it sends a consumer to a live operation.
+        carried = {old for chain in self.existing.renamed_tables.values() for old in chain}
+        required_triggers = set()
+        required_soft_deletes = set()
+        for app in django_apps.get_app_configs():
+            if not _generator.is_local(app):
+                continue
+            for model in app.get_models():
+                if is_mti_child(model, '_updated_at'):
+                    required_triggers.add(model._meta.db_table)
+                if is_mti_child(model, '_deleted_at'):
+                    required_soft_deletes.add(model._meta.db_table)
+
+        notes: list[str] = []
+        for kind, column, inert, recorded, required in (
+            (
+                'MTI Updated at Trigger',
+                '_updated_at',
+                "the plain form collides with the concrete model's own trigger, PostgreSQL "
+                'refusing a second of one name on a table, so that migration aborted -- but '
+                'the --adopt form drops before it creates, so that one applied',
+                self.existing.mti_triggers,
+                required_triggers,
+            ),
+            (
+                'MTI Soft Delete Rule',
+                '_deleted_at',
+                'PostgreSQL dedupes a rule on its name per table, so nothing collided -- '
+                'though the trigger beside it in the same atomic migration may still have '
+                'aborted the pair, on every ladder rung carrying both columns',
+                self.existing.mti_soft_deletes,
+                required_soft_deletes,
+            ),
+        ):
+            for table in sorted(set(recorded) - required):
+                # Positive evidence, 2.9.0's rule: a table mapping to nothing is a deleted
+                # model on one reading and a scoped run on another, and stays silent. A hosted
+                # table whose model does not call for the operation is the shape below.
+                if table not in hosting or table in carried:
+                    continue
+                notes.append(
+                    f"{kind} on '{table}' is recorded, but no local model reaches {column} "
+                    f'through an ancestor. Either a proxy model earned the operation before '
+                    f'2.9.1, naming its own table as its parent -- {inert} -- or a model was '
+                    f'flattened out of inheritance and left the object live. Delete the '
+                    f'operation from the migration that writes it either way; this command '
+                    f'cannot repair a file. Then look in the database rather than assuming, '
+                    f'and drop by hand whatever survived.'
+                )
+        return notes
+
+    #: What a repeated header of each kind did to its migration. Only the plain trigger form
+    #: collides, and the scan reads a comment, which cannot say which form wrote it -- so the
+    #: note carries the whole answer rather than picking the half that sounds worst.
+    _DUPLICATE_MTI_EFFECT = {
+        'MTI Updated at Trigger': (
+            'The plain form of that operation cannot apply, PostgreSQL refusing a second '
+            'trigger of one name on a table, and a rule beside it in the same atomic migration '
+            'goes down with it -- but the --adopt form drops before it creates, so a history '
+            'generated that way applied and is carrying the second'
+        ),
+        'MTI Soft Delete Rule': (
+            'That operation applies either way, the rule form being CREATE OR REPLACE and '
+            'PostgreSQL deduping a rule on its name per table, so the copy only ever replaced '
+            'the first -- unless a repeated trigger in the same atomic migration took it down'
+        ),
+    }
+
+    def _duplicated_mti_notes(self) -> list[str]:
+        """One migration carrying an MTI header twice, which is the only evidence of the proxy
+        shape :meth:`_orphaned_mti_notes` cannot see. Same-app only: a proxy declared in another
+        app writes its copy into that app's own file, and one table takes one operation *there*."""
+        return [
+            f"{kind} on '{table}' is written twice by migration '{migration}' of app "
+            f"'{app_label}' -- the table as that migration spells it, which a later rename may "
+            f'have moved on from. One table takes one such operation, so the second is a copy: '
+            f'a proxy model earned it before 2.9.1, or a migration was edited by hand, or two '
+            f'models share that ``db_table``. '
+            f'{self._DUPLICATE_MTI_EFFECT[kind]}. Delete the repeated operation from that file, '
+            f'keeping one, and look in the database rather than assuming; this command cannot '
+            f'repair a file.'
+            for app_label, migration, kind, table in self.existing.duplicate_mti_operations
+        ]
 
     def _unmapped_cascade_notes(self) -> list[str]:
         """Recorded cascade rules this run will not retire because a table they name maps to no

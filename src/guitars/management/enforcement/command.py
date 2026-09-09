@@ -206,11 +206,26 @@ class Command(OperationsMixin, BaseCommand):
         """Populate ``all_models`` and ``reverse_relations_mapping`` from installed apps."""
         for app in django_apps.get_app_configs():
             self.all_models.extend(app.get_models())
+        self._index_reverse_relations(self.all_models)
 
-        for model in self.all_models:
+    def _index_reverse_relations(self, source: list[type[models.Model]]) -> None:
+        """File every ``ForeignKey`` in *source* under the model it points at. Separate from the
+        registry walk above so a test can hand it a model list Django never registered."""
+        for model in source:
+            # A proxy declares no field of its own, so its ``get_fields()`` is its concrete
+            # model's and every arm here would be added twice under one table.
+            if model._meta.proxy:
+                continue
             for field in model._meta.get_fields():
                 if isinstance(field, models.ForeignKey):
-                    self.reverse_relations_mapping[field.related_model].add(
+                    # Keyed on the **concrete** model: ``related_model`` for
+                    # ``ForeignKey(SomeProxy)`` is the proxy, which owns no table and which
+                    # every model walk skips -- losing the rule, ``--check`` green.
+                    concrete = field.related_model._meta.concrete_model
+                    # ``or`` for the type only: ``Options`` seeds the attribute ``None`` and
+                    # the narrowing does not survive. Every model class carries one.
+                    target = concrete or field.related_model
+                    self.reverse_relations_mapping[target].add(
                         (model, field, field.remote_field.on_delete)
                     )
 
@@ -558,9 +573,15 @@ class Command(OperationsMixin, BaseCommand):
         for note in self._tenancy_notes + relocation_notes:
             self.stdout.write(self.style.WARNING(note))
 
-        # Autofill coverage this command recorded but can no longer retire or attribute --
-        # an orphaned function is inert, an unmapped table has no app to migrate into.
-        for note in self._unmapped_autofill_notes() + self._orphaned_autofill_function_notes():
+        # Coverage this command recorded but can no longer retire or attribute -- an orphaned
+        # function is inert, an unmapped table has no app to migrate into, and a file is not
+        # something this command can repair at all.
+        for note in (
+            self._unmapped_autofill_notes()
+            + self._orphaned_autofill_function_notes()
+            + self._orphaned_mti_notes()
+            + self._duplicated_mti_notes()
+        ):
             self.stdout.write(self.style.WARNING(note))
 
         # After every note above, for the reason `function_check_messages` is collected rather

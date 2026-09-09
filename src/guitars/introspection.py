@@ -47,8 +47,12 @@ def column_owner(model: type[models.Model], colname: str) -> type[models.Model]:
 
 def is_mti_child(model: type[models.Model], colname: str) -> bool:
     """Whether *model* reaches *colname* through an MTI ancestor's table."""
+    # A **proxy** is not one and reads as one without this: Django fills its ``_meta.parents``
+    # and it declares no field, so it shares its concrete model's table and every MTI operation
+    # it earned named that table as its own parent -- which fails ``migrate``. Issue #45.
     return (
-        bool(model._meta.parents)
+        not model._meta.proxy
+        and bool(model._meta.parents)
         and has_column(model, colname)
         and not owns_column(model, colname)
     )

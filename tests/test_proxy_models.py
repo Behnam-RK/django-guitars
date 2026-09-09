@@ -3,7 +3,7 @@
 model's table, the operations it earned named that table as their own parent."""
 
 import pytest
-from django.apps import apps as django_apps
+from django.db import models
 from django.test.utils import isolate_apps
 
 from guitars.introspection import is_mti_child
@@ -25,15 +25,6 @@ class _Config:
         return list(self._models)
 
 
-def _withdraw(*names: str) -> None:
-    """``AppConfig.models`` *is* ``apps.all_models[label]``, so one pop withdraws both. Left
-    registered, a proxy joins every later test's model sweep -- the reason the tenancy suite's
-    own proxy fixtures pop theirs too."""
-    for name in names:
-        django_apps.all_models['testapp'].pop(name, None)
-    django_apps.clear_cache()
-
-
 @pytest.fixture
 def plain_proxy():
     """A proxy over a plain soft-deletable model, registered for one test."""
@@ -51,14 +42,13 @@ def plain_proxy():
 
         return Plain, PlainProxy
 
-    plain, proxy = _build()
-    yield plain, proxy
-    _withdraw('plain', 'plainproxy')
+    return _build()
 
 
 def test_a_proxy_is_not_an_mti_child(plain_proxy):
-    """The predicate itself, which three callers ask. ``bool(_meta.parents)`` is true for a
-    proxy and ``owns_column`` false, which is the whole trap."""
+    """The predicate, and with it every caller -- ``needs_parent_function`` included, which
+    walks its own model list and so is out of the operations loop's reach. ``_meta.parents`` is
+    truthy for a proxy and ``owns_column`` false, which is the whole trap."""
     _plain, proxy = plain_proxy
 
     assert proxy._meta.parents  # the trap: Django fills this for a proxy too
@@ -83,15 +73,6 @@ def test_a_proxy_adds_no_operation_of_its_own(plain_proxy):
     assert not [header for header in headers if header.startswith('# MTI')]
 
 
-def test_a_proxy_alone_does_not_call_for_the_parent_trigger_function(plain_proxy):
-    """The third symptom, and the one the loop through ``_build_operations`` cannot reach:
-    ``needs_parent_function`` walks its own model list, so a proxy would have forced the MTI
-    parent trigger-function migration into a project with no MTI at all."""
-    _plain, proxy = plain_proxy
-
-    assert is_mti_child(proxy, '_updated_at') is False
-
-
 @pytest.fixture
 def mti_child_proxy():
     """A proxy over a *real* MTI child, the shape where the concrete model legitimately does
@@ -106,9 +87,7 @@ def mti_child_proxy():
 
         return OrchestraProxy
 
-    proxy = _build()
-    yield proxy
-    _withdraw('orchestraproxy')
+    return _build()
 
 
 def test_a_proxy_of_an_mti_child_adds_nothing_and_leaves_the_child_alone(mti_child_proxy):
@@ -134,8 +113,8 @@ def test_a_proxy_of_an_mti_child_adds_nothing_and_leaves_the_child_alone(mti_chi
 
 def test_a_recorded_mti_key_nothing_requires_is_named():
     """The generator cannot repair a file, so it says which file and what to do to it. Both
-    readings are named: a proxy left nothing live, a flattened model left the object live, and
-    the record they leave is identical -- so the note refuses to guess between them."""
+    readings are named -- a proxy and a model flattened out of inheritance leave an identical
+    record -- and the note sends the reader to the database rather than guessing which."""
     command = Command()
     # ``testapp_band`` is a plain model's table: hosted, and no model reaches a column through
     # an ancestor there. That is exactly the shape a proxy left behind.
@@ -144,16 +123,16 @@ def test_a_recorded_mti_key_nothing_requires_is_named():
     (note,) = command._orphaned_mti_notes()
 
     assert "MTI Updated at Trigger on 'testapp_band' is recorded" in note
-    assert 'A proxy model earned the operation before 2.9.1' in note
-    assert 'delete the operation from the migration' in note
+    assert 'a proxy model earned the operation before 2.9.1' in note
+    assert 'Delete the operation from the migration' in note
     assert 'flattened out of inheritance' in note
-    assert 'does not guess' in note
+    assert 'look in the database rather than assuming' in note
 
 
-def test_each_family_is_told_why_its_own_shape_left_nothing_live():
-    """The two halves are inert for different reasons, and one shared sentence was wrong for
-    one of them: a duplicate *rule* is deduped and applies, only a duplicate *trigger* aborts
-    the migration. Saying the trigger's reason over the rule would misreport what is live."""
+def test_each_family_says_what_its_own_shape_did_to_the_migration():
+    """The two halves differ in whether the migration applied at all, and one shared sentence
+    was wrong for one of them: a duplicate *rule* is deduped and applies, only a duplicate
+    *trigger* aborts. Saying the trigger's reason over the rule misreports what is live."""
     command = Command()
     command.existing.mti_triggers['testapp_band'] = 'abc'
     command.existing.mti_soft_deletes['testapp_band'] = 'abc'
@@ -162,10 +141,28 @@ def test_each_family_is_told_why_its_own_shape_left_nothing_live():
 
     assert 'MTI Soft Delete Rule' in rule
     assert 'dedupes a rule on its name per table' in rule
+    assert 'that migration applied' in rule
     assert '_deleted_at' in rule
     assert 'MTI Updated at Trigger' in trigger
-    assert 'refuses a second trigger of one name' in trigger
+    assert 'refusing a second of one name on a table' in trigger
+    # The --adopt form drops before it creates, so that one applied and the blanket
+    # "nothing is live" this note used to carry was false for it.
+    assert 'the --adopt form drops before it creates' in trigger
     assert '_updated_at' in trigger
+
+
+def test_a_name_a_rename_freed_and_another_model_retook_stays_silent():
+    """The third shape, and the one where both repairs are wrong. The scan declines to re-key
+    coverage onto the new spelling while the old name is live, so the record stays under the
+    freed name -- while the object itself went with the table under its new one."""
+    command = Command()
+    # ``testapp_callbacks`` was really renamed from ``testapp_encore`` (0051, 0053), so the
+    # chain is the corpus's own rather than a fixture's.
+    command.existing.mti_triggers['testapp_encore'] = 'abc'
+    # And the freed name is live again, which is the whole condition.
+    command._table_app_labels_cache = {**command._table_app_labels(), 'testapp_encore': 'testapp'}
+
+    assert command._orphaned_mti_notes() == []
 
 
 def test_a_recorded_mti_key_on_an_unmapped_table_stays_silent():
@@ -182,3 +179,104 @@ def test_the_real_corpus_produces_no_note():
     """Every MTI key the committed migrations record is still required by a concrete child, so
     a project with no proxy sees nothing."""
     assert Command()._orphaned_mti_notes() == []
+
+
+# --- A relation pointing *at* a proxy ----------------------------------------------------------
+
+
+@pytest.fixture
+def fk_to_proxy():
+    """A cascade key aimed at a proxy, plus a self-referential one. Django keeps the proxy as
+    ``Field.related_model``, so both arms were filed under a model that owns no table."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Owner(SetarModel):
+            parent = models.ForeignKey(
+                'testapp.OwnerProxy', on_delete=models.CASCADE, null=True, related_name='kids'
+            )
+
+            class Meta(SetarModel.Meta):
+                app_label = 'testapp'
+
+        class OwnerProxy(Owner):
+            class Meta:
+                app_label = 'testapp'
+                proxy = True
+
+        class Held(SetarModel):
+            ref = models.ForeignKey(OwnerProxy, on_delete=models.CASCADE)
+
+            class Meta(SetarModel.Meta):
+                app_label = 'testapp'
+
+        return Owner, OwnerProxy, Held
+
+    return _build()
+
+
+def _headers(*emitted: type[models.Model]) -> list[str]:
+    command = Command()
+    command.all_models = list(emitted)
+    command._index_reverse_relations(command.all_models)
+    return [
+        line
+        for operation in command._build_operations(_Config(*emitted))
+        for line in operation.splitlines()
+        if line.startswith('#') and 'retired' not in line
+    ]
+
+
+def test_a_cascade_key_aimed_at_a_proxy_still_gets_its_rule(fk_to_proxy):
+    """The regression the proxy skip opened. ``related_model`` is the proxy, so the arm was
+    filed under it, and skipping proxies then left no model reaching it: the rule vanished with
+    ``--check`` green, and a raw ``DELETE`` on the owner archived it and left the child live."""
+    owner, proxy, held = fk_to_proxy
+
+    headers = _headers(owner, proxy, held)
+
+    assert [
+        header
+        for header in headers
+        if 'Soft Delete Related Rule on "testapp_held" that is related to "testapp_owner"'
+        in header
+    ]
+
+
+def test_a_self_referential_cascade_key_aimed_at_a_proxy_still_gets_its_trigger(fk_to_proxy):
+    """The same loss in the family that takes a trigger instead of a rule (ADR 0018). Its key
+    names the proxy, so it too was filed under the model no walk reaches."""
+    owner, proxy, held = fk_to_proxy
+
+    headers = _headers(owner, proxy, held)
+
+    assert [header for header in headers if 'Self Cascade' in header and 'testapp_owner' in header]
+
+
+def test_a_proxy_of_the_child_does_not_double_the_arm(plain_proxy):
+    """The other direction, asserted on the mapping rather than the rules it feeds. A proxy's
+    ``get_fields()`` is its concrete model's, so indexing one files every key twice under a
+    single table, and which arm the table dedupe then drops is set order."""
+    plain, proxy = plain_proxy
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class Holder(SetarModel):
+            ref = models.ForeignKey(plain, on_delete=models.CASCADE)
+
+            class Meta(SetarModel.Meta):
+                app_label = 'testapp'
+
+        class HolderProxy(Holder):
+            class Meta:
+                app_label = 'testapp'
+                proxy = True
+
+        return Holder, HolderProxy
+
+    holder, _holder_proxy = _build()
+    command = Command()
+    command._index_reverse_relations([plain, proxy, holder, _holder_proxy])
+
+    (arm,) = command.reverse_relations_mapping[plain]
+    assert arm[0] is holder

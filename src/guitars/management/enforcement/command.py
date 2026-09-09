@@ -206,11 +206,26 @@ class Command(OperationsMixin, BaseCommand):
         """Populate ``all_models`` and ``reverse_relations_mapping`` from installed apps."""
         for app in django_apps.get_app_configs():
             self.all_models.extend(app.get_models())
+        self._index_reverse_relations(self.all_models)
 
-        for model in self.all_models:
+    def _index_reverse_relations(self, source: list[type[models.Model]]) -> None:
+        """File every ``ForeignKey`` in *source* under the model it points at. Separate from the
+        registry walk above so a test can hand it a model list Django never registered."""
+        for model in source:
+            # A proxy declares no field of its own, so its ``get_fields()`` is its concrete
+            # model's and every arm here would be added twice under one table.
+            if model._meta.proxy:
+                continue
             for field in model._meta.get_fields():
                 if isinstance(field, models.ForeignKey):
-                    self.reverse_relations_mapping[field.related_model].add(
+                    # Keyed on the **concrete** model: ``related_model`` for
+                    # ``ForeignKey(SomeProxy)`` is the proxy, which owns no table and which
+                    # every model walk skips -- losing the rule, ``--check`` green.
+                    concrete = field.related_model._meta.concrete_model
+                    # ``or`` for the type only: only an abstract model, which nothing points
+                    # at, has no ``concrete_model``.
+                    target = concrete or field.related_model
+                    self.reverse_relations_mapping[target].add(
                         (model, field, field.remote_field.on_delete)
                     )
 

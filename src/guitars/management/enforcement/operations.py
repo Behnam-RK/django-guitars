@@ -871,6 +871,10 @@ class OperationsMixin:
         them, naming its own table as parent, and a model flattened out of inheritance leaves
         the same record. Named rather than retired: the two want different repairs."""
         hosting = self._table_app_labels()
+        # A name a rename freed and a later model retook. The scan leaves the record under the
+        # freed name while that name is live, and the object went with the table -- so it is
+        # the rename's, not an orphan, and naming it sends a consumer to a live operation.
+        carried = {old for chain in self.existing.renamed_tables.values() for old in chain}
         required_triggers = set()
         required_soft_deletes = set()
         for app in django_apps.get_app_configs():
@@ -887,16 +891,17 @@ class OperationsMixin:
             (
                 'MTI Updated at Trigger',
                 '_updated_at',
-                'PostgreSQL refuses a second trigger of one name on a table, so that migration '
-                'aborted and left nothing behind',
+                "the plain form collides with the concrete model's own trigger, PostgreSQL "
+                'refusing a second of one name on a table, so that migration aborted -- but '
+                'the --adopt form drops before it creates, so that one applied',
                 self.existing.mti_triggers,
                 required_triggers,
             ),
             (
                 'MTI Soft Delete Rule',
                 '_deleted_at',
-                'PostgreSQL dedupes a rule on its name per table, so it only ever replaced the '
-                "concrete model's own rule with a byte-identical one",
+                'PostgreSQL dedupes a rule on its name per table, so that migration applied '
+                "and replaced the concrete model's own rule with a byte-identical one",
                 self.existing.mti_soft_deletes,
                 required_soft_deletes,
             ),
@@ -905,16 +910,16 @@ class OperationsMixin:
                 # Positive evidence, 2.9.0's rule: a table mapping to nothing is a deleted
                 # model on one reading and a scoped run on another, and stays silent. A hosted
                 # table whose model does not call for the operation is the shape below.
-                if table not in hosting:
+                if table not in hosting or table in carried:
                     continue
                 notes.append(
                     f"{kind} on '{table}' is recorded, but no local model reaches {column} "
-                    f'through an ancestor. Two shapes reach this and they want different '
-                    f'repairs. A proxy model earned the operation before 2.9.1, naming its own '
-                    f'table as its parent: {inert}, so delete the operation from the migration '
-                    f'that writes it. A model flattened out of inheritance leaves the same '
-                    f'record with the object live: drop that one by hand too. This command '
-                    f'cannot repair a file, and does not guess between the two.'
+                    f'through an ancestor. Either a proxy model earned the operation before '
+                    f'2.9.1, naming its own table as its parent -- {inert} -- or a model was '
+                    f'flattened out of inheritance and left the object live. Delete the '
+                    f'operation from the migration that writes it either way; this command '
+                    f'cannot repair a file. Then look in the database rather than assuming, '
+                    f'and drop by hand whatever survived.'
                 )
         return notes
 

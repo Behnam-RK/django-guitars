@@ -222,8 +222,8 @@ class Command(OperationsMixin, BaseCommand):
                     # ``ForeignKey(SomeProxy)`` is the proxy, which owns no table and which
                     # every model walk skips -- losing the rule, ``--check`` green.
                     concrete = field.related_model._meta.concrete_model
-                    # ``or`` for the type only: only an abstract model, which nothing points
-                    # at, has no ``concrete_model``.
+                    # ``or`` for the type only: ``Options`` seeds the attribute ``None`` and
+                    # the narrowing does not survive. Every model class carries one.
                     target = concrete or field.related_model
                     self.reverse_relations_mapping[target].add(
                         (model, field, field.remote_field.on_delete)

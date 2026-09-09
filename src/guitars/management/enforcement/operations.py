@@ -772,6 +772,10 @@ class OperationsMixin:
         related_model = models_by_table.get(key[0])
         if related_model is None:  # pragma: no cover - the caller checks hosting first
             return None
+        # A proxy binds the same table and may reach the map first, from an app registered
+        # earlier. Its ``local_fields`` are empty, so the scan below would recover nothing and
+        # the reverse would refuse where it could have rebuilt the rule.
+        related_model = related_model._meta.concrete_model or related_model
         # Not filtered to cascade candidates: the relaxed field is the one that stopped being
         # one, and is the common case. So the net is wide, and where it catches more than one
         # the reverse refuses -- guessing rebuilds the rule on a column it never read.

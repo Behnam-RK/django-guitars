@@ -241,3 +241,22 @@ def test_a_scoped_retirement_note_is_silent_where_the_owner_is_in_scope(command)
     command.existing.soft_delete_related[('testapp_album', 'testapp_genre', None)] = 'abc'
 
     assert command._scoped_cascade_retirement_notes({'testapp'}) == []
+
+
+def test_a_proxy_bound_to_the_table_still_recovers_the_retired_column(command):
+    """``_cascade_key_maps`` binds one model per table and a proxy of an earlier-registered app
+    can reach it first. Its ``local_fields`` are empty, so the column scan finds nothing and
+    the reverse refuses -- an irreversible migration where the rule could be rebuilt."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class ReviewProxy(apps.get_model('testapp', 'Review')):
+            class Meta:
+                app_label = 'testapp'
+                proxy = True
+
+        return ReviewProxy
+
+    key = ('testapp_review', 'testapp_release', None)
+
+    assert command._retired_cascade_column(key, {'testapp_review': _build()}) == 'release_id'

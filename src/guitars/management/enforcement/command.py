@@ -96,6 +96,7 @@ class Command(OperationsMixin, BaseCommand):
         # in-scope app and each sweeps *every* local app's coverage. Safe to cache -- they read
         # only the model registry and GUITARS_TENANT_POLICIES, neither moving mid-`handle()`.
         self._table_app_labels_cache: dict[str, str] | None = None
+        self._cascade_key_maps_cache: tuple[dict, dict] | None = None  # see the mixin
         # Lazy, not built here: the graph reads ``self.all_models``, which a caller can *replace*
         # after construction -- the generation tests do, ``isolate_apps`` swapping ``Options.apps``
         # rather than the registry this constructor read. Building it here freezes the old answer.
@@ -123,7 +124,10 @@ class Command(OperationsMixin, BaseCommand):
         in ``__init__``: Django constructs a ``Command()`` for ``--help`` and the registry,
         neither needing a filesystem scan of every local app's migrations."""
         if self._existing is None:
-            self._existing = scan_existing_operations()
+            # This command's own cached loader: the scan reads ``RetireEnforcement`` off
+            # loaded operations, and building a second loader would import every migration
+            # module in the project twice.
+            self._existing = scan_existing_operations(self._migration_loader())
             self.trigger_function_dependency = self._existing.trigger_function_dependency
             self.parent_trigger_function_dependency = (
                 self._existing.parent_trigger_function_dependency

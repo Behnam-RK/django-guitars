@@ -160,3 +160,131 @@ def resolve_dependencies(
         elif resolved not in edges:
             edges.append(resolved)
     return edges, unresolved
+
+
+def retired_enforcement(
+    loader: MigrationLoader, app_label: str
+) -> dict[str, list[tuple[str, str | None]]]:
+    """``migration name -> [(table, column), ...]`` for every ``RetireEnforcement`` *app_label*
+    has written. Read off the **loaded operations**: a regex over Python call syntax misses
+    keyword and quoting variants, and gives no ordering against the headers the scan reads."""
+    # Deferred: ``guitars.operations`` is a public module a consumer's migration imports, and
+    # nothing in the generator should pay for it on a run that meets no retirement.
+    from guitars.operations import RetireEnforcement  # noqa: PLC0415 - see the comment above
+
+    def _retirements(operation) -> list[tuple[str, str | None]]:
+        # Unwrapped for ``_establishes``' reason: this is the standard idiom for a change the
+        # database already has, and a hand-tuned squash carries it.
+        if isinstance(operation, SeparateDatabaseAndState):
+            return [
+                retirement
+                for inner in (*operation.database_operations, *operation.state_operations)
+                for retirement in _retirements(inner)
+            ]
+        if isinstance(operation, RetireEnforcement):
+            return [(operation.table, operation.column)]
+        return []
+
+    found: dict[str, list[tuple[str, str | None]]] = {}
+    for name in _app_migrations_in_order(loader, app_label):
+        migration = loader.disk_migrations.get((app_label, name))
+        if migration is None:
+            continue
+        retirements = [r for operation in migration.operations for r in _retirements(operation)]
+        if retirements:
+            found[name] = retirements
+    return found
+
+
+def renamed_tables(loader: MigrationLoader, app_label: str) -> dict[str, list[str]]:
+    """``current db_table -> every name it held before, oldest first``, for the renames in
+    *app_label*'s history. Empty, and cheap, for the apps that never renamed one."""
+    ordered = _app_migrations_in_order(loader, app_label)
+    interesting = [
+        name
+        for name in ordered
+        if (app_label, name) in loader.disk_migrations
+        and any(
+            _renaming(operation)
+            for operation in loader.disk_migrations[app_label, name].operations
+        )
+    ]
+    if not interesting:
+        return {}
+
+    # Resolved through Django's own migration state rather than by re-deriving its naming
+    # rules: an explicit ``db_table`` survives a ``RenameModel`` untouched, and an
+    # ``AlterModelTable`` moves a table with no model rename at all.
+    renames: dict[str, list[str]] = {}
+    for name in interesting:
+        before = _tables_by_model(loader, app_label, ordered, upto=name, inclusive=False)
+        after = _tables_by_model(loader, app_label, ordered, upto=name, inclusive=True)
+        for operation in loader.disk_migrations[app_label, name].operations:
+            for old_model, new_model in _renaming(operation):
+                # Read per *operation*, not by diffing the two states: a ``RenameModel``
+                # changes the model name too, so the same table appears under two keys and a
+                # diff sees one model gone and another arrived.
+                old_table, new_table = before.get(old_model), after.get(new_model)
+                if old_table and new_table and old_table != new_table:
+                    # **Every** prior name, not just the first. A generation that ran between
+                    # two renames left an object named after the intermediate table, and only
+                    # dropping each leaves one object behind. See ADR 0019.
+                    renames[new_table] = [*renames.pop(old_table, []), old_table]
+    return renames
+
+
+def renames_by_migration(
+    loader: MigrationLoader, app_label: str
+) -> dict[str, list[tuple[str, str]]]:
+    """``migration name -> [(old db_table, new db_table), ...]``, so a scan walking files in
+    order moves coverage where the rename happens rather than all at the end."""
+    # A post-pass cannot get a **cycle** right: ``A -> B`` and back leaves two entries under
+    # ``A``, and the final map does not say which is newer -- so the older won and the database
+    # read as covered while it still held objects named for ``B``.
+    ordered = _app_migrations_in_order(loader, app_label)
+    found: dict[str, list[tuple[str, str]]] = {}
+    for name in ordered:
+        migration = loader.disk_migrations.get((app_label, name))
+        if migration is None:
+            continue
+        before = _tables_by_model(loader, app_label, ordered, upto=name, inclusive=False)
+        after = _tables_by_model(loader, app_label, ordered, upto=name, inclusive=True)
+        moves = [
+            (before[old_model], after[new_model])
+            for operation in migration.operations
+            for old_model, new_model in _renaming(operation)
+            if before.get(old_model) and after.get(new_model)
+            if before[old_model] != after[new_model]
+        ]
+        if moves:
+            found[name] = moves
+    return found
+
+
+def _renaming(operation) -> list[tuple[str, str]]:
+    """``(old model name, new model name)`` for an operation that can move a table, lowercased
+    as the migration state keys them. Unwrapped for :func:`_establishes`' reason."""
+    if isinstance(operation, SeparateDatabaseAndState):
+        return [
+            pair
+            for inner in (*operation.database_operations, *operation.state_operations)
+            for pair in _renaming(inner)
+        ]
+    if isinstance(operation, RenameModel):
+        return [(operation.old_name_lower, operation.new_name_lower)]
+    if isinstance(operation, AlterModelTable):
+        return [(operation.name_lower, operation.name_lower)]
+    return []
+
+
+def _tables_by_model(
+    loader: MigrationLoader, app_label: str, ordered: list[str], *, upto: str, inclusive: bool
+) -> dict[str, str]:
+    """``model name -> db_table`` for *app_label* as of *upto*, read off the migration state."""
+    index = ordered.index(upto) + (1 if inclusive else 0)
+    state = loader.project_state([(app_label, ordered[index - 1])] if index else [])
+    return {
+        model_name: model_state.options.get('db_table') or f'{label}_{model_name}'
+        for (label, model_name), model_state in state.models.items()
+        if label == app_label
+    }

@@ -287,6 +287,21 @@ _ADOPT_SOFT_DELETE_OWNED_SWEEP = (
     + _CREATE_SOFT_DELETE_OWNED_SWEEP
 )
 
+# A retired rule whose column is unrecoverable -- the primary form's key never spelled it, and
+# the field is gone -- gets this as its ``reverse_sql``. Refusing loudly beats a silent no-op
+# that would leave history claiming a rule the database does not have.
+_REFUSE_RECREATING_RETIRED_RULE = """
+    DO $guitars_retired$
+    BEGIN
+        RAISE EXCEPTION
+            'guitars: rule % on % cannot be recreated -- the migration that retired it could '
+            'not record which column it read. Restore the foreign key in the models and run '
+            'makeguitarmigrations.', {literal_rule_name}, {literal_table}
+            USING ERRCODE = 'feature_not_supported';
+    END;
+    $guitars_retired$;
+"""
+
 # ---- Self-referential cascade: a trigger where the family above is a rule. A rule updating the
 # table it fires on is rewritten into itself and PostgreSQL rejects **every** ``UPDATE`` there.
 # Self keys only -- a multi-table cycle has no stable choice of edge. See ADR 0018. ----
@@ -436,4 +451,20 @@ CREATE_MTI_SOFT_DELETE_RULE = """
 
 DROP_MTI_SOFT_DELETE_RULE = """
     DROP RULE soft_delete ON {child_table};
+"""
+
+# ---- Rename forms. PostgreSQL carries an object with its table, so a name-bearing one survives
+# a rename under the name the *old* table gave it while the CREATE below mints a new one. ``IF
+# EXISTS`` because a project that never applied the old coverage has nothing to drop. ----
+
+_DROP_RENAMED_TRIGGER = """
+    DROP TRIGGER IF EXISTS {old_trigger} ON {table};
+    DROP FUNCTION IF EXISTS {old_function}();
+"""
+
+#: Prepended to a rule's ``CREATE OR REPLACE``: that alone would leave the carried-over rule
+#: live beside the new one, both cascading, which is a duplicate rather than a failure -- but a
+#: duplicate nothing later retires.
+_DROP_RENAMED_RULE = """
+    DROP RULE IF EXISTS {old_rule_name} ON {table};
 """

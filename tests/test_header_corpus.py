@@ -37,6 +37,13 @@ _BASELINE = {
     '_RE_SOFT_DELETE_OWNED_SWEEP': re.compile(
         r'# Soft Delete Owned Sweep on "([^"]+)" that is owned by "([^"]+)" via "([^"]+)"!'
     ),
+    # Born hand-written in 2.9.0, fusing the two retired forms as its create sibling fuses the
+    # two create ones. Baselined naively for the same reason, and because the corpus is where
+    # "neither family reads the other's operations" is proved on real files.
+    '_RE_SOFT_DELETE_RELATED_RETIRED': re.compile(
+        r'# Soft Delete Related Rule retired on "([^"]+)" that is related to "([^"]+)"'
+        r'(?: via "(?P<foreign_key>[^"]+)")?'
+    ),
     # Born derived in 2.8.0, baselined naively for its siblings' reason -- and because it is
     # the one family whose header must not read as any of the three above, which the corpus
     # (carrying all four on real files) is where that gets proved rather than argued.

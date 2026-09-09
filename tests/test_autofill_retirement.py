@@ -94,12 +94,12 @@ class TestScanningSubtracts:
             _header(HEADER_TENANT_AUTOFILL_RETIRED),
         )
 
-        assert 'testapp' in existing.autofill_retirement_apps
+        assert 'testapp' in existing.retirement_apps
 
     def test_an_app_that_never_retired_is_not_marked(self, monkeypatch):
         existing = _scan_with(monkeypatch, _header(HEADER_TENANT_AUTOFILL))
 
-        assert existing.autofill_retirement_apps == set()
+        assert existing.retirement_apps == set()
 
     def test_a_retirement_does_not_pop_a_different_function_on_the_same_table(
         self, monkeypatch
@@ -228,12 +228,15 @@ class TestTheFileDigestGuardYieldsToRetirement:
     def test_a_recurring_digest_is_skipped_without_a_retirement(self, _command):
         """The guard itself, unchanged for an app whose history only ever added."""
         _command.existing.existing_digests['testapp'] = {_generator.digest_of(self._OPERATIONS)}
+        # Said rather than assumed: the real testapp history now carries a cascade retirement
+        # (``Encore``), so "only ever added" has to be arranged here.
+        _command.existing.retirement_apps.discard('testapp')
 
         assert self._missing(_command) == []
 
     def test_a_recurring_digest_is_written_once_the_app_has_retired_something(self, _command):
         _command.existing.existing_digests['testapp'] = {_generator.digest_of(self._OPERATIONS)}
-        _command.existing.autofill_retirement_apps.add('testapp')
+        _command.existing.retirement_apps.add('testapp')
 
         assert self._missing(_command) == [('testapp', self._OPERATIONS)]
 
@@ -242,7 +245,7 @@ class TestTheFileDigestGuardYieldsToRetirement:
         waiving it appends a byte-identical migration every run. No waiver is needed there
         anyway -- the adopt form's ``DROP ... IF EXISTS`` digests differently from history."""
         _command.existing.existing_digests['testapp'] = {_generator.digest_of(self._OPERATIONS)}
-        _command.existing.autofill_retirement_apps.add('testapp')
+        _command.existing.retirement_apps.add('testapp')
 
         assert self._missing(_command, adopt=True) == []
 

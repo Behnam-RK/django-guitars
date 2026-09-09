@@ -41,6 +41,17 @@ HEADER_SOFT_DELETE_OWNED_SWEEP = (
     'via "{foreign_key}"!'
 )
 
+# The retirement of the two above, and the only headers besides the autofill pair that mean an
+# operation *removed* something. Two forms for the two create forms, since the rule they drop is
+# named after whichever one wrote it. See ``docs/migrations.md``'s "Retirement".
+HEADER_SOFT_DELETE_RELATED_RETIRED = (
+    '# Soft Delete Related Rule retired on "{related_table}" that is related to "{table}"!'
+)
+HEADER_SOFT_DELETE_RELATED_VIA_RETIRED = (
+    '# Soft Delete Related Rule retired on "{related_table}" that is related to "{table}" '
+    'via "{foreign_key}"!'
+)
+
 # A self-referential CASCADE FK, taking a trigger where every other cascade takes a rule
 # (ADR 0018). "Self Cascade Trigger" shares no token with the three above, so no scanner
 # reads one as another's. One table slot: the trigger fires on the table its key points at.
@@ -137,6 +148,14 @@ RE_TENANT_AUTOFILL_FUNCTION = 2
 # read from the tail independently of where this match ends.
 _RE_SOFT_DELETE_RELATED = re.compile(
     rf'# Soft Delete Related Rule on "({_QUOTED_CONTENT})" that is related to "({_QUOTED_CONTENT})"'
+    rf'(?: via "(?P<foreign_key>{_QUOTED_CONTENT})")?'
+)
+# Hand-written for its create sibling's reason, fusing the two retired forms into one optional
+# trailing group. Disjoint from that sibling on the literal "retired", so neither reads the
+# other's operations -- which would have the scan retire a key on the run that asserts it.
+_RE_SOFT_DELETE_RELATED_RETIRED = re.compile(
+    rf'# Soft Delete Related Rule retired on "({_QUOTED_CONTENT})" '
+    rf'that is related to "({_QUOTED_CONTENT})"'
     rf'(?: via "(?P<foreign_key>{_QUOTED_CONTENT})")?'
 )
 # Hand-written: naive derivation would also capture parent_table, so a parent's own rename

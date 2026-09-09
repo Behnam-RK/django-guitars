@@ -42,7 +42,9 @@ from guitars.management.enforcement.headers import (
     HEADER_SOFT_DELETE_OWNED,
     HEADER_SOFT_DELETE_OWNED_SWEEP,
     HEADER_SOFT_DELETE_RELATED,
+    HEADER_SOFT_DELETE_RELATED_RETIRED,
     HEADER_SOFT_DELETE_RELATED_VIA,
+    HEADER_SOFT_DELETE_RELATED_VIA_RETIRED,
     HEADER_SOFT_DELETE_SELF_CASCADE,
     HEADER_TENANT_AUTOFILL,
     HEADER_TENANT_AUTOFILL_RETIRED,
@@ -210,6 +212,9 @@ class OperationsMixin:
         _missing_edges: list[str]
         _unresolved_reference_notes: list[str]
         _table_app_labels_cache: dict[str, str] | None
+        _cascade_key_maps_cache: (
+            tuple[dict[tuple[str, str, str | None], str], dict[str, type[models.Model]]] | None
+        )
         _required_autofill_cache: dict[tuple[str, str], tuple[str, str]] | None
         _relocated_autofill_cache: dict[tuple[str, str], tuple[str, str]] | None
 
@@ -566,6 +571,7 @@ class OperationsMixin:
             # Retire before create: a rename emits both in one migration, and "retire, then
             # create" is the order that reads correctly. The names never collide, so this
             # is legibility rather than correctness.
+            + self._retired_cascade_operations(app, adopt=adopt)
             + self._retired_autofill_operations(app, adopt=adopt)
             + self._tenant_autofill_operations(app, adopt=adopt)
             + self._tenant_policy_operations(app, adopt=adopt)
@@ -721,6 +727,166 @@ class OperationsMixin:
                 adopt=_triggers._ADOPT_TENANT_AUTOFILL_TRIGGER.format(**slots),
             )
         return operations
+
+    def _cascade_key_maps(
+        self,
+    ) -> tuple[dict[tuple[str, str, str | None], str], dict[str, type[models.Model]]]:
+        """``(required cascade keys -> the FK column each names, table -> its model)``, from one
+        silent sweep of every local model. Cached: retirement asks it once per app, and the
+        sweep walks the whole registry."""
+        if self._cascade_key_maps_cache is not None:
+            return self._cascade_key_maps_cache
+        required: dict[tuple[str, str, str | None], str] = {}
+        models_by_table: dict[str, type[models.Model]] = {}
+        for app in django_apps.get_app_configs():
+            if not _generator.is_local(app):
+                continue
+            for model in app.get_models():
+                models_by_table.setdefault(model._meta.db_table, model)
+                if not has_column(model, '_deleted_at'):
+                    continue
+                owner_table = column_owner(model, '_deleted_at')._meta.db_table
+                # ``report=False``: this sweep covers apps the run was never asked about, and
+                # their misconfigurations are not its to report -- ``_owned_candidates``' rule.
+                candidates, _self = self._cascade_candidates(model, owner_table, report=False)
+                for related_model, fk_field, is_primary in candidates:
+                    related_table = related_model._meta.db_table
+                    column = fk_field.column
+                    required[(related_table, owner_table, None if is_primary else column)] = column
+        self._cascade_key_maps_cache = (required, models_by_table)
+        return self._cascade_key_maps_cache
+
+    def _retired_cascade_column(
+        self, key: tuple[str, str, str | None], models_by_table: dict[str, type[models.Model]]
+    ) -> str | None:
+        """The column a retired rule read, so its ``reverse_sql`` can recreate it. The ``_via``
+        form spells it in the key; the primary form does not, so it is recovered as the first
+        remaining foreign key from the child to that owner -- the same order that picked it."""
+        if key[2] is not None:
+            return key[2]
+        related_model = models_by_table.get(key[0])
+        if related_model is None:  # pragma: no cover - the caller checks hosting first
+            return None
+        # Not filtered to cascade candidates: the relaxed field is the one that stopped being
+        # one, and is the common case. So the net is wide, and where it catches more than one
+        # the reverse refuses -- guessing rebuilds the rule on a column it never read.
+        columns = sorted(
+            field.column
+            for field in related_model._meta.local_fields
+            if isinstance(field, models.ForeignKey)
+            and has_column(field.related_model, '_deleted_at')
+            and column_owner(field.related_model, '_deleted_at')._meta.db_table == key[1]
+        )
+        return columns[0] if len(columns) == 1 else None
+
+    def _retired_cascade_operations(self, app: AppConfig, *, adopt: bool = False) -> list[str]:
+        """Drop cascade rules *app*'s tables record but the models no longer call for -- a
+        ``CASCADE`` key relaxed to ``SET_NULL``, made owning, or removed. Positive evidence
+        only: both tables must still map, or a scoped run would retire a live rule."""
+        hosting = self._table_app_labels()
+        required, models_by_table = self._cascade_key_maps()
+        operations: list[str] = []
+        for key in sorted(
+            set(self.existing.soft_delete_related) - set(required),
+            key=lambda k: (k[0], k[1], k[2] or ''),
+        ):
+            related_table, owner_table, via = key
+            # Both, not just the host: a table mapping to nothing is a *deleted* model on one
+            # reading and an app dropped from LOCAL_APPS on another, and this cannot tell them
+            # apart. Named in ``_unmapped_cascade_notes`` instead.
+            if hosting.get(owner_table) != app.label or related_table not in hosting:
+                continue
+            rule_name = _related_rule_name(related_table, via)
+            ident_owner_table = _identifiers._quote_table(owner_table)
+            drop = _soft_delete._DROP_SOFT_DELETE_RELATED_OBJECTS_RULE.format(
+                rule_name=rule_name, table=ident_owner_table
+            )
+            if self._renamed(related_table):
+                # Which spelling is live depends on when a generation last ran, so every one
+                # goes, ``IF EXISTS``. A bare DROP of a name nothing has fails ``migrate``.
+                drop = self._drop_prior_rules(
+                    ident_owner_table,
+                    [
+                        _related_rule_name(name, via)
+                        for name in (*self._prior_names(related_table), related_table)
+                    ],
+                )
+            column = self._retired_cascade_column(key, models_by_table)
+            owner = models_by_table[owner_table]
+            reverse = (
+                _soft_delete._CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE.format(
+                    rule_name=rule_name,
+                    table=ident_owner_table,
+                    related_table=_identifiers._quote_table(related_table),
+                    primary_key=_identifiers._escape_ident(cast(str, owner._meta.pk.column)),
+                    foreign_key=_identifiers._escape_ident(column),
+                )
+                if column is not None
+                # Passed as ``RAISE`` arguments, not interpolated into the literal: the quoted
+                # forms escape ``"`` but not ``'``, so a db_table carrying one would break it.
+                else _soft_delete._REFUSE_RECREATING_RETIRED_RULE.format(
+                    literal_rule_name=_identifiers._quote_literal(rule_name),
+                    literal_table=_identifiers._quote_literal(owner_table),
+                )
+            )
+            header = (
+                HEADER_SOFT_DELETE_RELATED_RETIRED.format(
+                    related_table=_identifiers._escape_ident(related_table),
+                    table=_identifiers._escape_ident(owner_table),
+                )
+                if via is None
+                else HEADER_SOFT_DELETE_RELATED_VIA_RETIRED.format(
+                    related_table=_identifiers._escape_ident(related_table),
+                    table=_identifiers._escape_ident(owner_table),
+                    foreign_key=_identifiers._escape_ident(via),
+                )
+            )
+            # Not ``_append_if_stale``, for ``_retired_autofill_operations``' reason: the set
+            # difference above is the whole idempotency mechanism, and "recorded digest differs
+            # -> replace" means nothing for a drop.
+
+            # ``--adopt`` is honest about not knowing what the database holds, so it is the one
+            # path that may say ``IF EXISTS``, the swap the autofill retirement also makes.
+            source, _ = _operation(
+                header,
+                drop,
+                reverse,
+                # Where a rename already made ``drop`` all-``IF EXISTS`` over every
+                # spelling, that *is* the adopt form -- overriding it would leave adopt
+                # strictly weaker than the plain path in the one case the old name is live.
+                emit=self._drop_prior_rules(ident_owner_table, [rule_name])
+                if adopt and not self._renamed(related_table)
+                else drop,
+            )
+            operations.append(source)
+        return operations
+
+    def _unmapped_cascade_notes(self) -> list[str]:
+        """Recorded cascade rules this run will not retire because a table they name maps to no
+        local model. Named rather than dropped: that is a deleted model on one reading and a
+        scoped run on another, and following the wrong one destroys a live cascade."""
+        hosting = self._table_app_labels()
+        required, _models = self._cascade_key_maps()
+        notes: list[str] = []
+        for key in sorted(
+            set(self.existing.soft_delete_related) - set(required),
+            key=lambda k: (k[0], k[1], k[2] or ''),
+        ):
+            related_table, owner_table, via = key
+            if owner_table in hosting and related_table in hosting:
+                continue
+            drop = _soft_delete._DROP_SOFT_DELETE_RELATED_OBJECTS_RULE.format(
+                rule_name=_related_rule_name(related_table, via),
+                table=_identifiers._quote_table(owner_table),
+            ).strip()
+            notes.append(
+                f"Cascade rule on '{owner_table}' related to '{related_table}' is recorded but "
+                f'the models no longer call for it, and one of those tables maps to no local '
+                f'model -- so this run cannot tell a deleted model from an app outside '
+                f'LOCAL_APPS, and will not retire it. If the rule is really gone, drop it by '
+                f'hand: {drop}'
+            )
+        return notes
 
     def _retired_autofill_operations(self, app: AppConfig, *, adopt: bool = False) -> list[str]:
         """Drop autofill triggers *app*'s tables record but the models no longer require. A
@@ -916,7 +1082,7 @@ class OperationsMixin:
         )
 
     def _cascade_candidates(
-        self, model: type[models.Model], owner_table: str
+        self, model: type[models.Model], owner_table: str, *, report: bool = True
     ) -> tuple[list[tuple[type[models.Model], models.ForeignKey, bool]], list[models.ForeignKey]]:
         """CASCADE FKs pointing at *model*: the ones taking a **rule**, flagged whether each is
         the *primary* one for its related_table (the first in sorted order, keeping the historical
@@ -944,27 +1110,114 @@ class OperationsMixin:
             # other are rewritten into each other. Checked against the whole-registry graph,
             # so a cycle closed through another app's model is still caught.
             if (owner_table, related_table) in self._rule_cycle_edges():
-                self._skipped_rule_notes.append(
-                    self._cycle_warning(
-                        'Cascade', f"'{related_table}'", owner_table, related_table
+                if report:
+                    self._skipped_rule_notes.append(
+                        self._cycle_warning(
+                            'Cascade', f"'{related_table}'", owner_table, related_table
+                        )
                     )
-                )
                 continue
             # The flat rule does UPDATE related_table SET _deleted_at -- only valid when the
             # related child owns that column on the table its FK lives on. An FK whose
             # _deleted_at lives on a farther MTI ancestor needs a join form not emitted yet.
             if not owns_column(related_model, '_deleted_at'):
-                self._skipped_rule_notes.append(
-                    f"Cascade rule for '{related_table}' -> '{owner_table}' skipped: "
-                    f"'{related_model.__name__}' declares this foreign key on its own table "
-                    'but inherits _deleted_at from a multi-table-inheritance ancestor, which '
-                    'needs a join form the generator does not emit yet.'
-                )
+                if report:
+                    self._skipped_rule_notes.append(
+                        f"Cascade rule for '{related_table}' -> '{owner_table}' skipped: "
+                        f"'{related_model.__name__}' declares this foreign key on its own table "
+                        'but inherits _deleted_at from a multi-table-inheritance ancestor, '
+                        'which needs a join form the generator does not emit yet.'
+                    )
                 continue
             is_primary = related_table not in seen_related_tables
             seen_related_tables.add(related_table)
             candidates.append((related_model, fk_field, is_primary))
         return candidates, self_cascades
+
+    @staticmethod
+    def _drop_prior_rules(table: str, names: list[str]) -> str:
+        """``DROP RULE IF EXISTS`` for each name a rename left behind. Without it the
+        carried-over rule stays live beside the new one, both cascading, neither retired."""
+        return ''.join(
+            _soft_delete._DROP_RENAMED_RULE.format(old_rule_name=name, table=table)
+            for name in names
+        )
+
+    @staticmethod
+    def _drop_prior_triggers(slots: dict, names: list[str]) -> str:
+        """``DROP TRIGGER``/``DROP FUNCTION IF EXISTS`` for each name a rename left behind."""
+        return ''.join(
+            _soft_delete._DROP_RENAMED_TRIGGER.format(
+                old_trigger=name, old_function=name, table=slots['table']
+            )
+            for name in names
+        )
+
+    def _owned_sweep_form(
+        self,
+        slots: dict,
+        owner_table: str,
+        dependent_table: str,
+        foreign_key: str,
+        *,
+        unrenamed: str,
+    ) -> str:
+        """:meth:`_self_cascade_form` for the sweep, whose name folds in **two** tables --
+        either of which a rename can have moved, and each through its own chain."""
+        if not self._renamed(owner_table, dependent_table):
+            return unrenamed.format(**slots)
+        owners = [owner_table, *self._prior_names(owner_table)]
+        dependents = [dependent_table, *self._prior_names(dependent_table)]
+        names = [
+            _owned_sweep_name(owner, dependent, foreign_key)
+            for owner in owners
+            for dependent in dependents
+            if (owner, dependent) != (owner_table, dependent_table)
+        ]
+        return self._drop_prior_triggers(
+            slots, names
+        ) + _soft_delete._ADOPT_SOFT_DELETE_OWNED_SWEEP.format(**slots)
+
+    def _self_cascade_form(
+        self, slots: dict, owner_table: str, foreign_key: str, *, unrenamed: str
+    ) -> str:
+        """The replace or adopt form, *unrenamed* being which applies when no rename moved the
+        table. Where one did, every prior name goes and the adopt body drops the current one
+        ``IF EXISTS`` on top -- which spelling is live depends on when a generation last ran."""
+        if not self._renamed(owner_table):
+            return unrenamed.format(**slots)
+        return self._drop_prior_triggers(
+            slots,
+            [_self_cascade_name(name, foreign_key) for name in self._prior_names(owner_table)],
+        ) + _soft_delete._ADOPT_SOFT_DELETE_SELF_CASCADE.format(**slots)
+
+    def _renamed(self, *tables: str) -> bool:
+        """Whether any of *tables* has a prior name still worth dropping. Asked of
+        :meth:`_prior_names`, not of the chain: with nothing left to drop the strict form is
+        honest, and an ``IF EXISTS`` on a known answer would hide a diverged database."""
+        return any(self._prior_names(table) for table in tables)
+
+    def _prior_names(self, table: str) -> list[str]:
+        """Every *dead* name *table* held before, oldest first: all of them, a generation
+        between two renames having left an object under the intermediate one."""
+        # Filtered here, not in the chain the scan needs whole: a freed name retaken by a
+        # later ``CreateModel`` must not be dropped, but must still translate -- emptying the
+        # chain leaves the renamed table uncovered, so the plain CREATE collides after all.
+
+        chain = self.existing.renamed_tables.get(table, [])
+        if not chain:
+            # The overwhelming common case, and the reason the registry sweep below is not
+            # cached: a project that renamed nothing never reaches it at all.
+            return []
+
+        # Asked of the **whole** registry rather than ``LOCAL_APPS``: a name retaken by a model
+        # this generator never writes for is no less live, and dropping its objects no less wrong.
+        live = {
+            model._meta.db_table
+            for app in django_apps.get_app_configs()
+            for model in app.get_models()
+        }
+        return [name for name in chain if name not in live]
 
     def _claim_rule_name(self, table: str, rule_name: str, relation: tuple) -> None:
         """Record that *relation* -- ``(other_table, table, foreign_key)``, the column **always**
@@ -1060,6 +1313,20 @@ class OperationsMixin:
                 primary_key=ident_owner_pk,
                 foreign_key=ident_foreign_key,
             )
+            # A rule's name embeds the child's table, so a rename leaves the carried-over rule
+            # live beside the new one -- both cascading, and nothing later retires either.
+            replace = forward
+            if self._renamed(related_table):
+                replace = (
+                    self._drop_prior_rules(
+                        ident_owner_table,
+                        [
+                            _related_rule_name(name, None if is_primary else fk_field.column)
+                            for name in self._prior_names(related_table)
+                        ],
+                    )
+                    + forward
+                )
             reverse = _soft_delete._DROP_SOFT_DELETE_RELATED_OBJECTS_RULE.format(
                 rule_name=rule_name, table=ident_owner_table
             )
@@ -1071,6 +1338,7 @@ class OperationsMixin:
                 forward,
                 reverse,
                 is_adopt=adopt,
+                replace=replace,
             )
         for fk_field in self_cascades:
             self._self_cascade_operation(
@@ -1154,8 +1422,18 @@ class OperationsMixin:
             ),
             _soft_delete._CREATE_SOFT_DELETE_SELF_CASCADE.format(**slots),
             _soft_delete._DROP_SOFT_DELETE_SELF_CASCADE.format(**slots),
-            replace=_soft_delete._REPLACE_SOFT_DELETE_SELF_CASCADE.format(**slots),
-            adopt=_soft_delete._ADOPT_SOFT_DELETE_SELF_CASCADE.format(**slots),
+            replace=self._self_cascade_form(
+                slots,
+                owner_table,
+                foreign_key,
+                unrenamed=_soft_delete._REPLACE_SOFT_DELETE_SELF_CASCADE,
+            ),
+            adopt=self._self_cascade_form(
+                slots,
+                owner_table,
+                foreign_key,
+                unrenamed=_soft_delete._ADOPT_SOFT_DELETE_SELF_CASCADE,
+            ),
             is_adopt=adopt,
         )
 
@@ -1369,6 +1647,21 @@ class OperationsMixin:
             reverse = _soft_delete._DROP_SOFT_DELETE_OWNED_OBJECT_RULE.format(
                 rule_name=rule_name, table=ident_owner_table
             )
+            # The owned rule's name embeds the *dependent's* table, so a rename there leaves
+            # the carried-over rule live beside the new one -- both cascading, neither retired,
+            # and the stale one frozen at the old predicate.
+            owned_replace = forward
+            if self._renamed(dependent_table):
+                owned_replace = (
+                    self._drop_prior_rules(
+                        ident_owner_table,
+                        [
+                            _owned_rule_name(name, fk_field.column)
+                            for name in self._prior_names(dependent_table)
+                        ],
+                    )
+                    + forward
+                )
             self._append_if_stale(
                 ops,
                 self.existing.soft_delete_owned,
@@ -1377,6 +1670,7 @@ class OperationsMixin:
                 forward,
                 reverse,
                 is_adopt=adopt,
+                replace=owned_replace,
             )
             self._append_owned_sweep(
                 ops,
@@ -1496,8 +1790,20 @@ class OperationsMixin:
             ),
             _soft_delete._CREATE_SOFT_DELETE_OWNED_SWEEP.format(**slots),
             _soft_delete._DROP_SOFT_DELETE_OWNED_SWEEP.format(**slots),
-            replace=_soft_delete._REPLACE_SOFT_DELETE_OWNED_SWEEP.format(**slots),
-            adopt=_soft_delete._ADOPT_SOFT_DELETE_OWNED_SWEEP.format(**slots),
+            replace=self._owned_sweep_form(
+                slots,
+                owner_table,
+                dependent_table,
+                foreign_key,
+                unrenamed=_soft_delete._REPLACE_SOFT_DELETE_OWNED_SWEEP,
+            ),
+            adopt=self._owned_sweep_form(
+                slots,
+                owner_table,
+                dependent_table,
+                foreign_key,
+                unrenamed=_soft_delete._ADOPT_SOFT_DELETE_OWNED_SWEEP,
+            ),
             is_adopt=adopt,
         )
 
@@ -1700,6 +2006,29 @@ class OperationsMixin:
                         f"Cascade rule on '{related_table}' related to '{table}' skipped: "
                         f"parent app '{app.label}' is not in this scoped run."
                     )
+        return notes + self._scoped_cascade_retirement_notes(requested)
+
+    def _scoped_cascade_retirement_notes(self, requested: set[str]) -> list[str]:
+        """The other direction, and the dangerous half to leave silent: a rule the models no
+        longer call for, whose *owner's* app is out of the run. The creation gap merely delays a
+        rule; this one leaves a live rule still archiving rows, with ``--check`` green."""
+        hosting = self._table_app_labels()
+        required, _models = self._cascade_key_maps()
+        notes = []
+        for key in sorted(
+            set(self.existing.soft_delete_related) - set(required),
+            key=lambda k: (k[0], k[1], k[2] or ''),
+        ):
+            related_table, owner_table, _via = key
+            owner_app = hosting.get(owner_table)
+            if owner_app is None or owner_app in requested or related_table not in hosting:
+                continue
+            notes.append(
+                f"Cascade rule on '{owner_table}' related to '{related_table}' is recorded but "
+                f'the models no longer call for it, and it cannot be retired here: its app '
+                f"'{owner_app}' is not in this scoped run. Until a run includes that app the "
+                f'rule stays live and goes on archiving rows.'
+            )
         return notes
 
     def _migration_loader(self) -> MigrationLoader:
@@ -1898,7 +2227,7 @@ class OperationsMixin:
             # Retirement makes an operation set recur (retire, re-adopt, same CREATE), so the
             # guard must yield -- but never under *adopt*, where it is the only idempotency
             # there is. Safe: the adopt form's DROP ... IF EXISTS digests differently.
-            waive_digest_guard = not adopt and app.label in self.existing.autofill_retirement_apps
+            waive_digest_guard = not adopt and app.label in self.existing.retirement_apps
             if not waive_digest_guard and operations_digest in self.existing.existing_digests.get(
                 app.label, set()
             ):

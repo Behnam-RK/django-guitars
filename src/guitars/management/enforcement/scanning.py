@@ -11,6 +11,11 @@ from typing import TYPE_CHECKING, NamedTuple
 from django.apps import apps as django_apps
 
 from guitars.management import _generator
+from guitars.management.enforcement.graph import (
+    renamed_tables,
+    renames_by_migration,
+    retired_enforcement,
+)
 from guitars.management.enforcement.headers import (
     _RE_MTI_SOFT_DELETE,
     _RE_MTI_UPDATED_AT,
@@ -19,6 +24,7 @@ from guitars.management.enforcement.headers import (
     _RE_SOFT_DELETE_OWNED,
     _RE_SOFT_DELETE_OWNED_SWEEP,
     _RE_SOFT_DELETE_RELATED,
+    _RE_SOFT_DELETE_RELATED_RETIRED,
     _RE_SOFT_DELETE_SELF_CASCADE,
     _RE_TENANT_AUTOFILL,
     _RE_TENANT_AUTOFILL_FUNCTION,
@@ -40,6 +46,8 @@ from guitars.sql import _identifiers
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from django.db.migrations.loader import MigrationLoader
 
 
 class ExistingOperations(NamedTuple):
@@ -81,10 +89,14 @@ class ExistingOperations(NamedTuple):
     #: trigger operation, and the one field this scan *subtracts* from: a retired key must
     #: read as absent, not recorded. The pair because one table can carry several triggers.
     tenant_autofill: dict[tuple[str, str], str | None]
-    #: App labels whose history contains a retirement header. Retirement breaks the file-level
-    #: ``[DIGEST:...]`` guard's assumption that an operation set never recurs -- retire, then
-    #: re-adopt -- so these apps rely on the per-operation guards alone.
-    autofill_retirement_apps: set[str]
+    #: App labels whose history contains a retirement header, of **either** retiring family.
+    #: Retirement breaks the file-level ``[DIGEST:...]`` guard's assumption that an operation set
+    #: never recurs -- retire, then re-adopt -- so these apps rely on the per-operation guards.
+    retirement_apps: set[str]
+    #: ``current db_table -> every name it held before, oldest first``. The families whose
+    #: object name embeds a table have to drop each of them: a generation between two renames
+    #: left an object under the intermediate name.
+    renamed_tables: dict[str, list[str]]
     #: Function name -> the migration defining it, and that migration's ``[SQL:...]`` digest.
     #: Dicts rather than the singletons below because autofill is one function per
     #: ``(column, GUC)`` pair -- normally one, but a hand-rolled manager can add more.
@@ -103,9 +115,62 @@ class ExistingOperations(NamedTuple):
     parent_trigger_function_sql: str | None
 
 
-def scan_existing_operations() -> ExistingOperations:
-    """Scan every local app's migration files for enforcement operations already written --
-    by comment header, so a partially covered app receives exactly what it lacks."""
+def _subtract_retired(
+    table: str,
+    column: str | None,
+    keyed: dict[str, dict],
+    whole_table: dict[str, dict],
+) -> None:
+    """Forget what a ``RetireEnforcement`` dropped, so a later run re-emits what the models
+    still call for. *keyed* spell a table **and** a column, so a column form can match them;
+    *whole_table* are keyed on a table alone and only the whole-table form reaches them."""
+    for recorded in keyed.values():
+        # ``k[-1] is None`` is the cascade family's *primary* form, whose key drops the column
+        # as the historical rule name does, so a column retirement takes it unseen: over-
+        # subtracting costs a re-emitted CREATE OR REPLACE, under-subtracting hides a drop.
+        matches = [
+            k
+            for k in recorded
+            if k[0] == table and (column is None or k[-1] == column or k[-1] is None)
+        ]
+        for key in matches:
+            del recorded[key]
+    if column is not None:
+        return
+    for recorded in whole_table.values():
+        recorded.pop(table, None)
+
+
+def _move_renamed(old: str, new: str, recorded: dict | set) -> None:
+    """Move *recorded*'s entries from table *old* onto *new*, in place."""
+    # Called as the scan crosses the renaming migration, not over the finished scan: order is
+    # what makes a **cycle** right. ``A -> B`` and back leaves two entries under ``A`` and only
+    # the walk knows which is newer -- a post-pass guessed, and the pre-cycle one won.
+    if isinstance(recorded, set):
+        if old in recorded:
+            recorded.discard(old)
+            recorded.add(new)
+        return
+    for key in list(recorded):
+        # ``isinstance`` first: a string is iterable, so the tuple branch would shred a
+        # table-keyed entry into a tuple of characters.
+        moved = (
+            (new if key == old else key)
+            if isinstance(key, str)
+            else tuple(new if part == old else part for part in key)
+        )
+        if moved != key:
+            # Overwrite, never ``setdefault``: this runs at the rename, so anything already
+            # filed under the destination predates it and the moving entry is the newer.
+            recorded[moved] = recorded.pop(key)
+
+
+def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingOperations:
+    """Scan every local app's migration files for enforcement operations already written, by
+    comment header, so a partially covered app receives exactly what it lacks."""
+    # *loader* is the caller's cached one. A retirement is read off loaded operations, so one
+    # is built here when none is given, and at most once for the whole scan.
+
     # Table (or table pair) -> the [SQL:...] digest of its most recent operation.
     # Last write wins throughout, which is only the currently-applied answer because
     # _generator.iter_migration_files yields in filename order -- see its docstring.
@@ -118,7 +183,7 @@ def scan_existing_operations() -> ExistingOperations:
     existing_mti_triggers: dict[str, str | None] = {}
     existing_mti_soft_deletes: dict[str, str | None] = {}
     existing_tenant_autofill: dict[tuple[str, str], str | None] = {}
-    autofill_retirement_apps: set[str] = set()
+    retirement_apps: set[str] = set()
     # (regex, dict, key_fn) for every plain "finditer, record by key" scan -- the
     # singleton-function and tenant-policy/force blocks below don't fit this shape.
     # Every group is _unescape_ident'd, undoing operations.py's doubled '"'.
@@ -199,11 +264,99 @@ def scan_existing_operations() -> ExistingOperations:
     parent_trigger_function_sql: str | None = None
     autofill_function_deps: dict[str, tuple[str, str]] = {}
     autofill_function_sql: dict[str, str | None] = {}
+    built_loader = loader
+    _pending_renames: dict[str, list[str]] = {}
+    live_tables = {
+        model._meta.db_table for app in django_apps.get_app_configs() for model in app.get_models()
+    }
+
+    def _ensure_loader() -> MigrationLoader:
+        """The caller's loader, or one built once here. Building imports every migration module
+        in the project, so it is built at most once for the whole scan."""
+        nonlocal built_loader
+        if built_loader is None:
+            from django.db.migrations.loader import (  # noqa: PLC0415 - see the docstring
+                MigrationLoader as _Loader,
+            )
+
+            built_loader = _Loader(None, ignore_no_migrations=True)
+        return built_loader
+
+    # The families a column-scoped retirement can name, and the ones only a whole-table one
+    # reaches. Both hold live references to the dicts above, so a subtraction is seen by the
+    # rest of the scan -- which is the point: a later migration re-recording a key wins again.
+    keyed_families = {
+        'soft_delete_related': existing_soft_delete_related,
+        'soft_delete_owned': existing_soft_delete_owned,
+        'soft_delete_owned_sweep': existing_soft_delete_owned_sweep,
+        'soft_delete_self_cascade': existing_soft_delete_self_cascade,
+    }
+    whole_table_families = {
+        'triggers': existing_triggers,
+        'soft_deletes': existing_soft_deletes,
+        'mti_triggers': existing_mti_triggers,
+        'mti_soft_deletes': existing_mti_soft_deletes,
+    }
+
+    for app in django_apps.get_app_configs():
+        if _generator.is_local(app):
+            _pending_renames.update(renamed_tables(_ensure_loader(), app.label))
 
     for app in django_apps.get_app_configs():
         if not _generator.is_local(app):
             continue
+        retired = retired_enforcement(_ensure_loader(), app.label)
+        moves = renames_by_migration(_ensure_loader(), app.label)
+        every_family = (
+            existing_triggers,
+            existing_soft_deletes,
+            existing_soft_delete_related,
+            existing_soft_delete_owned,
+            existing_soft_delete_owned_sweep,
+            existing_soft_delete_self_cascade,
+            existing_mti_triggers,
+            existing_mti_soft_deletes,
+            existing_tenant_autofill,
+            existing_tenant_policies,
+            existing_policy_identities,
+            existing_policy_sql,
+            existing_policy_force,
+            existing_tenant_forces,
+        )
+        # A retirement names the table as spelled *now*, while the keys it must subtract may
+        # still be filed under a name a rename left behind -- the post-pass would then move the
+        # old key back over the hole and a dropped object would read as covered.
+        spellings = {
+            table: [table, *_pending_renames.get(table, [])]
+            for table, _ in [pair for pairs in retired.values() for pair in pairs]
+        }
         for path, content in _generator.iter_migration_files(app):
+            # Before this file's headers, not after: an operation retiring a key and a header
+            # re-asserting it in the same migration means the migration re-asserts it.
+            # Before this file's own headers and its retirements: the rename happened first.
+            for old_table, new_table in moves.get(path.stem, ()):
+                # A freed name already retaken by another model keeps its own coverage.
+                if old_table in live_tables:
+                    continue
+                for recorded in every_family:
+                    _move_renamed(old_table, new_table, recorded)
+
+            for table, column in retired.get(path.stem, ()):
+                for spelling in spellings[table]:
+                    _subtract_retired(spelling, column, keyed_families, whole_table_families)
+                    # A tenant policy is dropped on **either** path -- it is filed against the
+                    # column it reads, so a column form takes it too. Forgetting it only on the
+                    # whole-table path leaves tenancy off with ``--check`` green.
+                    existing_tenant_policies.discard(spelling)
+                    existing_policy_identities.pop(spelling, None)
+                    existing_policy_sql.pop(spelling, None)
+                    existing_policy_force.pop(spelling, None)
+                    existing_tenant_forces.discard(spelling)
+                    if column is None:
+                        # The trigger loop really is whole-table-only, so autofill is too.
+                        for key in [k for k in existing_tenant_autofill if k[0] == spelling]:
+                            del existing_tenant_autofill[key]
+
             digest_match = _generator.RE_DIGEST.search(content.split('\n', 1)[0])
             if digest_match:
                 existing_digests[app.label].add(digest_match.group('digest'))
@@ -235,13 +388,30 @@ def scan_existing_operations() -> ExistingOperations:
                 existing_tenant_autofill[_autofill_key(match)] = _recorded_sql_identity(
                     content, match
                 )
+            # After ``scan_table`` recorded this file's create headers, so retire-then-create
+            # inside one migration reads as the create -- the order the emitter writes them in.
+            cascade_retirements = list(_RE_SOFT_DELETE_RELATED_RETIRED.finditer(content))
+            for match in cascade_retirements:
+                existing_soft_delete_related.pop(
+                    (
+                        _identifiers._unescape_ident(match.group(1)),
+                        _identifiers._unescape_ident(match.group(2)),
+                        _identifiers._unescape_ident(match.group('foreign_key'))
+                        if match.group('foreign_key') is not None
+                        else None,
+                    ),
+                    None,
+                )
+            if cascade_retirements:
+                retirement_apps.add(app.label)
+
             retirements = list(_RE_TENANT_AUTOFILL_RETIRED.finditer(content))
             for match in retirements:
                 existing_tenant_autofill.pop(_autofill_key(match), None)
             if retirements:
                 # Recorded per app, not per key: this is what tells `_generate_stage` its
                 # file-level digest guard can no longer assume operation sets never recur.
-                autofill_retirement_apps.add(app.label)
+                retirement_apps.add(app.label)
 
             policy_matches = list(_RE_TENANT_POLICY.finditer(content))
             unforced_in_file = unforced_policy_tables(content, policy_matches)
@@ -268,6 +438,10 @@ def scan_existing_operations() -> ExistingOperations:
                 for m in _RE_TENANT_FORCE.finditer(content)
             )
 
+    # One map across every local app: a cascade rule's key names two tables, and they can
+    # belong to different apps, so translating per app would leave half a key behind.
+    renames = _pending_renames
+
     return ExistingOperations(
         triggers=existing_triggers,
         soft_deletes=existing_soft_deletes,
@@ -283,7 +457,8 @@ def scan_existing_operations() -> ExistingOperations:
         unforced_policies={table for table, unforced in existing_policy_force.items() if unforced},
         tenant_forces=existing_tenant_forces,
         tenant_autofill=existing_tenant_autofill,
-        autofill_retirement_apps=autofill_retirement_apps,
+        retirement_apps=retirement_apps,
+        renamed_tables=renames,
         tenant_autofill_function_dependencies=autofill_function_deps,
         tenant_autofill_function_sql=autofill_function_sql,
         existing_digests=dict(existing_digests),

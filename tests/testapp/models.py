@@ -632,3 +632,18 @@ class Troupe(GuitarModel):
 
     def __str__(self) -> str:
         return self.name
+
+
+class Refrain(SetarModel):
+    """The corpus's lifecycle shapes in one model: created as ``Encore`` with a ``CASCADE`` key
+    that 0049 relaxes (so 0050 retires its rule), renamed by 0051, given a ``db_table`` by 0053,
+    and renamed again by 0055 -- which moves no table, the ``db_table`` now pinning it."""
+
+    song = CharField(max_length=100)
+    band = ForeignKey(Band, on_delete=SET_NULL, null=True, blank=True, related_name='refrains')
+
+    class Meta(SetarModel.Meta):
+        db_table = 'testapp_callbacks'
+
+    def __str__(self) -> str:
+        return self.song

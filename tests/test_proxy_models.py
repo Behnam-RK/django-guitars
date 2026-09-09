@@ -8,11 +8,11 @@ from unittest import mock
 
 import pytest
 from django.db import models
-from django.apps import apps as django_apps
 from django.core.management import call_command
 from django.test.utils import isolate_apps
 
 from guitars.introspection import is_mti_child
+from guitars.management import _generator
 from guitars.management.enforcement.command import Command
 from guitars.models import SetarModel
 from tests.testapp.models import Ensemble, Orchestra
@@ -306,33 +306,33 @@ def test_a_migration_carrying_one_mti_header_twice_is_named_with_its_file():
     assert 'Delete the repeated operation' in note
 
 
-def test_the_scan_reads_a_repeat_out_of_a_real_migration_file():
-    """The scan half, against a file on disk rather than a hand-set field. Nothing in the
-    committed corpus repeats a header, so the repeat has to be written for one run and taken
-    away again -- which is also the assertion that a clean corpus reports nothing."""
-    migrations_dir = Path(django_apps.get_app_config('testapp').path) / 'migrations'
-    probe = migrations_dir / '9999_a_repeated_mti_header.py'
+def test_the_scan_reads_a_repeat_out_of_a_migration_file(monkeypatch):
+    """The scan half, through the real walk and the real regex, the file handed in rather than
+    written: on disk it goes in the app's own migrations directory, where ``-n auto`` lets
+    another worker read it half-written. The clean-corpus assertion comes first, before that."""
+    assert Command().existing.duplicate_mti_operations == []
+
     header = (
         '        # MTI Updated at Trigger on "testapp_orchestra" table '
         '(parent "testapp_ensemble")! [SQL:abc123abc123]\n'
         "        migrations.RunSQL(sql='SELECT 1;', reverse_sql='SELECT 1;'),\n"
     )
-
-    assert Command().existing.duplicate_mti_operations == []
-    probe.write_text(
-        'from django.db import migrations\n\n\n'
-        'class Migration(migrations.Migration):\n'
-        '    dependencies = []\n'
-        '    operations = [\n' + header + header + '    ]\n'
+    walk = _generator.iter_migration_files
+    monkeypatch.setattr(
+        _generator,
+        'iter_migration_files',
+        lambda app: (
+            [(Path('0099_a_repeated_mti_header.py'), header + header)]
+            if app.label == 'testapp'
+            else walk(app)
+        ),
     )
-    try:
-        (found,) = Command().existing.duplicate_mti_operations
-    finally:
-        probe.unlink()
+
+    (found,) = Command().existing.duplicate_mti_operations
 
     assert found == (
         'testapp',
-        '9999_a_repeated_mti_header',
+        '0099_a_repeated_mti_header',
         'MTI Updated at Trigger',
         'testapp_orchestra',
     )

@@ -27,3 +27,4 @@ New ADR? Start from [`template.md`](template.md).
 | [`0017`](0017-e003-names-the-declaring-model.md) | why `guitars.E003` reports only the model where `_deleted_at` meets a plain MTI parent while the generator refuses its descendants too (2.7.0) |
 | [`0018`](0018-self-referential-cascade-trigger.md) | why a self-referential `CASCADE` key now takes a statement-level trigger where every other cascade takes a rule, why multi-table cycles stay refused, and why the trigger fires on every `UPDATE` (2.8.0) |
 | [`0019`](0019-migration-lifecycle-objects.md) | why a rename carries coverage forward with every prior name, why retirement needs positive evidence, and why `RetireEnforcement` drops only what this kit mints (2.9.0) |
+| [`0020`](0020-proxy-models-are-not-mti-children.md) | why a proxy is guarded in three places rather than one, why a relation is keyed on the concrete model, and why the orphaned record is named rather than retired (2.9.1) |

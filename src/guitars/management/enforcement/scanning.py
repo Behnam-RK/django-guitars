@@ -74,6 +74,10 @@ class ExistingOperations(NamedTuple):
     soft_delete_self_cascade: dict[tuple[str, str], str | None]
     mti_triggers: dict[str, str | None]
     mti_soft_deletes: dict[str, str | None]
+    #: ``(app_label, migration, kind, table)`` for an MTI header a single migration carries
+    #: **twice** -- a proxy's copy of its concrete child's, one table taking one such
+    #: operation. Invisible to a set difference, the child requiring that same key.
+    duplicate_mti_operations: list[tuple[str, str, str, str]]
     tenant_policies: set[str]
     #: Table -> the ``[POLICY:...]`` identity its **most recent** policy operation carries.
     #: Separate from :attr:`tenant_policy_sql`: identity is what the policy *says* (``force``
@@ -182,6 +186,7 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
     existing_soft_delete_self_cascade: dict[tuple[str, str], str | None] = {}
     existing_mti_triggers: dict[str, str | None] = {}
     existing_mti_soft_deletes: dict[str, str | None] = {}
+    duplicate_mti: list[tuple[str, str, str, str]] = []
     existing_tenant_autofill: dict[tuple[str, str], str | None] = {}
     retirement_apps: set[str] = set()
     # (regex, dict, key_fn) for every plain "finditer, record by key" scan -- the
@@ -381,6 +386,19 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
                 for match in pattern.finditer(content):
                     target[key_fn(match)] = _recorded_sql_identity(content, match)
 
+            # Recorded per file, not per family: a repeat is only visible while the file is
+            # open, and the key it writes is the one a real MTI child writes too.
+            for pattern, kind in (
+                (_RE_MTI_UPDATED_AT, 'MTI Updated at Trigger'),
+                (_RE_MTI_SOFT_DELETE, 'MTI Soft Delete Rule'),
+            ):
+                seen_mti: set[str] = set()
+                for match in pattern.finditer(content):
+                    table = _identifiers._unescape_ident(match.group(1))
+                    if table in seen_mti:
+                        duplicate_mti.append((app.label, path.stem, kind, table))
+                    seen_mti.add(table)
+
             # Bespoke rather than a scan_table row, because these two headers partition one
             # key space and retirement *subtracts* -- the only place this scan does. A pop,
             # not a sentinel: a re-adopted column must read as uncovered and plainly CREATE.
@@ -451,6 +469,7 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
         soft_delete_self_cascade=existing_soft_delete_self_cascade,
         mti_triggers=existing_mti_triggers,
         mti_soft_deletes=existing_mti_soft_deletes,
+        duplicate_mti_operations=duplicate_mti,
         tenant_policies=existing_tenant_policies,
         tenant_policy_identities=existing_policy_identities,
         tenant_policy_sql=existing_policy_sql,

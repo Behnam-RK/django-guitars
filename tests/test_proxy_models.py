@@ -3,10 +3,12 @@
 model's table, the operations it earned named that table as their own parent."""
 
 from io import StringIO
+from pathlib import Path
 from unittest import mock
 
 import pytest
 from django.db import models
+from django.apps import apps as django_apps
 from django.core.management import call_command
 from django.test.utils import isolate_apps
 
@@ -286,6 +288,54 @@ def test_a_proxy_of_the_child_does_not_double_the_arm(plain_proxy):
 
     (arm,) = command.reverse_relations_mapping[plain]
     assert arm[0] is holder
+
+
+def test_a_migration_carrying_one_mti_header_twice_is_named_with_its_file():
+    """The shape the set difference is blind to: a proxy over a *real* MTI child recorded the
+    key its concrete child still requires. The repeat inside one file is the only evidence of
+    it, and unlike the orphan note this one can name the migration to open."""
+    command = Command()
+    command.existing.duplicate_mti_operations.append(
+        ('shop', '0004_auto_enforcement', 'MTI Updated at Trigger', 'shop_descendant')
+    )
+
+    (note,) = command._duplicated_mti_notes()
+
+    assert "MTI Updated at Trigger on 'shop_descendant' is written twice" in note
+    assert "migration '0004_auto_enforcement' of app 'shop'" in note
+    assert 'Delete the repeated operation' in note
+
+
+def test_the_scan_reads_a_repeat_out_of_a_real_migration_file():
+    """The scan half, against a file on disk rather than a hand-set field. Nothing in the
+    committed corpus repeats a header, so the repeat has to be written for one run and taken
+    away again -- which is also the assertion that a clean corpus reports nothing."""
+    migrations_dir = Path(django_apps.get_app_config('testapp').path) / 'migrations'
+    probe = migrations_dir / '9999_a_repeated_mti_header.py'
+    header = (
+        '        # MTI Updated at Trigger on "testapp_orchestra" table '
+        '(parent "testapp_ensemble")! [SQL:abc123abc123]\n'
+        "        migrations.RunSQL(sql='SELECT 1;', reverse_sql='SELECT 1;'),\n"
+    )
+
+    assert Command().existing.duplicate_mti_operations == []
+    probe.write_text(
+        'from django.db import migrations\n\n\n'
+        'class Migration(migrations.Migration):\n'
+        '    dependencies = []\n'
+        '    operations = [\n' + header + header + '    ]\n'
+    )
+    try:
+        (found,) = Command().existing.duplicate_mti_operations
+    finally:
+        probe.unlink()
+
+    assert found == (
+        'testapp',
+        '9999_a_repeated_mti_header',
+        'MTI Updated at Trigger',
+        'testapp_orchestra',
+    )
 
 
 def test_the_note_reaches_stdout_and_does_not_fail_the_check():

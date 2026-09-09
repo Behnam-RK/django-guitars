@@ -580,6 +580,7 @@ class Command(OperationsMixin, BaseCommand):
             self._unmapped_autofill_notes()
             + self._orphaned_autofill_function_notes()
             + self._orphaned_mti_notes()
+            + self._duplicated_mti_notes()
         ):
             self.stdout.write(self.style.WARNING(note))
 

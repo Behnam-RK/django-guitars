@@ -931,6 +931,20 @@ class OperationsMixin:
                 )
         return notes
 
+    def _duplicated_mti_notes(self) -> list[str]:
+        """One migration carrying an MTI header twice. That is the proxy shape the set
+        difference cannot see -- the copy keys on what the concrete child still requires -- and
+        the file cannot apply, so the duplicate itself is the evidence."""
+        return [
+            f"{kind} on '{table}' is written twice by migration '{migration}' of app "
+            f"'{app_label}'. One table takes one such operation, so the second is a proxy's "
+            f"copy of its concrete child's, earned before 2.9.1. That migration cannot apply "
+            f'-- PostgreSQL refuses a second trigger of one name on a table, and a rule beside '
+            f'it in the same atomic migration goes down with it. Delete the repeated operation '
+            f'from that file, keeping one; this command cannot repair a file.'
+            for app_label, migration, kind, table in self.existing.duplicate_mti_operations
+        ]
+
     def _unmapped_cascade_notes(self) -> list[str]:
         """Recorded cascade rules this run will not retire because a table they name maps to no
         local model. Named rather than dropped: that is a deleted model on one reading and a

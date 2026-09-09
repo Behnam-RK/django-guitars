@@ -21,7 +21,7 @@ class Orchestra(Ensemble):          # its own table
 ## Why it needs special handling at all
 
 `_updated_at` and `_deleted_at` physically live on the **ancestor that declares them** — the
-child's table has neither column, so a rule/trigger referencing them there is invalid SQL, and
+child's table has neither, so a rule referencing them there is invalid SQL, and
 `hasattr(Child, "_deleted_at")` is `True` and useless: Python attributes, not columns.
 
 Everything below resolves the **owner** — the concrete model whose physical table declares the
@@ -30,22 +30,21 @@ up). Every table in a chain shares one primary-key **value** via
 `OneToOneField(parent_link=True)`, a correlated `WHERE owner_pk = child_pk`.
 
 A **proxy is not an MTI child** though it reads as one: Django fills its `_meta.parents` and it
-declares no field, so operations it earned named its own table as parent. Answered `False` since
-2.9.1, and relations keyed on `_meta.concrete_model` — `related_model` at a proxy is the proxy.
+declares no field, so it earned operations naming the owner's table as its child's. Answered
+`False` since 2.9.1, relations keyed on `_meta.concrete_model` (`related_model` at a proxy *is*
+the proxy).
 
 ## What each child table gets
 
 **Soft deletion — a redirect rule** preserves the child row and stamps the **owner**:
 
 ```sql
-CREATE RULE soft_delete AS ON DELETE TO <child>
-    DO INSTEAD (UPDATE <owner> SET _deleted_at = NOW()
-                WHERE <owner_pk> = old.<child_pk> AND _deleted_at IS NULL);
+CREATE RULE soft_delete AS ON DELETE TO <child> DO INSTEAD (UPDATE <owner>
+    SET _deleted_at = NOW() WHERE <owner_pk> = old.<child_pk> AND _deleted_at IS NULL);
 ```
 
-Django deletes child-before-parent, so the parent's own rule no-ops via its `_deleted_at IS
-NULL` guard — cascades fire once, at any depth. `cursor.rowcount` describes the *substituted*
-`UPDATE`.
+Django deletes child-before-parent, so the parent's rule no-ops via its `_deleted_at IS NULL`
+guard — cascades fire once, at any depth. `cursor.rowcount` describes the *substituted* `UPDATE`.
 
 The **inverse** shape — a child carrying `_deleted_at`, declared or inherited from a second
 parent, over a concrete parent that has none — is **refused** ([`guitars.E003`](adr/0015-refuse-soft-deletable-mti-orphans.md),
@@ -89,7 +88,8 @@ other way — [ADR 0003](adr/0003-mti-owner-join-policy.md).
   relation is itself `CASCADE`), collecting every table in the chain child-first; at the
   queryset level it deletes the whole chain leaf-to-root by shared PK.
 - **Known limitation:** a *cascade* FK on a child's own table while `_deleted_at` lives farther
-  up warns instead of emitting broken SQL; an [`OwningForeignKey`](owned-relations.md#mti) too.
+  up warns instead of emitting broken SQL. An [`OwningForeignKey`](owned-relations.md#mti) gets
+  no rule either, but is read.
 
 `tests/testapp/models.py` carries `Ensemble → Orchestra → ChamberOrchestra` (untenanted) and
 `Tour → WorldTour → StadiumTour` (tenanted, owner-join two tables up); `tests/test_mti.py` and

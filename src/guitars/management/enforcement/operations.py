@@ -871,9 +871,12 @@ class OperationsMixin:
         return operations
 
     def _orphaned_mti_notes(self) -> list[str]:
-        """Recorded MTI operations no local model calls for -- through 2.9.0 a **proxy** earned
-        them, naming its own table as parent, and a model flattened out of inheritance leaves
-        the same record. Named rather than retired: the two want different repairs."""
+        """Recorded MTI operations no local model calls for -- through 2.9.0 a **proxy** over a
+        model owning the column earned them, naming its own table as parent, and a model
+        flattened out of inheritance leaves the same record. Named, not retired: repairs differ."""
+        # Blind by construction to a proxy over a *real* MTI child: it recorded the very key the
+        # child still requires, so the difference is empty and nothing distinguishes it. That
+        # migration carries the operation twice and fails a fresh ``migrate`` for good.
         hosting = self._table_app_labels()
         # A name a rename freed and a later model retook. The scan leaves the record under the
         # freed name while that name is live, and the object went with the table -- so it is
@@ -904,8 +907,9 @@ class OperationsMixin:
             (
                 'MTI Soft Delete Rule',
                 '_deleted_at',
-                'PostgreSQL dedupes a rule on its name per table, so that migration applied '
-                "and replaced the concrete model's own rule with a byte-identical one",
+                'PostgreSQL dedupes a rule on its name per table, so nothing collided -- '
+                'though the trigger beside it in the same atomic migration may still have '
+                'aborted the pair, on every ladder rung carrying both columns',
                 self.existing.mti_soft_deletes,
                 required_soft_deletes,
             ),

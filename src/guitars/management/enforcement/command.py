@@ -573,8 +573,9 @@ class Command(OperationsMixin, BaseCommand):
         for note in self._tenancy_notes + relocation_notes:
             self.stdout.write(self.style.WARNING(note))
 
-        # Autofill coverage this command recorded but can no longer retire or attribute --
-        # an orphaned function is inert, an unmapped table has no app to migrate into.
+        # Coverage this command recorded but can no longer retire or attribute -- an orphaned
+        # function is inert, an unmapped table has no app to migrate into, and a file is not
+        # something this command can repair at all.
         for note in (
             self._unmapped_autofill_notes()
             + self._orphaned_autofill_function_notes()

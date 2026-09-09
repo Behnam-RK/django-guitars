@@ -2,8 +2,12 @@
 ``_meta.parents`` and it declares no field, so it read as one -- and sharing its concrete
 model's table, the operations it earned named that table as their own parent."""
 
+from io import StringIO
+from unittest import mock
+
 import pytest
 from django.db import models
+from django.core.management import call_command
 from django.test.utils import isolate_apps
 
 from guitars.introspection import is_mti_child
@@ -141,7 +145,9 @@ def test_each_family_says_what_its_own_shape_did_to_the_migration():
 
     assert 'MTI Soft Delete Rule' in rule
     assert 'dedupes a rule on its name per table' in rule
-    assert 'that migration applied' in rule
+    # And not a flat "so that migration applied": on every rung carrying both columns the
+    # trigger rides the same atomic migration and takes the rule down with it.
+    assert 'may still have aborted the pair' in rule
     assert '_deleted_at' in rule
     assert 'MTI Updated at Trigger' in trigger
     assert 'refusing a second of one name on a table' in trigger
@@ -254,9 +260,9 @@ def test_a_self_referential_cascade_key_aimed_at_a_proxy_still_gets_its_trigger(
 
 
 def test_a_proxy_of_the_child_does_not_double_the_arm(plain_proxy):
-    """The other direction, asserted on the mapping rather than the rules it feeds. A proxy's
-    ``get_fields()`` is its concrete model's, so indexing one files every key twice under a
-    single table, and which arm the table dedupe then drops is set order."""
+    """The other direction, on the mapping rather than the rules it feeds: a proxy's
+    ``get_fields()`` is its concrete model's, so indexing one files every key twice under one
+    table. ``_is_cascade_candidate`` rejects the copy anyway; this never files it."""
     plain, proxy = plain_proxy
 
     @isolate_apps('tests.testapp')
@@ -280,3 +286,16 @@ def test_a_proxy_of_the_child_does_not_double_the_arm(plain_proxy):
 
     (arm,) = command.reverse_relations_mapping[plain]
     assert arm[0] is holder
+
+
+def test_the_note_reaches_stdout_and_does_not_fail_the_check():
+    """Wiring, and the deliberate half of it. Every other test here calls the method, so the
+    one line joining it to the report could go without a failure -- and the note is advisory:
+    a run that fails ``--check`` over a file the command cannot repair helps nobody."""
+    out, err = StringIO(), StringIO()
+    with mock.patch.object(
+        Command, '_orphaned_mti_notes', return_value=['A recorded MTI key nothing requires.']
+    ):
+        call_command('makeguitarmigrations', '--check', stdout=out, stderr=err)
+
+    assert 'A recorded MTI key nothing requires.' in out.getvalue()

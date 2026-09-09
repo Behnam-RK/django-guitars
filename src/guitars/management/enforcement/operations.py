@@ -2006,6 +2006,29 @@ class OperationsMixin:
                         f"Cascade rule on '{related_table}' related to '{table}' skipped: "
                         f"parent app '{app.label}' is not in this scoped run."
                     )
+        return notes + self._scoped_cascade_retirement_notes(requested)
+
+    def _scoped_cascade_retirement_notes(self, requested: set[str]) -> list[str]:
+        """The other direction, and the dangerous half to leave silent: a rule the models no
+        longer call for, whose *owner's* app is out of the run. The creation gap merely delays a
+        rule; this one leaves a live rule still archiving rows, with ``--check`` green."""
+        hosting = self._table_app_labels()
+        required, _models = self._cascade_key_maps()
+        notes = []
+        for key in sorted(
+            set(self.existing.soft_delete_related) - set(required),
+            key=lambda k: (k[0], k[1], k[2] or ''),
+        ):
+            related_table, owner_table, _via = key
+            owner_app = hosting.get(owner_table)
+            if owner_app is None or owner_app in requested or related_table not in hosting:
+                continue
+            notes.append(
+                f"Cascade rule on '{owner_table}' related to '{related_table}' is recorded but "
+                f'the models no longer call for it, and it cannot be retired here: its app '
+                f"'{owner_app}' is not in this scoped run. Until a run includes that app the "
+                f'rule stays live and goes on archiving rows.'
+            )
         return notes
 
     def _migration_loader(self) -> MigrationLoader:

@@ -11,7 +11,11 @@ from typing import TYPE_CHECKING, NamedTuple
 from django.apps import apps as django_apps
 
 from guitars.management import _generator
-from guitars.management.enforcement.graph import renamed_tables, retired_enforcement
+from guitars.management.enforcement.graph import (
+    renamed_tables,
+    renames_by_migration,
+    retired_enforcement,
+)
 from guitars.management.enforcement.headers import (
     _RE_MTI_SOFT_DELETE,
     _RE_MTI_UPDATED_AT,
@@ -137,34 +141,28 @@ def _subtract_retired(
         recorded.pop(table, None)
 
 
-def _translate_renamed(renames: dict[str, list[str]], recorded: dict | set) -> None:
-    """Re-key *recorded* from the table names a rename left behind onto the ones in use now."""
-    # PostgreSQL carries an object with its table, so after a rename it is still there while the
-    # coverage asserting it is filed under the old name -- the new name then reads as uncovered
-    # and the plain CREATE collides. Re-keyed, each family's own replace path fires instead.
-
-    # Skipped where the old name is *live*: a freed name retaken by a later ``CreateModel``
-    # would have its own coverage moved onto the new table and deleted, which never converges.
-    live = {
-        model._meta.db_table for app in django_apps.get_app_configs() for model in app.get_models()
-    }
-    old_to_new = {old: new for new, priors in renames.items() for old in priors if old not in live}
+def _move_renamed(old: str, new: str, recorded: dict | set) -> None:
+    """Move *recorded*'s entries from table *old* onto *new*, in place."""
+    # Called as the scan crosses the renaming migration, not over the finished scan: order is
+    # what makes a **cycle** right. ``A -> B`` and back leaves two entries under ``A`` and only
+    # the walk knows which is newer -- a post-pass guessed, and the pre-cycle one won.
     if isinstance(recorded, set):
-        for old in old_to_new.keys() & recorded:
+        if old in recorded:
             recorded.discard(old)
-            recorded.add(old_to_new[old])
+            recorded.add(new)
         return
     for key in list(recorded):
+        # ``isinstance`` first: a string is iterable, so the tuple branch would shred a
+        # table-keyed entry into a tuple of characters.
         moved = (
-            old_to_new.get(key)
+            (new if key == old else key)
             if isinstance(key, str)
-            else tuple(old_to_new.get(part, part) for part in key)
+            else tuple(new if part == old else part for part in key)
         )
-        if moved is not None and moved != key:
-            # ``setdefault``: a key already recorded under the new name was written after the
-            # rename and is the current answer, so the stale one never displaces it.
-            recorded.setdefault(moved, recorded[key])
-            del recorded[key]
+        if moved != key:
+            # Overwrite, never ``setdefault``: this runs at the rename, so anything already
+            # filed under the destination predates it and the moving entry is the newer.
+            recorded[moved] = recorded.pop(key)
 
 
 def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingOperations:
@@ -268,6 +266,9 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
     autofill_function_sql: dict[str, str | None] = {}
     built_loader = loader
     _pending_renames: dict[str, list[str]] = {}
+    live_tables = {
+        model._meta.db_table for app in django_apps.get_app_configs() for model in app.get_models()
+    }
 
     def _ensure_loader() -> MigrationLoader:
         """The caller's loader, or one built once here. Building imports every migration module
@@ -305,6 +306,23 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
         if not _generator.is_local(app):
             continue
         retired = retired_enforcement(_ensure_loader(), app.label)
+        moves = renames_by_migration(_ensure_loader(), app.label)
+        every_family = (
+            existing_triggers,
+            existing_soft_deletes,
+            existing_soft_delete_related,
+            existing_soft_delete_owned,
+            existing_soft_delete_owned_sweep,
+            existing_soft_delete_self_cascade,
+            existing_mti_triggers,
+            existing_mti_soft_deletes,
+            existing_tenant_autofill,
+            existing_tenant_policies,
+            existing_policy_identities,
+            existing_policy_sql,
+            existing_policy_force,
+            existing_tenant_forces,
+        )
         # A retirement names the table as spelled *now*, while the keys it must subtract may
         # still be filed under a name a rename left behind -- the post-pass would then move the
         # old key back over the hole and a dropped object would read as covered.
@@ -315,6 +333,14 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
         for path, content in _generator.iter_migration_files(app):
             # Before this file's headers, not after: an operation retiring a key and a header
             # re-asserting it in the same migration means the migration re-asserts it.
+            # Before this file's own headers and its retirements: the rename happened first.
+            for old_table, new_table in moves.get(path.stem, ()):
+                # A freed name already retaken by another model keeps its own coverage.
+                if old_table in live_tables:
+                    continue
+                for recorded in every_family:
+                    _move_renamed(old_table, new_table, recorded)
+
             for table, column in retired.get(path.stem, ()):
                 for spelling in spellings[table]:
                     _subtract_retired(spelling, column, keyed_families, whole_table_families)
@@ -415,24 +441,6 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
     # One map across every local app: a cascade rule's key names two tables, and they can
     # belong to different apps, so translating per app would leave half a key behind.
     renames = _pending_renames
-    if renames:
-        for recorded in (
-            existing_triggers,
-            existing_soft_deletes,
-            existing_soft_delete_related,
-            existing_soft_delete_owned,
-            existing_soft_delete_owned_sweep,
-            existing_soft_delete_self_cascade,
-            existing_mti_triggers,
-            existing_mti_soft_deletes,
-            existing_tenant_autofill,
-            existing_tenant_policies,
-            existing_policy_identities,
-            existing_policy_sql,
-            existing_policy_force,
-            existing_tenant_forces,
-        ):
-            _translate_renamed(renames, recorded)
 
     return ExistingOperations(
         triggers=existing_triggers,

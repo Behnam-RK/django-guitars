@@ -233,6 +233,34 @@ def renamed_tables(loader: MigrationLoader, app_label: str) -> dict[str, list[st
     return renames
 
 
+def renames_by_migration(
+    loader: MigrationLoader, app_label: str
+) -> dict[str, list[tuple[str, str]]]:
+    """``migration name -> [(old db_table, new db_table), ...]``, so a scan walking files in
+    order moves coverage where the rename happens rather than all at the end."""
+    # A post-pass cannot get a **cycle** right: ``A -> B`` and back leaves two entries under
+    # ``A``, and the final map does not say which is newer -- so the older won and the database
+    # read as covered while it still held objects named for ``B``.
+    ordered = _app_migrations_in_order(loader, app_label)
+    found: dict[str, list[tuple[str, str]]] = {}
+    for name in ordered:
+        migration = loader.disk_migrations.get((app_label, name))
+        if migration is None:
+            continue
+        before = _tables_by_model(loader, app_label, ordered, upto=name, inclusive=False)
+        after = _tables_by_model(loader, app_label, ordered, upto=name, inclusive=True)
+        moves = [
+            (before[old_model], after[new_model])
+            for operation in migration.operations
+            for old_model, new_model in _renaming(operation)
+            if before.get(old_model) and after.get(new_model)
+            if before[old_model] != after[new_model]
+        ]
+        if moves:
+            found[name] = moves
+    return found
+
+
 def _renaming(operation) -> list[tuple[str, str]]:
     """``(old model name, new model name)`` for an operation that can move a table, lowercased
     as the migration state keys them. Unwrapped for :func:`_establishes`' reason."""

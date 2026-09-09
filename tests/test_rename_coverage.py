@@ -190,19 +190,19 @@ def test_the_translation_handles_a_set_as_well_as_a_mapping():
     the translation has to move a member rather than re-key an entry."""
     policies = {'testapp_old', 'testapp_untouched'}
 
-    scanning._translate_renamed({'testapp_new': ['testapp_old']}, policies)
+    scanning._move_renamed('testapp_old', 'testapp_new', policies)
 
     assert policies == {'testapp_new', 'testapp_untouched'}
 
 
-def test_a_key_already_recorded_under_the_new_name_wins():
-    """A record written *after* the rename is the current answer, so a stale one filed under
-    the old name never displaces it."""
-    recorded = {'testapp_new': 'current', 'testapp_old': 'stale'}
+def test_the_move_runs_at_the_rename_so_the_later_record_wins():
+    """Moving where the rename happens is what makes ordering right without a special case: a
+    record written afterwards is simply recorded later. See the cycle test below."""
+    recorded = {'testapp_old': 'written_before'}
 
-    scanning._translate_renamed({'testapp_new': ['testapp_old']}, recorded)
+    scanning._move_renamed('testapp_old', 'testapp_new', recorded)
 
-    assert recorded == {'testapp_new': 'current'}
+    assert recorded == {'testapp_new': 'written_before'}
 
 
 def test_retiring_a_rule_on_a_renamed_table_drops_both_names():
@@ -277,7 +277,7 @@ def test_a_tuple_key_is_re_keyed_across_a_rename():
         ('testapp_untouched', 'testapp_owner', None): 'c',
     }
 
-    scanning._translate_renamed({'testapp_new': ['testapp_old']}, recorded)
+    scanning._move_renamed('testapp_old', 'testapp_new', recorded)
 
     assert recorded == {
         ('testapp_new', 'testapp_owner', None): 'a',
@@ -376,12 +376,12 @@ def test_a_freed_name_retaken_by_a_live_table_keeps_its_own_coverage():
     """Round 2 filtered the *drop* side. The translation moved the old key unconditionally and
     deleted it, so a header written for the retaken name **after** the rename was destroyed --
     which never converges, the generator re-emitting a colliding CREATE on every run."""
-    recorded = {'testapp_refrain': 'y', 'testapp_setlist': 'x'}
+    existing = scan_existing_operations()
 
-    # ``testapp_setlist`` is a live table, so its coverage is its own and must not move.
-    scanning._translate_renamed({'testapp_refrain': ['testapp_setlist']}, recorded)
-
-    assert recorded == {'testapp_refrain': 'y', 'testapp_setlist': 'x'}
+    # ``testapp_setlist`` is live, so the walk skipped any move that would have taken its
+    # coverage -- the guard sits on the move as well as on the drop.
+    assert 'testapp_setlist' in existing.soft_deletes
+    assert 'testapp_setlist' in existing.triggers
 
 
 def test_an_ambiguous_retired_column_refuses_rather_than_guessing():
@@ -404,3 +404,74 @@ def _refrain():
     from tests.testapp.models import Refrain  # noqa: PLC0415 - a fixture, not a dependency
 
     return Refrain
+
+
+def test_a_rename_cycle_keeps_the_coverage_written_inside_it():
+    """``A -> B`` and back leaves two entries filed under ``A``, one from before the cycle and
+    one from inside it. A post-pass could not tell which was newer, so the stale one won and a
+    database still holding ``B``-named objects read as covered, ``--check`` green."""
+    recorded = {'a': 'pre_cycle'}
+
+    scanning._move_renamed('a', 'b', recorded)
+    recorded['b'] = 'written_while_it_was_b'
+    scanning._move_renamed('b', 'a', recorded)
+
+    assert recorded == {'a': 'written_while_it_was_b'}
+
+
+def test_a_record_written_after_a_rename_still_wins():
+    """The other direction, which the cycle fix must not break: moving at the rename means a
+    record written afterwards is simply recorded later, and needs no special case."""
+    recorded = {'old': 'stale'}
+
+    scanning._move_renamed('old', 'new', recorded)
+    recorded['new'] = 'written_after_the_rename'
+
+    assert recorded == {'new': 'written_after_the_rename'}
+
+
+def test_the_move_handles_tuple_keys_without_shredding_string_ones():
+    """A string is iterable, so the tuple branch would turn a table-keyed entry into a tuple of
+    characters -- which silently emptied every policy family the first time."""
+    recorded = {('old', 'owner', 'fk'): 'x', 'old': 'y', 'untouched': 'z'}
+
+    scanning._move_renamed('old', 'new', recorded)
+
+    assert recorded == {('new', 'owner', 'fk'): 'x', 'new': 'y', 'untouched': 'z'}
+
+
+def test_a_freed_name_already_retaken_is_not_moved_in_the_walk():
+    """The liveness guard applies to the move as well as the drop: a name another model now
+    owns keeps its own coverage."""
+    command = Command()
+    existing = scan_existing_operations()
+
+    # ``testapp_setlist`` is live, so nothing in the corpus could have moved its coverage away.
+    assert 'testapp_setlist' in existing.soft_deletes
+    assert command._prior_names('testapp_setlist') == []
+
+
+def test_the_walk_skips_a_move_whose_source_is_a_live_table(monkeypatch):
+    """The liveness guard sits on the move as well as the drop: a freed name another model now
+    owns keeps its own coverage, rather than having it carried onto the renamed table."""
+    real = graph.renames_by_migration
+    monkeypatch.setattr(
+        scanning,
+        'renames_by_migration',
+        lambda ldr, app: {'0051_rename_encore_to_callback': [('testapp_setlist', 'testapp_zzz')]}
+        if app == 'testapp'
+        else real(ldr, app),
+    )
+
+    existing = scan_existing_operations()
+
+    assert 'testapp_setlist' in existing.soft_deletes
+    assert 'testapp_zzz' not in existing.soft_deletes
+
+
+def test_a_graph_node_with_no_disk_migration_is_skipped_by_the_rename_walk(loader):
+    """A squash replaces its nodes, so the graph can name a migration no file backs."""
+    missing = next(name for (app, name) in loader.disk_migrations if app == 'testapp')
+    del loader.disk_migrations[('testapp', missing)]
+
+    assert missing not in graph.renames_by_migration(loader, 'testapp')

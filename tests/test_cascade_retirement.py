@@ -220,3 +220,24 @@ def test_adopt_keeps_the_prior_name_drops_a_rename_added(command):
 
     assert 'DROP RULE IF EXISTS "soft_delete_related_testapp_encore"' in operation
     assert 'DROP RULE IF EXISTS "soft_delete_related_testapp_callbacks"' in operation
+
+
+def test_a_scoped_run_names_the_retirement_it_cannot_write(command):
+    """The dangerous half to leave silent. A creation gap merely delays a rule; a retirement
+    gap leaves one live and still archiving rows, with ``--check`` green -- so it is named, the
+    way the autofill family already names its own."""
+    command.existing.soft_delete_related[('testapp_album', 'testapp_genre', None)] = 'abc'
+
+    # The rule lives on ``testapp_genre``, hosted by testapp, and testapp is out of scope.
+    (note,) = command._scoped_cascade_retirement_notes({'crossapp_owner'})
+
+    assert "its app 'testapp' is not in this scoped run" in note
+    assert 'goes on archiving rows' in note
+
+
+def test_a_scoped_retirement_note_is_silent_where_the_owner_is_in_scope(command):
+    """The note is for the gap only: with the owner's app in the run the retirement is written,
+    so there is nothing to report."""
+    command.existing.soft_delete_related[('testapp_album', 'testapp_genre', None)] = 'abc'
+
+    assert command._scoped_cascade_retirement_notes({'testapp'}) == []

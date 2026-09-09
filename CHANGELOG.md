@@ -10,7 +10,7 @@ Full history and diffs: [GitHub releases](https://github.com/Behnam-RK/django-gu
 
 ## [Unreleased]
 
-## [2.9.0] - 2026-09-08
+## [2.9.0] - 2026-09-09
 
 Migration-lifecycle correctness ([ADR 0019](docs/adr/0019-migration-lifecycle-objects.md)): the three things the enforcement layer could not survive were a renamed table, a relaxed foreign key, and a removed column. All three now have an answer, and none of them needed one before because nothing in this kit had ever retired or moved an object.
 

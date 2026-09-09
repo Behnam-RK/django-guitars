@@ -97,4 +97,4 @@ Django release that changes what `_meta.parents` or `Field.related_model` mean f
 
 - [ADR 0015](0015-refuse-soft-deletable-mti-orphans.md) — the other MTI shape the kit refuses.
 - [ADR 0019](0019-migration-lifecycle-objects.md) — the positive-evidence rule these notes follow.
-- [`docs/mti.md`](../mti.md), [`docs/migrations.md`](../migrations.md), issue #45.
+- [`docs/mti.md`](../mti.md), [`docs/migrations.md`](../migrations.md), issues #45 and #49.

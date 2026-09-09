@@ -395,8 +395,12 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
                 seen_mti: set[str] = set()
                 for match in pattern.finditer(content):
                     table = _identifiers._unescape_ident(match.group(1))
+                    # Recorded on the *second* copy only: a third would otherwise print the
+                    # same sentence again, and the reader has one file to open either way.
                     if table in seen_mti:
-                        duplicate_mti.append((app.label, path.stem, kind, table))
+                        entry = (app.label, path.stem, kind, table)
+                        if entry not in duplicate_mti:
+                            duplicate_mti.append(entry)
                     seen_mti.add(table)
 
             # Bespoke rather than a scan_table row, because these two headers partition one

@@ -874,9 +874,9 @@ class OperationsMixin:
         """Recorded MTI operations no local model calls for -- through 2.9.0 a **proxy** over a
         model owning the column earned them, naming its own table as parent, and a model
         flattened out of inheritance leaves the same record. Named, not retired: repairs differ."""
-        # Blind by construction to a proxy over a *real* MTI child: it recorded the very key the
-        # child still requires, so the difference is empty and nothing distinguishes it. That
-        # migration carries the operation twice and fails a fresh ``migrate`` for good.
+        # Blind by construction to a proxy over a *real* MTI child: it recorded the very key
+        # the child still requires, so the difference is empty. That one is read off the file
+        # instead, by ``_duplicated_mti_notes``, which needs no difference to see it.
         hosting = self._table_app_labels()
         # A name a rename freed and a later model retook. The scan leaves the record under the
         # freed name while that name is live, and the object went with the table -- so it is
@@ -931,17 +931,36 @@ class OperationsMixin:
                 )
         return notes
 
+    #: What a repeated header of each kind did to its migration. Only the plain trigger form
+    #: collides, and the scan reads a comment, which cannot say which form wrote it -- so the
+    #: note carries the whole answer rather than picking the half that sounds worst.
+    _DUPLICATE_MTI_EFFECT = {
+        'MTI Updated at Trigger': (
+            'The plain form of that operation cannot apply, PostgreSQL refusing a second '
+            'trigger of one name on a table, and a rule beside it in the same atomic migration '
+            'goes down with it -- but the --adopt form drops before it creates, so a history '
+            'generated that way applied and is carrying the second'
+        ),
+        'MTI Soft Delete Rule': (
+            'That operation applies either way, the rule form being CREATE OR REPLACE and '
+            'PostgreSQL deduping a rule on its name per table, so the copy only ever replaced '
+            'the first -- unless a repeated trigger in the same atomic migration took it down'
+        ),
+    }
+
     def _duplicated_mti_notes(self) -> list[str]:
-        """One migration carrying an MTI header twice. That is the proxy shape the set
-        difference cannot see -- the copy keys on what the concrete child still requires -- and
-        the file cannot apply, so the duplicate itself is the evidence."""
+        """One migration carrying an MTI header twice, which is the only evidence of the proxy
+        shape :meth:`_orphaned_mti_notes` cannot see. Same-app only: a proxy declared in another
+        app writes its copy into that app's own file, and one table takes one operation *there*."""
         return [
             f"{kind} on '{table}' is written twice by migration '{migration}' of app "
-            f"'{app_label}'. One table takes one such operation, so the second is a proxy's "
-            f"copy of its concrete child's, earned before 2.9.1. That migration cannot apply "
-            f'-- PostgreSQL refuses a second trigger of one name on a table, and a rule beside '
-            f'it in the same atomic migration goes down with it. Delete the repeated operation '
-            f'from that file, keeping one; this command cannot repair a file.'
+            f"'{app_label}' -- the table as that migration spells it, which a later rename may "
+            f'have moved on from. One table takes one such operation, so the second is a copy: '
+            f'a proxy model earned it before 2.9.1, or a migration was edited by hand, or two '
+            f'models share that ``db_table``. '
+            f'{self._DUPLICATE_MTI_EFFECT[kind]}. Delete the repeated operation from that file, '
+            f'keeping one, and look in the database rather than assuming; this command cannot '
+            f'repair a file.'
             for app_label, migration, kind, table in self.existing.duplicate_mti_operations
         ]
 

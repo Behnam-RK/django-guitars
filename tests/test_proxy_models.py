@@ -299,11 +299,25 @@ def test_a_migration_carrying_one_mti_header_twice_is_named_with_its_file():
         ('shop', '0004_auto_enforcement', 'MTI Updated at Trigger', 'shop_descendant')
     )
 
-    (note,) = command._duplicated_mti_notes()
+    command.existing.duplicate_mti_operations.append(
+        ('shop', '0004_auto_enforcement', 'MTI Soft Delete Rule', 'shop_descendant')
+    )
 
-    assert "MTI Updated at Trigger on 'shop_descendant' is written twice" in note
-    assert "migration '0004_auto_enforcement' of app 'shop'" in note
-    assert 'Delete the repeated operation' in note
+    trigger, rule = command._duplicated_mti_notes()
+
+    assert "MTI Updated at Trigger on 'shop_descendant' is written twice" in trigger
+    assert "migration '0004_auto_enforcement' of app 'shop'" in trigger
+    assert 'Delete the repeated operation' in trigger
+    # Both readings, as every sibling note gives: a hand-edited file and two models sharing one
+    # ``db_table`` reach this too, and the note tells a consumer to delete something.
+    assert 'a migration was edited by hand' in trigger
+    assert 'two models share that ``db_table``' in trigger
+    # And the applicability hedged per kind. Only the plain trigger form collides: the rule form
+    # is CREATE OR REPLACE and the --adopt trigger form drops first, so a flat "cannot apply"
+    # would send a consumer with a working database to edit applied history.
+    assert 'the --adopt form drops before it creates' in trigger
+    assert 'That operation applies either way' in rule
+    assert 'CREATE OR REPLACE' in rule
 
 
 def test_the_scan_reads_a_repeat_out_of_a_migration_file(monkeypatch):
@@ -338,14 +352,35 @@ def test_the_scan_reads_a_repeat_out_of_a_migration_file(monkeypatch):
     )
 
 
-def test_the_note_reaches_stdout_and_does_not_fail_the_check():
+def test_a_third_copy_does_not_repeat_the_sentence(monkeypatch):
+    """Recorded per file rather than per extra copy. Three copies are one file to open, and
+    the same sentence printed twice reads as two problems."""
+    header = (
+        '        # MTI Updated at Trigger on "testapp_orchestra" table '
+        '(parent "testapp_ensemble")! [SQL:abc123abc123]\n'
+    )
+    walk = _generator.iter_migration_files
+    monkeypatch.setattr(
+        _generator,
+        'iter_migration_files',
+        lambda app: (
+            [(Path('0099_thrice.py'), header * 3)] if app.label == 'testapp' else walk(app)
+        ),
+    )
+
+    assert len(Command().existing.duplicate_mti_operations) == 1
+
+
+@pytest.mark.parametrize(
+    'method',
+    ['_orphaned_mti_notes', '_duplicated_mti_notes'],
+)
+def test_each_note_reaches_stdout_and_does_not_fail_the_check(method):
     """Wiring, and the deliberate half of it. Every other test here calls the method, so the
-    one line joining it to the report could go without a failure -- and the note is advisory:
+    one line joining each to the report could go without a failure -- and both are advisory:
     a run that fails ``--check`` over a file the command cannot repair helps nobody."""
     out, err = StringIO(), StringIO()
-    with mock.patch.object(
-        Command, '_orphaned_mti_notes', return_value=['A recorded MTI key nothing requires.']
-    ):
+    with mock.patch.object(Command, method, return_value=[f'Reported by {method}.']):
         call_command('makeguitarmigrations', '--check', stdout=out, stderr=err)
 
-    assert 'A recorded MTI key nothing requires.' in out.getvalue()
+    assert f'Reported by {method}.' in out.getvalue()

@@ -1,42 +1,44 @@
 # 0020 — a proxy model is not an MTI child, in both directions
 
-- **Status:** accepted
+- **Status:** accepted — implemented in 2.9.1
 - **Date:** 2026-09-09
+- **Amends:** nothing — [ADR 0019](0019-migration-lifecycle-objects.md)'s rule is followed.
 - **Affects:** `guitars.introspection.is_mti_child`, `Command._index_reverse_relations`,
-  `OperationsMixin._build_operations`, the two MTI notes
+  `OperationsMixin._build_operations`, `OperationsMixin._retired_cascade_column`,
+  `guitars.management.enforcement.scanning`, the two MTI notes
 
 ## Context
 
 Django gives a proxy model a populated `_meta.parents` and an empty `local_fields`, the same
 pair a real multi-table-inheritance child shows for a column its ancestor declares. The kit's
-`is_mti_child` reads exactly that pair, so through 2.9.0 it answered **true** for a proxy, and
-`column_owner` then resolved the proxy's own concrete model. Every MTI operation a proxy earned
-therefore named its own table as its parent.
+`is_mti_child` reads exactly that pair, so through 2.9.0 it answered **true** for a proxy. Where
+the concrete model **owns** the column, `column_owner` resolves that model and the operation
+names the proxy's own table as its parent; where it is a real MTI child, the genuine ancestor is
+resolved and the operation is a byte-identical *copy* — the distinction Consequences turns on.
 
-Reported as issue #45, which read the result as a redundant second update. It is worse in one
-direction and inert in another. The rule half is a no-op: both templates name their rule
-`soft_delete`, PostgreSQL dedupes a rule on its name per table, and for a proxy the two render
-byte-identically. The trigger half breaks `migrate` outright — triggers are not deduped by name
-and the plain form has no `OR REPLACE`, so a project declaring a proxy over a `DutarModel` or
-below could not apply its enforcement migration. A third symptom went unrecorded:
-`needs_parent_function` walks its own model list, so a proxy alone forced the parent
-trigger-function migration into a project with no MTI.
+Issue #45 read the result as a redundant second update. It is worse in one direction and inert
+in another. The rule half is a no-op: both templates name their rule `soft_delete`, PostgreSQL
+dedupes a rule on its name per table, and the two render byte-identically. The trigger half
+breaks `migrate` — triggers are not deduped by name and the plain form has no `OR REPLACE`, so
+a project with a proxy over a `DutarModel` or below could not apply its enforcement migration.
+A third symptom went unrecorded: `needs_parent_function` walks its own model list, so a proxy
+alone forced the parent trigger-function migration into a project with no MTI.
 
 Fixing the predicate alone leaves the proxy walking the cascade, owned and tenancy families in
-`_build_operations`, where every key it produces already belongs to its concrete model. Skipping
+`_build_operations`, where every key it produces already belongs to its concrete model; skipping
 proxies there alone leaves `needs_parent_function` wrong. Both were needed.
 
 Skipping proxies in that loop then opened a worse defect than the one being fixed.
 `Field.related_model` for `ForeignKey(SomeProxy)` **is the proxy** — Django normalises that in
 `_relation_tree`, not in the field — so `reverse_relations_mapping` filed the cascade arm under
-a model owning no table, and the proxy was the only model reaching it. Through 2.9.0 the proxy's
-own colliding trigger masked this by aborting the migration; skipping proxies without more turns
-that loud failure silent, the rule absent with `--check` green and a raw `DELETE` on the owner
+a model owning no table, the only model reaching it. Through 2.9.0 the proxy's own colliding
+trigger masked this by aborting the migration; skipping proxies without more turns that loud
+failure silent, the rule absent with `--check` green and a raw `DELETE` archiving the owner and
 leaving every child live.
 
 ## Decision
 
-**Three guards, not one.**
+**Four guards, not one.**
 
 1. `is_mti_child` answers `False` for a proxy, so every caller agrees — including
    `needs_parent_function`, which no loop filter can reach.
@@ -44,6 +46,8 @@ leaving every child live.
    the tenancy discovery walk already do.
 3. `reverse_relations_mapping` is keyed on `field.related_model._meta.concrete_model`, and a
    proxy is skipped while indexing since its `get_fields()` is its concrete model's.
+4. `_retired_cascade_column` resolves a proxy bound to a table to its concrete model, whose
+   `local_fields` a proxy's empty one cannot stand in for.
 
 A pre-2.9.1 migration carrying such an operation is **named, not retired**: a recorded MTI key
 no local model reaches through an ancestor, and whose table still maps, is reported with the
@@ -57,14 +61,12 @@ walking their own model lists; the loop skip covers families that never ask it. 
 leaves a live defect, and both are one line.
 
 **Keyed on the concrete model rather than un-skipping proxies in the loop.** Un-skipping restores
-the original bug. Normalising the key is what Django itself does in `_relation_tree`, what the
-`Collector` does, and what the owned family already does through `column_owner` — it makes the
-generator agree with the three parties it must agree with, rather than adding a fourth rule.
+the original bug. Normalising is what Django does in `_relation_tree`, the `Collector` does, and
+the owned family does through `column_owner` — agreement with all three, not a fourth rule.
 
 **Named rather than retired.** Nothing can be dropped on positive evidence: whether the object
 is live turns on the family and on `--adopt`, and the record cannot tell a proxy's artefact from
-a flattening. Retiring on a guess destroys a live trigger; a note costs a line. This follows
-2.9.0's retirement rule rather than inventing a second.
+a flattening. Retiring on a guess destroys a live trigger; a note costs a line.
 
 **No refusal, unlike `guitars.E003`.** A proxy is ordinary Django and the shape is handled
 correctly now. Both notes stay advisory rather than failing `--check`, the broken file failing
@@ -73,25 +75,23 @@ correctly now. Both notes stay advisory rather than failing `--check`, the broke
 ## Consequences
 
 **Accepted costs.** A proxy over a *real* MTI child recorded the very key its concrete child
-still requires, so the **set difference** is blind to it. The evidence is elsewhere: that
-migration carries the header twice, one table taking one such operation, so the second note
-reads the repeat off the file and names the file — which the record-driven one, working from a
-record with no provenance, cannot. Neither can edit a migration.
+still requires, so the **set difference** is blind to it. The evidence is elsewhere, and only
+where the proxy is declared in its concrete model's **own app**: that file carries the header
+twice, so the second note reads the repeat off it and names the migration, which the
+record-driven one cannot. A proxy in another app writes its copy into that app's file, one
+header there too, and **neither** note sees it. Neither can edit a migration either.
 
 A **legacy cross-app hazard** this branch surfaces without causing. Through 2.9.0 an FK-to-proxy
 cascade rule was written into the *proxy's* app while retirement is attributed to the app owning
 the table the rule fires on. Those differ, and the retirement carries no edge to the creating
-migration, so a fresh `migrate` can order the `DROP RULE` first and abort with
-`rule … does not exist`. It reproduces identically on 2.9.0; only what puts the two in different
-apps is proxy-specific. New rules land in the concrete model's app either way, so nothing
-generated from 2.9.1 on reaches it.
+migration, so a fresh `migrate` can order the `DROP RULE` first and abort with `rule … does not
+exist`. It reproduces identically on 2.9.0. New rules land in the concrete model's app either
+way, so nothing generated from 2.9.1 on reaches it.
 
-The record-driven note also stays silent where the orphaned object is genuinely live but its
-table maps to no local model — 2.9.0's positive-evidence rule, deliberately kept.
+It also stays silent where the orphaned object is live but its table maps to no local model.
 
-**Reversibility.** Cheap. The three guards are independent one-liners and the note is advisory.
-Undoing any of them reintroduces a defect this ADR names, so the reason to revisit would be a
-Django release that changes what `_meta.parents` or `Field.related_model` mean for a proxy.
+**Reversibility.** Cheap — four independent one-liners and two advisory notes. Undoing any
+reintroduces a defect named here; only Django changing what those two attributes mean would.
 
 ## Related
 

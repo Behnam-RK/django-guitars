@@ -560,7 +560,11 @@ class Command(OperationsMixin, BaseCommand):
 
         # Autofill coverage this command recorded but can no longer retire or attribute --
         # an orphaned function is inert, an unmapped table has no app to migrate into.
-        for note in self._unmapped_autofill_notes() + self._orphaned_autofill_function_notes():
+        for note in (
+            self._unmapped_autofill_notes()
+            + self._orphaned_autofill_function_notes()
+            + self._orphaned_mti_notes()
+        ):
             self.stdout.write(self.style.WARNING(note))
 
         # After every note above, for the reason `function_check_messages` is collected rather

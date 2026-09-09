@@ -406,6 +406,11 @@ class OperationsMixin:
         deferred: list[str] = []
 
         for model in app.get_models():
+            # A proxy owns no table, so every operation it earns is one its concrete model
+            # already has -- keyed on the same ``db_table``, so it collides rather than adds.
+            # Filtered as ``_table_app_labels`` filters it, and as the tenancy walk does.
+            if model._meta.proxy:
+                continue
             table = model._meta.db_table
             # The *column*, not the field name -- they agree for a plain `id` pk, but a
             # `OneToOneField(primary_key=True)` pk (name `owner`, column `owner_id`) would
@@ -860,6 +865,43 @@ class OperationsMixin:
             )
             operations.append(source)
         return operations
+
+    def _orphaned_mti_notes(self) -> list[str]:
+        """Recorded MTI operations no local model calls for -- through 2.9.0 a **proxy** earned
+        them, naming its own table as parent. Such a migration has never applied anywhere, so
+        nothing is live to retire: the file is the problem, and a file cannot be repaired."""
+        hosting = self._table_app_labels()
+        required_triggers = set()
+        required_soft_deletes = set()
+        for app in django_apps.get_app_configs():
+            if not _generator.is_local(app):
+                continue
+            for model in app.get_models():
+                if is_mti_child(model, '_updated_at'):
+                    required_triggers.add(model._meta.db_table)
+                if is_mti_child(model, '_deleted_at'):
+                    required_soft_deletes.add(model._meta.db_table)
+
+        notes: list[str] = []
+        for kind, recorded, required in (
+            ('MTI Updated at Trigger', self.existing.mti_triggers, required_triggers),
+            ('MTI Soft Delete Rule', self.existing.mti_soft_deletes, required_soft_deletes),
+        ):
+            for table in sorted(set(recorded) - required):
+                # Positive evidence, 2.9.0's rule: a table mapping to nothing is a deleted
+                # model on one reading and a scoped run on another, and stays silent. A hosted
+                # table whose model does not call for the operation is the proxy case.
+                if table not in hosting:
+                    continue
+                notes.append(
+                    f"{kind} on '{table}' is recorded but no local model reaches that column "
+                    f'through an ancestor -- a proxy model earned it before 2.9.1, naming its '
+                    f'own table as its parent. That migration cannot apply (PostgreSQL '
+                    f'refuses a second trigger of one name on a table), so nothing is live to '
+                    f'retire and no database can be carrying it. Delete the operation from '
+                    f'the migration that writes it; this command cannot repair a file.'
+                )
+        return notes
 
     def _unmapped_cascade_notes(self) -> list[str]:
         """Recorded cascade rules this run will not retire because a table they name maps to no

@@ -58,8 +58,9 @@ class CascadeRetirementSite(NamedTuple):
     app_label: str
     migration: str
     key: tuple[str, str, str | None]
-    #: ``None`` where the create had not been scanned yet: apps walk in registry order, which
-    #: is not chronological, so the reader falls back to the finished provenance map.
+    #: The create this drop dropped, filled by :func:`_settle_retirement_sites` once the whole
+    #: walk is in. ``None`` where no create is recorded, or where several are and the graph
+    #: orders none of them before this drop.
     created: tuple[str, str] | None
 
 
@@ -73,10 +74,10 @@ class ExistingOperations(NamedTuple):
     #: Keyed on (related_table, table, foreign_key) -- the third element is ``None`` for the
     #: one FK per pair keeping the plain historical header, or the column for any other.
     soft_delete_related: dict[tuple[str, str, str | None], str | None]
-    #: That same key -> the ``(app_label, migration)`` whose header created the rule. The one
-    #: family whose drop is hosted by a different app than its create, and a rule is a
-    #: ``RunSQL``, so nothing in migration state resolves it. See ADR 0021.
-    soft_delete_related_dependencies: dict[tuple[str, str, str | None], tuple[str, str]]
+    #: That same key -> every ``(app_label, migration)`` whose header created the rule, oldest
+    #: first. A list because a retired key can be created again, and which create a given drop
+    #: dropped is what orders it -- a rule being a ``RunSQL``, nothing resolves it. See ADR 0021.
+    soft_delete_related_dependencies: dict[tuple[str, str, str | None], list[tuple[str, str]]]
     #: Every cascade retirement already written, with the create it drops. The ``--check``
     #: half of ADR 0021: the emitter cannot reach a file it will never rewrite.
     cascade_retirement_sites: list[CascadeRetirementSite]
@@ -152,44 +153,79 @@ def _cascade_key(match: re.Match) -> tuple[str, str, str | None]:
     )
 
 
-def _resolve_retirement_sites(
+def _current_key(
+    key: tuple[str, str, str | None], moved: dict[str, str]
+) -> tuple[str, str, str | None]:
+    """*key* under the spelling a rename has moved its coverage onto. Both tables, because
+    ``_move_renamed`` rewrites every position of the tuple -- translating only the related one
+    left an owner-side rename missing the map and the site silently unattributed."""
+    related, owner, via = key
+    return (moved.get(related, related), moved.get(owner, owner), via)
+
+
+def _settle_retirement_sites(
     sites: list[CascadeRetirementSite],
-    provenance: dict[tuple[str, str, str | None], tuple[str, str]],
-    renames: dict[str, list[str]],
-) -> list[CascadeRetirementSite]:
-    """Fill in the create each site dropped, once, so every reader asks the same question. The
-    snapshot first; then the finished map, under the key a rename may have moved the coverage
-    onto -- the header spells the old name and the map is re-keyed onto the new one."""
-    moved = {old: new for new, chain in renames.items() for old in chain}
-    resolved = []
-    for site in sites:
-        created = site.created
-        if created is None:
-            related, owner, via = site.key
-            for key in ((related, owner, via), (moved.get(related, related), owner, via)):
-                created = created or provenance.get(key)
-        resolved.append(site._replace(created=created))
-    return resolved
-
-
-def _settle_retired_key(
-    site: CascadeRetirementSite,
     recorded: dict[tuple[str, str, str | None], str | None],
+    provenance: dict[tuple[str, str, str | None], list[tuple[str, str]]],
+    renames: dict[str, list[str]],
+    retirement_apps: set[str],
     ensure_loader: Callable[[], MigrationLoader],
-) -> None:
-    """Whether *site*'s retirement or the create of its key wins, asked of the migration graph
-    rather than of the scan's walk order. The retirement wins only where it is provably later
-    -- the create being an ancestor of it. Anything else leaves the walk's verdict standing."""
-    if site.key not in recorded or site.created is None:
-        return
+) -> list[CascadeRetirementSite]:
+    """Match each retirement to the create it dropped and settle whether it or that create won.
+    After the walk, because the walk is registry order while both questions are graph order: an
+    app scanned first pops a key its create then re-records. See ADR 0021."""
+    moved = {old: new for new, chain in renames.items() for old in chain}
     graph = ensure_loader().graph
-    node = (site.app_label, site.migration)
-    # Unordered is not "the create is older". Nothing orders a re-adopted create against the
-    # retirement it revives, and reading that as retired would pop a live rule's coverage.
-    if node not in graph.node_map or site.created not in graph.node_map:
-        return
-    if site.created in set(graph.forwards_plan(node)):
-        recorded.pop(site.key, None)
+    settled = []
+    for site in sites:
+        # Translated first. The scan leaves coverage under a freed name another model retook,
+        # so the untranslated spelling can hit that model's create instead of this key's.
+        key = _current_key(site.key, moved)
+        node = (site.app_label, site.migration)
+        creates = provenance.get(key, [])
+        created = _create_this_drop_dropped(node, creates, graph)
+        settled.append(site._replace(key=key, created=created))
+        if created is None:
+            continue
+        # The app that *creates* the key, not the one carrying the header: a re-adoption is
+        # re-emitted from there, and its operation set recurs, which is what the file-level
+        # digest guard assumes never happens.
+        retirement_apps.add(created[0])
+        # Per key, newest against newest, not per site: an older drop is ordered before the
+        # create that revived the rule, and settling on that one reads a live rule as retired
+        # -- so the second retirement is never emitted and the rule stays live for good.
+        latest = max((s for s in sites if _current_key(s.key, moved) == key), key=_position)
+        if key in recorded and _orders(creates[-1], (latest.app_label, latest.migration), graph):
+            recorded.pop(key, None)
+    return settled
+
+
+def _position(site: CascadeRetirementSite) -> tuple[str, str]:
+    """Sort key for "the last retirement of this key". Filename order within an app, which is
+    application order; across apps the graph would be the honest answer, but two apps retiring
+    one key means two drops of one rule, which is unsound before this question is reached."""
+    return (site.app_label, site.migration)
+
+
+def _orders(earlier: tuple[str, str], later: tuple[str, str], graph) -> bool:
+    """Whether the graph puts *earlier* before *later*. Unordered is not "earlier": nothing
+    orders a re-adopted create against the retirement it revives, and reading that as ordered
+    would pop a live rule's coverage."""
+    if earlier not in graph.node_map or later not in graph.node_map:
+        return False
+    return earlier in set(graph.forwards_plan(later))
+
+
+def _create_this_drop_dropped(
+    node: tuple[str, str], creates: list[tuple[str, str]], graph
+) -> tuple[str, str] | None:
+    """The newest create *node*'s drop can actually have dropped -- the last one the graph puts
+    before it. Not simply the newest: after a re-adoption that one is the create the drop
+    *precedes*, and naming it would order the drop after the rule it revives, for good."""
+    ordered = [create for create in creates if _orders(create, node, graph)]
+    # Nothing provably before it: fall back to a lone create, which is every history without a
+    # re-adoption, so an unordered cross-app pair -- the shape this release is for -- still reads.
+    return ordered[-1] if ordered else (creates[0] if len(creates) == 1 else None)
 
 
 def _subtract_retired(
@@ -254,7 +290,7 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
     existing_triggers: dict[str, str | None] = {}
     existing_soft_deletes: dict[str, str | None] = {}
     existing_soft_delete_related: dict[tuple[str, str, str | None], str | None] = {}
-    cascade_deps: dict[tuple[str, str, str | None], tuple[str, str]] = {}
+    cascade_deps: dict[tuple[str, str, str | None], list[tuple[str, str]]] = {}
     retirement_sites: list[CascadeRetirementSite] = []
     existing_soft_delete_owned: dict[tuple[str, str, str], str | None] = {}
     existing_soft_delete_owned_sweep: dict[tuple[str, str, str], str | None] = {}
@@ -452,11 +488,15 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
                 for match in pattern.finditer(content):
                     target[key_fn(match)] = _recorded_sql_identity(content, match)
 
-            # Bespoke rather than a fourth ``scan_table`` column: one family asks this, the only
-            # one whose drop is hosted by a different app than its create. Last write wins with
-            # the digest above, so a re-adoption's create supersedes the one it replaced.
+            # Bespoke, one family asking this: the only one whose drop is hosted by a different
+            # app than its create. A list, not last-write-wins -- a key created, retired and
+            # created again has two, and which of them a drop dropped is what orders it.
             for match in _RE_SOFT_DELETE_RELATED.finditer(content):
-                cascade_deps[_cascade_key(match)] = (app.label, path.stem)
+                creates = cascade_deps.setdefault(_cascade_key(match), [])
+                # One entry per migration: the plain and ``_via`` forms of one pair share a
+                # key when the column is dropped, so a file can name it more than once.
+                if (app.label, path.stem) not in creates:
+                    creates.append((app.label, path.stem))
 
             # Recorded per file, not per family: a repeat is only visible while the file is
             # open, and the key it writes is the one a real MTI child writes too.
@@ -487,10 +527,10 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
             cascade_retirements = list(_RE_SOFT_DELETE_RELATED_RETIRED.finditer(content))
             for match in cascade_retirements:
                 key = _cascade_key(match)
-                # Snapshotted here rather than resolved later: a re-adoption overwrites the
-                # provenance map, and the create *this* file dropped is the one it held now.
-                site = CascadeRetirementSite(app.label, path.stem, key, cascade_deps.get(key))
-                retirement_sites.append(site)
+                # ``created`` is filled after the walk, not here: registry order can put the
+                # create in an app scanned later, and which create this drop dropped is a
+                # question about the graph.
+                retirement_sites.append(CascadeRetirementSite(app.label, path.stem, key, None))
                 existing_soft_delete_related.pop(key, None)
             if cascade_retirements:
                 retirement_apps.add(app.label)
@@ -531,9 +571,14 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
     # Settled after the walk, because the walk is registry order and this question is graph
     # order: a retirement in an app scanned first pops a key its create then re-records, and
     # the retirement re-emits on every run with ``--check`` never going green.
-    retirement_sites = _resolve_retirement_sites(retirement_sites, cascade_deps, _pending_renames)
-    for site in retirement_sites:
-        _settle_retired_key(site, existing_soft_delete_related, _ensure_loader)
+    retirement_sites = _settle_retirement_sites(
+        retirement_sites,
+        existing_soft_delete_related,
+        cascade_deps,
+        _pending_renames,
+        retirement_apps,
+        _ensure_loader,
+    )
 
     # One map across every local app: a cascade rule's key names two tables, and they can
     # belong to different apps, so translating per app would leave half a key behind.

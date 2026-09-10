@@ -26,6 +26,11 @@ _CHILD = 'crossapp_retire_child'
 #: shared between apps.
 _CREATE = (_CHILD, '0002_auto_enforcement')
 _RETIREMENT = (_OWNER, '0003_auto_enforcement')
+#: The key relaxed, then restored, then relaxed again. One edge orders a drop after its create;
+#: the cycle needs the mirror too, or a re-adopted create reaches a fresh database first and
+#: leaves the rule dropped where an incremental one has it.
+_READOPTION = (_CHILD, '0005_auto_enforcement')
+_SECOND_RETIREMENT = (_OWNER, '0004_auto_enforcement')
 _SCOPED = override_settings(LOCAL_APPS=[f'tests.{_OWNER}', f'tests.{_CHILD}'])
 
 
@@ -60,12 +65,22 @@ def test_the_written_retirement_declares_the_edge_to_its_create():
     assert _CREATE in _declared_dependencies(_migration(_RETIREMENT).read_text())
 
 
-def test_a_fresh_migrate_plans_the_create_before_the_drop():
-    """What the edge buys, asked of the graph rather than of a database: the property is the
-    ordering, and a plan is where a fresh ``migrate`` decides it."""
-    plan = MigrationLoader(None, ignore_no_migrations=True).graph.forwards_plan(_RETIREMENT)
+def test_the_readopted_create_declares_the_retirement_it_revives():
+    """The mirror edge. A create ordered against nothing can reach a fresh database before the
+    drop it revives, which then drops the rule the models call for -- so the fresh database
+    ends without it while an incremental one has it."""
+    assert _RETIREMENT in _declared_dependencies(_migration(_READOPTION).read_text())
 
-    assert plan.index(_CREATE) < plan.index(_RETIREMENT)
+
+def test_a_fresh_migrate_plans_the_whole_cycle_in_order():
+    """What the two edges buy, asked of the graph rather than a database. Create, drop,
+    re-create, drop: every one of the four ordered against the one before it."""
+    plan = MigrationLoader(None, ignore_no_migrations=True).graph.forwards_plan(_SECOND_RETIREMENT)
+
+    assert [plan.index(node) for node in (_CREATE, _RETIREMENT, _READOPTION)] == sorted(
+        plan.index(node) for node in (_CREATE, _RETIREMENT, _READOPTION)
+    )
+    assert plan.index(_READOPTION) < plan.index(_SECOND_RETIREMENT)
 
 
 @pytest.mark.django_db(transaction=True)
@@ -92,5 +107,7 @@ def test_the_rule_is_gone_from_a_database_that_applied_the_pair():
         )
         rules = {row[0] for row in cursor.fetchall()}
 
+    # The cycle ends retired, so the cascade rule is gone -- which is also what an
+    # incrementally-migrated database holds, the property ADR 0006 is about.
     assert 'soft_delete_related_crossapp_retire_child_dependant' not in rules
     assert 'soft_delete' in rules

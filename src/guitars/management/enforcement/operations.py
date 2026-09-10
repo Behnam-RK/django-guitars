@@ -1127,14 +1127,34 @@ class OperationsMixin:
         """Order a cascade retirement against the migration that created the rule it drops.
         Read off the scan rather than resolved: a rule is a ``RunSQL``, so migration state has
         nothing to resolve, and the drop is hosted by the owner table's app either way."""
-        created = self.existing.soft_delete_related_dependencies.get(key)
-        # Own-app creates are ordered by the app's own linear history already, and an edge into
-        # the file being written is what ``write_migration_file`` drops as a self-reference.
-        if created is None or created[0] == app_label:
+        creates = self.existing.soft_delete_related_dependencies.get(key, [])
+        # The newest: the drop being written now comes after every one of them, so the last is
+        # the one whose rule is live. Own-app creates are ordered by that app's own history.
+        if not creates or creates[-1][0] == app_label:
             return
-        edges = self._retirement_edges.setdefault(app_label, [])
-        if created not in edges:
-            edges.append(created)
+        self._record_edge(self._retirement_edges, app_label, creates[-1])
+
+    def _record_readoption_edge(self, app_label: str, key: tuple[str, str, str | None]) -> None:
+        """Order a cascade create against the retirement it revives. Without it a fresh
+        ``migrate`` can run the ``CREATE`` before that ``DROP`` and end with no rule, where an
+        incremental database has one -- the mirror of the drop's own edge. See ADR 0021."""
+        sites = [
+            (site.app_label, site.migration)
+            for site in self.existing.cascade_retirement_sites
+            if site.key == key
+        ]
+        if not sites or sites[-1][0] == app_label:
+            return
+        self._record_edge(self._retirement_edges, app_label, sites[-1])
+
+    @staticmethod
+    def _record_edge(
+        edges_by_app: dict[str, list[tuple[str, str]]], app_label: str, edge: tuple[str, str]
+    ) -> None:
+        """File *edge* under the app whose migration will carry it, once."""
+        edges = edges_by_app.setdefault(app_label, [])
+        if edge not in edges:
+            edges.append(edge)
 
     def _refuse_owned(self, key: tuple[str, str, str] | None, message: str) -> None:
         """Record an owned-rule refusal, escalating where anything for *key* is already
@@ -1416,6 +1436,9 @@ class OperationsMixin:
             # a model promoted to ``SetarModel`` gains it in a later migration, and an edge to
             # the creation alone would let the rule be created before the column exists.
             self._record_object_ref(model, related_model, '_deleted_at')
+            # And, where this key was retired before, the drop that retired it: a re-adopted
+            # create reaching a fresh database first leaves the rule dropped and never rebuilt.
+            self._record_readoption_edge(model._meta.app_label, key)
             # The relation, not `key`: `key` drops the column on the plain form, and two
             # relations can then share one key -- see `_claim_rule_name`'s docstring.
             self._claim_rule_name(
@@ -2243,12 +2266,11 @@ class OperationsMixin:
             return []
         loader = self._migration_loader()
         notes: list[str] = []
-        # A key retired more than once is left alone entirely. Its older sites name a create
-        # the scan can no longer attribute, and the newest one may be the *re-adoption*:
-        # pasting that tuple would order the old drop after it, taking a live rule out for good.
-        retired_twice = {site.key for site in sites if sum(s.key == site.key for s in sites) > 1}
         for site in sites:
-            created = None if site.key in retired_twice else site.created
+            # Resolved by the scan, per site: the newest create the graph puts *before* this
+            # drop. Naming the newest create outright would, after a re-adoption, print a tuple
+            # ordering this drop after the rule it revives, destroying it on every database.
+            created = site.created
             node = (site.app_label, site.migration)
             if (
                 created is None

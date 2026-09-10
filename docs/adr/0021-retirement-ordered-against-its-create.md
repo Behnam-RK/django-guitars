@@ -30,25 +30,24 @@ the *table*, not the *rule*. Confidently wrong is worse than absent.
 **The scan records which migration created each cascade rule, and the retirement is ordered
 against that node.**
 
-1. `ExistingOperations.soft_delete_related_dependencies` maps the cascade key to the
-   `(app_label, migration)` whose header created it — never popped, and carried through a
-   rename with the coverage it mirrors.
+1. `ExistingOperations.soft_delete_related_dependencies` maps the cascade key to **every**
+   migration whose header created it, oldest first — never popped, and carried through a rename
+   with the coverage it mirrors. A list, a retired key being creatable again.
 2. `_retired_cascade_operations` records the edge as it emits, structurally (ADR 0013 point 1).
    Nothing re-parses the header the emitter just wrote.
 3. **One edge suffices**: the creating migration already carried edges for everything its
    `CREATE RULE` named, so ordering after it orders after the table the `DROP` names.
 4. **Emitted under `--adopt` too.** Its `DROP RULE IF EXISTS` turns the abort into *silence* —
    the drop no-ops and the later create leaves the rule live — so adopt needs the edge more.
-5. **A node the graph does not hold warns and emits no edge** (ADR 0013 point 5) -- it was read
-   off a header, and a squash can have replaced the file. On the write path only: `--check`
-   reaches the note below instead.
+5. **A node the graph does not hold warns and emits no edge** (ADR 0013 point 5), on the write
+   path only -- `--check` reaches the note below instead.
 6. **Which of a retirement and a create wins is settled by graph order**, after the walk, since
-   registry order is not chronological. The retirement wins only where the create is an ancestor
-   of it: unordered is not "the create is older", and reading it so pops a live rule.
-7. **`--check` names a retirement already written that nothing orders**, by reachability, joining
-   `_missing_edges` so the existing refusal raises it. `cascade_retirement_sites` records each with
-   the create it dropped, snapshotted at the pop and falling back to the finished map — apps walk
-   in registry order, so the create may be scanned second.
+   registry order is not chronological. Per *key*, newest against newest — settling per site
+   reads a re-adopted rule as retired. Unordered is not "the create is older".
+7. **Each drop is matched to the create it dropped**: the newest the graph puts *before* it, not
+   the newest of the key, which after a re-adoption is the create that drop *precedes*.
+8. **`--check` names a retirement already written that nothing orders**, by reachability, joining
+   `_missing_edges` so the existing refusal raises it.
 
 ## Why
 
@@ -59,8 +58,10 @@ rewritten, so the note is the only channel: ADR 0013's "retrofitting is by hand"
 create can ask this: nothing retires the trigger, soft-delete, owned or self-cascade families, and
 the autofill retirement's edge targets the *function* migration.
 
-**Re-creation needs no special case.** A key retired twice is popped both times, so the second
-retirement is never re-emitted — its edge having been decided when the create was its own app's.
+**Both directions, because the cycle needs both.** A drop ordered after its create is half an
+ordering: a re-adopted create ordered against nothing reaches a fresh database first and leaves
+the rule dropped where an incremental one has it. So a create carries an edge to the retirement
+it revives, and the pair alternates for as many cycles as a project runs.
 
 ## Consequences
 
@@ -74,9 +75,8 @@ retirement is never re-emitted — its edge having been decided when the create 
   name on one table. Which of a create and a retirement wins no longer rides on it (decision 6).
 - **Two apps creating one rule stays unsound**: one edge cannot order three nodes. The
   `--check` half reports it, which is the best available outcome.
-- **A key retired more than once is not reported at all**: its older sites name a create the
-  scan cannot attribute and the newest may be a re-adoption, so the tuple would order the old
-  drop after the create reviving the rule.
+- **Two apps retiring one key is unsound** and undetected: that is two drops of one rule, and
+  "the last retirement" is then a question the graph cannot answer either.
 - **An edge target can vanish**, removing the creating app later turning it into
   `NodeNotFoundError`. Shared with every ADR 0013 edge, but this one points at an *enforcement*
   migration, likelier to be squashed.

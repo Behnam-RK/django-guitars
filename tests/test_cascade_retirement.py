@@ -337,10 +337,7 @@ def test_a_rename_carries_provenance_with_the_coverage_it_mirrors(monkeypatch):
 
     moved = ('testapp_renamed', 'testapp_genre', None)
     assert moved in existing.soft_delete_related
-    assert existing.soft_delete_related_dependencies[moved] == (
-        'testapp',
-        '0000_auto_enforcement',
-    )
+    assert existing.soft_delete_related_dependencies[moved] == [('testapp', '0000_auto_enforcement')]
     assert ('testapp_gone', 'testapp_genre', None) not in existing.soft_delete_related_dependencies
 
 
@@ -349,7 +346,7 @@ def test_a_create_records_the_migration_that_wrote_it(monkeypatch):
     a ``RunSQL``, so no walk of migration *state* can answer which file made it."""
     existing = _scan_with(monkeypatch, testapp=(_created(),))
 
-    assert existing.soft_delete_related_dependencies[_KEY] == ('testapp', '0000_auto_enforcement')
+    assert existing.soft_delete_related_dependencies[_KEY] == [('testapp', '0000_auto_enforcement')]
 
 
 def test_a_later_create_supersedes_the_earlier_one(monkeypatch):
@@ -357,7 +354,10 @@ def test_a_later_create_supersedes_the_earlier_one(monkeypatch):
     one a retirement after it is ordered against, not the one it replaced."""
     existing = _scan_with(monkeypatch, testapp=(_created(), _created()))
 
-    assert existing.soft_delete_related_dependencies[_KEY] == ('testapp', '0001_auto_enforcement')
+    assert existing.soft_delete_related_dependencies[_KEY] == [
+        ('testapp', '0000_auto_enforcement'),
+        ('testapp', '0001_auto_enforcement'),
+    ]
 
 
 def test_a_retirement_leaves_the_provenance_it_popped(monkeypatch):
@@ -366,7 +366,7 @@ def test_a_retirement_leaves_the_provenance_it_popped(monkeypatch):
     existing = _scan_with(monkeypatch, testapp=(_created(), _retired()))
 
     assert _KEY not in existing.soft_delete_related
-    assert existing.soft_delete_related_dependencies[_KEY] == ('testapp', '0000_auto_enforcement')
+    assert existing.soft_delete_related_dependencies[_KEY] == [('testapp', '0000_auto_enforcement')]
     (site,) = existing.cascade_retirement_sites
     assert site == ('testapp', '0001_auto_enforcement', _KEY, ('testapp', '0000_auto_enforcement'))
 
@@ -380,7 +380,7 @@ def test_a_create_scanned_after_the_retirement_is_still_attributed_to_it(monkeyp
 
     (site,) = existing.cascade_retirement_sites
     assert site.created == ('crossapp_owner', '0000_auto_enforcement')
-    assert existing.soft_delete_related_dependencies[_KEY] == site.created
+    assert existing.soft_delete_related_dependencies[_KEY] == [site.created]
 
 
 # --- The edge the retirement carries -----------------------------------------------------------
@@ -389,7 +389,7 @@ def test_a_create_scanned_after_the_retirement_is_still_attributed_to_it(monkeyp
 def _seed(built: Command, created: tuple[str, str] | None) -> tuple[str, str, str | None]:
     built.existing.soft_delete_related[_KEY] = 'abc'
     if created is not None:
-        built.existing.soft_delete_related_dependencies[_KEY] = created
+        built.existing.soft_delete_related_dependencies[_KEY] = [created]
     return _KEY
 
 
@@ -510,21 +510,30 @@ def test_two_rules_from_one_migration_share_a_single_edge(command):
     second = ('testapp_merch', 'testapp_genre', None)
     _seed(command, created)
     command.existing.soft_delete_related[second] = 'abc'
-    command.existing.soft_delete_related_dependencies[second] = created
+    command.existing.soft_delete_related_dependencies[second] = [created]
 
     assert len(_retirements(command)) == 2
 
     assert command._retired_cascade_dependencies_for(apps.get_app_config('testapp')) == [created]
 
 
-def test_a_key_retired_more_than_once_is_left_alone(command):
-    """Its older sites name a create the scan can no longer attribute, and the newest may be a
-    re-adoption -- so the tuple would order the old drop after the create reviving the rule and
-    take it out for good. Silence beats advice that destroys a live cascade."""
-    site = _site('crossapp_owner', '0001_initial', ('crossapp_third', '0001_initial'))
-    command.existing.cascade_retirement_sites.extend([site, site])
+def test_a_key_retired_twice_names_the_create_each_drop_dropped(command):
+    """One note per retirement, each naming its *own* create rather than the newest of the
+    key. The scan matched them; this asserts the note carries that through instead of
+    collapsing to one answer, which after a re-adoption is the wrong one."""
+    command.existing.cascade_retirement_sites.extend(
+        [
+            _site('crossapp_owner', '0001_initial', ('crossapp_third', '0001_initial')),
+            _site(
+                'crossapp_owner', '0002_auto_enforcement', ('crossapp_third', '0002_auto_enforcement')
+            ),
+        ]
+    )
 
-    assert command._missing_retirement_edge_notes(set()) == []
+    first, second = command._missing_retirement_edge_notes(set())
+
+    assert "('crossapp_third', '0001_initial')," in first
+    assert "('crossapp_third', '0002_auto_enforcement')," in second
 
 
 def test_a_note_is_confined_to_the_apps_a_scoped_run_asked_about(command):
@@ -560,6 +569,21 @@ def test_a_key_created_again_after_its_retirement_stays_recorded(monkeypatch):
     assert _KEY in existing.soft_delete_related
 
 
+def _settled(retirement, creates):
+    """Run the post-pass over one site with *creates* recorded for its key, and report both
+    halves of its verdict: whether the key survives, and which create the site was matched to."""
+    recorded = {_KEY: 'abc'}
+    (site,) = scanning._settle_retirement_sites(
+        [CascadeRetirementSite('testapp', retirement, _KEY, None)],
+        recorded,
+        {_KEY: creates},
+        {},
+        set(),
+        lambda: MigrationLoader(None, ignore_no_migrations=True),
+    )
+    return _KEY in recorded, site.created
+
+
 @pytest.mark.parametrize(
     ('retirement', 'create', 'survives'),
     [
@@ -568,33 +592,85 @@ def test_a_key_created_again_after_its_retirement_stays_recorded(monkeypatch):
     ],
 )
 def test_the_retirement_wins_only_where_the_create_is_provably_older(retirement, create, survives):
-    """Asked of the graph directly, over two real nodes. The corpus's own 0048 creates the rule
-    0050 retires, so reversing the pair is the re-adoption shape without inventing a history --
-    and unordered is *not* "the create is older", which is what a cross-app re-adoption is."""
-    recorded = {_KEY: 'abc'}
-
-    scanning._settle_retired_key(
-        CascadeRetirementSite('testapp', retirement, _KEY, ('testapp', create)),
-        recorded,
-        lambda: MigrationLoader(None, ignore_no_migrations=True),
-    )
-
-    assert (_KEY in recorded) is survives
+    """Asked of the graph over two real nodes. The corpus's own 0048 creates the rule 0050
+    retires, so reversing the pair is the re-adoption shape without inventing a history."""
+    assert _settled(retirement, [('testapp', create)])[0] is survives
 
 
 def test_an_unordered_create_is_not_read_as_older_than_the_retirement():
-    """The mirror of the bug the post-pass fixes, and the reason it asks whether the *create*
-    is an ancestor rather than whether the retirement is not. A re-adopted create in another
-    app is ordered against nothing, and reading that as retired pops a live rule's coverage."""
+    """Unordered is not "the create is older". A re-adopted create in another app is ordered
+    against nothing, and reading it as ordered pops a live rule's coverage."""
     recorded = {_KEY: 'abc'}
 
-    scanning._settle_retired_key(
+    scanning._settle_retirement_sites(
         # Two real nodes in different apps with no path between them either way.
-        CascadeRetirementSite(
-            'crossapp_owner', '0001_initial', _KEY, ('crossapp_third', '0001_initial')
-        ),
+        [CascadeRetirementSite('crossapp_owner', '0001_initial', _KEY, None)],
         recorded,
+        {_KEY: [('crossapp_third', '0001_initial'), ('crossapp_owner', '0002_auto_enforcement')]},
+        {},
+        set(),
         lambda: MigrationLoader(None, ignore_no_migrations=True),
     )
 
     assert _KEY in recorded
+
+
+def test_a_site_is_matched_to_the_newest_create_before_it_not_the_newest_of_all():
+    """The destructive one. After retire/re-adopt the newest create is the *re-adoption*, and
+    naming it would print a tuple ordering this drop after the rule it revives -- dropping it
+    on every database, fresh and incremental, from advice the tool printed."""
+    creates = [('testapp', '0048_auto_enforcement'), ('testapp', '0055_auto_enforcement')]
+
+    assert _settled('0050_auto_enforcement', creates)[1] == ('testapp', '0048_auto_enforcement')
+
+
+def test_a_readopted_create_declares_the_retirement_it_revives(command):
+    """The mirror of the drop's own edge. Without it a fresh ``migrate`` can run the ``CREATE``
+    before the ``DROP`` that retired the key, ending with no rule where an incremental database
+    has one -- the same ADR 0006 divergence, reached from the other side."""
+    command.existing.cascade_retirement_sites.append(
+        _site('crossapp_owner', '0001_initial', ('crossapp_third', '0001_initial'))
+    )
+
+    command._record_readoption_edge('testapp', _KEY)
+
+    assert command._retired_cascade_dependencies_for(apps.get_app_config('testapp')) == [
+        ('crossapp_owner', '0001_initial')
+    ]
+
+
+def test_a_readopted_create_in_the_retiring_app_needs_no_edge(command):
+    """Its own linear history orders it after the drop already, and an edge into the file being
+    written is what the writer drops as a self-reference."""
+    command.existing.cascade_retirement_sites.append(
+        _site('testapp', '0050_auto_enforcement', ('testapp', '0048_auto_enforcement'))
+    )
+
+    command._record_readoption_edge('testapp', _KEY)
+
+    assert command._retired_cascade_dependencies_for(apps.get_app_config('testapp')) == []
+
+
+def test_the_create_path_records_that_edge_itself(command):
+    """Wired, not merely written: the recorder is called from ``_cascade_operations``, so the
+    one line joining them could go without a failure. Seeds a retirement for a key the models
+    still require, which is exactly a re-adoption."""
+    live = next(iter(command._cascade_key_maps()[0]))
+    command.existing.cascade_retirement_sites.append(
+        _site('crossapp_owner', '0001_initial', ('crossapp_third', '0001_initial'))._replace(
+            key=live
+        )
+    )
+
+    command._build_operations(apps.get_app_config('testapp'))
+
+    assert ('crossapp_owner', '0001_initial') in command._retirement_edges.get('testapp', [])
+
+
+def test_one_migration_naming_a_key_twice_is_recorded_once(monkeypatch):
+    """The provenance list is per migration, not per header. A file naming one key twice would
+    otherwise offer the same node as two candidate creates, and "the newest before this drop"
+    would then depend on how many times a header happened to appear."""
+    existing = _scan_with(monkeypatch, testapp=(_created() + _created(),))
+
+    assert existing.soft_delete_related_dependencies[_KEY] == [('testapp', '0000_auto_enforcement')]

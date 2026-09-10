@@ -9,6 +9,7 @@ import pytest
 from django.apps import apps
 from django.core.management import CommandError, call_command
 from django.db import models
+from django.db.migrations.loader import MigrationLoader
 from django.db.models import CASCADE, SET_NULL
 from django.test import override_settings
 from django.test.utils import isolate_apps
@@ -526,3 +527,48 @@ def test_one_retirement_reported_twice_is_named_once(command):
     command.existing.cascade_retirement_sites.extend([site, site])
 
     assert len(command._missing_retirement_edge_notes()) == 1
+
+
+def test_a_retirement_scanned_before_its_create_still_reads_as_retired():
+    """Apps walk in registry order and this question is graph order. The owner app is scanned
+    first, so its retirement popped a key the child app then re-recorded -- leaving the rule
+    reading as live and the retirement re-emitted on every run, ``--check`` never green."""
+    with override_settings(
+        LOCAL_APPS=['tests.crossapp_retire_owner', 'tests.crossapp_retire_child']
+    ):
+        existing = scan_existing_operations()
+
+    key = ('crossapp_retire_child_dependant', 'crossapp_retire_owner_retiree', None)
+    assert key in existing.soft_delete_related_dependencies
+    assert key not in existing.soft_delete_related
+
+
+def test_a_key_created_again_after_its_retirement_stays_recorded(monkeypatch):
+    """The other side of that verdict, and the reason it is not a blanket pop: a create the
+    graph puts *after* the retirement is a re-adoption, and the rule is live again."""
+    existing = _scan_with(monkeypatch, testapp=(_created(), _retired(), _created()))
+
+    assert _KEY in existing.soft_delete_related
+
+
+@pytest.mark.parametrize(
+    ('retirement', 'create', 'survives'),
+    [
+        ('0050_auto_enforcement', '0048_auto_enforcement', False),
+        ('0048_auto_enforcement', '0050_auto_enforcement', True),
+    ],
+)
+def test_the_later_of_the_two_migrations_wins(retirement, create, survives):
+    """Asked of the graph directly, over two real nodes: the create wins only where it is
+    provably after the retirement. The corpus's own 0048 creates the rule 0050 retires, so
+    reversing the pair is the re-adoption shape without inventing a history for it."""
+    recorded = {_KEY: 'abc'}
+
+    scanning._settle_retired_key(
+        CascadeRetirementSite('testapp', retirement, _KEY, None),
+        recorded,
+        {_KEY: ('testapp', create)},
+        lambda: MigrationLoader(None, ignore_no_migrations=True),
+    )
+
+    assert (_KEY in recorded) is survives

@@ -152,6 +152,23 @@ def _cascade_key(match: re.Match) -> tuple[str, str, str | None]:
     )
 
 
+def _settle_retired_key(site, recorded: dict, provenance: dict, ensure_loader) -> None:
+    """Whether *site*'s retirement or the last create of its key wins, asked of the migration
+    graph rather than of the scan's walk order. The create wins only where it is provably
+    later -- the retirement being reachable from it, which covers a re-adoption."""
+    created = provenance.get(site.key)
+    if site.key not in recorded or created is None:
+        return
+    graph = ensure_loader().graph
+    node = (site.app_label, site.migration)
+    # An unknown node leaves the walk's own verdict standing: a synthetic history has no graph,
+    # and a squash can have replaced either file.
+    if node not in graph.node_map or created not in graph.node_map:
+        return
+    if node not in set(graph.forwards_plan(created)):
+        recorded.pop(site.key, None)
+
+
 def _subtract_retired(
     table: str,
     column: str | None,
@@ -487,6 +504,12 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
                 _identifiers._unescape_ident(m.group(1))
                 for m in _RE_TENANT_FORCE.finditer(content)
             )
+
+    # Settled after the walk, because the walk is registry order and this question is graph
+    # order: a retirement in an app scanned first pops a key its create then re-records, and
+    # the retirement re-emits on every run with ``--check`` never going green.
+    for site in retirement_sites:
+        _settle_retired_key(site, existing_soft_delete_related, cascade_deps, _ensure_loader)
 
     # One map across every local app: a cascade rule's key names two tables, and they can
     # belong to different apps, so translating per app would leave half a key behind.

@@ -154,13 +154,17 @@ def _cascade_key(match: re.Match) -> tuple[str, str, str | None]:
 
 
 def _current_key(
-    key: tuple[str, str, str | None], moved: dict[str, str]
+    key: tuple[str, str, str | None], moved: dict[str, str], live: set[str]
 ) -> tuple[str, str, str | None]:
-    """*key* under the spelling a rename has moved its coverage onto. Both tables, because
-    ``_move_renamed`` rewrites every position of the tuple -- translating only the related one
-    left an owner-side rename missing the map and the site silently unattributed."""
+    """*key* under the spelling a rename moved its coverage onto. Both tables, ``_move_renamed``
+    rewriting every position -- and only where that walk moved it: a freed name another model
+    retook keeps its own coverage there, so translating anyway looks up the wrong model's."""
+
+    def _now(table: str) -> str:
+        return table if table in live else moved.get(table, table)
+
     related, owner, via = key
-    return (moved.get(related, related), moved.get(owner, owner), via)
+    return (_now(related), _now(owner), via)
 
 
 def _settle_retirement_sites(
@@ -168,6 +172,7 @@ def _settle_retirement_sites(
     recorded: dict[tuple[str, str, str | None], str | None],
     provenance: dict[tuple[str, str, str | None], list[tuple[str, str]]],
     renames: dict[str, list[str]],
+    live_tables: set[str],
     retirement_apps: set[str],
     ensure_loader: Callable[[], MigrationLoader],
 ) -> list[CascadeRetirementSite]:
@@ -176,28 +181,44 @@ def _settle_retirement_sites(
     app scanned first pops a key its create then re-records. See ADR 0021."""
     moved = {old: new for new, chain in renames.items() for old in chain}
     graph = ensure_loader().graph
-    settled = []
+    by_key: dict[tuple[str, str, str | None], list[CascadeRetirementSite]] = {}
     for site in sites:
-        # Translated first. The scan leaves coverage under a freed name another model retook,
-        # so the untranslated spelling can hit that model's create instead of this key's.
-        key = _current_key(site.key, moved)
-        node = (site.app_label, site.migration)
+        by_key.setdefault(_current_key(site.key, moved, live_tables), []).append(site)
+    settled = []
+    for key, drops in by_key.items():
         creates = provenance.get(key, [])
-        created = _create_this_drop_dropped(node, creates, graph)
-        settled.append(site._replace(key=key, created=created))
-        if created is None:
-            continue
-        # The app that *creates* the key, not the one carrying the header: a re-adoption is
-        # re-emitted from there, and its operation set recurs, which is what the file-level
-        # digest guard assumes never happens.
-        retirement_apps.add(created[0])
-        # Per key, newest against newest, not per site: an older drop is ordered before the
-        # create that revived the rule, and settling on that one reads a live rule as retired
-        # -- so the second retirement is never emitted and the rule stays live for good.
-        latest = max((s for s in sites if _current_key(s.key, moved) == key), key=_position)
-        if key in recorded and _orders(creates[-1], (latest.app_label, latest.migration), graph):
+        drops.sort(key=_position)
+        for rank, site in enumerate(drops):
+            node = (site.app_label, site.migration)
+            created = _create_this_drop_dropped(node, creates, graph, rank)
+            settled.append(site._replace(key=key, created=created))
+            if created is not None:
+                # The app that *creates* the key, not the one carrying the header: a re-adoption
+                # is re-emitted from there, and its operation set recurs, which is what the
+                # file-level digest guard assumes never happens.
+                retirement_apps.add(created[0])
+        if key in recorded and _retirement_is_the_last_word(drops, creates, graph):
             recorded.pop(key, None)
     return settled
+
+
+def _retirement_is_the_last_word(
+    drops: list[CascadeRetirementSite], creates: list[tuple[str, str]], graph
+) -> bool:
+    """Whether the newest drop of a key comes after its newest create. Per key, not per site:
+    an older drop is ordered before the create that revived the rule, and settling on that one
+    reads a live rule as retired, so the next retirement is never emitted."""
+    if not creates:
+        return False
+    node = (drops[-1].app_label, drops[-1].migration)
+    if _orders(creates[-1], node, graph):
+        return True
+    # A create the graph puts *after* this drop is a re-adoption, and the rule is live again.
+    if any(_orders(node, create, graph) for create in creates):
+        return False
+    # Nothing orders them either way, which is the pre-2.10.0 history this release exists for.
+    # Counting is the only signal left, and the two alternate: relax, restore, relax.
+    return len(drops) >= len(creates)
 
 
 def _position(site: CascadeRetirementSite) -> tuple[str, str]:
@@ -217,15 +238,18 @@ def _orders(earlier: tuple[str, str], later: tuple[str, str], graph) -> bool:
 
 
 def _create_this_drop_dropped(
-    node: tuple[str, str], creates: list[tuple[str, str]], graph
+    node: tuple[str, str], creates: list[tuple[str, str]], graph, rank: int
 ) -> tuple[str, str] | None:
-    """The newest create *node*'s drop can actually have dropped -- the last one the graph puts
-    before it. Not simply the newest: after a re-adoption that one is the create the drop
-    *precedes*, and naming it would order the drop after the rule it revives, for good."""
+    """The newest create *node*'s drop can have dropped -- the last one the graph puts before
+    it. Not simply the newest: after a re-adoption that one is the create the drop *precedes*,
+    and naming it would order the drop after the rule it revives, for good."""
     ordered = [create for create in creates if _orders(create, node, graph)]
-    # Nothing provably before it: fall back to a lone create, which is every history without a
-    # re-adoption, so an unordered cross-app pair -- the shape this release is for -- still reads.
-    return ordered[-1] if ordered else (creates[0] if len(creates) == 1 else None)
+    if ordered:
+        return ordered[-1]
+    # Nothing orders them at all -- the pre-2.10.0 history this release exists for. Paired by
+    # rank, the two alternating: the *n*th drop dropped the *n*th create. A guess, and named as
+    # one in the note, but the alternative is silence on the histories most in need of it.
+    return creates[rank] if rank < len(creates) else None
 
 
 def _subtract_retired(
@@ -576,6 +600,7 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
         existing_soft_delete_related,
         cascade_deps,
         _pending_renames,
+        live_tables,
         retirement_apps,
         _ensure_loader,
     )

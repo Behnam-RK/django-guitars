@@ -1,6 +1,6 @@
-"""A cascade retirement is ordered against the migration that created the rule it drops
-(2.10.0, issue #49). The create is hosted by the app that walked the owner model; the drop by
-the app owning the table it fires on. Those differ, and only an explicit edge orders them."""
+"""The committed shape of issue #49, asserted on real files and a real database: a cascade
+create in one app, its drop in another, and the cycle between them. The *emitter* is tested in
+``test_cascade_retirement.py`` -- everything here reads what is already on disk."""
 
 from __future__ import annotations
 
@@ -85,9 +85,9 @@ def test_a_fresh_migrate_plans_the_whole_cycle_in_order():
 
 @pytest.mark.django_db(transaction=True)
 def test_the_generator_would_write_that_file_again_unchanged():
-    """The committed retirement is the emitter's own output, not a hand-made stand-in, so a
-    change in how the edge is emitted fails here rather than passing against a stale artifact.
-    Through ``--check``, the file being one the generator never rewrites once recorded."""
+    """The committed history is the emitter's own output and stays current: a run over the pair
+    asks for nothing more. Not an edge test -- dependencies are deliberately outside
+    ``[DIGEST:...]``, so ``--check`` is green whether or not one is still emitted."""
     out, err = StringIO(), StringIO()
 
     with _SCOPED:

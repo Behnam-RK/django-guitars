@@ -569,6 +569,10 @@ def test_a_key_created_again_after_its_retirement_stays_recorded(monkeypatch):
     assert _KEY in existing.soft_delete_related
 
 
+def _loader() -> MigrationLoader:
+    return MigrationLoader(None, ignore_no_migrations=True)
+
+
 def _settled(retirement, creates):
     """Run the post-pass over one site with *creates* recorded for its key, and report both
     halves of its verdict: whether the key survives, and which create the site was matched to."""
@@ -578,6 +582,7 @@ def _settled(retirement, creates):
         recorded,
         {_KEY: creates},
         {},
+        set(),
         set(),
         lambda: MigrationLoader(None, ignore_no_migrations=True),
     )
@@ -608,6 +613,7 @@ def test_an_unordered_create_is_not_read_as_older_than_the_retirement():
         recorded,
         {_KEY: [('crossapp_third', '0001_initial'), ('crossapp_owner', '0002_auto_enforcement')]},
         {},
+        set(),
         set(),
         lambda: MigrationLoader(None, ignore_no_migrations=True),
     )
@@ -674,3 +680,78 @@ def test_one_migration_naming_a_key_twice_is_recorded_once(monkeypatch):
     existing = _scan_with(monkeypatch, testapp=(_created() + _created(),))
 
     assert existing.soft_delete_related_dependencies[_KEY] == [('testapp', '0000_auto_enforcement')]
+
+
+def test_a_legacy_history_with_two_unordered_cycles_is_still_named(command):
+    """The population this release exists for, at its worst: create, drop, re-create, drop,
+    with nothing ordering any of it. Attributing only where the graph proves it left these
+    silent while a *less* broken single-cycle history got a note."""
+    # Real nodes with no path either way, which is what a pre-2.10.0 cross-app history is.
+    creates = [
+        ('crossapp_tenant_ancestor', '0001_initial'),
+        ('crossapp_tenant_ancestor', '0003_auto_enforcement'),
+    ]
+    drops = [
+        _site('crossapp_owner', '0001_initial', None),
+        _site('crossapp_owner', '0003_auto_enforcement', None),
+    ]
+    settled = scanning._settle_retirement_sites(
+        drops, {}, {_KEY: creates}, {}, set(), set(), _loader
+    )
+
+    # Paired by rank, the two alternating: the nth drop dropped the nth create.
+    assert [site.created for site in settled] == creates
+    command.existing.cascade_retirement_sites.extend(settled)
+    assert len(command._missing_retirement_edge_notes(set())) == 2
+
+
+def test_an_unordered_history_ending_in_a_drop_reads_as_retired(command):
+    """And the pop that goes with it. Nothing orders the halves, so counting is the only
+    signal: as many drops as creates means the last event was a drop, and re-emitting a third
+    would fail on a rule already gone."""
+    creates = [('shop', '0002_auto_enforcement')]
+    recorded = {_KEY: 'abc'}
+
+    scanning._settle_retirement_sites(
+        [_site('stock', '0003_auto_enforcement', None)],
+        recorded,
+        {_KEY: creates},
+        {},
+        set(),
+        set(),
+        _loader,
+    )
+
+    assert _KEY not in recorded
+
+
+def test_a_retirement_whose_create_was_never_scanned_leaves_the_key_alone():
+    """No create recorded at all -- a hand-written drop, or one whose create lives in an app
+    outside ``LOCAL_APPS``. Nothing to compare it against, so the walk's verdict stands rather
+    than a guess popping coverage the models may still require."""
+    recorded = {_KEY: 'abc'}
+
+    (site,) = scanning._settle_retirement_sites(
+        [_site('crossapp_owner', '0001_initial', None)], recorded, {}, {}, set(), set(), _loader
+    )
+
+    assert site.created is None
+    assert _KEY in recorded
+
+
+def test_a_renamed_key_is_told_the_quieter_symptom(command):
+    """A rename makes that drop ``IF EXISTS`` over every prior spelling, so an unordered one
+    does not abort -- it no-ops, and the create after it leaves the rule live. Promising the
+    abort would have a reader wait for a failure that never comes."""
+    key = ('testapp_callbacks', 'testapp_band', None)
+    command.existing.renamed_tables['testapp_callbacks'] = ['testapp_encore']
+    command.existing.cascade_retirement_sites.append(
+        _site('crossapp_owner', '0001_initial', ('crossapp_third', '0001_initial'))._replace(
+            key=key
+        )
+    )
+
+    (note,) = command._missing_retirement_edge_notes(set())
+
+    assert 'silently does nothing and leaves the rule live' in note
+    assert 'does not exist' not in note

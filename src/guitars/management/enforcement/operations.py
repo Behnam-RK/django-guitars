@@ -1138,6 +1138,11 @@ class OperationsMixin:
         """Order a cascade create against the retirement it revives. Without it a fresh
         ``migrate`` can run the ``CREATE`` before that ``DROP`` and end with no rule, where an
         incremental database has one -- the mirror of the drop's own edge. See ADR 0021."""
+        # Only where the key is *not* recorded: it was retired and this run is reviving it. A
+        # key still recorded was never dropped, and an edge for it is one the app's own history
+        # already implies -- which ``drop_implied_edges`` cannot see, comparing only candidates.
+        if key in self.existing.soft_delete_related:
+            return
         sites = [
             (site.app_label, site.migration)
             for site in self.existing.cascade_retirement_sites
@@ -2287,15 +2292,24 @@ class OperationsMixin:
             # Already quoted by ``_safe_ident``: quoting it again prints a name no `migrate`
             # log carries, and the whole point of the sentence is that it can be grepped for.
             rule_name = _related_rule_name(site.key[0], site.key[2])
-            note = (
+            # A renamed table makes that drop ``IF EXISTS`` over every prior spelling, so it
+            # does not abort -- it no-ops, and the create after it leaves the rule live. The
+            # quieter half, and the one whose symptom a reader would otherwise wait for.
+            symptom = (
+                'a fresh `migrate` reaches the drop before that create, and the drop being '
+                '`IF EXISTS` over the names this table has held, it silently does nothing and '
+                'leaves the rule live'
+                if self._renamed(site.key[0], site.key[1])
+                else f'a fresh `migrate` reaches the drop first and fails with `rule '
+                f'{rule_name} for relation "{site.key[1]}" does not exist`'
+            )
+            notes.append(
                 f"Enforcement migration '{site.app_label}.{site.migration}' drops the cascade "
                 f"rule on '{site.key[1]}' related to '{site.key[0]}', but nothing orders it "
-                f"after '{created[0]}.{created[1]}', which creates that rule -- a fresh "
-                f'`migrate` reaches the drop first and fails with `rule {rule_name} for '
-                f'relation "{site.key[1]}" does not exist`. Add to its dependencies:\n'
+                f"after '{created[0]}.{created[1]}', which creates that rule -- {symptom}. "
+                f'Add to its dependencies:\n'
                 f"        ('{created[0]}', '{created[1]}'),"
             )
-            notes.append(note)
         return notes
 
     def _missing_edge_notes(self, app: AppConfig) -> list[str]:

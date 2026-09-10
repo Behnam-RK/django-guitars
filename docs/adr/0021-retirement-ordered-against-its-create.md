@@ -61,7 +61,7 @@ the autofill retirement's edge targets the *function* migration.
 **Both directions, because the cycle needs both.** A drop ordered after its create is half an
 ordering: a re-adopted create ordered against nothing reaches a fresh database first and leaves
 the rule dropped where an incremental one has it. So a create carries an edge to the retirement
-it revives, and the pair alternates for as many cycles as a project runs.
+it revives, for as many cycles as a project runs.
 
 ## Consequences
 
@@ -70,16 +70,16 @@ it revives, and the pair alternates for as many cycles as a project runs.
 - **`--check` fails on graphs that passed before**, on files this release did not touch — why
   2.10.0 is a minor, the precedent being 2.5.0. Scoped to the apps a run names, and narrowed by
   two reachability guards and the own-app filter.
-- **Cross-app recording is not chronological.** Two apps creating one rule record
-  last-write-wins, a *weaker* edge but never a wrong one: every create of a key renders one rule
-  name on one table. Which of a create and a retirement wins no longer rides on it (decision 6).
+- **Two apps creating one rule is unsound and undetected.** Registry order picks which create
+  the drop is ordered after, so the drop can run before the other one and leave the rule live
+  where an incremental database has it retired. One edge cannot order three nodes.
 - **Two apps creating one rule stays unsound**: one edge cannot order three nodes. The
   `--check` half reports it, which is the best available outcome.
-- **Two apps retiring one key is unsound** and undetected: that is two drops of one rule, and
-  "the last retirement" is then a question the graph cannot answer either.
-- **An edge target can vanish**, removing the creating app later turning it into
-  `NodeNotFoundError`. Shared with every ADR 0013 edge, but this one points at an *enforcement*
-  migration, likelier to be squashed.
+- **Two apps retiring one key** is that shape from the other side, equally undetected.
+- **An unordered history is attributed by rank**, the two alternating: the *n*th drop dropped the
+  *n*th create. A guess, made because the alternative is silence on the histories most in need.
+- **An edge target can vanish**, removing that app later turning it into `NodeNotFoundError` --
+  shared with every ADR 0013 edge, but pointing at an *enforcement* migration, likelier squashed.
 
 **Reversibility.** High: dependencies are graph metadata, not inlined SQL, and the provenance is
 re-derived every run. No database carries a trace.

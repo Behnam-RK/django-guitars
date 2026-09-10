@@ -207,6 +207,7 @@ class OperationsMixin:
         _owner_arms_cache: dict[str, list[OwnerArm]] | None
         _owned_tenancy_cache: dict[tuple[str, str, str], list[str]] | None
         _object_refs: dict[str, list[ObjectRef]]
+        _retirement_edges: dict[str, list[tuple[str, str]]]
         _loader_cache: MigrationLoader | None
         _refusals_over_live_rules: list[str]
         _missing_edges: list[str]
@@ -805,6 +806,7 @@ class OperationsMixin:
             # apart. Named in ``_unmapped_cascade_notes`` instead.
             if hosting.get(owner_table) != app.label or related_table not in hosting:
                 continue
+            self._record_retirement_edge(app.label, key)
             rule_name = _related_rule_name(related_table, via)
             ident_owner_table = _identifiers._quote_table(owner_table)
             drop = _soft_delete._DROP_SOFT_DELETE_RELATED_OBJECTS_RULE.format(
@@ -1121,6 +1123,55 @@ class OperationsMixin:
         if ref not in refs:
             refs.append(ref)
 
+    def _record_retirement_edge(self, app_label: str, key: tuple[str, str, str | None]) -> None:
+        """Order a cascade retirement against the migration that created the rule it drops.
+        Read off the scan rather than resolved: a rule is a ``RunSQL``, so migration state has
+        nothing to resolve, and the drop is hosted by the owner table's app either way."""
+        # This drop is genuinely being written, so its operation set may recur if the key is
+        # re-adopted and retired again -- tainted here, not for every app that has ever retired
+        # anything, or a one-time retirement disables the guard forever needlessly.
+        self.existing.retirement_apps.add(app_label)
+        creates = self.existing.soft_delete_related_dependencies.get(key, [])
+        # The newest: the drop being written now comes after every one of them, so the last is
+        # the one whose rule is live. Own-app creates are ordered by that app's own history.
+        if not creates or creates[-1][0] == app_label:
+            return
+        self._record_edge(self._retirement_edges, app_label, creates[-1])
+
+    def _record_readoption_edge(self, app_label: str, key: tuple[str, str, str | None]) -> None:
+        """Order a cascade create against the retirement it revives. Without it a fresh
+        ``migrate`` can run the ``CREATE`` before that ``DROP`` and end with no rule, where an
+        incremental database has one -- the mirror of the drop's own edge. See ADR 0021."""
+        # Only where the key is *not* recorded: it was retired and this run is reviving it. A
+        # key still recorded was never dropped, and an edge for it is one the app's own history
+        # already implies -- which ``drop_implied_edges`` cannot see, comparing only candidates.
+        if key in self.existing.soft_delete_related:
+            return
+        sites = [
+            (site.app_label, site.migration)
+            for site in self.existing.cascade_retirement_sites
+            if site.key == key
+        ]
+        # Genuinely absent with no retirement history is a brand new key, not a re-adoption --
+        # its create has never recurred, so the digest guard has nothing to yield for.
+        if not sites:
+            return
+        # Reaching here, this app is re-emitting a create it already wrote once -- breaking
+        # the digest guard's "an operation set never recurs" assumption on purpose.
+        self.existing.retirement_apps.add(app_label)
+        if sites[-1][0] == app_label:
+            return
+        self._record_edge(self._retirement_edges, app_label, sites[-1])
+
+    @staticmethod
+    def _record_edge(
+        edges_by_app: dict[str, list[tuple[str, str]]], app_label: str, edge: tuple[str, str]
+    ) -> None:
+        """File *edge* under the app whose migration will carry it, once."""
+        edges = edges_by_app.setdefault(app_label, [])
+        if edge not in edges:
+            edges.append(edge)
+
     def _refuse_owned(self, key: tuple[str, str, str] | None, message: str) -> None:
         """Record an owned-rule refusal, escalating where anything for *key* is already
         recorded: refusing emits nothing, so what is live stays live and wrong under a green
@@ -1401,6 +1452,9 @@ class OperationsMixin:
             # a model promoted to ``SetarModel`` gains it in a later migration, and an edge to
             # the creation alone would let the rule be created before the column exists.
             self._record_object_ref(model, related_model, '_deleted_at')
+            # And, where this key was retired before, the drop that retired it: a re-adopted
+            # create reaching a fresh database first leaves the rule dropped and never rebuilt.
+            self._record_readoption_edge(model._meta.app_label, key)
             # The relation, not `key`: `key` drops the column on the plain form, and two
             # relations can then share one key -- see `_claim_rule_name`'s docstring.
             self._claim_rule_name(
@@ -2150,11 +2204,44 @@ class OperationsMixin:
 
     def _dependencies_for(self, app: AppConfig, operations_blob: str) -> list[tuple[str, str]]:
         """Every edge *app*'s new migration needs: the shared-function ones read off the
-        operation headers, plus one per object the rules name in another app. Both, in that
-        order, so a file's dependency list reads the same as it did before 2.5.0 plus."""
-        return self._function_dependencies_for(operations_blob) + self._object_dependencies_for(
+        operation headers, one per object the rules name in another app, and one per rule a
+        retirement drops that another app created. In that order, so an old file reads the same."""
+        edges = self._function_dependencies_for(operations_blob) + self._object_dependencies_for(
             app
         )
+        retirement = [
+            edge for edge in self._retired_cascade_dependencies_for(app) if edge not in edges
+        ]
+        if not retirement:
+            return edges
+        # ``drop_implied_edges`` over the union but keeping only its verdict on the new ones: the
+        # two halves above keep the answer they had, and a retirement edge the file already
+        # reaches says nothing the graph did not. ADR 0013's "an implied edge is dropped".
+        kept = set(drop_implied_edges(self._migration_loader(), edges + retirement))
+        return edges + [edge for edge in retirement if edge in kept]
+
+    def _retired_cascade_dependencies_for(self, app: AppConfig) -> list[tuple[str, str]]:
+        """Edges to the migrations that created the rules *app*'s retirements drop. A ``DROP
+        RULE`` reaching a fresh database before its ``CREATE`` aborts ``migrate``; under
+        ``--adopt``'s ``IF EXISTS`` it leaves the rule live instead, which is worse."""
+        edges = self._retirement_edges.get(app.label, [])
+        if not edges:
+            return []
+        loader = self._migration_loader()
+        resolved = []
+        for edge in edges:
+            if edge in loader.graph.node_map:
+                resolved.append(edge)
+                continue
+            # Warned, not refused, as an unresolvable object reference is: the scan read this
+            # node off a header, and a squash since then can have replaced the file.
+            self._unresolved_reference_notes.append(
+                f"Enforcement migration for '{app.label}' retires a cascade rule created by "
+                f"'{edge[0]}.{edge[1]}', which is not in the migration graph, so no dependency "
+                'edge was emitted. A fresh `migrate` may reach the drop first. Add the edge by '
+                'hand against whatever replaced that migration.'
+            )
+        return resolved
 
     def _object_dependencies_for(self, app: AppConfig) -> list[tuple[str, str]]:
         """Edges to the migrations that create what *app*'s rules reference. A rule's action is
@@ -2179,6 +2266,62 @@ class OperationsMixin:
                 'migrated elsewhere.'
             )
         return drop_implied_edges(loader, edges)
+
+    def _missing_retirement_edge_notes(self, requested: set[str]) -> list[str]:
+        """Cascade retirements already written that nothing orders against the migration
+        creating the rule they drop. Once per run, not per app: the emitter never rewrites a
+        file the digest guard skips, so for those histories this note is the only channel."""
+        # Scoped like every other refusal: the scan reads all of LOCAL_APPS, and a per-app CI
+        # job going red over a file it was not asked about has no fix available from that job.
+        sites = [
+            site
+            for site in self.existing.cascade_retirement_sites
+            if not requested or site.app_label in requested
+        ]
+        if not sites:
+            return []
+        loader = self._migration_loader()
+        notes: list[str] = []
+        for site in sites:
+            # Resolved by the scan, per site: the newest create the graph puts *before* this
+            # drop. Naming the newest create outright would, after a re-adoption, print a tuple
+            # ordering this drop after the rule it revives, destroying it on every database.
+            created = site.created
+            node = (site.app_label, site.migration)
+            if (
+                created is None
+                or created[0] == site.app_label
+                or created not in loader.graph.node_map
+                or node not in loader.graph.node_map
+                # Reachability, as ``_missing_edge_notes`` asks it: an ordering guaranteed
+                # through another path is guaranteed. And the reverse, which Django rejects
+                # outright, so reporting it would be red with no move that clears it.
+                or created in set(loader.graph.forwards_plan(node))
+                or node in set(loader.graph.forwards_plan(created))
+            ):
+                continue
+            # Already quoted by ``_safe_ident``: quoting it again prints a name no `migrate`
+            # log carries, and the whole point of the sentence is that it can be grepped for.
+            rule_name = _related_rule_name(site.key[0], site.key[2])
+            # A renamed *related* table makes that drop ``IF EXISTS`` over every prior
+            # spelling -- ``_retired_cascade_operations`` checks that table alone, an owner
+            # rename playing no part -- so it no-ops instead of aborting, and the rule stays live.
+            symptom = (
+                'a fresh `migrate` reaches the drop before that create, and the drop being '
+                '`IF EXISTS` over the names this table has held, it silently does nothing and '
+                'leaves the rule live'
+                if self._renamed(site.key[0])
+                else f'a fresh `migrate` reaches the drop first and fails with `rule '
+                f'{rule_name} for relation "{site.key[1]}" does not exist`'
+            )
+            notes.append(
+                f"Enforcement migration '{site.app_label}.{site.migration}' drops the cascade "
+                f"rule on '{site.key[1]}' related to '{site.key[0]}', but nothing orders it "
+                f"after '{created[0]}.{created[1]}', which creates that rule -- {symptom}. "
+                f'Add to its dependencies:\n'
+                f"        ('{created[0]}', '{created[1]}'),"
+            )
+        return notes
 
     def _missing_edge_notes(self, app: AppConfig) -> list[str]:
         """Enforcement migrations of *app* that name another app's table without being ordered

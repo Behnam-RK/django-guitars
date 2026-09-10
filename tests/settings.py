@@ -35,6 +35,8 @@ INSTALLED_APPS = [  # noqa: F405
     'tests.crossapp_third',
     'tests.crossapp_tenant_ancestor',
     'tests.crossapp_tenant_child',
+    'tests.crossapp_retire_owner',
+    'tests.crossapp_retire_child',
 ]
 
 LOCAL_APPS = ['tests.testapp']

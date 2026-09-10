@@ -2228,20 +2228,27 @@ class OperationsMixin:
             )
         return drop_implied_edges(loader, edges)
 
-    def _missing_retirement_edge_notes(self) -> list[str]:
+    def _missing_retirement_edge_notes(self, requested: set[str]) -> list[str]:
         """Cascade retirements already written that nothing orders against the migration
         creating the rule they drop. Once per run, not per app: the emitter never rewrites a
         file the digest guard skips, so for those histories this note is the only channel."""
-        sites = self.existing.cascade_retirement_sites
+        # Scoped like every other refusal: the scan reads all of LOCAL_APPS, and a per-app CI
+        # job going red over a file it was not asked about has no fix available from that job.
+        sites = [
+            site
+            for site in self.existing.cascade_retirement_sites
+            if not requested or site.app_label in requested
+        ]
         if not sites:
             return []
         loader = self._migration_loader()
         notes: list[str] = []
+        # A key retired more than once is left alone entirely. Its older sites name a create
+        # the scan can no longer attribute, and the newest one may be the *re-adoption*:
+        # pasting that tuple would order the old drop after it, taking a live rule out for good.
+        retired_twice = {site.key for site in sites if sum(s.key == site.key for s in sites) > 1}
         for site in sites:
-            # The snapshot first: it is immune to a re-adoption having overwritten the map
-            # since. The map second: apps walk in registry order, so the create may have been
-            # scanned after the retirement that dropped it, leaving the snapshot empty.
-            created = site.created or self.existing.soft_delete_related_dependencies.get(site.key)
+            created = None if site.key in retired_twice else site.created
             node = (site.app_label, site.migration)
             if (
                 created is None
@@ -2255,17 +2262,18 @@ class OperationsMixin:
                 or node in set(loader.graph.forwards_plan(created))
             ):
                 continue
+            # Already quoted by ``_safe_ident``: quoting it again prints a name no `migrate`
+            # log carries, and the whole point of the sentence is that it can be grepped for.
             rule_name = _related_rule_name(site.key[0], site.key[2])
             note = (
                 f"Enforcement migration '{site.app_label}.{site.migration}' drops the cascade "
                 f"rule on '{site.key[1]}' related to '{site.key[0]}', but nothing orders it "
                 f"after '{created[0]}.{created[1]}', which creates that rule -- a fresh "
-                f'`migrate` reaches the drop first and fails with `rule "{rule_name}" for '
+                f'`migrate` reaches the drop first and fails with `rule {rule_name} for '
                 f'relation "{site.key[1]}" does not exist`. Add to its dependencies:\n'
                 f"        ('{created[0]}', '{created[1]}'),"
             )
-            if note not in notes:
-                notes.append(note)
+            notes.append(note)
         return notes
 
     def _missing_edge_notes(self, app: AppConfig) -> list[str]:

@@ -152,20 +152,43 @@ def _cascade_key(match: re.Match) -> tuple[str, str, str | None]:
     )
 
 
-def _settle_retired_key(site, recorded: dict, provenance: dict, ensure_loader) -> None:
-    """Whether *site*'s retirement or the last create of its key wins, asked of the migration
-    graph rather than of the scan's walk order. The create wins only where it is provably
-    later -- the retirement being reachable from it, which covers a re-adoption."""
-    created = provenance.get(site.key)
-    if site.key not in recorded or created is None:
+def _resolve_retirement_sites(
+    sites: list[CascadeRetirementSite],
+    provenance: dict[tuple[str, str, str | None], tuple[str, str]],
+    renames: dict[str, list[str]],
+) -> list[CascadeRetirementSite]:
+    """Fill in the create each site dropped, once, so every reader asks the same question. The
+    snapshot first; then the finished map, under the key a rename may have moved the coverage
+    onto -- the header spells the old name and the map is re-keyed onto the new one."""
+    moved = {old: new for new, chain in renames.items() for old in chain}
+    resolved = []
+    for site in sites:
+        created = site.created
+        if created is None:
+            related, owner, via = site.key
+            for key in ((related, owner, via), (moved.get(related, related), owner, via)):
+                created = created or provenance.get(key)
+        resolved.append(site._replace(created=created))
+    return resolved
+
+
+def _settle_retired_key(
+    site: CascadeRetirementSite,
+    recorded: dict[tuple[str, str, str | None], str | None],
+    ensure_loader: Callable[[], MigrationLoader],
+) -> None:
+    """Whether *site*'s retirement or the create of its key wins, asked of the migration graph
+    rather than of the scan's walk order. The retirement wins only where it is provably later
+    -- the create being an ancestor of it. Anything else leaves the walk's verdict standing."""
+    if site.key not in recorded or site.created is None:
         return
     graph = ensure_loader().graph
     node = (site.app_label, site.migration)
-    # An unknown node leaves the walk's own verdict standing: a synthetic history has no graph,
-    # and a squash can have replaced either file.
-    if node not in graph.node_map or created not in graph.node_map:
+    # Unordered is not "the create is older". Nothing orders a re-adopted create against the
+    # retirement it revives, and reading that as retired would pop a live rule's coverage.
+    if node not in graph.node_map or site.created not in graph.node_map:
         return
-    if node not in set(graph.forwards_plan(created)):
+    if site.created in set(graph.forwards_plan(node)):
         recorded.pop(site.key, None)
 
 
@@ -508,8 +531,9 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
     # Settled after the walk, because the walk is registry order and this question is graph
     # order: a retirement in an app scanned first pops a key its create then re-records, and
     # the retirement re-emits on every run with ``--check`` never going green.
+    retirement_sites = _resolve_retirement_sites(retirement_sites, cascade_deps, _pending_renames)
     for site in retirement_sites:
-        _settle_retired_key(site, existing_soft_delete_related, cascade_deps, _ensure_loader)
+        _settle_retired_key(site, existing_soft_delete_related, _ensure_loader)
 
     # One map across every local app: a cascade rule's key names two tables, and they can
     # belong to different apps, so translating per app would leave half a key behind.

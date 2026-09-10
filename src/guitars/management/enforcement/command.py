@@ -551,7 +551,7 @@ class Command(OperationsMixin, BaseCommand):
         # Once per run, after the stage that may have written one: a retirement already on disk
         # is never rewritten, so the emitter's edge cannot reach it. Not on the --force-rls path
         # below, which returns before here and writes no rule operation at all. ADR 0021.
-        self._missing_edges.extend(self._missing_retirement_edge_notes())
+        self._missing_edges.extend(self._missing_retirement_edge_notes(requested))
 
         # Step 3: surface cross-app cascade rules this scoped run intentionally
         # did not create, so the "pragmatic scope" tradeoff is never silent.

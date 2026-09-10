@@ -371,19 +371,16 @@ def test_a_retirement_leaves_the_provenance_it_popped(monkeypatch):
     assert site == ('testapp', '0001_auto_enforcement', _KEY, ('testapp', '0000_auto_enforcement'))
 
 
-def test_a_create_scanned_after_the_retirement_leaves_the_snapshot_empty(monkeypatch):
+def test_a_create_scanned_after_the_retirement_is_still_attributed_to_it(monkeypatch):
     """Apps walk in registry order, which is not chronological, so the create can be read after
-    the retirement that dropped it. The snapshot is then ``None`` and the reader falls back to
-    the finished map -- the shape #49 is actually made of, and why one alone will not do."""
+    the retirement that dropped it. Nothing is in scope at the pop, so the site is filled from
+    the finished map afterwards -- the shape #49 is made of, and why the snapshot alone fails."""
     with override_settings(LOCAL_APPS=['tests.testapp', 'tests.crossapp_owner']):
         existing = _scan_with(monkeypatch, testapp=(_retired(),), crossapp_owner=(_created(),))
 
     (site,) = existing.cascade_retirement_sites
-    assert site.created is None
-    assert existing.soft_delete_related_dependencies[_KEY] == (
-        'crossapp_owner',
-        '0000_auto_enforcement',
-    )
+    assert site.created == ('crossapp_owner', '0000_auto_enforcement')
+    assert existing.soft_delete_related_dependencies[_KEY] == site.created
 
 
 # --- The edge the retirement carries -----------------------------------------------------------
@@ -457,7 +454,7 @@ def test_check_names_a_retirement_nothing_orders_against_its_create(command):
         _site('crossapp_owner', '0001_initial', ('crossapp_third', '0001_initial'))
     )
 
-    (note,) = command._missing_retirement_edge_notes()
+    (note,) = command._missing_retirement_edge_notes(set())
 
     assert "'crossapp_owner.0001_initial' drops the cascade rule on 'testapp_genre'" in note
     assert "nothing orders it after 'crossapp_third.0001_initial'" in note
@@ -472,7 +469,7 @@ def test_a_retirement_already_ordered_against_its_create_is_not_named(command):
         _site('crossapp_dependent', '0002_auto_enforcement', ('crossapp_owner', '0001_initial'))
     )
 
-    assert command._missing_retirement_edge_notes() == []
+    assert command._missing_retirement_edge_notes(set()) == []
 
 
 def test_a_create_that_already_depends_on_the_retirement_is_not_named(command):
@@ -482,14 +479,14 @@ def test_a_create_that_already_depends_on_the_retirement_is_not_named(command):
         _site('crossapp_owner', '0001_initial', ('crossapp_dependent', '0002_auto_enforcement'))
     )
 
-    assert command._missing_retirement_edge_notes() == []
+    assert command._missing_retirement_edge_notes(set()) == []
 
 
 def test_the_committed_corpus_is_named_by_neither_half():
     """Its one retirement (0050) drops a rule 0048 created, both in testapp, so the own-app
     filter takes it. A note here would fail every consumer's CI over a file this release
     did not touch."""
-    assert Command()._missing_retirement_edge_notes() == []
+    assert Command()._missing_retirement_edge_notes(set()) == []
 
 
 def test_the_note_fails_a_check_run(monkeypatch):
@@ -499,7 +496,7 @@ def test_the_note_fails_a_check_run(monkeypatch):
     monkeypatch.setattr(
         OperationsMixin,
         '_missing_retirement_edge_notes',
-        lambda self: ['A retirement nothing orders.'],
+        lambda self, requested: ['A retirement nothing orders.'],
     )
 
     with pytest.raises(CommandError, match='A retirement nothing orders.'):
@@ -520,13 +517,25 @@ def test_two_rules_from_one_migration_share_a_single_edge(command):
     assert command._retired_cascade_dependencies_for(apps.get_app_config('testapp')) == [created]
 
 
-def test_one_retirement_reported_twice_is_named_once(command):
-    """A key retired again in a later migration leaves two sites naming one repair, and the
-    reader has one file to open either way."""
+def test_a_key_retired_more_than_once_is_left_alone(command):
+    """Its older sites name a create the scan can no longer attribute, and the newest may be a
+    re-adoption -- so the tuple would order the old drop after the create reviving the rule and
+    take it out for good. Silence beats advice that destroys a live cascade."""
     site = _site('crossapp_owner', '0001_initial', ('crossapp_third', '0001_initial'))
     command.existing.cascade_retirement_sites.extend([site, site])
 
-    assert len(command._missing_retirement_edge_notes()) == 1
+    assert command._missing_retirement_edge_notes(set()) == []
+
+
+def test_a_note_is_confined_to_the_apps_a_scoped_run_asked_about(command):
+    """Scoped like every other refusal. The scan reads all of LOCAL_APPS, so an unscoped note
+    turns every per-app CI job red over one app's history, with no fix available from that job."""
+    command.existing.cascade_retirement_sites.append(
+        _site('crossapp_owner', '0001_initial', ('crossapp_third', '0001_initial'))
+    )
+
+    assert command._missing_retirement_edge_notes({'testapp'}) == []
+    assert len(command._missing_retirement_edge_notes({'crossapp_owner'})) == 1
 
 
 def test_a_retirement_scanned_before_its_create_still_reads_as_retired():
@@ -558,17 +567,34 @@ def test_a_key_created_again_after_its_retirement_stays_recorded(monkeypatch):
         ('0048_auto_enforcement', '0050_auto_enforcement', True),
     ],
 )
-def test_the_later_of_the_two_migrations_wins(retirement, create, survives):
-    """Asked of the graph directly, over two real nodes: the create wins only where it is
-    provably after the retirement. The corpus's own 0048 creates the rule 0050 retires, so
-    reversing the pair is the re-adoption shape without inventing a history for it."""
+def test_the_retirement_wins_only_where_the_create_is_provably_older(retirement, create, survives):
+    """Asked of the graph directly, over two real nodes. The corpus's own 0048 creates the rule
+    0050 retires, so reversing the pair is the re-adoption shape without inventing a history --
+    and unordered is *not* "the create is older", which is what a cross-app re-adoption is."""
     recorded = {_KEY: 'abc'}
 
     scanning._settle_retired_key(
-        CascadeRetirementSite('testapp', retirement, _KEY, None),
+        CascadeRetirementSite('testapp', retirement, _KEY, ('testapp', create)),
         recorded,
-        {_KEY: ('testapp', create)},
         lambda: MigrationLoader(None, ignore_no_migrations=True),
     )
 
     assert (_KEY in recorded) is survives
+
+
+def test_an_unordered_create_is_not_read_as_older_than_the_retirement():
+    """The mirror of the bug the post-pass fixes, and the reason it asks whether the *create*
+    is an ancestor rather than whether the retirement is not. A re-adopted create in another
+    app is ordered against nothing, and reading that as retired pops a live rule's coverage."""
+    recorded = {_KEY: 'abc'}
+
+    scanning._settle_retired_key(
+        # Two real nodes in different apps with no path between them either way.
+        CascadeRetirementSite(
+            'crossapp_owner', '0001_initial', _KEY, ('crossapp_third', '0001_initial')
+        ),
+        recorded,
+        lambda: MigrationLoader(None, ignore_no_migrations=True),
+    )
+
+    assert _KEY in recorded

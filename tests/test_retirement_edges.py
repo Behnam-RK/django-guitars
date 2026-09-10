@@ -21,9 +21,11 @@ from django.test import override_settings
 # transient file listed and then gone, and failed with ``ModuleNotFoundError``.
 _OWNER = 'crossapp_retire_owner'
 _CHILD = 'crossapp_retire_child'
-#: The hand-written legacy migration: it carries the create whose app the drop's does not match.
+#: Written by the generator itself while walking the MTI child, though the rule it creates fires
+#: on the ancestor's table -- which is the whole split, and needs no proxy and no ``db_table``
+#: shared between apps.
 _CREATE = (_CHILD, '0002_auto_enforcement')
-_RETIREMENT = (_OWNER, '0002_auto_enforcement')
+_RETIREMENT = (_OWNER, '0003_auto_enforcement')
 _SCOPED = override_settings(LOCAL_APPS=[f'tests.{_OWNER}', f'tests.{_CHILD}'])
 
 
@@ -46,7 +48,10 @@ def test_the_retirement_lands_in_the_owner_app_while_the_create_sits_in_the_othe
 
     assert 'Soft Delete Related Rule retired' in retirement
     assert 'crossapp_retire_owner_retiree' in retirement
-    assert 'Soft Delete Related Rule on' in _migration(_CREATE).read_text()
+    # The create names the ancestor's table too, from the other app's file.
+    create = _migration(_CREATE).read_text()
+    assert 'Soft Delete Related Rule on' in create
+    assert 'crossapp_retire_owner_retiree' in create
 
 
 def test_the_written_retirement_declares_the_edge_to_its_create():
@@ -77,10 +82,15 @@ def test_the_generator_would_write_that_file_again_unchanged():
 
 
 @pytest.mark.django_db(transaction=True)
-def test_the_pair_applies_to_a_database():
-    """End to end, off the suite's own ``migrate`` rather than a second one: it walks the same
-    plan, so this is the assertion that would have raised `rule ... does not exist`."""
-    applied = MigrationLoader(connection, ignore_no_migrations=True).applied_migrations
+def test_the_rule_is_gone_from_a_database_that_applied_the_pair():
+    """End to end, off the suite's own ``migrate``. Asserting the *rule* rather than the two
+    nodes: `migrate` sorts leaves by app name here, so `crossapp_retire_child` would precede
+    the owner even unordered, and asserting both applied passes with the edge removed."""
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT rulename FROM pg_rules WHERE tablename = 'crossapp_retire_owner_retiree'"
+        )
+        rules = {row[0] for row in cursor.fetchall()}
 
-    assert _CREATE in applied
-    assert _RETIREMENT in applied
+    assert 'soft_delete_related_crossapp_retire_child_dependant' not in rules
+    assert 'soft_delete' in rules

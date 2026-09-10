@@ -1,6 +1,6 @@
-"""The owner half of the retirement-ordering pair (issue #49). Its table is the one the cascade
-rule fires on, so ``_table_app_labels`` hosts the retirement here -- while the create was written
-into the *other* app, which is the whole shape."""
+"""The ancestor half of the retirement-ordering pair (issue #49). It declares ``_deleted_at``,
+so every cascade rule aimed at a descendant fires on *this* table -- and the retirement is
+hosted here, while the create is written into the app that walked the descendant."""
 
 from guitars.models import SoftDeletableModel
 

@@ -50,6 +50,19 @@ if TYPE_CHECKING:
     from django.db.migrations.loader import MigrationLoader
 
 
+class CascadeRetirementSite(NamedTuple):
+    """A cascade retirement already on disk, and the create it drops. A file already written is
+    never rewritten -- the digest guard skips it -- so this is the only channel by which a
+    history whose two halves nothing orders can be told. See ADR 0021."""
+
+    app_label: str
+    migration: str
+    key: tuple[str, str, str | None]
+    #: ``None`` where the create had not been scanned yet: apps walk in registry order, which
+    #: is not chronological, so the reader falls back to the finished provenance map.
+    created: tuple[str, str] | None
+
+
 class ExistingOperations(NamedTuple):
     """Which enforcement operations the migration files already contain, scanned once. The
     first five map key -> ``[SQL:...]`` digest, not a set: conflating "covered" with
@@ -60,6 +73,13 @@ class ExistingOperations(NamedTuple):
     #: Keyed on (related_table, table, foreign_key) -- the third element is ``None`` for the
     #: one FK per pair keeping the plain historical header, or the column for any other.
     soft_delete_related: dict[tuple[str, str, str | None], str | None]
+    #: That same key -> the ``(app_label, migration)`` whose header created the rule. The one
+    #: family whose drop is hosted by a different app than its create, and a rule is a
+    #: ``RunSQL``, so nothing in migration state resolves it. See ADR 0021.
+    soft_delete_related_dependencies: dict[tuple[str, str, str | None], tuple[str, str]]
+    #: Every cascade retirement already written, with the create it drops. The ``--check``
+    #: half of ADR 0021: the emitter cannot reach a file it will never rewrite.
+    cascade_retirement_sites: list[CascadeRetirementSite]
     #: Keyed on (dependent_table, table, foreign_key) -- the owner-side mirror of the above.
     #: The FK is never ``None`` here: an owned rule is always named after its column, there
     #: being no pre-2.3.0 plain form to stay compatible with.
@@ -117,6 +137,19 @@ class ExistingOperations(NamedTuple):
     #: nothing: both ensure methods returned early on mere presence.
     trigger_function_sql: str | None
     parent_trigger_function_sql: str | None
+
+
+def _cascade_key(match: re.Match) -> tuple[str, str, str | None]:
+    """``(related_table, owner_table, foreign_key)`` off a cascade header. Shared by the create
+    scan, its provenance and the retirement pop, which all key the same rule: three spellings of
+    one triple is how one of them drifts. ``None`` is the plain historical form's column."""
+    return (
+        _identifiers._unescape_ident(match.group(1)),
+        _identifiers._unescape_ident(match.group(2)),
+        _identifiers._unescape_ident(match.group('foreign_key'))
+        if match.group('foreign_key') is not None
+        else None,
+    )
 
 
 def _subtract_retired(
@@ -181,6 +214,8 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
     existing_triggers: dict[str, str | None] = {}
     existing_soft_deletes: dict[str, str | None] = {}
     existing_soft_delete_related: dict[tuple[str, str, str | None], str | None] = {}
+    cascade_deps: dict[tuple[str, str, str | None], tuple[str, str]] = {}
+    retirement_sites: list[CascadeRetirementSite] = []
     existing_soft_delete_owned: dict[tuple[str, str, str], str | None] = {}
     existing_soft_delete_owned_sweep: dict[tuple[str, str, str], str | None] = {}
     existing_soft_delete_self_cascade: dict[tuple[str, str], str | None] = {}
@@ -199,17 +234,7 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
             existing_soft_deletes,
             lambda m: _identifiers._unescape_ident(m.group(1)),
         ),
-        (
-            _RE_SOFT_DELETE_RELATED,
-            existing_soft_delete_related,
-            lambda m: (
-                _identifiers._unescape_ident(m.group(1)),
-                _identifiers._unescape_ident(m.group(2)),
-                _identifiers._unescape_ident(m.group('foreign_key'))
-                if m.group('foreign_key') is not None
-                else None,
-            ),
-        ),
+        (_RE_SOFT_DELETE_RELATED, existing_soft_delete_related, _cascade_key),
         (
             _RE_SOFT_DELETE_OWNED,
             existing_soft_delete_owned,
@@ -321,6 +346,7 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
             existing_soft_delete_self_cascade,
             existing_mti_triggers,
             existing_mti_soft_deletes,
+            cascade_deps,
             existing_tenant_autofill,
             existing_tenant_policies,
             existing_policy_identities,
@@ -386,6 +412,12 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
                 for match in pattern.finditer(content):
                     target[key_fn(match)] = _recorded_sql_identity(content, match)
 
+            # Bespoke rather than a fourth ``scan_table`` column: one family asks this, the only
+            # one whose drop is hosted by a different app than its create. Last write wins with
+            # the digest above, so a re-adoption's create supersedes the one it replaced.
+            for match in _RE_SOFT_DELETE_RELATED.finditer(content):
+                cascade_deps[_cascade_key(match)] = (app.label, path.stem)
+
             # Recorded per file, not per family: a repeat is only visible while the file is
             # open, and the key it writes is the one a real MTI child writes too.
             for pattern, kind in (
@@ -414,16 +446,12 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
             # inside one migration reads as the create -- the order the emitter writes them in.
             cascade_retirements = list(_RE_SOFT_DELETE_RELATED_RETIRED.finditer(content))
             for match in cascade_retirements:
-                existing_soft_delete_related.pop(
-                    (
-                        _identifiers._unescape_ident(match.group(1)),
-                        _identifiers._unescape_ident(match.group(2)),
-                        _identifiers._unescape_ident(match.group('foreign_key'))
-                        if match.group('foreign_key') is not None
-                        else None,
-                    ),
-                    None,
-                )
+                key = _cascade_key(match)
+                # Snapshotted here rather than resolved later: a re-adoption overwrites the
+                # provenance map, and the create *this* file dropped is the one it held now.
+                site = CascadeRetirementSite(app.label, path.stem, key, cascade_deps.get(key))
+                retirement_sites.append(site)
+                existing_soft_delete_related.pop(key, None)
             if cascade_retirements:
                 retirement_apps.add(app.label)
 
@@ -468,6 +496,8 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
         triggers=existing_triggers,
         soft_deletes=existing_soft_deletes,
         soft_delete_related=existing_soft_delete_related,
+        soft_delete_related_dependencies=cascade_deps,
+        cascade_retirement_sites=retirement_sites,
         soft_delete_owned=existing_soft_delete_owned,
         soft_delete_owned_sweep=existing_soft_delete_owned_sweep,
         soft_delete_self_cascade=existing_soft_delete_self_cascade,

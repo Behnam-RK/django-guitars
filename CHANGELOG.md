@@ -10,6 +10,13 @@ Full history and diffs: [GitHub releases](https://github.com/Behnam-RK/django-gu
 
 ## [Unreleased]
 
+## [2.10.0] - 2026-09-10
+
+- Fixed: **a cascade retirement could be written into a different app from the migration that created the rule, with nothing ordering the two.** The create is hosted by the app that walked the owner model; the drop by the app owning the table the rule fires on. Those agree only by accident, and where they differ a fresh `migrate` reached the `DROP RULE` first and aborted with `rule "..." for relation "..." does not exist` — while an incrementally-migrated database was untouched, so the graph was green all the way to a virgin-database failure. Reproduced on 2.9.0; found by a review round on #48, tracked as #49.
+- The retirement now **depends on the migration that created the rule it drops**. That node cannot be derived: a rule is a `RunSQL`, invisible to migration state, so [ADR 0013](docs/adr/0013-cross-app-migration-dependency-edges.md)'s resolver has nothing to resolve and an `ObjectRef` for the table would name the migration creating the *table* rather than the *rule*. The scan records it per cascade key instead, beside the digest, carried through a rename with the coverage it mirrors. One edge suffices: the creating migration already carried edges for everything its `CREATE RULE` named. Emitted under `--adopt` too, whose `DROP RULE IF EXISTS` turns the abort into silence — the drop no-ops and the later create leaves the rule live.
+- **`--check` now names a retirement already written that nothing orders**, with the dependency tuple to paste. The emitter cannot reach those files: a migration already recorded is skipped by the digest guard and never rewritten, so for every history that already has this defect the note is the only channel. It joins the existing missing-edge refusal rather than adding a `--check` surface. This is why 2.10.0 is a minor — it fails graphs that passed before, the same reason 2.5.0 was.
+- Recorded as [ADR 0021](docs/adr/0021-retirement-ordered-against-its-create.md), which also records what the fix does *not* claim: two apps creating one rule stays unsound, one edge being unable to order three nodes.
+
 ## [2.9.1] - 2026-09-09
 
 - Fixed: **a proxy model was treated as a multi-table-inheritance child**, which broke `migrate` for any project declaring one over a `DutarModel` or below. Django fills a proxy's `_meta.parents` and leaves its `local_fields` empty, so `is_mti_child` answered true. Where the concrete model **owns** the column, `column_owner` resolves that model and the operation names the proxy's own table as its parent; where it is a real MTI child, the genuine ancestor is resolved and the operation is a byte-identical copy of the child's own. The soft-delete half was inert -- both forms name their rule `soft_delete` and PostgreSQL dedupes a rule by name, so the second merely replaced the first with a byte-identical body -- but the trigger half emitted a second `CREATE TRIGGER updated_at_trigger` on a table that already had one, which PostgreSQL refuses: `trigger "updated_at_trigger" for relation ... already exists`. A proxy alone also flipped `needs_parent_function`, forcing the MTI parent trigger-function migration into a project with no MTI at all. Fixed in both places -- `is_mti_child` now answers false for a proxy, so every caller agrees, and `_build_operations` skips proxies as `_table_app_labels` and the tenancy walk already do.
@@ -246,7 +253,8 @@ First stable release. **BREAKING:** the instrument ladder shifted down one rung 
 
 - Added: initial release — `SetarModel`, `GuitarModel`, `SoftDeletableModel`, `DisableSignals`, `makeguitarmigrations`.
 
-[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.9.1...HEAD
+[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.10.0...HEAD
+[2.10.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.10.0
 [2.9.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.9.1
 [2.9.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.9.0
 [2.8.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.8.0

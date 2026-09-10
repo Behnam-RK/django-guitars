@@ -111,6 +111,10 @@ class Command(OperationsMixin, BaseCommand):
         # parsed at CREATE time, so anything it references in *another* app needs a dependency
         # edge. Filled as the rules are built and read back per app -- see ``_object_refs``.
         self._object_refs: dict[str, list[ObjectRef]] = {}
+        # Migrations that created the rules this run's retirements drop, keyed by the app whose
+        # migration carries the drop. Not an ``ObjectRef``: a rule is a ``RunSQL``, so migration
+        # state cannot resolve it and the node comes from the scan. See ADR 0021.
+        self._retirement_edges: dict[str, list[tuple[str, str]]] = {}
         # The project's migration graph, shared by the two readers of it below and dropped
         # whenever this command writes a file. ``None`` is "not built"; building one imports
         # every migration module in the project, so it is worth not doing per app.
@@ -544,6 +548,10 @@ class Command(OperationsMixin, BaseCommand):
             adopt=adopt,
         )
         changes_made = changes_made or stage_changed
+        # Once per run, after the stage that may have written one: a retirement already on disk
+        # is never rewritten, so the emitter's edge cannot reach it. Not on the --force-rls path
+        # below, which returns before here and writes no rule operation at all. ADR 0021.
+        self._missing_edges.extend(self._missing_retirement_edge_notes())
 
         # Step 3: surface cross-app cascade rules this scoped run intentionally
         # did not create, so the "pragmatic scope" tradeoff is never silent.

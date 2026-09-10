@@ -1127,6 +1127,10 @@ class OperationsMixin:
         """Order a cascade retirement against the migration that created the rule it drops.
         Read off the scan rather than resolved: a rule is a ``RunSQL``, so migration state has
         nothing to resolve, and the drop is hosted by the owner table's app either way."""
+        # This drop is genuinely being written, so its operation set may recur if the key is
+        # re-adopted and retired again -- tainted here, not for every app that has ever retired
+        # anything, or a one-time retirement disables the guard forever needlessly.
+        self.existing.retirement_apps.add(app_label)
         creates = self.existing.soft_delete_related_dependencies.get(key, [])
         # The newest: the drop being written now comes after every one of them, so the last is
         # the one whose rule is live. Own-app creates are ordered by that app's own history.
@@ -1148,7 +1152,14 @@ class OperationsMixin:
             for site in self.existing.cascade_retirement_sites
             if site.key == key
         ]
-        if not sites or sites[-1][0] == app_label:
+        # Genuinely absent with no retirement history is a brand new key, not a re-adoption --
+        # its create has never recurred, so the digest guard has nothing to yield for.
+        if not sites:
+            return
+        # Reaching here, this app is re-emitting a create it already wrote once -- breaking
+        # the digest guard's "an operation set never recurs" assumption on purpose.
+        self.existing.retirement_apps.add(app_label)
+        if sites[-1][0] == app_label:
             return
         self._record_edge(self._retirement_edges, app_label, sites[-1])
 

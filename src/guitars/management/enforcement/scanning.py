@@ -173,7 +173,6 @@ def _settle_retirement_sites(
     provenance: dict[tuple[str, str, str | None], list[tuple[str, str]]],
     renames: dict[str, list[str]],
     live_tables: set[str],
-    retirement_apps: set[str],
     ensure_loader: Callable[[], MigrationLoader],
 ) -> list[CascadeRetirementSite]:
     """Match each retirement to the create it dropped and pop the key where the drop wins. The
@@ -186,17 +185,19 @@ def _settle_retirement_sites(
         by_key.setdefault(_current_key(site.key, moved, live_tables), []).append(site)
     settled = []
     for key, drops in by_key.items():
-        creates = provenance.get(key, [])
         drops.sort(key=_position)
+        drop_nodes = {(site.app_label, site.migration) for site in drops}
+        # A migration cannot create what it also retires: a create sharing a file with a drop
+        # for the same key is a hand-edited, self-contradicting migration, and is not evidence
+        # of anything -- excluded rather than paired with itself.
+        creates = [c for c in provenance.get(key, []) if c not in drop_nodes]
         for rank, site in enumerate(drops):
             node = (site.app_label, site.migration)
-            created = _create_this_drop_dropped(node, creates, graph, rank)
-            settled.append(site._replace(key=key, created=created))
-            if created is not None:
-                # The app that *creates* the key, not the one carrying the header: a re-adoption
-                # is re-emitted from there, and its operation set recurs, which is what the
-                # file-level digest guard assumes never happens.
-                retirement_apps.add(created[0])
+            settled.append(
+                site._replace(
+                    key=key, created=_create_this_drop_dropped(node, creates, graph, rank)
+                )
+            )
         if _retirement_is_the_last_word(drops, creates, graph):
             recorded.pop(key, None)
     return settled
@@ -554,9 +555,6 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
                 retirement_sites.append(
                     CascadeRetirementSite(app.label, path.stem, _cascade_key(match), None)
                 )
-            if cascade_retirements:
-                retirement_apps.add(app.label)
-
             retirements = list(_RE_TENANT_AUTOFILL_RETIRED.finditer(content))
             for match in retirements:
                 existing_tenant_autofill.pop(_autofill_key(match), None)
@@ -599,7 +597,6 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
         cascade_deps,
         _pending_renames,
         live_tables,
-        retirement_apps,
         _ensure_loader,
     )
 

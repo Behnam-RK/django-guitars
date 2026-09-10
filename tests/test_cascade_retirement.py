@@ -153,9 +153,9 @@ def test_the_committed_history_records_and_then_forgets_the_retired_key():
 
     assert ('testapp_callbacks', 'testapp_band', None) not in existing.soft_delete_related
     assert ('testapp_encore', 'testapp_band', None) not in existing.soft_delete_related
-    # And the app is flagged, so the file-level digest guard yields -- retirement makes an
-    # operation set recur, which that guard otherwise assumes never happens.
-    assert 'testapp' in existing.retirement_apps
+    # Not flagged: this key is gone for good, nothing in the current models calls for it
+    # again, so no operation set for it will ever recur and the digest guard stays intact.
+    assert 'testapp' not in existing.retirement_apps
 
 
 def test_the_silent_sweep_meets_a_cycle_and_says_nothing():
@@ -402,6 +402,9 @@ def test_the_retirement_declares_an_edge_to_the_migration_that_created_the_rule(
     assert _retirements(command)
 
     assert command._retired_cascade_dependencies_for(app) == [('crossapp_owner', '0001_initial')]
+    # The drop is genuinely being written, so testapp's operation set may recur if this key
+    # is ever re-adopted and retired again.
+    assert 'testapp' in command.existing.retirement_apps
 
 
 def test_a_create_in_the_same_app_needs_no_edge(command):
@@ -412,6 +415,8 @@ def test_a_create_in_the_same_app_needs_no_edge(command):
     assert _retirements(command)
 
     assert command._retired_cascade_dependencies_for(apps.get_app_config('testapp')) == []
+    # No cross-app edge needed, but the drop still recurs the app's own operation set.
+    assert 'testapp' in command.existing.retirement_apps
 
 
 def test_a_creating_migration_the_graph_never_saw_warns_instead_of_emitting_an_edge(command):
@@ -583,7 +588,6 @@ def _settled(retirement, creates):
         {_KEY: creates},
         {},
         set(),
-        set(),
         lambda: MigrationLoader(None, ignore_no_migrations=True),
     )
     return _KEY in recorded, site.created
@@ -614,7 +618,6 @@ def test_an_unordered_create_is_not_read_as_older_than_the_retirement():
         {_KEY: [('crossapp_third', '0001_initial'), ('crossapp_owner', '0002_auto_enforcement')]},
         {},
         set(),
-        set(),
         lambda: MigrationLoader(None, ignore_no_migrations=True),
     )
 
@@ -643,6 +646,8 @@ def test_a_readopted_create_declares_the_retirement_it_revives(command):
     assert command._retired_cascade_dependencies_for(apps.get_app_config('testapp')) == [
         ('crossapp_owner', '0001_initial')
     ]
+    # testapp is re-emitting a create it already wrote once -- its own digest guard must yield.
+    assert 'testapp' in command.existing.retirement_apps
 
 
 def test_a_readopted_create_in_the_retiring_app_needs_no_edge(command):
@@ -655,6 +660,7 @@ def test_a_readopted_create_in_the_retiring_app_needs_no_edge(command):
     command._record_readoption_edge('testapp', _KEY)
 
     assert command._retired_cascade_dependencies_for(apps.get_app_config('testapp')) == []
+    assert 'testapp' in command.existing.retirement_apps
 
 
 def test_the_create_path_records_that_edge_itself(command):
@@ -696,7 +702,7 @@ def test_a_legacy_history_with_two_unordered_cycles_is_still_named(command):
         _site('crossapp_owner', '0003_auto_enforcement', None),
     ]
     settled = scanning._settle_retirement_sites(
-        drops, {}, {_KEY: creates}, {}, set(), set(), _loader
+        drops, {}, {_KEY: creates}, {}, set(), _loader
     )
 
     # Paired by rank, the two alternating: the nth drop dropped the nth create.
@@ -718,7 +724,6 @@ def test_an_unordered_history_ending_in_a_drop_reads_as_retired(command):
         {_KEY: creates},
         {},
         set(),
-        set(),
         _loader,
     )
 
@@ -732,7 +737,7 @@ def test_a_retirement_whose_create_was_never_scanned_leaves_the_key_alone():
     recorded = {_KEY: 'abc'}
 
     (site,) = scanning._settle_retirement_sites(
-        [_site('crossapp_owner', '0001_initial', None)], recorded, {}, {}, set(), set(), _loader
+        [_site('crossapp_owner', '0001_initial', None)], recorded, {}, {}, set(), _loader
     )
 
     assert site.created is None
@@ -803,10 +808,44 @@ def test_a_freed_name_retaken_by_a_live_model_is_not_translated():
         {key: [create]},
         {'shop_new_child': ['shop_old_child']},
         {'shop_old_child'},
-        set(),
         _loader,
     )
 
     (site,) = settled
     assert site.key == key
     assert site.created == create
+
+
+def test_a_genuinely_retired_key_taints_only_when_its_own_drop_is_written(command):
+    """The bug: an app that ever retired one key used to lose its digest guard forever, over
+    content the retirement never touches again. A live retirement taints the app writing it;
+    the corpus's own permanently-retired key, with nothing left to write, must not."""
+    _seed(command, ('crossapp_owner', '0001_initial'))
+    assert _retirements(command)
+    assert 'testapp' in command.existing.retirement_apps
+
+    real = Command()
+    real._build_operations(apps.get_app_config('testapp'))
+    assert 'testapp' not in real.existing.retirement_apps
+
+
+def test_a_migration_that_creates_and_retires_the_same_key_is_not_read_as_its_own_evidence(
+    monkeypatch,
+):
+    """A hand-edited migration self-contradicting on one key: the generator itself can never
+    write both headers for one, coming from mutually exclusive halves of one set difference.
+    A self-referencing create counts for nothing, rather than reading the key as retired."""
+    existing = _scan_with(monkeypatch, testapp=(_created() + _retired(),))
+
+    assert _KEY in existing.soft_delete_related
+    (site,) = existing.cascade_retirement_sites
+    assert site.created is None
+
+
+def test_a_brand_new_key_with_no_retirement_history_does_not_taint_the_app(command):
+    """Absent from ``recorded`` is not the same as retired: a key that has simply never been
+    created before -- a from-scratch scan, or a genuinely new cascade -- must not taint the
+    app as if a re-adoption were in progress. Only a key with a real retirement site is one."""
+    command._record_readoption_edge('testapp', ('testapp_album', 'testapp_genre', None))
+
+    assert 'testapp' not in command.existing.retirement_apps

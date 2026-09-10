@@ -45,13 +45,19 @@ def generated():
     The two apps are installed but out of ``LOCAL_APPS``, so nothing else in the suite sees
     them -- they are scoped in here and nowhere else."""
     directory = Path(apps.get_app_config(_OWNER).path) / 'migrations'
+    child_dir = Path(apps.get_app_config(_CHILD).path) / 'migrations'
     before = set(directory.glob('*.py'))
+    child_before = set(child_dir.glob('*.py'))
     written = None
     try:
         with _SCOPED:
             call_command('makeguitarmigrations', stdout=StringIO(), stderr=StringIO())
         new = set(directory.glob('*.py')) - before
         assert len(new) == 1, new
+        # The child's own coverage is committed, so a run adds nothing there. Asserted rather
+        # than cleaned: a file this fixture does not know about is one it would leave in the
+        # repository, and the teardown below only reaches the app it expects to write to.
+        assert set(child_dir.glob('*.py')) == child_before
         written = new.pop()
         yield written
     finally:

@@ -755,3 +755,58 @@ def test_a_renamed_key_is_told_the_quieter_symptom(command):
 
     assert 'silently does nothing and leaves the rule live' in note
     assert 'does not exist' not in note
+
+
+def test_a_re_adopted_key_reads_as_live_regardless_of_which_apps_scan_last(monkeypatch):
+    """The bug the raw walk's own pop used to hide: whichever app scanned last decided the
+    answer, so a re-adopted key -- more creates than drops, unordered -- read as retired
+    whenever its drop's app scanned after its creates'. ``testapp`` scans first."""
+    with override_settings(LOCAL_APPS=['tests.testapp', 'tests.crossapp_owner']):
+        existing = _scan_with(
+            monkeypatch,
+            testapp=(_created(), _created()),
+            crossapp_owner=(_retired(),),
+        )
+
+    assert _KEY in existing.soft_delete_related
+
+
+def test_a_renamed_owner_table_alone_still_promises_the_abort(command):
+    """The owner table's own rename plays no part in ``_retired_cascade_operations``' choice
+    of ``IF EXISTS`` -- only the related table's does -- so a rename here must not switch the
+    note to the quieter symptom, which promises a silence this drop cannot produce."""
+    key = ('testapp_album', 'testapp_genre', None)
+    command.existing.renamed_tables['testapp_genre'] = ['testapp_old_genre']
+    command.existing.cascade_retirement_sites.append(
+        _site('crossapp_owner', '0001_initial', ('crossapp_third', '0001_initial'))._replace(
+            key=key
+        )
+    )
+
+    (note,) = command._missing_retirement_edge_notes(set())
+
+    assert 'does not exist' in note
+    assert 'silently does nothing' not in note
+
+
+def test_a_freed_name_retaken_by_a_live_model_is_not_translated():
+    """The mirror of ``_move_renamed``'s own guard: a freed name another model retook keeps
+    its own coverage under that name, so the site's key must stay untranslated too, or the
+    lookup misses the provenance the walk deliberately left where it was."""
+    key = ('shop_old_child', 'testapp_genre', None)
+    create = ('crossapp_third', '0001_initial')
+    drop = _site('crossapp_owner', '0001_initial', None)._replace(key=key)
+
+    settled = scanning._settle_retirement_sites(
+        [drop],
+        {},
+        {key: [create]},
+        {'shop_new_child': ['shop_old_child']},
+        {'shop_old_child'},
+        set(),
+        _loader,
+    )
+
+    (site,) = settled
+    assert site.key == key
+    assert site.created == create

@@ -70,14 +70,14 @@ it revives, for as many cycles as a project runs.
 - **`--check` fails on graphs that passed before**, on files this release did not touch — why
   2.10.0 is a minor, the precedent being 2.5.0. Scoped to the apps a run names, and narrowed by
   two reachability guards and the own-app filter.
-- **Two apps creating one rule is unsound and undetected.** Registry order picks which create
-  the drop is ordered after, so the drop can run before the other one and leave the rule live
-  where an incremental database has it retired. One edge cannot order three nodes.
-- **Two apps creating one rule stays unsound**: one edge cannot order three nodes. The
-  `--check` half reports it, which is the best available outcome.
-- **Two apps retiring one key** is that shape from the other side, equally undetected.
-- **An unordered history is attributed by rank**, the two alternating: the *n*th drop dropped the
-  *n*th create. A guess, made because the alternative is silence on the histories most in need.
+- **Two apps creating (or retiring) one rule is unsound and undetected.** One edge cannot order
+  three nodes: registry order picks which create the drop is ordered after, so the drop can run
+  before the other one and leave the rule live where an incremental database has it retired.
+- **An unordered history is attributed by rank**, the two alternating: the *n*th drop dropped
+  the *n*th create -- a guess, since silence would fall on the histories most in need. It assumes
+  every recorded create was a genuine event: a digest-only replace pads the count with no
+  retirement between, and `RetireEnforcement`'s wholesale subtraction touches this bookkeeping
+  not at all. Both misattribute rank; neither is detected.
 - **An edge target can vanish**, removing that app later turning it into `NodeNotFoundError` --
   shared with every ADR 0013 edge, but pointing at an *enforcement* migration, likelier squashed.
 

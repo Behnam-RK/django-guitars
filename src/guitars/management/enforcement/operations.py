@@ -2292,14 +2292,14 @@ class OperationsMixin:
             # Already quoted by ``_safe_ident``: quoting it again prints a name no `migrate`
             # log carries, and the whole point of the sentence is that it can be grepped for.
             rule_name = _related_rule_name(site.key[0], site.key[2])
-            # A renamed table makes that drop ``IF EXISTS`` over every prior spelling, so it
-            # does not abort -- it no-ops, and the create after it leaves the rule live. The
-            # quieter half, and the one whose symptom a reader would otherwise wait for.
+            # A renamed *related* table makes that drop ``IF EXISTS`` over every prior
+            # spelling -- ``_retired_cascade_operations`` checks that table alone, an owner
+            # rename playing no part -- so it no-ops instead of aborting, and the rule stays live.
             symptom = (
                 'a fresh `migrate` reaches the drop before that create, and the drop being '
                 '`IF EXISTS` over the names this table has held, it silently does nothing and '
                 'leaves the rule live'
-                if self._renamed(site.key[0], site.key[1])
+                if self._renamed(site.key[0])
                 else f'a fresh `migrate` reaches the drop first and fails with `rule '
                 f'{rule_name} for relation "{site.key[1]}" does not exist`'
             )

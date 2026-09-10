@@ -176,9 +176,9 @@ def _settle_retirement_sites(
     retirement_apps: set[str],
     ensure_loader: Callable[[], MigrationLoader],
 ) -> list[CascadeRetirementSite]:
-    """Match each retirement to the create it dropped and settle whether it or that create won.
-    After the walk, because the walk is registry order while both questions are graph order: an
-    app scanned first pops a key its create then re-records. See ADR 0021."""
+    """Match each retirement to the create it dropped and pop the key where the drop wins. The
+    walk itself never pops: which of a create and its drop it sees last is registry order, not
+    time, so both questions are settled here, once, by the graph. See ADR 0021."""
     moved = {old: new for new, chain in renames.items() for old in chain}
     graph = ensure_loader().graph
     by_key: dict[tuple[str, str, str | None], list[CascadeRetirementSite]] = {}
@@ -197,7 +197,7 @@ def _settle_retirement_sites(
                 # is re-emitted from there, and its operation set recurs, which is what the
                 # file-level digest guard assumes never happens.
                 retirement_apps.add(created[0])
-        if key in recorded and _retirement_is_the_last_word(drops, creates, graph):
+        if _retirement_is_the_last_word(drops, creates, graph):
             recorded.pop(key, None)
     return settled
 
@@ -546,16 +546,14 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
                 existing_tenant_autofill[_autofill_key(match)] = _recorded_sql_identity(
                     content, match
                 )
-            # After ``scan_table`` recorded this file's create headers, so retire-then-create
-            # inside one migration reads as the create -- the order the emitter writes them in.
+            # Not popped here: two apps scan in a fixed registry order, so which of a create
+            # and its drop is seen *last* in this walk is an accident of INSTALLED_APPS, not
+            # of time. Left for the settle post-pass, which asks the graph instead. See ADR 0021.
             cascade_retirements = list(_RE_SOFT_DELETE_RELATED_RETIRED.finditer(content))
             for match in cascade_retirements:
-                key = _cascade_key(match)
-                # ``created`` is filled after the walk, not here: registry order can put the
-                # create in an app scanned later, and which create this drop dropped is a
-                # question about the graph.
-                retirement_sites.append(CascadeRetirementSite(app.label, path.stem, key, None))
-                existing_soft_delete_related.pop(key, None)
+                retirement_sites.append(
+                    CascadeRetirementSite(app.label, path.stem, _cascade_key(match), None)
+                )
             if cascade_retirements:
                 retirement_apps.add(app.label)
 

@@ -56,6 +56,7 @@ from guitars.management.enforcement.headers import (
 )
 from guitars.management.enforcement.identity import _literal, _operation
 from guitars.models.fields import OwningForeignKey, _targets_primary_key
+from guitars.routing import migrates_to_postgresql, vendor_skip_note
 from guitars.sql import _identifiers
 from guitars.sql import policy as _policy
 from guitars.sql import soft_delete as _soft_delete
@@ -192,6 +193,7 @@ class OperationsMixin:
         stderr: OutputWrapper
         style: Style
         _tenancy_notes: list[str]
+        _vendor_skip_notes: list[str]
         _skipped_rule_notes: list[str]
         _rule_name_clashes: list[str]
         _claimed_rule_names: dict[tuple[str, str], tuple]
@@ -213,6 +215,7 @@ class OperationsMixin:
         _missing_edges: list[str]
         _unresolved_reference_notes: list[str]
         _table_app_labels_cache: dict[str, str] | None
+        _routed_away_cache: frozenset[str] | None
         _cascade_key_maps_cache: (
             tuple[dict[tuple[str, str, str | None], str], dict[str, type[models.Model]]] | None
         )
@@ -411,6 +414,12 @@ class OperationsMixin:
             # already has -- keyed on the same ``db_table``, so it collides rather than adds.
             # Filtered as ``_table_app_labels`` filters it, and as the tenancy walk does.
             if model._meta.proxy:
+                continue
+            # Every family below is PostgreSQL DDL, and ``migrate`` asks the router about
+            # each ``RunSQL`` it applies -- so a model the router sends elsewhere earns
+            # operations its own backend's parser refuses. Asked once, for all seven.
+            if not migrates_to_postgresql(model):
+                self._vendor_skip_notes.append(vendor_skip_note(model))
                 continue
             table = model._meta.db_table
             # The *column*, not the field name -- they agree for a plain `id` pk, but a
@@ -611,9 +620,30 @@ class OperationsMixin:
                 for model in app.get_models():
                     if model._meta.proxy or bool(model._meta.managed) is not managed:
                         continue
+                    # A routed-away table maps to nothing, which is what withholds the
+                    # retirement: ``_retired_cascade_operations`` drops only on positive
+                    # evidence, and "maps to no local model" is the scoped-run reading too.
+                    if not migrates_to_postgresql(model):
+                        continue
                     hosting.setdefault(model._meta.db_table, app.label)
         self._table_app_labels_cache = hosting
         return hosting
+
+    def _routed_away_tables(self) -> frozenset[str]:
+        """Every local table the router migrates off PostgreSQL. Read by the note families
+        that compare recorded coverage against required: without it a routed-away model's
+        own migration reads as abandoned and each would advise dropping it by hand."""
+        if self._routed_away_cache is not None:
+            return self._routed_away_cache
+        tables = {
+            model._meta.db_table
+            for app in django_apps.get_app_configs()
+            if _generator.is_local(app)
+            for model in app.get_models()
+            if not model._meta.proxy and not migrates_to_postgresql(model)
+        }
+        self._routed_away_cache = frozenset(tables)
+        return self._routed_away_cache
 
     def _autofill_key_maps(
         self,
@@ -748,8 +778,10 @@ class OperationsMixin:
             if not _generator.is_local(app):
                 continue
             for model in app.get_models():
+                # Filed before the gate below: ``_retired_cascade_column`` looks a table up
+                # here to spell a reverse, and a routed-away table is still a table.
                 models_by_table.setdefault(model._meta.db_table, model)
-                if not has_column(model, '_deleted_at'):
+                if not has_column(model, '_deleted_at') or not migrates_to_postgresql(model):
                     continue
                 owner_table = column_owner(model, '_deleted_at')._meta.db_table
                 # ``report=False``: this sweep covers apps the run was never asked about, and
@@ -980,6 +1012,10 @@ class OperationsMixin:
             related_table, owner_table, via = key
             if owner_table in hosting and related_table in hosting:
                 continue
+            # A routed-away table maps to nothing by design, and the vendor note already
+            # says why. Advising a by-hand drop here would name the same model twice.
+            if {owner_table, related_table} & self._routed_away_tables():
+                continue
             drop = _soft_delete._DROP_SOFT_DELETE_RELATED_OBJECTS_RULE.format(
                 rule_name=_related_rule_name(related_table, via),
                 table=_identifiers._quote_table(owner_table),
@@ -1036,7 +1072,7 @@ class OperationsMixin:
         required = self._required_autofill_keys()
         notes: list[str] = []
         for table, function in sorted(set(self.existing.tenant_autofill) - set(required)):
-            if table in hosting:
+            if table in hosting or table in self._routed_away_tables():
                 continue
             slots = self._autofill_slots(table, function)
             notes.append(
@@ -1228,6 +1264,10 @@ class OperationsMixin:
         return (
             on_delete == models.CASCADE
             and has_column(related_model, '_deleted_at')
+            # Both ends, not just the owner `_build_operations` already gated: the rule fires
+            # on the owner's table and its action updates the child's, so a child the router
+            # sends elsewhere is a table this DDL cannot name.
+            and migrates_to_postgresql(related_model)
             # The MTI parent-link (a CASCADE OneToOne) is structural, not a user cascade FK.
             and not getattr(fk_field.remote_field, 'parent_link', False)
             # An FK reached through MTI is not a second FK: it is the *same physical column*
@@ -1607,6 +1647,10 @@ class OperationsMixin:
             # An FK reached through MTI is the same physical column on the ancestor's table,
             # covered by that ancestor's own pass -- as in _is_cascade_candidate.
             and fk_field.model is model
+            # Both ends again: the rule fires on the owner's table and its action stamps the
+            # dependent's, so either one routed off PostgreSQL leaves it unwritable.
+            and migrates_to_postgresql(model)
+            and migrates_to_postgresql(fk_field.related_model)
         )
 
     @staticmethod

@@ -26,6 +26,7 @@ from guitars.introspection import (
     owns_column,
     rule_update_cycle_edges,
 )
+from guitars.routing import migrates_to_postgresql
 from guitars.sql import SWITCH_OFF_HARD_DELETION, SWITCH_ON_HARD_DELETION
 
 from .fields import OwningForeignKey, _targets_primary_key
@@ -56,6 +57,10 @@ def _declared_owning_fields(model: type[Model]) -> list[OwningForeignKey]:
         if isinstance(field, OwningForeignKey)
         and has_column(field.related_model, '_deleted_at')
         and _targets_primary_key(field)
+        # And the routing refusal, for the same reason as the two above: the generator
+        # writes no rule across a relation either end of which is off PostgreSQL.
+        and migrates_to_postgresql(model)
+        and migrates_to_postgresql(field.related_model)
     ]
 
 

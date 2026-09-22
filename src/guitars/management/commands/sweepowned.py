@@ -19,6 +19,7 @@ from guitars.introspection import (
 from guitars.management import _generator
 from guitars.management.enforcement.operations import _owned_rule_name
 from guitars.models.soft_deletion import _owned_fields
+from guitars.routing import ENFORCEMENT_VENDOR
 from guitars.sql._identifiers import _split_qualified, _unescape_ident
 from guitars.tenancy import tenancy_bypassed
 
@@ -179,6 +180,14 @@ class Command(BaseCommand):
 
     def handle(self, *app_labels, **options):
         using = options['database']
+        # ``_owned_rules_in_database`` reads ``pg_rules``: on another backend there are no
+        # owned rules to follow, so a sweep there would be a syntax error, never a repair.
+        if connections[using].vendor != ENFORCEMENT_VENDOR:
+            raise CommandError(
+                f"Database '{using}' is {connections[using].vendor}, not "
+                f'{ENFORCEMENT_VENDOR}: this kit writes no owned rules there, so there is '
+                f'nothing to sweep.'
+            )
         repair = options['repair']
         requested = set(app_labels)
         # A typo'd label would otherwise match no app and report "nothing to repair" -- a

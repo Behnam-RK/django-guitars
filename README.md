@@ -10,7 +10,7 @@ Most Django soft-delete and timestamp libraries live in Python: a signal here, a
 
 ## Requirements
 
-**Python** ≥ 3.10 · **Django** 5.0–6.0 (uses `db_default`; CI samples 5.0/5.2/6.0 against Python 3.10/3.12/3.14) · **PostgreSQL** ≥ 14, currently the only supported backend since the soft-delete rule and `_updated_at` trigger live in the database itself (CI verifies 14 and 18).
+**Python** ≥ 3.10 · **Django** 5.0–6.0 (uses `db_default`; CI samples 5.0/5.2/6.0 against Python 3.10/3.12/3.14) · **PostgreSQL** ≥ 14, currently the only supported backend since the soft-delete rule and `_updated_at` trigger live in the database itself (CI verifies 14 and 18) — a model your own database router sends elsewhere is skipped with a note rather than handed DDL that backend cannot run.
 
 > **Status:** the public API — base models, managers, the `guitars.sql` names generated migrations depend on, and `GUITARS_*` settings — is stable since 1.0.0; breaking changes now require a major version. See [`CHANGELOG.md`](CHANGELOG.md).
 

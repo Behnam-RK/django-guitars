@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, NamedTuple, cast
 
+from guitars.routing import migrates_to_postgresql
+
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -204,6 +206,8 @@ def owner_arms(candidates: Iterable[type[models.Model]]) -> dict[str, list[Owner
                 or not has_column(model, '_deleted_at')
                 or not has_column(field.related_model, '_deleted_at')
                 or not _targets_primary_key(field)
+                or not migrates_to_postgresql(model)
+                or not migrates_to_postgresql(field.related_model)
             ):
                 continue
             dependent_table = column_owner(field.related_model, '_deleted_at')._meta.db_table
@@ -277,6 +281,8 @@ def owned_tenancy_refusals(
                 or field.model is not model
                 or not has_column(field.related_model, '_deleted_at')
                 or not _targets_primary_key(field)
+                or not migrates_to_postgresql(model)
+                or not migrates_to_postgresql(field.related_model)
             ):
                 continue
             dependent = column_owner(field.related_model, '_deleted_at')

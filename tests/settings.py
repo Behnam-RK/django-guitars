@@ -19,6 +19,15 @@ DATABASES['pooled'] = {  # noqa: F405
     'TEST': {'MIRROR': 'default'},
 }
 
+# A non-PostgreSQL alias, so the router gate reads a real `connections[alias].vendor` rather
+# than a patched one. TEST.MIGRATE is load-bearing: setup_databases migrates every alias, and
+# this project's enforcement migrations are PostgreSQL DDL sqlite's parser would refuse.
+DATABASES['nonpg'] = {  # noqa: F405
+    'ENGINE': 'django.db.backends.sqlite3',
+    'NAME': ':memory:',
+    'TEST': {'MIGRATE': False},
+}
+
 # 'legacy_migrations'/'mti_incremental'/'crossapp_*' are installed but out of LOCAL_APPS -- each
 # test scopes explicitly; the trio co-owns one dependent across apps, the crossapp_tenant pair an
 # MTI chain tenanted one app up. 'makemigrations_override'/'schema_qualified' self-install instead.

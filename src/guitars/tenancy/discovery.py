@@ -486,7 +486,7 @@ def app_coverage(app: AppConfig) -> Coverage:
         # A policy and an autofill trigger are PostgreSQL, and the manager's Python half is
         # not -- which is the whole point of naming the two separately here.
         if not migrates_to_postgresql(model):
-            notes.append(vendor_skip_note(model, python_scoping=True))
+            notes.append(vendor_skip_note(model))
             continue
         coverage, model_notes = _classify(model, memo)
         notes.extend(model_notes)

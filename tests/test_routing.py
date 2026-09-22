@@ -5,6 +5,7 @@ here is registry-and-settings only -- the gate must never open a connection, whi
 from io import StringIO
 
 import pytest
+from django.apps import apps
 from django.core.management import call_command
 from django.test import override_settings
 
@@ -117,14 +118,17 @@ def test_the_note_names_the_alias_and_its_vendor():
     note = routing.vendor_skip_note(Band)
     assert note.startswith(f"'{Band._meta.db_table}' skipped:")
     assert "'nonpg'" in note and 'sqlite' in note
-    assert 'Python scoping still applies' not in note
+    # The Python half is a clause of the one note, not a per-caller suffix -- see the
+    # dedupe test below for what having two spellings of one skip cost.
+    assert note.endswith('Python scoping still applies where a tenanted manager declares it.')
 
 
 @override_settings(DATABASE_ROUTERS=[_ToNonPg()])
-def test_the_note_promises_python_scoping_only_when_asked():
-    assert routing.vendor_skip_note(Band, python_scoping=True).endswith(
-        'Python scoping still applies.'
-    )
+def test_the_note_is_one_string_per_model_whoever_asks():
+    """Both the generator and tenancy discovery reach a tenanted model, and the report dedupes
+    on equality -- so a per-caller suffix printed the same skip twice, differing by a sentence."""
+    assert routing.vendor_skip_note(Band) == routing.vendor_skip_note(Band)
+    assert 'Python scoping still applies' in routing.vendor_skip_note(Band)
 
 
 @override_settings(DATABASE_ROUTERS=[_Nowhere()])
@@ -150,6 +154,9 @@ def _command():
     command.existing.triggers.clear()
     command.existing.soft_deletes.clear()
     command.existing.soft_delete_related.clear()
+    # Both cascade families, or a test asserting a note is empty passes because the *other*
+    # family still holds the committed keys rather than because the routing filter fired.
+    command.existing.soft_delete_revive.clear()
     return command
 
 
@@ -169,9 +176,16 @@ def test_a_routed_away_model_is_named_once_on_stdout():
     call_command('makeguitarmigrations', 'testapp', stdout=out, stderr=err)
 
     printed = out.getvalue()
-    note = routing.vendor_skip_note(Release, python_scoping=True)
-    assert printed.count(note) == 1
+    note = routing.vendor_skip_note(Release)
     assert note in printed
+    # The count is the whole assertion, and it has to be taken over the string the callers
+    # actually append: counting a *longer* string no printed line can contain would report 1
+    # whether the dedupe fired, misfired, or was deleted outright.
+    assert printed.count(note) == 1
+    # And no second line about the same table under any other spelling: counting the note
+    # alone would still read 1 if one caller started rendering a variant of it.
+    naming_it = [line for line in printed.splitlines() if Release._meta.db_table in line]
+    assert len(naming_it) == 1, naming_it
 
 
 @override_settings(DATABASE_ROUTERS=[_ToNonPg()])
@@ -191,10 +205,20 @@ def test_recorded_coverage_for_a_routed_away_app_is_not_retired_or_advised_away(
     nowhere, and retirement drops only on positive evidence -- and no note advises dropping
     it by hand either, the vendor note having already named the model."""
     command = _command()
-    assert command._unmapped_cascade_notes() == []
-    assert command._unmapped_autofill_notes() == []
-    assert command._routed_away_tables()
+    # Seeded, or the assertion is true because nothing is recorded rather than because the
+    # routing filter fired -- the helper clears both families, so there is nothing otherwise.
+    key = (Band._meta.db_table, Release._meta.db_table, None)
+    command.existing.soft_delete_related[key] = 'abc'
+    command.existing.soft_delete_revive[key] = 'def'
+
+    assert command._routed_away_tables() >= {Band._meta.db_table, Release._meta.db_table}
+    # Empty hosting is what makes the assertion below bite: the note's earlier "both tables
+    # still map" branch cannot be what suppresses it, so the routing filter is.
     assert command._table_app_labels() == {}
+    # Both tables map nowhere, so retirement withholds the drop on positive evidence -- and
+    # the by-hand note is withheld too, the vendor note having already named the model.
+    assert command._unmapped_cascade_notes() == []
+    assert command._retired_cascade_operations(apps.get_app_config('testapp')) == []
 
 
 @override_settings(DATABASE_ROUTERS=[_ToNonPgModel()])
@@ -222,3 +246,31 @@ def test_the_generator_and_hard_delete_agree_on_a_routed_away_relation():
     assert Band._meta.db_table not in arms
     for found in arms.values():
         assert all(arm.owner_table != Band._meta.db_table for arm in found)
+
+
+@override_settings(DATABASE_ROUTERS=[_ToNonPgModel()])
+def test_a_routed_away_model_contributes_no_rule_edge():
+    """An edge from a model this kit writes no rule for is *invented*, and the graph's own note
+    says an invented edge is worse than a missing one: it closes a cycle that cannot form and
+    refuses every edge on it, withholding a legitimate rule between two PostgreSQL tables."""
+    from django.apps import apps
+
+    from guitars.introspection import _rule_update_edges
+
+    edges = _rule_update_edges(apps.get_models())
+
+    assert edges, 'the fixture registry should still produce edges'
+    assert not [edge for edge in edges if Band._meta.db_table in edge]
+
+
+@override_settings(DATABASE_ROUTERS=[_ToNonPgModel()])
+def test_a_routed_away_target_drops_the_edge_pointing_at_it():
+    """Both ends, as every other routing gate reads them: an edge naming a routed-away table as
+    its *target* is as invented as one naming it as the table the rule fires on."""
+    from django.apps import apps
+
+    from guitars.introspection import _rule_update_edges
+
+    assert not [
+        edge for edge in _rule_update_edges(apps.get_models()) if edge[1] == Band._meta.db_table
+    ]

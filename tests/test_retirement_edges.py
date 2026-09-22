@@ -111,3 +111,22 @@ def test_the_rule_is_gone_from_a_database_that_applied_the_pair():
     # incrementally-migrated database holds, the property ADR 0006 is about.
     assert 'soft_delete_related_crossapp_retire_child_dependant' not in rules
     assert 'soft_delete' in rules
+
+
+def test_the_note_names_the_rule_of_the_family_whose_site_it_is():
+    """A ``CascadeRetirementSite`` carries no family, and the two resolve to *different*
+    creates -- this repo's own shape, the cascade in 0057 and the revive in 0058. One shared
+    minter sends the reader grepping for a name the `migrate` failure never prints."""
+    from guitars.management.enforcement.command import Command
+    from guitars.management.enforcement.scanning import CascadeRetirementSite
+
+    command = Command()
+    command.existing.cascade_retirement_sites.clear()
+    command.existing.revive_retirement_sites.clear()
+    site = CascadeRetirementSite('testapp', '0059_retirement_host', ('testapp_album', 'testapp_band', None), _CREATE)
+    command.existing.revive_retirement_sites.append(site)
+
+    (note,) = command._missing_retirement_edge_notes(set())
+
+    assert 'soft_delete_revive_13_testapp_album' in note
+    assert 'soft_delete_related_testapp_album' not in note

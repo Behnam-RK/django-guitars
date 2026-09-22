@@ -14,11 +14,11 @@ Three options were on the table, all named in the issue: consult the router; a `
 
 ## Decision
 
-A leaf module `guitars.routing`, beside `guitars.local_apps` and for its reason — `tenancy` and `management` both need it. `migrates_to_postgresql(model)` is `True` when **any** alias `router.allow_migrate_model` accepts for that model has `vendor == 'postgresql'`, and short-circuits to `True` when `settings.DATABASE_ROUTERS` is empty. `vendor_skip_note(model, *, python_scoping=False)` renders the one note both callers print.
+A leaf module `guitars.routing`, beside `guitars.local_apps` and for its reason — `tenancy` and `management` both need it. `migrates_to_postgresql(model)` is `True` when **any** alias `router.allow_migrate_model` accepts for that model has `vendor == 'postgresql'`, and short-circuits to `True` when `settings.DATABASE_ROUTERS` is empty. `vendor_skip_note(model)` renders one string per model whoever asks — a per-caller suffix made the generator and tenancy discovery print two spellings of one skip, which the report's equality dedupe could not collapse.
 
 Every walk that decides whether to *emit* asks it: `_build_operations`' model loop, `_table_app_labels`, `_cascade_key_maps`, `_is_cascade_candidate` and `_is_owned_candidate` (both ends of each relation, not just the owner), `command.py`'s singleton-function scan, and `tenancy.discovery`'s `app_coverage`, `owner_autofill_notes` and `_dimensions`. It is also asked by `introspection.owner_arms`, `introspection.owned_tenancy_refusals` and `models.soft_deletion._declared_owning_fields`, so the generator and `hard_delete()` cannot disagree. `audittenancy` and `sweepowned` raise `CommandError` on a non-PostgreSQL connection; `RetireEnforcement.database_forwards` returns without executing.
 
-Walks that answer "does any model still hold this table name" are deliberately **not** gated: `scanning.live_tables`, `operations._live_names`, `command._index_reverse_relations` and `tenancy.discovery._owner_column_claims`. `guitars.E003` is not gated either.
+Walks that answer "does any model still hold this table name" are deliberately **not** gated: `scanning.live_tables`, `operations._live_names`, `command._index_reverse_relations` and `tenancy.discovery._owner_column_claims`. `guitars.E003` is not gated either. `introspection._rule_update_edges` **is** gated, at both ends of every edge.
 
 ## Why
 
@@ -31,6 +31,8 @@ Against a setting: it is a second place to say where a model lives, free to disa
 The strongest objection to what was chosen is that a router is a runtime object and this consults it at *generation* time, when no database need be reachable. That is why the predicate reads `connections[alias].vendor`, a class attribute on the backend wrapper, and why the `DATABASE_ROUTERS` short-circuit comes first: a project with no routing constructs no wrapper, imports no backend module, and cannot raise from a half-configured secondary alias. The no-op is a proof, not an argument, and a test asserts it by making every connection access raise.
 
 The ungated walks are the 2.9.1 lesson (ADR 0020) resolved in the other direction. A routed-away model's table is still *held* — gating `live_tables` would make recorded coverage read as a deleted model and start emitting retirements, which is the failure this release exists to avoid. Gating the reverse-relations index is what lost a cascade rule entirely in 2.9.1, so each consumer applies the gate where it decides to emit instead. `_owner_column_claims` fails toward emitting, so dropping a claimant there could turn a refusal into a rule. And `E003` describes what Django's `Collector` does, which is backend-independent: the chain is destroyed on ClickHouse too, and silencing the error would hide real data loss for a model that genuinely loses rows.
+
+`_rule_update_edges` goes the other way, and it was nearly left ungated on the ground that an extra edge only adds refusals and so fails safe. That is wrong, and the module's own comment already said so: an invented edge closes a cycle that cannot form and takes the legitimate rule pointing back down with it. A routed-away table sitting on a cycle would have withheld a rule between two PostgreSQL tables, which is the direction this kit must never fail in. Routing, never *scoping* — a scoped run still means the rule exists, so scope must not be read there.
 
 ## Consequences
 

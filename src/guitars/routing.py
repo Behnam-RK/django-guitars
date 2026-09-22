@@ -39,10 +39,10 @@ def migrates_to_postgresql(model: type[Model]) -> bool:
     )
 
 
-def vendor_skip_note(model: type[Model], *, python_scoping: bool = False) -> str:
-    """The note for a model the router sends off PostgreSQL, in ``_skip_note``'s voice. Pass
-    *python_scoping* where a tenanted manager keeps working without its policy; the
-    ``_updated_at`` and ``_deleted_at`` families have no Python half to promise."""
+def vendor_skip_note(model: type[Model]) -> str:
+    """The note for a model the router sends off PostgreSQL, in ``_skip_note``'s voice. One
+    string per model, not one per caller: both the generator and tenancy discovery reach a
+    tenanted model, and two spellings of one skip print as two findings."""
     aliases = migration_aliases(model)
     where = ', '.join(repr(alias) for alias in aliases) or 'no configured alias'
     vendors = ', '.join(sorted({connections[alias].vendor for alias in aliases}))
@@ -50,6 +50,6 @@ def vendor_skip_note(model: type[Model], *, python_scoping: bool = False) -> str
     return (
         f"'{model._meta.db_table}' skipped: the database router migrates "
         f"'{model._meta.label}' only to {where}{carrying}, and this kit's triggers, rules and "
-        f'policies are PostgreSQL, so none is created for it.'
-        + (' Python scoping still applies.' if python_scoping else '')
+        f'policies are PostgreSQL, so none is created for it. Python scoping still applies '
+        f'where a tenanted manager declares it.'
     )

@@ -90,8 +90,9 @@ class Command(OperationsMixin, BaseCommand):
         self._claimed_sweep_names: dict[str, tuple] = {}
         # Tables tenancy discovery could not cover, with the reason. Also surfaced.
         self._tenancy_notes: list[str] = []
-        # Models the project's router migrates off PostgreSQL. Byte-identical to the note
-        # tenancy discovery raises for the same model, so the two dedupe when both fire.
+        # Models the project's router migrates off PostgreSQL. ``vendor_skip_note`` renders one
+        # string per model whoever asks, so a tenanted model reached by both this and tenancy
+        # discovery dedupes below rather than printing the same skip in two spellings.
         self._vendor_skip_notes: list[str] = []
 
         self._existing: ExistingOperations | None = None

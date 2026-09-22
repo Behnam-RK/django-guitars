@@ -919,7 +919,7 @@ def test_the_via_form_retires_both_under_their_own_names(command):
     (revive,) = _revive_retirements(command)
 
     assert 'soft_delete_related_testapp_callbacks_band_id' in cascade
-    assert 'soft_delete_revive_17_testapp_callbacks_7_band_id' in revive
+    assert 'soft_delete_revive_via_17_testapp_callbacks_7_band_id' in revive
     assert 'via "band_id"!' in cascade and 'via "band_id"!' in revive
 
 
@@ -934,3 +934,29 @@ def test_an_unrecoverable_column_refuses_to_reverse_either_rule(command):
     (revive,) = _revive_retirements(command)
 
     assert 'RAISE' in cascade and 'RAISE' in revive
+
+
+def test_an_unretirable_key_names_both_halves_to_drop_by_hand(command):
+    """The precedent the owned pair set: naming the cascade alone leaves the revive live on a
+    table nothing cascades into, and a later un-archive of the parent then revives children
+    whose stamp still matches it -- the exposing direction ADR 0024 exists to avoid."""
+    key = ('gone_child', 'gone_owner', None)
+    command.existing.soft_delete_related[key] = 'abc'
+    command.existing.soft_delete_revive[key] = 'def'
+
+    (note,) = command._unmapped_cascade_notes()
+
+    assert 'DROP RULE "soft_delete_related_gone_child" ON "gone_owner"' in note
+    assert 'DROP RULE "soft_delete_revive_10_gone_child" ON "gone_owner"' in note
+
+
+def test_an_unretirable_key_names_only_the_half_the_project_recorded(command):
+    """A project that never generated under 2.13.0 has no revive rule, and telling it to drop
+    one sends it to `psql` for an object that was never created."""
+    key = ('gone_child', 'gone_owner', None)
+    command.existing.soft_delete_related[key] = 'abc'
+
+    (note,) = command._unmapped_cascade_notes()
+
+    assert 'soft_delete_related_gone_child' in note
+    assert 'soft_delete_revive' not in note

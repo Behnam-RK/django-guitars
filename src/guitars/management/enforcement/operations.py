@@ -147,9 +147,13 @@ def _revive_rule_name(related_table: str, foreign_key: str | None = None) -> str
     # must spell the ``DROP RULE`` from the dedupe key, whose third element is ``None`` on the
     # primary form, so the name has to stay a pure function of that key.
     schema, bare_table = _identifiers._split_qualified('table', related_table)
+    # Two *optional* sized segments are not injective: ``('myapp.x', None)`` and
+    # ``('myapp', 'x')`` named one rule, which the frozen cascade spelling keeps apart.
+    # A literal ``via`` splits the forms -- a sized segment always opens with a digit.
+    prefix = 'soft_delete_revive' if foreign_key is None else 'soft_delete_revive_via'
     sized_schema = [] if schema is None else [_sized(schema)]
     sized_key = [] if foreign_key is None else [_sized(foreign_key)]
-    parts = ['soft_delete_revive', *sized_schema, _sized(bare_table), *sized_key]
+    parts = [prefix, *sized_schema, _sized(bare_table), *sized_key]
     return _identifiers._safe_ident('_'.join(parts))
 
 
@@ -1065,8 +1069,7 @@ class OperationsMixin:
         hosting = self._table_app_labels()
         required, _models = self._cascade_key_maps()
         notes: list[str] = []
-        # Deduped by key across both families: one unretirable cascade key is one finding, and
-        # the ``DROP RULE`` printed is the cascade's because that is the rule 0.x shipped.
+        # Deduped by key across both families: one unretirable cascade key is one finding.
         recorded = set(self.existing.soft_delete_related) | set(self.existing.soft_delete_revive)
         for key in sorted(recorded - set(required), key=lambda k: (k[0], k[1], k[2] or '')):
             related_table, owner_table, via = key
@@ -1076,10 +1079,28 @@ class OperationsMixin:
             # says why. Advising a by-hand drop here would name the same model twice.
             if {owner_table, related_table} & self._routed_away_tables():
                 continue
-            drop = _soft_delete._DROP_SOFT_DELETE_RELATED_OBJECTS_RULE.format(
-                rule_name=_related_rule_name(related_table, via),
-                table=_identifiers._quote_table(owner_table),
-            ).strip()
+            # **Both** halves, the precedent the owned pair set: the cascade alone leaves the
+            # revive live, and a later un-archive then revives children whose stamp still
+            # matches -- the exposing direction. Only halves this project recorded are named.
+            drop = '\n'.join(
+                template.format(
+                    rule_name=name(related_table, via),
+                    table=_identifiers._quote_table(owner_table),
+                ).strip()
+                for recorded_in, template, name in (
+                    (
+                        self.existing.soft_delete_related,
+                        _soft_delete._DROP_SOFT_DELETE_RELATED_OBJECTS_RULE,
+                        _related_rule_name,
+                    ),
+                    (
+                        self.existing.soft_delete_revive,
+                        _soft_delete._DROP_SOFT_DELETE_REVIVE_RELATED_OBJECTS_RULE,
+                        _revive_rule_name,
+                    ),
+                )
+                if key in recorded_in
+            )
             notes.append(
                 f"Cascade rule on '{owner_table}' related to '{related_table}' is recorded but "
                 f'the models no longer call for it, and one of those tables maps to no local '
@@ -1527,6 +1548,7 @@ class OperationsMixin:
         self,
         ops: list[str],
         *,
+        app_label: str,
         key: tuple[str, str, str | None],
         is_primary: bool,
         related_table: str,
@@ -1553,10 +1575,21 @@ class OperationsMixin:
         header_slots = {'related_table': header_related_table, 'table': header_owner_table}
         if not is_primary:
             header_slots['foreign_key'] = ident_foreign_key
+        # Its own re-adoption edge, though: a key retired and revived alternates create and
+        # drop per family, and after a retirement wrote only one half the two diverge.
+        self._record_readoption_edge(
+            app_label,
+            key,
+            self.existing.soft_delete_revive,
+            self.existing.revive_retirement_sites,
+        )
         # No object refs of its own: the cascade records the related table and its
         # ``_deleted_at`` per candidate *before* this runs, so a migration carrying only revive
         # operations still gets both edges. The two rules name exactly the same objects.
-        self._claim_rule_name(ident_owner_table, rule_name, (related_table, key[1], foreign_key))
+
+        # The **bare** owner table, as the cascade's own claim passes: the registry is keyed
+        # ``(table, rule_name)``, so a second spelling of one table splits that key space.
+        self._claim_rule_name(key[1], rule_name, (related_table, key[1], foreign_key))
         forward = _soft_delete._CREATE_SOFT_DELETE_REVIVE_RELATED_OBJECTS_RULE.format(
             rule_name=rule_name,
             table=ident_owner_table,
@@ -1680,6 +1713,7 @@ class OperationsMixin:
             )
             self._append_cascade_revive(
                 ops,
+                app_label=model._meta.app_label,
                 key=key,
                 is_primary=is_primary,
                 related_table=related_table,
@@ -2339,7 +2373,9 @@ class OperationsMixin:
             if not _generator.is_local(app) or app.label in requested:
                 continue
             for model in app.get_models():
-                if not has_column(model, '_deleted_at'):
+                # Routed away: no run emits this rule, so reporting a scoped run's *gap* in it
+                # sends the reader to add an app that would still write nothing.
+                if not has_column(model, '_deleted_at') or not migrates_to_postgresql(model):
                     continue
                 # The rule lives on the table that owns _deleted_at (the model itself, or its
                 # MTI ancestor), matching where `_cascade_operations` places it.
@@ -2356,7 +2392,13 @@ class OperationsMixin:
                         continue
                     related_table = related_model._meta.db_table
                     key = (related_table, table, None if is_primary else fk_field.column)
-                    if key in self.existing.soft_delete_related:
+                    # Both families: every project upgrading to 2.13.0 has the cascade recorded
+                    # and the revive not, so asking about the cascade alone reports no gap for
+                    # the inverse rule this scoped run is equally failing to create.
+                    if (
+                        key in self.existing.soft_delete_related
+                        and key in self.existing.soft_delete_revive
+                    ):
                         continue
                     notes.append(
                         f"Cascade rule on '{related_table}' related to '{table}' skipped: "
@@ -2473,13 +2515,14 @@ class OperationsMixin:
         # Scoped like every other refusal: the scan reads all of LOCAL_APPS, and a per-app CI
         # job going red over a file it was not asked about has no fix available from that job.
 
-        # Both families: a revive's drop is ordered against the migration that created the
-        # *revive*, so a history missing that edge is missing it just as silently.
+        # Both families, each paired with the minter that spells *its* rule: a site carries
+        # no family of its own, and the two resolve to different creates, so one shared minter
+        # sends the reader grepping for a name the `migrate` failure never prints.
         sites = [
-            site
-            for site in (
-                *self.existing.cascade_retirement_sites,
-                *self.existing.revive_retirement_sites,
+            (site, name)
+            for site, name in (
+                *((site, _related_rule_name) for site in self.existing.cascade_retirement_sites),
+                *((site, _revive_rule_name) for site in self.existing.revive_retirement_sites),
             )
             if not requested or site.app_label in requested
         ]
@@ -2487,7 +2530,7 @@ class OperationsMixin:
             return []
         loader = self._migration_loader()
         notes: list[str] = []
-        for site in sites:
+        for site, rule_name_for in sites:
             # Resolved by the scan, per site: the newest create the graph puts *before* this
             # drop. Naming the newest create outright would, after a re-adoption, print a tuple
             # ordering this drop after the rule it revives, destroying it on every database.
@@ -2507,7 +2550,7 @@ class OperationsMixin:
                 continue
             # Already quoted by ``_safe_ident``: quoting it again prints a name no `migrate`
             # log carries, and the whole point of the sentence is that it can be grepped for.
-            rule_name = _related_rule_name(site.key[0], site.key[2])
+            rule_name = rule_name_for(site.key[0], site.key[2])
             # A renamed *related* table makes that drop ``IF EXISTS`` over every prior
             # spelling -- ``_retired_cascade_operations`` checks that table alone, an owner
             # rename playing no part -- so it no-ops instead of aborting, and the rule stays live.

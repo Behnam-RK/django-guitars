@@ -17,13 +17,13 @@ from django.test import override_settings
 from django.test.utils import isolate_apps
 
 from guitars import sql
-from guitars.models import OwningForeignKey, SetarModel
 from guitars.management import _generator
 from guitars.management.enforcement import command as command_module
 from guitars.management.enforcement import headers as headers_module
 from guitars.management.enforcement import identity as identity_module
 from guitars.management.enforcement import operations as operations_module
 from guitars.management.enforcement.command import Command
+from guitars.models import OwningForeignKey, SetarModel
 from guitars.sql import _identifiers
 from guitars.tenancy.discovery import app_coverage, autofill_function_name
 from tests.testapp.models import Album, Band, Ensemble, Foyer, Kiosk, Merch, Orchestra
@@ -991,6 +991,18 @@ def _sponsor_fk_reverse_relation():
     return {(Orchestra, _FakeFKField(), CASCADE)}
 
 
+def _record_cascade_key(*, both: bool):
+    """Seed the Album->Band cascade key, optionally in the inverse family too."""
+
+    def setup(command):
+        key = (Album._meta.db_table, Band._meta.db_table, None)
+        command.existing.soft_delete_related[key] = None
+        if both:
+            command.existing.soft_delete_revive[key] = None
+
+    return setup
+
+
 @pytest.mark.parametrize(
     (
         'local_apps',
@@ -1075,12 +1087,23 @@ def _sponsor_fk_reverse_relation():
                 _fake_app_config('fake.banda', 'banda', [Band]),
                 _fake_app_config('fake.albumb', 'albumb', [Album]),
             ],
-            lambda command: command.existing.soft_delete_related.__setitem__(
-                (Album._meta.db_table, Band._meta.db_table, None), None
-            ),
+            _record_cascade_key(both=True),
             {'albumb'},
             [],
-            id='skipped_when_rule_already_exists',
+            id='skipped_when_both_rules_already_exist',
+        ),
+        pytest.param(
+            ['fake.banda', 'fake.albumb'],
+            lambda: [
+                _fake_app_config('fake.banda', 'banda', [Band]),
+                _fake_app_config('fake.albumb', 'albumb', [Album]),
+            ],
+            # The shape every project upgrading to 2.13.0 is in: the cascade recorded, the
+            # inverse not. The scoped run is still failing to create one, so it is a gap.
+            _record_cascade_key(both=False),
+            {'albumb'},
+            ["Cascade rule on 'testapp_album' related to 'testapp_band' skipped"],
+            id='reported_when_only_the_cascade_half_exists',
         ),
     ],
 )
@@ -1090,6 +1113,7 @@ def test_scoped_cascade_gap_notes(
     with override_settings(LOCAL_APPS=local_apps):
         command = Command()
         command.existing.soft_delete_related.clear()
+        command.existing.soft_delete_revive.clear()
         if setup is not None:
             setup(command)
         monkeypatch.setattr(command_module.django_apps, 'get_app_configs', app_configs)
@@ -1993,7 +2017,12 @@ def test_cascade_operations_report_an_mti_parent_and_child_sharing_a_rule_name()
     # segment keeps the revive names apart. Sizing cannot help this shape: both keys reach one
     # owner table and each is the primary of its own call, so both ask for the plain form.
     assert len(command._rule_name_clashes) == 2
-    assert any('soft_delete_revive' in note for note in command._rule_name_clashes)
+    (revive_clash,) = [n for n in command._rule_name_clashes if 'soft_delete_revive' in n]
+    # The bare table, as the cascade's own report names it: the claim registry is keyed
+    # ``(table, rule_name)``, so a second spelling would split that key space -- and the
+    # operator would read a table name with quotes inside the quotes naming it.
+    assert "on 'testapp_parent'" in revive_clash
+    assert '"testapp_parent"' not in revive_clash
     clash = command._rule_name_clashes[0]
     assert "via 'p_id'" in clash and "via 'c_id'" in clash
     assert 'the second replaces the first' in clash

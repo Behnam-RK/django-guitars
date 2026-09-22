@@ -3092,3 +3092,28 @@ def test_a_refused_sweep_does_not_claim_its_function_name():
     command = _build()
 
     assert command._claimed_sweep_names == {}
+
+
+@pytest.mark.parametrize('adopt', [False, True])
+def test_upgrading_to_the_revive_family_never_drops_the_cascade_rule_first(adopt):
+    """The upgrade every consumer takes: a project recorded under the pre-2.12.0 cascade digest
+    and with no revive at all. Both operations are plain ``CREATE OR REPLACE``, on the adopt
+    path too -- a forward ``DROP`` would leave a window with no cascade rule mid-migrate."""
+    command = Command()
+    command.existing.soft_delete_related[('testapp_album', 'testapp_band', None)] = 'stale0000000'
+    command.existing.soft_delete_revive.clear()
+
+    ops = [
+        operation
+        for operation in command._build_operations(apps.get_app_config('testapp'), adopt=adopt)
+        if 'testapp_album" that is related to "testapp_band' in operation
+    ]
+
+    assert len(ops) == 2
+    assert [operation.splitlines()[0].split(' on ')[0] for operation in ops] == [
+        '# Soft Delete Related Rule',
+        '# Soft Delete Revive Rule',
+    ]
+    for operation in ops:
+        assert 'DROP RULE' not in operation.split('reverse_sql')[0]
+        assert 'CREATE OR REPLACE RULE' in operation

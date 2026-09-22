@@ -901,9 +901,13 @@ def test_a_key_recorded_only_as_a_revive_retires_only_the_revive(command):
     """The mirror, and the reason the loop iterates the union rather than either family: a key
     whose cascade was retired earlier still has an inverse to drop."""
     command.existing.soft_delete_revive[('testapp_album', 'testapp_genre', None)] = 'abc'
+    command.existing.retirement_apps.discard('testapp')
 
     assert _retirements(command) == []
     assert len(_revive_retirements(command)) == 1
+    # And the digest guard is waived for the app either way: a drop genuinely written here
+    # means this app's operation set can recur, whichever family the key was recorded in.
+    assert 'testapp' in command.existing.retirement_apps
 
 
 def test_the_via_form_retires_both_under_their_own_names(command):

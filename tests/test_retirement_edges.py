@@ -162,3 +162,41 @@ def test_a_revive_retirement_settles_against_its_own_create_not_the_cascades():
     # drop against 0057, and a fresh `migrate` would then reach it before 0058's CREATE.
     assert site.created == revive_create
     assert site.created != cascade_create
+
+
+def test_the_scan_reads_a_revive_retirement_off_a_migration(monkeypatch):
+    """The scan half of the inverse family's retirement, which no committed migration reaches:
+    the corpus has none, so this feeds one synthetic file through the real walk rather than
+    editing a fixture whose history never created the trigger to drop."""
+    from pathlib import Path
+
+    from guitars.management import _generator
+    from guitars.management.enforcement import scanning
+
+    header = (
+        '# Soft Delete Revive Trigger retired on "testapp_album" '
+        'that is related to "testapp_band"!'
+    )
+    real = _generator.iter_migration_files
+
+    create = (
+        '# Soft Delete Revive Trigger on "testapp_album" that is related to "testapp_band"!'
+    )
+
+    def _walk(app):
+        if app.label == 'testapp':
+            # The create twice, so the provenance list's dedupe is exercised: one file can
+            # name one key more than once, and a repeat must not order the drop twice.
+            yield Path('0999_pretend.py'), f'{create}\n{create}\n{header}\n'
+            return
+        yield from real(app)
+
+    monkeypatch.setattr(scanning._generator, 'iter_migration_files', _walk)
+
+    existing = scanning.scan_existing_operations()
+
+    key = ('testapp_album', 'testapp_band', None)
+    (site,) = [s for s in existing.revive_retirement_sites if s.migration == '0999_pretend']
+    assert site.key == key
+    assert site.app_label == 'testapp'
+    assert existing.soft_delete_revive_dependencies[key] == [('testapp', '0999_pretend')]

@@ -3168,3 +3168,61 @@ def test_upgrading_to_the_revive_family_never_drops_the_cascade_rule_first(adopt
         assert 'DROP TRIGGER IF EXISTS' in revive_forward
     else:
         assert 'DROP TRIGGER' not in revive_forward
+
+
+def _revive_dollar_command(recorded: bool):
+    """A cascade child whose ``db_table`` carries ``$$``, for the revive family's two refusal
+    branches. The cascade *rule* beside it needs no dollar quoting and is emitted regardless."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class DollarOwner(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+                db_table = 'testapp_dollar_owner'
+
+        class DollarChild(SetarModel):
+            owner = models.ForeignKey(DollarOwner, on_delete=CASCADE, related_name='+')
+
+            class Meta:
+                app_label = 'testapp'
+                db_table = 'testapp_dollar$$child'
+
+        command = Command()
+        command._skipped_rule_notes.clear()
+        command._refusals_over_live_rules.clear()
+        clear_cascade_coverage(command)
+        key = ('testapp_dollar$$child', 'testapp_dollar_owner', None)
+        if recorded:
+            command.existing.soft_delete_revive[key] = 'deadbeefcafe'
+        command.reverse_relations_mapping[DollarOwner] = {
+            (DollarChild, DollarChild._meta.get_field('owner'), CASCADE)
+        }
+        return command, command._cascade_operations(DollarOwner)
+
+    return _build()
+
+
+def test_a_revive_refused_for_dollar_quoting_leaves_the_cascade_rule_alone():
+    """The inverse is a dollar-quoted function and the cascade beside it is a rule, so only one
+    of the pair is refused -- the reason the refusal returns rather than skipping the relation."""
+    command, ops = _revive_dollar_command(recorded=False)
+
+    assert len(ops) == 1
+    assert ops[0].startswith('# Soft Delete Related Rule on')
+    assert len(command._skipped_rule_notes) == 1
+    assert 'Revive trigger' in command._skipped_rule_notes[0]
+    assert '"$$"' in command._skipped_rule_notes[0]
+    assert command._refusals_over_live_rules == []
+
+
+def test_a_revive_refused_for_dollar_quoting_escalates_over_its_own_live_trigger():
+    """Recorded already, so it is live in every migrated database and this run will not replace
+    it. Both objects named, the trigger alone leaving its function behind."""
+    command, _ops = _revive_dollar_command(recorded=True)
+
+    assert len(command._refusals_over_live_rules) == 1
+    escalation = command._refusals_over_live_rules[0]
+    assert "Revive trigger on 'testapp_dollar_owner'" in escalation
+    assert 'DROP TRIGGER' in escalation
+    assert 'DROP FUNCTION' in escalation

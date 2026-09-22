@@ -220,3 +220,16 @@ def test_the_same_revive_through_all_objects_works_and_fires_the_rule():
 
     assert _stamp(Band, band.pk) is None
     assert _stamp(Album, album.pk) is None
+
+
+def test_the_retirement_reverse_splices_updated_at_only_where_the_child_owns_it():
+    """The reverse rebuilds the trigger, so it has to ask the same question the forward asked.
+    A table mapping to no model, and a child without the column, both answer "no splice"."""
+    from guitars.management.enforcement.command import Command
+
+    command = Command()
+
+    assert command._revive_updated_at('no_such_table') == ''
+    # `testapp_riff` is a TarModel: no `_updated_at` of its own to stamp.
+    assert command._revive_updated_at('testapp_riff') == ''
+    assert command._revive_updated_at('testapp_album') == ', _updated_at = NOW()'

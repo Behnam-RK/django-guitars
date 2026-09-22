@@ -2,16 +2,16 @@
 here is registry-and-settings only -- the gate must never open a connection, which
 `test_no_router_consults_no_connection` asserts by making every connection access raise."""
 
+import types
 from io import StringIO
 
 import pytest
 from django.apps import apps
-from django.core.management import call_command
+from django.core.management import CommandError, call_command
 from django.test import override_settings
 
-from tests.conftest import clear_cascade_coverage
-
 from guitars import routing
+from tests.conftest import clear_cascade_coverage
 from tests.crossapp_owner.models import Owner
 from tests.testapp.models import Album, Band, Release
 
@@ -357,3 +357,44 @@ def test_nothing_is_routed_away_without_a_router():
     from guitars.tenancy.discovery import routed_away_tables
 
     assert routed_away_tables() == set()
+
+
+def test_audittenancy_refuses_a_non_postgresql_alias():
+    """Every probe it runs reads a PostgreSQL catalog, so on another backend it would die in
+    the driver rather than report -- and a green audit that examined nothing is the one
+    failure an audit must not have."""
+    with pytest.raises(CommandError, match='sqlite'):
+        call_command('audittenancy', '--database', 'nonpg', stdout=StringIO())
+
+
+def test_sweepowned_refuses_a_non_postgresql_alias():
+    with pytest.raises(CommandError, match='sqlite'):
+        call_command('sweepowned', '--database', 'nonpg', stdout=StringIO())
+
+
+@override_settings(DATABASE_ROUTERS=[_AlbumToNonPg()])
+def test_a_routed_away_model_declares_no_owning_fields():
+    """The runtime half of the gate, on ``hard_delete()``'s path: the generator writes no owned
+    rule for a routed-away model, and following in Python what no rule covers destroys what the
+    refusal spared."""
+    from guitars.models.soft_deletion import _declared_owning_fields
+
+    assert _declared_owning_fields(Album) == []
+
+
+def test_retire_enforcement_stands_aside_on_a_non_postgresql_connection():
+    """Its body is pure PostgreSQL catalog SQL. Skipped rather than failed, which is what
+    ``RunSQL`` does when the router says no: recorded as applied, having done nothing."""
+    from guitars.operations import RetireEnforcement
+
+    executed = []
+
+    class _Editor:
+        connection = types.SimpleNamespace(vendor='sqlite', alias='nonpg')
+
+        def execute(self, *args, **kwargs):
+            executed.append(args)
+
+    RetireEnforcement('any_table').database_forwards('testapp', _Editor(), None, None)
+
+    assert executed == []

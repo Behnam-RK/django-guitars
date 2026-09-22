@@ -1298,16 +1298,14 @@ class OperationsMixin:
         self,
         app_label: str,
         key: tuple[str, str, str | None],
-        creates_by_key: dict[tuple[str, str, str | None], list[tuple[str, str]]] | None = None,
+        creates_by_key: dict[tuple[str, str, str | None], list[tuple[str, str]]],
     ) -> None:
-        """Order a cascade retirement against the migration that created the rule it drops.
-        Read off the scan rather than resolved: a rule is a ``RunSQL``, so migration state has
-        nothing to resolve, and the drop is hosted by the owner table's app either way."""
-        # Per family, not shared: the cascade's creates cannot order the revive's drop. The two
-        # land in one migration today and nothing enforces that, and the failure -- a DROP RULE
-        # reached before its CREATE on a fresh database -- is silent until that migrate.
-        if creates_by_key is None:
-            creates_by_key = self.existing.soft_delete_related_dependencies
+        """Order a cascade retirement against the migration that created the object it drops.
+        Read off the scan rather than resolved: neither is visible to migration state, and the
+        drop is hosted by the owner table's app either way."""
+        # *creates_by_key* is required, not defaulted: the cascade's creates cannot order the
+        # revive's drop, and a default would hand a caller that forgot it the wrong family.
+
         # This drop is genuinely being written, so its operation set may recur if the key is
         # re-adopted and retired again -- tainted here, not for every app that has ever retired
         # anything, or a one-time retirement disables the guard forever needlessly.

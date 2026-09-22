@@ -906,7 +906,13 @@ class OperationsMixin:
         that trigger -- so the column has to move here or it moves on neither path."""
         _required, models_by_table = self._cascade_key_maps()
         model = models_by_table.get(related_table)
-        if model is None or not owns_column(model, '_updated_at'):
+        if model is None:
+            return ''
+        # Through ``concrete_model``, as ``_retired_cascade_column`` resolves the same map: a
+        # proxy binds the same table and may reach it first, from an app registered earlier,
+        # and declares no ``local_fields`` -- so ``owns_column`` would answer for the wrong one.
+        model = model._meta.concrete_model or model
+        if not owns_column(model, '_updated_at'):
             return ''
         return _soft_delete._SOFT_DELETE_REVIVE_UPDATED_AT
 
@@ -1518,6 +1524,32 @@ class OperationsMixin:
             slots, names
         ) + _soft_delete._ADOPT_SOFT_DELETE_OWNED_SWEEP.format(**slots)
 
+    def _revive_form(
+        self,
+        slots: dict,
+        owner_table: str,
+        related_table: str,
+        foreign_key: str | None,
+        *,
+        unrenamed: str,
+    ) -> str:
+        """:meth:`_owned_sweep_form` for the inverse family, whose name folds in **two** tables
+        since ``d5aa8e6`` -- either of which a rename can have moved, and each through its own
+        chain. Asking about the related table alone left the old owner's pair live for good."""
+        if not self._renamed(owner_table, related_table):
+            return unrenamed.format(**slots)
+        owners = [owner_table, *self._prior_names(owner_table)]
+        relateds = [related_table, *self._prior_names(related_table)]
+        names = [
+            _revive_name(owner, related, foreign_key)
+            for owner in owners
+            for related in relateds
+            if (owner, related) != (owner_table, related_table)
+        ]
+        return self._drop_prior_triggers(
+            slots, names
+        ) + _soft_delete._ADOPT_SOFT_DELETE_REVIVE.format(**slots)
+
     def _self_cascade_form(
         self, slots: dict, owner_table: str, foreign_key: str, *, unrenamed: str
     ) -> str:
@@ -1639,34 +1671,41 @@ class OperationsMixin:
         # Claimed on the name alone, as the owned sweep is: a function is namespaced per
         # schema where a rule is per table, so two owner tables can collide on one.
         self._claim_sweep_function_name(name, (related_table, key[1], foreign_key), kind='Revive')
-        forward = _soft_delete._CREATE_SOFT_DELETE_REVIVE.format(
-            function=name,
-            trigger=name,
-            table=ident_owner_table,
-            related_table=ident_related_table,
-            primary_key=ident_owner_pk,
-            foreign_key=ident_foreign_key,
-            updated_at_assignment=(
+        slots = {
+            'function': name,
+            'trigger': name,
+            'table': ident_owner_table,
+            'related_table': ident_related_table,
+            'primary_key': ident_owner_pk,
+            'foreign_key': ident_foreign_key,
+            'updated_at_assignment': (
                 _soft_delete._SOFT_DELETE_REVIVE_UPDATED_AT
                 if owns_column(related_model, '_updated_at')
                 else ''
             ),
-        )
-        replace = forward
-        if self._renamed(related_table):
-            replace = (
-                self._drop_prior_triggers(
-                    {'table': ident_owner_table},
-                    [
-                        _revive_name(key[1], prior, column)
-                        for prior in self._prior_names(related_table)
-                    ],
-                )
-                + forward
+        }
+        # Refused rather than escaped, as the sweep and the self cascade refuse it: an
+        # identifier admits '$', so a db_table like 'a$$b' closes this template's dollar
+        # quoting early and the generated migration fails `migrate` with a syntax error.
+        for slot, rendered in slots.items():
+            if '$$' not in rendered:
+                continue
+            self._skipped_rule_notes.append(
+                f"Revive trigger for '{key[1]}' -> '{related_table}' skipped: the {slot} "
+                f'{rendered!r} contains "$$", which closes the dollar quoting this trigger '
+                f'function depends on -- the generated migration would not apply. Set a '
+                f'db_table / db_column without it.'
             )
-        reverse = _soft_delete._DROP_SOFT_DELETE_REVIVE.format(
-            function=name, trigger=name, table=ident_owner_table
-        )
+            if key in self.existing.soft_delete_revive:
+                self._refusals_over_live_rules.append(
+                    f"Revive trigger on '{key[1]}' related to '{related_table}' is refused "
+                    "but already exists in this project's migrations. It is still live in "
+                    f'any migrated database. Drop it by hand: DROP TRIGGER {name} ON '
+                    f'{ident_owner_table}; DROP FUNCTION {name}();'
+                )
+            return
+        forward = _soft_delete._CREATE_SOFT_DELETE_REVIVE.format(**slots)
+        reverse = _soft_delete._DROP_SOFT_DELETE_REVIVE.format(**slots)
         self._append_if_stale(
             ops,
             self.existing.soft_delete_revive,
@@ -1675,7 +1714,22 @@ class OperationsMixin:
             forward,
             reverse,
             is_adopt=adopt,
-            replace=replace,
+            # ``CREATE TRIGGER`` has no ``OR REPLACE``, so neither of these may be ``forward``:
+            # a re-emission over a live trigger aborts the migration. See ADR 0024.
+            replace=self._revive_form(
+                slots,
+                key[1],
+                related_table,
+                column,
+                unrenamed=_soft_delete._REPLACE_SOFT_DELETE_REVIVE,
+            ),
+            adopt=self._revive_form(
+                slots,
+                key[1],
+                related_table,
+                column,
+                unrenamed=_soft_delete._ADOPT_SOFT_DELETE_REVIVE,
+            ),
         )
 
     def _cascade_operations(self, model: type[models.Model], *, adopt: bool = False) -> list[str]:

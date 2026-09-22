@@ -85,7 +85,7 @@ _BASELINE = {
 _EXPECTED_EMPTY = {
     '_RE_TENANT_FORCE',
     '_RE_TENANT_AUTOFILL_RETIRED',
-    # No committed migration retires a revive rule either -- the family is new in 2.13.0.
+    # No committed migration retires a revive trigger either -- the family is new in 2.13.0.
     '_RE_SOFT_DELETE_REVIVE_RETIRED',
 }
 

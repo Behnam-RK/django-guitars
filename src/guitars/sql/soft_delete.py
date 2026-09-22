@@ -149,6 +149,21 @@ _CREATE_SOFT_DELETE_REVIVE = (
 
 _DROP_SOFT_DELETE_REVIVE = _DROP_SOFT_DELETE_REVIVE_TRIGGER + _DROP_SOFT_DELETE_REVIVE_FUNCTION
 
+# ``CREATE TRIGGER`` has no ``OR REPLACE``, so a re-emission needs the drop in front of it or
+# it aborts with *trigger ... already exists* -- and the operation being atomic, it takes
+# whatever rule sits beside it in that migration down too.
+_REPLACE_SOFT_DELETE_REVIVE = _DROP_SOFT_DELETE_REVIVE_TRIGGER + _CREATE_SOFT_DELETE_REVIVE
+
+# ``--adopt`` is the one path that may claim nothing about what the database holds. The
+# function stays ``CREATE OR REPLACE`` in both: ``DROP FUNCTION`` refuses while a trigger
+# depends on it, and ``CASCADE`` would take that trigger with it.
+_ADOPT_SOFT_DELETE_REVIVE = (
+    """
+    DROP TRIGGER IF EXISTS {trigger} ON {table};
+"""
+    + _CREATE_SOFT_DELETE_REVIVE
+)
+
 # ---- Private, non-frozen owned-rule templates: the cascade pair above with the predicate
 # sides swapped, the FK living on the owner. The NOT EXISTS is the last-owner guard, always
 # emitted -- see ADR 0011 for why it is never derived from a unique constraint. ----

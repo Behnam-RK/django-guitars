@@ -3136,8 +3136,8 @@ def test_a_refused_sweep_does_not_claim_its_function_name():
 @pytest.mark.parametrize('adopt', [False, True])
 def test_upgrading_to_the_revive_family_never_drops_the_cascade_rule_first(adopt):
     """The upgrade every consumer takes: recorded under the pre-2.12.0 cascade digest, with no
-    revive at all. Count and order bite -- one operation, not two, without the inverse family.
-    The ``DROP``-free half is a **guard** against a future adopt form, not a live check."""
+    revive at all. Count and order bite, and so does the shape of each forward: the rule needs
+    no drop and the trigger needs one on ``--adopt``, ``CREATE TRIGGER`` having no replace."""
     command = Command()
     command.existing.soft_delete_related[('testapp_album', 'testapp_band', None)] = 'stale0000000'
     command.existing.soft_delete_revive.clear()
@@ -3154,10 +3154,17 @@ def test_upgrading_to_the_revive_family_never_drops_the_cascade_rule_first(adopt
         '# Soft Delete Revive Trigger',
     ]
     cascade, revive = ops
+    # The cascade is a rule, idempotent by construction, so it drops nothing on either path.
     assert 'DROP RULE' not in cascade.split('reverse_sql')[0]
     assert 'CREATE OR REPLACE RULE' in cascade
-    # The inverse is a function and a trigger, and its forward drops nothing either: a
-    # ``CREATE OR REPLACE FUNCTION`` needs no drop, and the trigger is new on this upgrade.
-    assert 'DROP TRIGGER' not in revive.split('reverse_sql')[0]
+
+    # ``CREATE TRIGGER`` has no ``OR REPLACE``. The plain path's key is unrecorded, so a bare
+    # create is right; ``--adopt`` re-emits every operation, so it must drop first or a
+    # project that already has the trigger gets a migration that aborts.
+    revive_forward = revive.split('reverse_sql')[0]
     assert 'CREATE OR REPLACE FUNCTION' in revive
     assert 'CREATE TRIGGER' in revive
+    if adopt:
+        assert 'DROP TRIGGER IF EXISTS' in revive_forward
+    else:
+        assert 'DROP TRIGGER' not in revive_forward

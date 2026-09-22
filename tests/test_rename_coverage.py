@@ -505,3 +505,40 @@ def test_a_graph_node_with_no_disk_migration_is_skipped_by_the_rename_walk(loade
     del loader.disk_migrations[('testapp', missing)]
 
     assert missing not in graph.renames_by_migration(loader, 'testapp')
+
+
+def test_a_renamed_revive_drops_both_of_its_tables_old_names():
+    """The name folds in two tables since the trigger conversion, so either rename strands the
+    pair -- and asking about the related table alone left the old *owner*'s trigger and function
+    live for good, both running the same predicate on every update to that table."""
+    command = Command()
+    command.existing.renamed_tables['testapp_band'] = ['testapp_oldband']
+    command.existing.soft_delete_revive[('testapp_album', 'testapp_band', None)] = 'stale00000'
+
+    (operation,) = [
+        candidate
+        for candidate in command._build_operations(apps.get_app_config('testapp'))
+        if candidate.startswith('# Soft Delete Revive Trigger on "testapp_album"')
+    ]
+
+    assert 'soft_delete_revive_15_testapp_oldband_13_testapp_album' in operation
+    assert 'DROP TRIGGER IF EXISTS' in operation
+    assert 'DROP FUNCTION IF EXISTS' in operation
+
+
+def test_a_revive_re_emission_drops_its_trigger_before_creating_it():
+    """``CREATE TRIGGER`` has no ``OR REPLACE``. A stale digest re-emits the operation, and a
+    bare create over a live trigger aborts the migration with *already exists* -- taking the
+    rule beside it down too, the operation being atomic."""
+    command = Command()
+    command.existing.soft_delete_revive[('testapp_album', 'testapp_band', None)] = 'stale00000'
+
+    (operation,) = [
+        candidate
+        for candidate in command._build_operations(apps.get_app_config('testapp'))
+        if candidate.startswith('# Soft Delete Revive Trigger on "testapp_album"')
+    ]
+
+    forward = operation.split('reverse_sql')[0]
+    assert 'DROP TRIGGER "soft_delete_revive_12_testapp_band_13_testapp_album"' in forward
+    assert forward.index('DROP TRIGGER') < forward.index('CREATE TRIGGER')

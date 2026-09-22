@@ -960,3 +960,31 @@ def test_an_unretirable_key_names_only_the_half_the_project_recorded(command):
 
     assert 'soft_delete_related_gone_child' in note
     assert 'soft_delete_revive' not in note
+    # And it opens on the family whose DROP it prints, or it reads as a stale warning about
+    # a rule the project's migrations still carry.
+    assert note.startswith('Cascade rule on')
+
+
+def test_an_unretirable_revive_only_key_opens_on_the_revive(command):
+    key = ('gone_child', 'gone_owner', None)
+    command.existing.soft_delete_revive[key] = 'def'
+
+    (note,) = command._unmapped_cascade_notes()
+
+    assert note.startswith('Revive rule on')
+    assert 'soft_delete_related' not in note
+
+
+def test_the_unretirable_note_actually_reaches_the_operator(monkeypatch):
+    """It did not, from 2.9.0 until a review found it: the note was defined, tested directly and
+    never printed, while ``_retired_cascade_operations`` promised the key it withholds is named
+    there. Both rules stayed live on a table no model claims, with ``--check`` green."""
+    sentinel = 'SENTINEL-unretirable-cascade-note'
+    monkeypatch.setattr(
+        OperationsMixin, '_unmapped_cascade_notes', lambda self: [sentinel], raising=True
+    )
+    out, err = StringIO(), StringIO()
+
+    call_command('makeguitarmigrations', 'testapp', stdout=out, stderr=err)
+
+    assert sentinel in out.getvalue() + err.getvalue()

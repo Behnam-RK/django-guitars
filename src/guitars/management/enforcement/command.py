@@ -599,7 +599,8 @@ class Command(OperationsMixin, BaseCommand):
         # function is inert, an unmapped table has no app to migrate into, and a file is not
         # something this command can repair at all.
         for note in (
-            self._unmapped_autofill_notes()
+            self._unmapped_cascade_notes()
+            + self._unmapped_autofill_notes()
             + self._orphaned_autofill_function_notes()
             + self._orphaned_mti_notes()
             + self._duplicated_mti_notes()

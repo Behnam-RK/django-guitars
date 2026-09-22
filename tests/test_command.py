@@ -1102,7 +1102,9 @@ def _record_cascade_key(*, both: bool):
             # inverse not. The scoped run is still failing to create one, so it is a gap.
             _record_cascade_key(both=False),
             {'albumb'},
-            ["Cascade rule on 'testapp_album' related to 'testapp_band' skipped"],
+            # "Revive", not "Cascade": the cascade rule is in their migrations already, and
+            # naming it sends the operator to an object that is not the missing one.
+            ["Revive rule on 'testapp_album' related to 'testapp_band' skipped"],
             id='reported_when_only_the_cascade_half_exists',
         ),
     ],
@@ -1951,6 +1953,9 @@ def test_cascade_operations_report_two_relations_that_would_share_a_rule_name():
         command = Command()
         command._rule_name_clashes.clear()
         command.existing.soft_delete_related.clear()
+        # Both families: these count operations, and a committed revive record for a
+        # table these synthetic models ever collide with would silently drop the count.
+        command.existing.soft_delete_revive.clear()
         command.all_models = [Parent, Child, Namesake]
         command.reverse_relations_mapping[Parent] = {
             (Child, Child._meta.get_field('a'), CASCADE),
@@ -1999,6 +2004,9 @@ def test_cascade_operations_report_an_mti_parent_and_child_sharing_a_rule_name()
         command = Command()
         command._rule_name_clashes.clear()
         command.existing.soft_delete_related.clear()
+        # Both families: these count operations, and a committed revive record for a
+        # table these synthetic models ever collide with would silently drop the count.
+        command.existing.soft_delete_revive.clear()
         command.all_models = [Parent, Child, Referrer]
         command.reverse_relations_mapping[Parent] = {
             (Referrer, Referrer._meta.get_field('p'), CASCADE),
@@ -3125,9 +3133,9 @@ def test_a_refused_sweep_does_not_claim_its_function_name():
 
 @pytest.mark.parametrize('adopt', [False, True])
 def test_upgrading_to_the_revive_family_never_drops_the_cascade_rule_first(adopt):
-    """The upgrade every consumer takes: a project recorded under the pre-2.12.0 cascade digest
-    and with no revive at all. Both operations are plain ``CREATE OR REPLACE``, on the adopt
-    path too -- a forward ``DROP`` would leave a window with no cascade rule mid-migrate."""
+    """The upgrade every consumer takes: recorded under the pre-2.12.0 cascade digest, with no
+    revive at all. Count and order bite -- one operation, not two, without the inverse family.
+    The ``DROP``-free half is a **guard** against a future adopt form, not a live check."""
     command = Command()
     command.existing.soft_delete_related[('testapp_album', 'testapp_band', None)] = 'stale0000000'
     command.existing.soft_delete_revive.clear()

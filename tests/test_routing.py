@@ -11,7 +11,7 @@ from django.test import override_settings
 
 from guitars import routing
 from tests.crossapp_owner.models import Owner
-from tests.testapp.models import Band, Release
+from tests.testapp.models import Album, Band, Release
 
 
 class _ToNonPg:
@@ -29,6 +29,16 @@ class _ToNonPgModel:
 
     def allow_migrate(self, db, app_label, model_name=None, **hints):
         if hints.get('model') is Band:
+            return db == 'nonpg'
+        return None
+
+
+class _AlbumToNonPg:
+    """Routes the model that *declares* the cascade key away, leaving its target on
+    PostgreSQL -- the only arrangement that isolates the model gate from the target gate."""
+
+    def allow_migrate(self, db, app_label, model_name=None, **hints):
+        if hints.get('model') is Album:
             return db == 'nonpg'
         return None
 
@@ -260,17 +270,23 @@ def test_a_routed_away_model_contributes_no_rule_edge():
     edges = _rule_update_edges(apps.get_models())
 
     assert edges, 'the fixture registry should still produce edges'
+    # A cascade edge is ``(target, declaring_table)``, so a routed-away ``Band`` is the
+    # *target* of ``Album``'s key -- named at index 0, never index 1. Asserting on index 1
+    # alone would be ``[] == []`` against the ungated code.
+    assert (Band._meta.db_table, Album._meta.db_table) not in edges
     assert not [edge for edge in edges if Band._meta.db_table in edge]
 
 
-@override_settings(DATABASE_ROUTERS=[_ToNonPgModel()])
-def test_a_routed_away_target_drops_the_edge_pointing_at_it():
-    """Both ends, as every other routing gate reads them: an edge naming a routed-away table as
-    its *target* is as invented as one naming it as the table the rule fires on."""
+@override_settings(DATABASE_ROUTERS=[_AlbumToNonPg()])
+def test_a_routed_away_declaring_model_drops_the_edge_it_would_contribute():
+    """The **model** gate specifically. A cascade edge is ``(target, declaring_table)``, so
+    routing the *target* away is what the sibling above covers; only routing the model that
+    declares the key isolates this branch, which no other test reaches."""
     from django.apps import apps
 
     from guitars.introspection import _rule_update_edges
 
-    assert not [
-        edge for edge in _rule_update_edges(apps.get_models()) if edge[1] == Band._meta.db_table
-    ]
+    edges = _rule_update_edges(apps.get_models())
+
+    assert edges, 'the fixture registry should still produce edges'
+    assert (Band._meta.db_table, Album._meta.db_table) not in edges

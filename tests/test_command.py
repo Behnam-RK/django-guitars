@@ -231,7 +231,7 @@ def test_cascade_operations_disambiguates_two_fks_to_the_same_related_table():
         for h in headers
     )
     assert any(
-        '# Soft Delete Revive Rule on "testapp_merch" that is related to "testapp_album"!' in h
+        '# Soft Delete Revive Trigger on "testapp_merch" that is related to "testapp_album"!' in h
         for h in headers
     )
     assert len([h for h in headers if 'via "bonus_album_id"!' in h]) == 2
@@ -239,8 +239,8 @@ def test_cascade_operations_disambiguates_two_fks_to_the_same_related_table():
     blob = '\n'.join(merch_ops)
     assert 'RULE "soft_delete_related_testapp_merch"\n' in blob
     assert 'RULE "soft_delete_related_testapp_merch_bonus_album_id"' in blob
-    assert 'RULE "soft_delete_revive_13_testapp_merch"\n' in blob
-    assert 'RULE "soft_delete_revive_via_13_testapp_merch_14_bonus_album_id"' in blob
+    assert 'TRIGGER "soft_delete_revive_13_testapp_album_13_testapp_merch"\n' in blob
+    assert 'TRIGGER "soft_delete_revive_via_13_testapp_album_13_testapp_m_8576eb3445"' in blob
 
 
 def test_cascade_operation_warns_when_related_model_is_mti_child_without_own_deleted_at(
@@ -2029,11 +2029,10 @@ def test_cascade_operations_report_an_mti_parent_and_child_sharing_a_rule_name()
     # owner table and each is the primary of its own call, so both ask for the plain form.
     assert len(command._rule_name_clashes) == 2
     (revive_clash,) = [n for n in command._rule_name_clashes if 'soft_delete_revive' in n]
-    # The bare table, as the cascade's own report names it: the claim registry is keyed
-    # ``(table, rule_name)``, so a second spelling would split that key space -- and the
-    # operator would read a table name with quotes inside the quotes naming it.
-    assert "on 'testapp_parent'" in revive_clash
-    assert '"testapp_parent"' not in revive_clash
+    # Reported on the *name* alone, as the owned sweep's function is: a function is namespaced
+    # per schema where a rule is per table, so the clash is not about one table.
+    assert revive_clash.startswith('Revive function')
+    assert "'testapp_referrer'" in revive_clash
     clash = command._rule_name_clashes[0]
     assert "via 'p_id'" in clash and "via 'c_id'" in clash
     assert 'the second replaces the first' in clash
@@ -3152,8 +3151,13 @@ def test_upgrading_to_the_revive_family_never_drops_the_cascade_rule_first(adopt
     assert len(ops) == 2
     assert [operation.splitlines()[0].split(' on ')[0] for operation in ops] == [
         '# Soft Delete Related Rule',
-        '# Soft Delete Revive Rule',
+        '# Soft Delete Revive Trigger',
     ]
-    for operation in ops:
-        assert 'DROP RULE' not in operation.split('reverse_sql')[0]
-        assert 'CREATE OR REPLACE RULE' in operation
+    cascade, revive = ops
+    assert 'DROP RULE' not in cascade.split('reverse_sql')[0]
+    assert 'CREATE OR REPLACE RULE' in cascade
+    # The inverse is a function and a trigger, and its forward drops nothing either: a
+    # ``CREATE OR REPLACE FUNCTION`` needs no drop, and the trigger is new on this upgrade.
+    assert 'DROP TRIGGER' not in revive.split('reverse_sql')[0]
+    assert 'CREATE OR REPLACE FUNCTION' in revive
+    assert 'CREATE TRIGGER' in revive

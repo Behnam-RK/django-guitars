@@ -128,5 +128,37 @@ def test_the_note_names_the_rule_of_the_family_whose_site_it_is():
 
     (note,) = command._missing_retirement_edge_notes(set())
 
-    assert 'soft_delete_revive_13_testapp_album' in note
+    assert 'soft_delete_revive_12_testapp_band_13_testapp_album' in note
     assert 'soft_delete_related_testapp_album' not in note
+
+
+def test_a_revive_retirement_settles_against_its_own_create_not_the_cascades():
+    """A **contract** test of the second ``_settle_retirement_sites`` call, not end-to-end: no
+    committed migration carries a revive-retired header, so that family's scan never fires here.
+    What it pins is that the function honours the provenance handed to it."""
+    from django.db.migrations.loader import MigrationLoader
+
+    from guitars.management.enforcement.scanning import (
+        CascadeRetirementSite,
+        _settle_retirement_sites,
+    )
+
+    key = ('testapp_album', 'testapp_band', None)
+    cascade_create = ('testapp', '0057_auto_enforcement')
+    revive_create = ('testapp', '0058_auto_enforcement')
+    drop = CascadeRetirementSite('testapp', '0059_retirement_host', key, None)
+
+    settled = _settle_retirement_sites(
+        [drop],
+        {key: 'digest'},
+        {key: [revive_create]},
+        {},
+        {'testapp_album', 'testapp_band'},
+        lambda: MigrationLoader(None, ignore_no_migrations=True),
+    )
+
+    (site,) = settled
+    # Its *own* family's create. Passing the cascade's provenance here would order the revive
+    # drop against 0057, and a fresh `migrate` would then reach it before 0058's CREATE.
+    assert site.created == revive_create
+    assert site.created != cascade_create

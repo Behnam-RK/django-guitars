@@ -56,17 +56,17 @@ HEADER_SOFT_DELETE_RELATED_VIA_RETIRED = (
 # relation refused a cascade is refused a revive. "Revive" not "Related" keeps the scanners
 # disjoint, as "Sweep" does for the owned pair; the retired pair is its own for ADR 0021.
 HEADER_SOFT_DELETE_REVIVE = (
-    '# Soft Delete Revive Rule on "{related_table}" that is related to "{table}"!'
+    '# Soft Delete Revive Trigger on "{related_table}" that is related to "{table}"!'
 )
 HEADER_SOFT_DELETE_REVIVE_VIA = (
-    '# Soft Delete Revive Rule on "{related_table}" that is related to "{table}" '
+    '# Soft Delete Revive Trigger on "{related_table}" that is related to "{table}" '
     'via "{foreign_key}"!'
 )
 HEADER_SOFT_DELETE_REVIVE_RETIRED = (
-    '# Soft Delete Revive Rule retired on "{related_table}" that is related to "{table}"!'
+    '# Soft Delete Revive Trigger retired on "{related_table}" that is related to "{table}"!'
 )
 HEADER_SOFT_DELETE_REVIVE_VIA_RETIRED = (
-    '# Soft Delete Revive Rule retired on "{related_table}" that is related to "{table}" '
+    '# Soft Delete Revive Trigger retired on "{related_table}" that is related to "{table}" '
     'via "{foreign_key}"!'
 )
 
@@ -181,11 +181,11 @@ _RE_SOFT_DELETE_RELATED_RETIRED = re.compile(
 # differs: "Revive" where those say "Related". A recorded cascade must never count as a
 # recorded revive, or an upgrading project never receives one. "retired" splits these two.
 _RE_SOFT_DELETE_REVIVE = re.compile(
-    rf'# Soft Delete Revive Rule on "({_QUOTED_CONTENT})" that is related to "({_QUOTED_CONTENT})"'
+    rf'# Soft Delete Revive Trigger on "({_QUOTED_CONTENT})" that is related to "({_QUOTED_CONTENT})"'
     rf'(?: via "(?P<foreign_key>{_QUOTED_CONTENT})")?'
 )
 _RE_SOFT_DELETE_REVIVE_RETIRED = re.compile(
-    rf'# Soft Delete Revive Rule retired on "({_QUOTED_CONTENT})" '
+    rf'# Soft Delete Revive Trigger retired on "({_QUOTED_CONTENT})" '
     rf'that is related to "({_QUOTED_CONTENT})"'
     rf'(?: via "(?P<foreign_key>{_QUOTED_CONTENT})")?'
 )

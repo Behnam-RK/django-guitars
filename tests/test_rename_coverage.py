@@ -186,13 +186,21 @@ def test_a_renamed_cascade_child_drops_its_inverse_rules_old_name_too():
     (operation,) = [
         candidate
         for candidate in command._build_operations(apps.get_app_config('testapp'))
-        if candidate.startswith('# Soft Delete Revive Rule on "testapp_album"')
+        if candidate.startswith('# Soft Delete Revive Trigger on "testapp_album"')
     ]
 
-    assert 'DROP RULE IF EXISTS "soft_delete_revive_16_testapp_oldalbum" ON "testapp_band"' in (
-        operation
+    assert (
+        'DROP TRIGGER IF EXISTS "soft_delete_revive_12_testapp_band_16_testapp_oldalbum" '
+        'ON "testapp_band"'
+    ) in operation
+    # The function goes with it: a trigger and its function share one name here, and the
+    # carried-over function would otherwise keep a body reading the old table's key.
+    assert (
+        'DROP FUNCTION IF EXISTS "soft_delete_revive_12_testapp_band_16_testapp_oldalbum"()'
+    ) in operation
+    assert (
+        'CREATE TRIGGER "soft_delete_revive_12_testapp_band_13_testapp_album"' in operation
     )
-    assert 'CREATE OR REPLACE RULE "soft_delete_revive_13_testapp_album"' in operation
 
 
 def test_a_rename_wrapped_in_separate_database_and_state_is_still_seen():

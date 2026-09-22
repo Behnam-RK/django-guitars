@@ -337,3 +337,23 @@ def test_the_router_is_asked_about_the_concrete_model_not_a_proxy():
         # The proxy resolves to its concrete model, which no router sends anywhere.
         assert routing.migrates_to_postgresql(proxy) is True
         assert routing.migrates_to_postgresql(concrete) is True
+
+
+@override_settings(DATABASE_ROUTERS=[_ToNonPg()])
+def test_a_routed_away_tenanted_table_is_not_called_a_disagreement():
+    """An applied policy on a routed-away model stays, and its objects are real. It is absent
+    from ``expected.tables`` because nothing writes it one *now*, not because the models
+    stopped expecting it -- which is what the audit used to report."""
+    from guitars.tenancy.discovery import expected_coverage, routed_away_tables
+
+    away = routed_away_tables()
+
+    assert Release._meta.db_table in away
+    # The premise: it really is missing from the coverage the audit compares against.
+    assert Release._meta.db_table not in expected_coverage().tables
+
+
+def test_nothing_is_routed_away_without_a_router():
+    from guitars.tenancy.discovery import routed_away_tables
+
+    assert routed_away_tables() == set()

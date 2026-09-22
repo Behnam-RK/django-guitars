@@ -56,7 +56,7 @@ def _revive_retirements(built: Command, app: str = 'testapp') -> list[str]:
     return [
         operation
         for operation in built._retired_cascade_operations(app)
-        if operation.startswith('# Soft Delete Revive Rule retired')
+        if operation.startswith('# Soft Delete Revive Trigger retired')
     ]
 
 
@@ -877,15 +877,18 @@ def test_a_relaxed_key_retires_both_of_its_rules(command):
         cascade
     )
     # Sized name, and every prior spelling of the renamed table, exactly as the cascade does.
-    assert 'DROP RULE IF EXISTS "soft_delete_revive_17_testapp_callbacks" ON "testapp_band"' in (
-        revive
-    )
-    assert 'DROP RULE IF EXISTS "soft_delete_revive_14_testapp_encore" ON "testapp_band"' in (
-        revive
-    )
-    # And the reverse rebuilds the inverse rule, not a second copy of the cascade.
-    assert 'old._deleted_at IS NOT NULL AND new._deleted_at IS NULL' in revive
-    assert '_deleted_at = old._deleted_at' in revive
+    assert (
+        'DROP TRIGGER IF EXISTS "soft_delete_revive_12_testapp_band_17_testapp_callbacks" '
+        'ON "testapp_band"'
+    ) in revive
+    assert (
+        'DROP TRIGGER IF EXISTS "soft_delete_revive_12_testapp_band_14_testapp_encore" '
+        'ON "testapp_band"'
+    ) in revive
+    # And the reverse rebuilds the inverse form, not a second copy of the cascade.
+    assert 'guitars_before._deleted_at IS NOT NULL' in revive
+    assert 'guitars_after._deleted_at IS NULL' in revive
+    assert '_deleted_at = guitars_revived._deleted_at' in revive
 
 
 def test_a_key_recorded_before_the_inverse_family_existed_retires_only_the_cascade(command):
@@ -920,7 +923,7 @@ def test_the_via_form_retires_both_under_their_own_names(command):
     (revive,) = _revive_retirements(command)
 
     assert 'soft_delete_related_testapp_callbacks_band_id' in cascade
-    assert 'soft_delete_revive_via_17_testapp_callbacks_7_band_id' in revive
+    assert 'soft_delete_revive_via_12_testapp_band_17_testapp_ca_c0a6f2b114' in revive
     assert 'via "band_id"!' in cascade and 'via "band_id"!' in revive
 
 
@@ -948,7 +951,10 @@ def test_an_unretirable_key_names_both_halves_to_drop_by_hand(command):
     (note,) = command._unmapped_cascade_notes()
 
     assert 'DROP RULE "soft_delete_related_gone_child" ON "gone_owner"' in note
-    assert 'DROP RULE "soft_delete_revive_10_gone_child" ON "gone_owner"' in note
+    assert (
+        'DROP TRIGGER "soft_delete_revive_10_gone_owner_10_gone_child" ON "gone_owner"' in note
+    )
+    assert 'DROP FUNCTION "soft_delete_revive_10_gone_owner_10_gone_child"()' in note
 
 
 def test_an_unretirable_key_names_only_the_half_the_project_recorded(command):

@@ -21,6 +21,7 @@ from guitars.tenancy.discovery import (
     AUTOFILL_FUNCTION_PREFIX,
     autofill_function_name,
     expected_coverage,
+    routed_away_tables,
 )
 
 
@@ -502,11 +503,16 @@ class Command(BaseCommand):
 
         # The other direction: a scoped run can't tell "not mine" from "gone", so only a
         # full-repo audit may claim a policy is unexpected.
+
+        # A routed-away model is absent from ``expected.tables`` because nothing writes it a
+        # policy *now*, not because the models stopped expecting one -- its applied policy is
+        # real, as ``docs/migrations.md``'s "Routing" says.
+        routed_away = routed_away_tables()
         unexpected = (
             sorted(
                 table
                 for table, state in live.items()
-                if state.has_policy and table not in expected.tables
+                if state.has_policy and table not in expected.tables and table not in routed_away
             )
             if not requested
             else []

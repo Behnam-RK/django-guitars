@@ -53,7 +53,7 @@ def test_upgrading_an_already_migrated_legacy_project():
         # album rule, the band<->album cascade rule, and since 2.13.0 that cascade's inverse --
         # a legacy project receives the revive rule on the same upgrade that modernises it.
         assert content.count('[SQL:') == 6, content
-        assert content.count('Soft Delete Revive Rule') == 1, content
+        assert content.count('Soft Delete Revive Trigger') == 1, content
         # The *replace* form specifically, not a plain create: the generator knows this
         # object already exists (a header was found, just with no matching digest), and a
         # plain CREATE here would fail `migrate` with "already exists".

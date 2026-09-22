@@ -313,23 +313,26 @@ class TestSafeIdent:
         assert _identifiers._safe_ident('rls_exempt_Weird Role') == '"rls_exempt_Weird Role"'
 
 
-def test_the_revive_rule_name_is_injective_over_schema_table_and_key():
-    """Both of its variable segments are optional -- the schema, and the key the primary form
-    does not carry -- so sizing alone left ``('myapp.x', None)`` and ``('myapp', 'x')`` naming
-    one rule on one owner table, and PostgreSQL would have kept whichever was created last."""
-    from guitars.management.enforcement.operations import _revive_rule_name
+def test_the_revive_name_is_injective_over_owner_schema_table_and_key():
+    """Its schema segments and its key are all optional, so sizing alone left ``('myapp.x',
+    None)`` and ``('myapp', 'x')`` naming one object. A function is namespaced per schema, so
+    two owner tables sharing a ``(related, fk)`` pair would collide without the owner too."""
+    from guitars.management.enforcement.operations import _revive_name
 
-    assert _revive_rule_name('myapp.x', None) != _revive_rule_name('myapp', 'x')
-    # The general property, over every pair that sizing alone cannot separate.
-    pairs = [
-        ('myapp.x', None),
-        ('myapp', 'x'),
-        ('a.b_1_c', None),
-        ('a_1_b', 'c'),
-        ('a.b', 'c'),
-        ('a', 'b_1_c'),
-        ('testapp_album', None),
-        ('testapp_album', 'band_id'),
+    assert _revive_name('o', 'myapp.x', None) != _revive_name('o', 'myapp', 'x')
+    # Two owners sharing a related table and key -- the collision a rule name would not have.
+    assert _revive_name('owner_a', 'child', 'fk') != _revive_name('owner_b', 'child', 'fk')
+    triples = [
+        ('o', 'myapp.x', None),
+        ('o', 'myapp', 'x'),
+        ('o', 'a.b_1_c', None),
+        ('o', 'a_1_b', 'c'),
+        ('o', 'a.b', 'c'),
+        ('o', 'a', 'b_1_c'),
+        ('o.p', 'a', None),
+        ('o_p', 'a', None),
+        ('testapp_band', 'testapp_album', None),
+        ('testapp_band', 'testapp_album', 'band_id'),
     ]
-    names = [_revive_rule_name(*pair) for pair in pairs]
-    assert len(set(names)) == len(pairs), sorted(names)
+    names = [_revive_name(*triple) for triple in triples]
+    assert len(set(names)) == len(triples), sorted(names)

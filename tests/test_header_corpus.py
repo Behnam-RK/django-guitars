@@ -44,15 +44,15 @@ _BASELINE = {
         r'# Soft Delete Related Rule retired on "([^"]+)" that is related to "([^"]+)"'
         r'(?: via "(?P<foreign_key>[^"]+)")?'
     ),
-    # Born hand-written in 2.13.0, fusing its two forms as the cascade pair does. Baselined
-    # naively for the same reason, and because the corpus is where "Revive never reads as
-    # Related" is proved on the real files rather than argued from the one token that differs.
+    # Born hand-written in 2.13.0, baselined naively for the cascade pair's reason.
+    # Disjointness is *not* provable here -- a widened scanner widens its own baseline
+    # identically -- so ``test_enforcement_identity.py`` asserts it, as for the other pairs.
     '_RE_SOFT_DELETE_REVIVE': re.compile(
-        r'# Soft Delete Revive Rule on "([^"]+)" that is related to "([^"]+)"'
+        r'# Soft Delete Revive Trigger on "([^"]+)" that is related to "([^"]+)"'
         r'(?: via "(?P<foreign_key>[^"]+)")?'
     ),
     '_RE_SOFT_DELETE_REVIVE_RETIRED': re.compile(
-        r'# Soft Delete Revive Rule retired on "([^"]+)" that is related to "([^"]+)"'
+        r'# Soft Delete Revive Trigger retired on "([^"]+)" that is related to "([^"]+)"'
         r'(?: via "(?P<foreign_key>[^"]+)")?'
     ),
     # Born derived in 2.8.0, baselined naively for its siblings' reason -- and because it is

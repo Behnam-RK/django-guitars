@@ -185,8 +185,8 @@ class Command(BaseCommand):
         if connections[using].vendor != ENFORCEMENT_VENDOR:
             raise CommandError(
                 f"Database '{using}' is {connections[using].vendor}, not "
-                f'{ENFORCEMENT_VENDOR}, and the owned rules this sweeps live in '
-                f'``pg_rules``. If this project keeps its guitars models on another alias, '
+                f'{ENFORCEMENT_VENDOR}, and the owned rules this sweeps live in the PostgreSQL '
+                f'catalog. If this project keeps its guitars models on another alias, '
                 f'sweep that one: --database=<alias>.'
             )
         repair = options['repair']

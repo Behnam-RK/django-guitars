@@ -46,6 +46,7 @@ __all__ = [
     'is_local',
     'owner_autofill_notes',
     'policy_dimensions',
+    'routed_away_tables',
     'tenant_policies_enabled',
 ]
 
@@ -493,6 +494,19 @@ def app_coverage(app: AppConfig) -> Coverage:
         if coverage is not None:
             tables[_meta(model).db_table] = coverage
     return Coverage(tables=tables, notes=notes)
+
+
+def routed_away_tables() -> set[str]:
+    """Tenanted local tables the router sends off PostgreSQL. ``app_coverage`` leaves these out
+    of ``Coverage.tables``, so ``audittenancy`` would otherwise read a policy that is real,
+    applied and correct as one "the models no longer expect"."""
+    return {
+        _meta(model).db_table
+        for app in django_apps.get_app_configs()
+        if is_local(app)
+        for model in app.get_models()
+        if tenant_spec(model) and not _meta(model).proxy and not migrates_to_postgresql(model)
+    }
 
 
 def expected_coverage(requested: set[str] | None = None) -> Coverage:

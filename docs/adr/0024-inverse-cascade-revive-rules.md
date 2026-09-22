@@ -1,8 +1,8 @@
-# 0024 — an inverse rule revives what a cascade archived
+# 0024 — an inverse trigger revives what a cascade archived
 
 - **Status:** accepted
 - **Date:** 2026-09-22
-- **Affects:** `guitars.sql.soft_delete._CREATE_SOFT_DELETE_REVIVE_RELATED_OBJECTS_RULE`, `guitars.management.enforcement`
+- **Affects:** `guitars.sql.soft_delete._CREATE_SOFT_DELETE_REVIVE`, `guitars.management.enforcement`
 
 ## Context
 
@@ -14,17 +14,19 @@ Two other options were on the table: a Python `revive()`/`undelete()` on the que
 
 ## Decision
 
-A new private rule family, `soft_delete_revive_*`, emitted from inside `_cascade_operations`' own loop against the same key and after the same refusals — so which relations carry a revive **is** which carry a cascade. Its predicate is `old._deleted_at IS NOT NULL AND new._deleted_at IS NULL`, and its action is `SET _deleted_at = NULL WHERE "<fk>" = old."<pk>" AND _deleted_at = old._deleted_at`.
+A new private family, `soft_delete_revive_*`, emitted from inside `_cascade_operations`' own loop against the same key and after the same refusals — so which relations carry a revive **is** which carry a cascade. It is a **statement-level `AFTER UPDATE` trigger**, not a second rule: it reads the transition tables for parents whose `_deleted_at` went from set to `NULL`, and clears `_deleted_at` on children whose value still equals the parent's.
 
 Plain and VIA only. The owned family and the self-referential cascade trigger stay archive-only. A retirement now drops **both** rules per key, each arm testing its own recorded map, and each is ordered against the migration that created it.
 
 ## Why
 
-Timestamp equality is the provenance test, and it needs no second mechanism: it implies `IS NOT NULL` (`NULL = x` never holds), it chains level by level because each level's rule fires on the level above's `UPDATE`, and a multi-row statement stays correct because the rule's action expands as a join rather than one broadcast value. All four were verified against PostgreSQL before any of the wiring was written.
+Timestamp equality is the provenance test, and it needs no second mechanism: it chains level by level because each level's own `UPDATE` fires the level below's trigger, and a multi-row statement stays correct because the transition tables are joined on the primary key rather than one value being broadcast. Both were verified against PostgreSQL before any of the wiring was written.
 
-No statement-level sweep, unlike the owned family. [ADR 0014](0014-statement-level-owned-sweep.md)'s problem was that the owned rule's guard reads *sibling liveness*, which the same statement mutates. This predicate is strictly per-pair and reads nothing the statement changes but the child's own column, which only this rule writes and writes idempotently.
+**Statement-level, and this is the decision that changed.** The family shipped first as a second `ON UPDATE` rule beside the cascade one, which is wrong for a reason a review round measured: PostgreSQL's rewriter expands *both* rules for any `UPDATE`, then rewrites each arm against the child's two rules, so a cascade chain of depth N costs 2^(N+1)−1 query trees. The revive arm inside a cascade expansion is provably dead — `new._deleted_at IS NULL` is constant-false there — but the rewriter builds it and the planner plans it. Measured at depth 6: **127 query trees and 93 ms** to plan a plain `UPDATE … SET label = 'x'`, against 7 and 2 ms with the cascade rules alone; a statement trigger restores 7 and ~6 ms. It doubles per level and is paid on every write, `save()` included. That is the cost [ADR 0018](0018-self-referential-cascade-trigger.md) converted the self-referential cascade to avoid, and the cost CLAUDE.md cites as the whole reason for the rule-cycle refusal, arriving by expense rather than by error.
 
-A separate operation rather than more SQL inside the cascade's own, though bundling looks cheaper. Bundled, a retirement would have to emit `DROP RULE <revive>` for keys whose project never created one — every project upgrading to this release — and the escapes are `IF EXISTS`, a knowledge claim reserved for `--adopt`, or comparing a recorded digest against the current template's bytes, which breaks the next time either template changes. It is also ADR 0014's own finding: a recorded rule must not read as a recorded second object, or upgrading projects never receive one.
+No **refusal** on a key rewrite, unlike the owned sweep. That sweep raises where a statement archives an owner and moves its primary key, because its join cannot then say whether the row was archived and the dependent would leak. Here the same shape leaves the children archived — the state they were already in — so it fails toward hiding and needs no exception.
+
+A separate operation rather than more SQL inside the cascade's own, though bundling looks cheaper. Bundled, a retirement would have to drop a revive for keys whose project never created one — every project upgrading to this release — and the escapes are `IF EXISTS`, a knowledge claim reserved for `--adopt`, or comparing a recorded digest against the current template's bytes, which breaks the next time either template changes. It is also ADR 0014's own finding: a recorded rule must not read as a recorded second object, or upgrading projects never receive one.
 
 Against a Python `revive()`: the kit's premise is that behaviour is enforced by PostgreSQL because the paths that matter — `queryset.delete()`, `bulk_update`, raw SQL — never reach `.save()`. A Python method is bypassed by a raw `UPDATE ... SET _deleted_at = NULL`, by another service, and by this repository's own test suite, which writes exactly that. The counter-argument is real and worth stating: unlike deletion, which Django issues on the caller's behalf through rows they never named, un-archiving is always a deliberate act at a known call site, so a Python API would be reachable at the point of intent. That makes the Python branch viable, not equivalent — it narrows the hole rather than closing it.
 
@@ -40,9 +42,9 @@ Under tenancy the family is emitted, not refused, as the cascade family is: a ch
 
 One shape is left as accepted rather than guarded: a row that is both an `OwningForeignKey` dependent and an ordinary `CASCADE` child of the *same* parent is revived by this rule regardless of its other owners, the owned family's last-owner reasoning not reaching it. `tests/testapp` has no such shape.
 
-The rule-name clash report now covers two families. The revive name sizes each segment it emits *and* carries a literal `via` on the keyed form — sizing alone is not injective here, because both of its variable segments are optional, and `('myapp.x', None)` and `('myapp', 'x')` named one rule until a review round caught it. `_owned_rule_name` escapes that only because its key is mandatory, so its segment count says whether the first segment is a schema; the docstring cited its reasoning without inheriting its precondition. So the revive names stay apart where the frozen cascade spelling collides — but not for an MTI parent and child whose keys both reach one owner table, where each is the primary of its own pass and both ask for the plain form. Both clashes are reported; a proof in one family is not a reason to stop watching.
+The name-clash report now covers a third family. The revive name sizes every segment it emits *and* carries a literal `via` on the keyed form, because all three of its variable parts are optional and sizing alone let `('myapp.x', None)` meet `('myapp', 'x')`. It spells the **owner** table too, for `_owned_sweep_name`'s reason: a trigger is namespaced per table but a function per schema, so two owners sharing a `(related, key)` pair would otherwise overwrite each other's body. It is claimed on the name alone, as that sweep is, rather than per table.
 
-**Reversibility.** The family is private and additive: dropping its templates, headers, scanner and emitter would leave the cascade family untouched, and the retirement path already knows how to drop the rules. What would not come back is the provenance ADR 0023 paid for.
+**Reversibility.** The family is private and additive: dropping its templates, headers, scanner and emitter would leave the cascade family untouched, and the retirement path already drops the trigger and its function. What would not come back is the provenance ADR 0023 paid for. Relaxing a key rather than removing it still wants a hand-written `DROP TRIGGER` and `DROP FUNCTION`, as it does for the owned sweep — and `RetireEnforcement`'s whole-table form takes them, while its column-scoped form cannot, a trigger depending on no column.
 
 ## Related
 

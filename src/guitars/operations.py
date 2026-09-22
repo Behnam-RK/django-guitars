@@ -11,6 +11,7 @@ from __future__ import annotations
 from django.db.migrations.exceptions import IrreversibleError
 from django.db.migrations.operations.base import Operation
 
+from guitars.routing import ENFORCEMENT_VENDOR
 from guitars.sql import _identifiers
 from guitars.sql import policy as _policy
 
@@ -127,6 +128,7 @@ BEGIN
                   guitars_trigger.tgname = 'updated_at_trigger'
                   OR guitars_trigger.tgname LIKE 'soft\\_delete\\_self\\_cascade%'
                   OR guitars_trigger.tgname LIKE 'soft\\_delete\\_owned\\_sweep%'
+                  OR guitars_trigger.tgname LIKE 'soft\\_delete\\_revive%'
                   OR guitars_trigger.tgname LIKE 'guitars\\_fill%'
               )
         LOOP
@@ -177,6 +179,11 @@ class RetireEnforcement(Operation):
         beside it; this one is a database-only step."""
 
     def database_forwards(self, app_label, schema_editor, from_state, to_state) -> None:  # noqa: ARG002
+        # Every catalog this body reads is PostgreSQL's, so on another backend it is a syntax
+        # error rather than a retirement. Skipped, which is what ``RunSQL`` does when the
+        # router answers no: recorded as applied, having done nothing.
+        if schema_editor.connection.vendor != ENFORCEMENT_VENDOR:
+            return
         # ``to_regclass`` over the *quoted* spelling, not a bare literal: ``'MyTable'::regclass``
         # resolves ``mytable`` and a name with a space raises, while ``_quote_table`` produces
         # the form the rest of the kit writes -- and refuses a spelling it cannot.

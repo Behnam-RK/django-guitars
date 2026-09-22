@@ -66,6 +66,26 @@ HEADER_SCANNERS = [
         {'related_table': 'shop_line', 'table': 'shop_order', 'foreign_key': 'bonus_order_id'},
     ),
     (
+        headers_module.HEADER_SOFT_DELETE_REVIVE,
+        headers_module._RE_SOFT_DELETE_REVIVE,
+        {'related_table': 'shop_line', 'table': 'shop_order'},
+    ),
+    (
+        headers_module.HEADER_SOFT_DELETE_REVIVE_VIA,
+        headers_module._RE_SOFT_DELETE_REVIVE,
+        {'related_table': 'shop_line', 'table': 'shop_order', 'foreign_key': 'bonus_order_id'},
+    ),
+    (
+        headers_module.HEADER_SOFT_DELETE_REVIVE_RETIRED,
+        headers_module._RE_SOFT_DELETE_REVIVE_RETIRED,
+        {'related_table': 'shop_line', 'table': 'shop_order'},
+    ),
+    (
+        headers_module.HEADER_SOFT_DELETE_REVIVE_VIA_RETIRED,
+        headers_module._RE_SOFT_DELETE_REVIVE_RETIRED,
+        {'related_table': 'shop_line', 'table': 'shop_order', 'foreign_key': 'bonus_order_id'},
+    ),
+    (
         headers_module.HEADER_SOFT_DELETE_SELF_CASCADE,
         headers_module._RE_SOFT_DELETE_SELF_CASCADE,
         {'table': 'shop_order', 'foreign_key': 'parent_id'},
@@ -592,3 +612,31 @@ def test_the_committed_migration_creates_the_body_the_audit_expects():
     # emits a *second* `NNNN_auto_enforcement_guitars_fill_..._label_id.py` (that is what the
     # [SQL:...] identity is for), and only the last one applied creates the body audited for.
     assert triggers._squeeze(body) in triggers._squeeze(written[-1].read_text())
+
+
+def test_the_cascade_and_revive_headers_never_match_each_other():
+    """The third family keying on the cascade triple, differing only in the token after "Soft
+    Delete". One scanner reading both takes every recorded cascade for a recorded revive, so no
+    upgrading project receives one -- the failure ADR 0014 records for the owned pair."""
+    slots = {'related_table': 'shop_line', 'table': 'shop_order'}
+    cascade = headers_module.HEADER_SOFT_DELETE_RELATED.format(**slots)
+    revive = headers_module.HEADER_SOFT_DELETE_REVIVE.format(**slots)
+
+    assert headers_module._RE_SOFT_DELETE_RELATED.search(revive) is None
+    assert headers_module._RE_SOFT_DELETE_REVIVE.search(cascade) is None
+    assert headers_module._RE_SOFT_DELETE_REVIVE.search(revive).groups() == (
+        'shop_line',
+        'shop_order',
+        None,
+    )
+
+
+def test_the_live_and_retired_revive_headers_never_match_each_other():
+    """The other half, on the literal "retired": a scanner reading both records every retired
+    key as a live create, so the retirement stops emitting its drop and nothing fails."""
+    slots = {'related_table': 'shop_line', 'table': 'shop_order'}
+    live = headers_module.HEADER_SOFT_DELETE_REVIVE.format(**slots)
+    retired = headers_module.HEADER_SOFT_DELETE_REVIVE_RETIRED.format(**slots)
+
+    assert headers_module._RE_SOFT_DELETE_REVIVE.search(retired) is None
+    assert headers_module._RE_SOFT_DELETE_REVIVE_RETIRED.search(live) is None

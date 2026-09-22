@@ -2,10 +2,12 @@
 its own, so an author removing a column a rule names has to say so: these pin what
 ``RetireEnforcement`` drops, what it leaves, and that it refuses to be reversed."""
 
+from pathlib import Path
+
 import pytest
 from django.db import connection, transaction
-from django.db.migrations.exceptions import IrreversibleError
 from django.db.migrations import Migration
+from django.db.migrations.exceptions import IrreversibleError
 from django.db.migrations.loader import MigrationLoader
 from django.db.migrations.operations import SeparateDatabaseAndState
 from django.db.migrations.writer import OperationWriter
@@ -215,6 +217,24 @@ def test_a_whole_table_retirement_subtracts_both_shapes():
     assert whole['triggers'] == {'shop_order': 'eee'}
 
 
+def _stem_after_every_create() -> str:
+    """``testapp``'s newest migration, which carries no operation of its own -- the enforcement
+    one cannot serve, a file that both creates and retires a key not being its own evidence.
+    Read, not spelled: the tests below mean "after everything that asserts this key"."""
+    migrations_dir = Path(__file__).parent / 'testapp' / 'migrations'
+    stems = sorted(path.stem for path in migrations_dir.glob('0*.py'))
+    newest_create = max(stem for stem in stems if stem.endswith('_auto_enforcement'))
+    host = stems[-1]
+    # Asserted rather than assumed: regenerating puts a new create last, and these tests then
+    # pretend a retirement into the file that asserts the key -- which reads as no retirement
+    # at all, and fails with an assertion about the key rather than about the ordering.
+    assert host > newest_create, (
+        f'{host!r} must sort after {newest_create!r}: add an empty migration after it, as '
+        f'0059_retirement_host is, or these tests pretend a retirement into its own create.'
+    )
+    return host
+
+
 def _retire_at(monkeypatch, stem: str, table: str, column: str | None = None) -> None:
     """Pretend *stem* carried a ``RetireEnforcement``, so the wiring can be exercised against
     the real testapp migrations without a migration that would really drop those objects."""
@@ -232,7 +252,7 @@ def test_the_scan_forgets_what_a_retirement_dropped(monkeypatch):
     reading the database as covered."""
     assert 'testapp_setlistentry' in scan_existing_operations().soft_deletes
 
-    _retire_at(monkeypatch, '0046_auto_enforcement', 'testapp_setlistentry')
+    _retire_at(monkeypatch, _stem_after_every_create(), 'testapp_setlistentry')
 
     existing = scan_existing_operations()
     assert 'testapp_setlistentry' not in existing.soft_deletes
@@ -258,7 +278,7 @@ def test_a_column_retirement_leaves_the_tables_own_coverage(monkeypatch):
     """The column form reaches the keyed families only. The cascade rule reading
     ``setlist_id`` goes; the entry table's own soft-delete rule and trigger stay, because
     dropping one column is not dropping the model."""
-    _retire_at(monkeypatch, '0046_auto_enforcement', 'testapp_setlistentry', 'setlist_id')
+    _retire_at(monkeypatch, _stem_after_every_create(), 'testapp_setlistentry', 'setlist_id')
 
     existing = scan_existing_operations()
 

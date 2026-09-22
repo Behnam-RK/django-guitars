@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, NamedTuple, cast
 
+from guitars.routing import migrates_to_postgresql
+
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -69,8 +71,8 @@ def mti_root(model: type[models.Model]) -> type[models.Model]:
 
 def _rule_update_edges(candidates: Iterable[type[models.Model]]) -> set[tuple[str, str]]:
     """``(fires_on_table, updates_table)`` for every ON UPDATE soft-delete rule *candidates* call
-    for -- cascade and owned alike, each read off the model declaring the foreign key, so a partial
-    *candidates* can only miss edges, never invent one. Imports deferred: see below."""
+    for -- cascade and owned alike, read off the model declaring the key and off its target, so
+    a partial *candidates*, or a routed-away end, misses edges rather than inventing one."""
     # Deferred: every other name in this module comes from ``_meta`` alone, while
     # ``guitars.models.fields`` reaches ``guitars.models.__init__`` and the tenancy runtime
     # behind it -- a cost only a caller asking about rules should pay.
@@ -87,11 +89,21 @@ def _rule_update_edges(candidates: Iterable[type[models.Model]]) -> set[tuple[st
         # that inherits the column declares no rule of its own -- its ancestor does.
         if not owns_column(model, '_deleted_at'):
             continue
+        # And a model this kit writes no rule for at all: an edge from one is invented,
+        # which the note below calls worse than a missing one. Routing, never *scoping* --
+        # a scoped run still means the rule exists, so scope must not be read here.
+        if not migrates_to_postgresql(model):
+            continue
         table = model._meta.db_table
         for field in model._meta.local_fields:
             if not isinstance(field, ForeignKey) or not has_column(
                 field.related_model, '_deleted_at'
             ):
+                continue
+            # The related model, and *only* it: the generator gates two models per relation,
+            # the one declaring the key and the one it points at. Asking a third -- this
+            # target's column owner -- dropped edges no rule refusal matches.
+            if not migrates_to_postgresql(field.related_model):
                 continue
             target_table = column_owner(field.related_model, '_deleted_at')._meta.db_table
             # ``_targets_primary_key`` too: a redirected ``to_field`` gets no rule from either
@@ -204,6 +216,8 @@ def owner_arms(candidates: Iterable[type[models.Model]]) -> dict[str, list[Owner
                 or not has_column(model, '_deleted_at')
                 or not has_column(field.related_model, '_deleted_at')
                 or not _targets_primary_key(field)
+                or not migrates_to_postgresql(model)
+                or not migrates_to_postgresql(field.related_model)
             ):
                 continue
             dependent_table = column_owner(field.related_model, '_deleted_at')._meta.db_table
@@ -277,6 +291,8 @@ def owned_tenancy_refusals(
                 or field.model is not model
                 or not has_column(field.related_model, '_deleted_at')
                 or not _targets_primary_key(field)
+                or not migrates_to_postgresql(model)
+                or not migrates_to_postgresql(field.related_model)
             ):
                 continue
             dependent = column_owner(field.related_model, '_deleted_at')

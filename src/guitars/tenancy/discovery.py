@@ -12,6 +12,7 @@ from django.conf import settings
 from guitars.gucs import BYPASS_GUC, guc_name
 from guitars.introspection import column_owner, owns_column
 from guitars.local_apps import is_local
+from guitars.routing import migrates_to_postgresql, vendor_skip_note
 from guitars.sql._identifiers import _safe_identifier
 
 from .spec import _autofills, _meta, local_tenant_fields, tenant_spec
@@ -45,6 +46,7 @@ __all__ = [
     'is_local',
     'owner_autofill_notes',
     'policy_dimensions',
+    'routed_away_tables',
     'tenant_policies_enabled',
 ]
 
@@ -358,7 +360,14 @@ def owner_autofill_notes() -> list[str]:
         # Local claimants only, matching ``expected_coverage``'s gate: a third-party app's
         # models produce no coverage, so a refusal about one names a trigger never to be
         # emitted. ``_relocatable`` below still counts *every* descendant's opt-out.
-        if _meta(model).proxy or not tenant_spec(model) or not is_local(_meta(model).app_config):
+        if (
+            _meta(model).proxy
+            or not tenant_spec(model)
+            or not is_local(_meta(model).app_config)
+            # And routed-away claimants, matching ``app_coverage``'s gate for its reason: a
+            # refusal about one names a trigger never to be emitted.
+            or not migrates_to_postgresql(model)
+        ):
             continue
         for field_name in local_tenant_fields(model).values():
             if owns_column(model, field_name):
@@ -434,7 +443,11 @@ def _dimensions(
     spec = tenant_spec(concrete)
     if not spec:
         return frozenset()
-    if not is_local(django_apps.get_app_config(_meta(concrete).app_label)):
+    # A routed-away model answers as one outside ``LOCAL_APPS`` does, and for the identical
+    # reason: this kit writes no policy for it, so its declared spec describes nothing live.
+    if not is_local(
+        django_apps.get_app_config(_meta(concrete).app_label)
+    ) or not migrates_to_postgresql(concrete):
         return frozenset(spec) if outside_local_apps is None else outside_local_apps
     key = (concrete, outside_local_apps is None)
     if memo is not None and key in memo:
@@ -471,11 +484,29 @@ def app_coverage(app: AppConfig) -> Coverage:
             if not tenant_spec(_meta(model).concrete_model):
                 notes.append(_proxy_note(model))
             continue
+        # A policy and an autofill trigger are PostgreSQL, and the manager's Python half is
+        # not -- which is the whole point of naming the two separately here.
+        if not migrates_to_postgresql(model):
+            notes.append(vendor_skip_note(model))
+            continue
         coverage, model_notes = _classify(model, memo)
         notes.extend(model_notes)
         if coverage is not None:
             tables[_meta(model).db_table] = coverage
     return Coverage(tables=tables, notes=notes)
+
+
+def routed_away_tables() -> set[str]:
+    """Tenanted local tables the router sends off PostgreSQL. ``app_coverage`` leaves these out
+    of ``Coverage.tables``, so ``audittenancy`` would otherwise read a policy that is real,
+    applied and correct as one "the models no longer expect"."""
+    return {
+        _meta(model).db_table
+        for app in django_apps.get_app_configs()
+        if is_local(app)
+        for model in app.get_models()
+        if tenant_spec(model) and not _meta(model).proxy and not migrates_to_postgresql(model)
+    }
 
 
 def expected_coverage(requested: set[str] | None = None) -> Coverage:

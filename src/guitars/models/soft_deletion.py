@@ -26,6 +26,7 @@ from guitars.introspection import (
     owns_column,
     rule_update_cycle_edges,
 )
+from guitars.routing import migrates_to_postgresql
 from guitars.sql import SWITCH_OFF_HARD_DELETION, SWITCH_ON_HARD_DELETION
 
 from .fields import OwningForeignKey, _targets_primary_key
@@ -47,6 +48,11 @@ def _declared_owning_fields(model: type[Model]) -> list[OwningForeignKey]:
     # rule would fire on a table ``old."<column>"`` cannot reach. See docs/owned-relations.md.
     if not owns_column(model, '_deleted_at'):
         return []
+    # Beside that return, not in the comprehension: it does not vary across ``local_fields``,
+    # and with a router configured each ask runs the whole chain per alias -- on a path
+    # ``hard_delete`` walks per collected model, per fixpoint round.
+    if not migrates_to_postgresql(model):
+        return []
     # Mirrors ``_owned_candidates``/``_owned_operations``' "nothing to stamp" and non-primary-key
     # refusals: no rule is emitted, so the relation is not followed -- following it destroys what
     # the rule spared, and under a redirected key destroys a row nothing ever owned.
@@ -56,6 +62,9 @@ def _declared_owning_fields(model: type[Model]) -> list[OwningForeignKey]:
         if isinstance(field, OwningForeignKey)
         and has_column(field.related_model, '_deleted_at')
         and _targets_primary_key(field)
+        # And the routing refusal, for the same reason as the two above: the generator
+        # writes no rule across a relation either end of which is off PostgreSQL.
+        and migrates_to_postgresql(field.related_model)
     ]
 
 

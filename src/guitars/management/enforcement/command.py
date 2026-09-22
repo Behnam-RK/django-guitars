@@ -27,6 +27,7 @@ from guitars.management.enforcement.headers import (
 from guitars.management.enforcement.identity import _operation
 from guitars.management.enforcement.operations import OperationsMixin, OwnerArm
 from guitars.management.enforcement.scanning import ExistingOperations, scan_existing_operations
+from guitars.routing import migrates_to_postgresql
 from guitars.sql import _identifiers
 from guitars.sql import triggers as _triggers
 from guitars.tenancy.discovery import owner_autofill_notes, tenant_policies_enabled
@@ -89,6 +90,10 @@ class Command(OperationsMixin, BaseCommand):
         self._claimed_sweep_names: dict[str, tuple] = {}
         # Tables tenancy discovery could not cover, with the reason. Also surfaced.
         self._tenancy_notes: list[str] = []
+        # Models the project's router migrates off PostgreSQL. ``vendor_skip_note`` renders one
+        # string per model whoever asks, so a tenanted model reached by both this and tenancy
+        # discovery dedupes below rather than printing the same skip in two spellings.
+        self._vendor_skip_notes: list[str] = []
 
         self._existing: ExistingOperations | None = None
 
@@ -96,6 +101,7 @@ class Command(OperationsMixin, BaseCommand):
         # in-scope app and each sweeps *every* local app's coverage. Safe to cache -- they read
         # only the model registry and GUITARS_TENANT_POLICIES, neither moving mid-`handle()`.
         self._table_app_labels_cache: dict[str, str] | None = None
+        self._routed_away_cache: frozenset[str] | None = None
         self._cascade_key_maps_cache: tuple[dict, dict] | None = None  # see the mixin
         # Lazy, not built here: the graph reads ``self.all_models``, which a caller can *replace*
         # after construction -- the generation tests do, ``isolate_apps`` swapping ``Options.apps``
@@ -496,6 +502,9 @@ class Command(OperationsMixin, BaseCommand):
             for app in django_apps.get_app_configs()
             if _generator.is_in_scope(app, requested)
             for model in app.get_models()
+            # Gated as `_build_operations` gates it: with every `_updated_at` model routed
+            # off PostgreSQL there is no trigger to call, so nothing to scaffold either.
+            if migrates_to_postgresql(model)
         ]
         needs_trigger_function = any(owns_column(m, '_updated_at') for m in in_scope_models)
         needs_parent_function = any(is_mti_child(m, '_updated_at') for m in in_scope_models)
@@ -578,14 +587,20 @@ class Command(OperationsMixin, BaseCommand):
         # relocation refusals print here too, not only via `expected_coverage`. Once per run,
         # not per app: a refusal is a fact about the owner's table, shared by every child.
         relocation_notes = owner_autofill_notes() if self._tenant_policies_enabled() else []
-        for note in self._tenancy_notes + relocation_notes:
+        # `dict.fromkeys`, not a set: a model routed off PostgreSQL is named once by tenancy
+        # discovery and once by `_build_operations`, byte-identically, and printing the same
+        # sentence twice reads as two findings. Order preserved, unlike a set.
+        for note in dict.fromkeys(
+            self._tenancy_notes + self._vendor_skip_notes + relocation_notes
+        ):
             self.stdout.write(self.style.WARNING(note))
 
         # Coverage this command recorded but can no longer retire or attribute -- an orphaned
         # function is inert, an unmapped table has no app to migrate into, and a file is not
         # something this command can repair at all.
         for note in (
-            self._unmapped_autofill_notes()
+            self._unmapped_cascade_notes()
+            + self._unmapped_autofill_notes()
             + self._orphaned_autofill_function_notes()
             + self._orphaned_mti_notes()
             + self._duplicated_mti_notes()

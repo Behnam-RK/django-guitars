@@ -52,6 +52,24 @@ HEADER_SOFT_DELETE_RELATED_VIA_RETIRED = (
     'via "{foreign_key}"!'
 )
 
+# The inverse of the cascade rule (issue #51), on the same triple and from the same loop, so a
+# relation refused a cascade is refused a revive. "Revive" not "Related" keeps the scanners
+# disjoint, as "Sweep" does for the owned pair; the retired pair is its own for ADR 0021.
+HEADER_SOFT_DELETE_REVIVE = (
+    '# Soft Delete Revive Trigger on "{related_table}" that is related to "{table}"!'
+)
+HEADER_SOFT_DELETE_REVIVE_VIA = (
+    '# Soft Delete Revive Trigger on "{related_table}" that is related to "{table}" '
+    'via "{foreign_key}"!'
+)
+HEADER_SOFT_DELETE_REVIVE_RETIRED = (
+    '# Soft Delete Revive Trigger retired on "{related_table}" that is related to "{table}"!'
+)
+HEADER_SOFT_DELETE_REVIVE_VIA_RETIRED = (
+    '# Soft Delete Revive Trigger retired on "{related_table}" that is related to "{table}" '
+    'via "{foreign_key}"!'
+)
+
 # A self-referential CASCADE FK, taking a trigger where every other cascade takes a rule
 # (ADR 0018). "Self Cascade Trigger" shares no token with the three above, so no scanner
 # reads one as another's. One table slot: the trigger fires on the table its key points at.
@@ -155,6 +173,19 @@ _RE_SOFT_DELETE_RELATED = re.compile(
 # other's operations -- which would have the scan retire a key on the run that asserts it.
 _RE_SOFT_DELETE_RELATED_RETIRED = re.compile(
     rf'# Soft Delete Related Rule retired on "({_QUOTED_CONTENT})" '
+    rf'that is related to "({_QUOTED_CONTENT})"'
+    rf'(?: via "(?P<foreign_key>{_QUOTED_CONTENT})")?'
+)
+
+# Hand-written for the cascade pair's reason, and disjoint from it on the one token that
+# differs: "Revive" where those say "Related". A recorded cascade must never count as a
+# recorded revive, or an upgrading project never receives one. "retired" splits these two.
+_RE_SOFT_DELETE_REVIVE = re.compile(
+    rf'# Soft Delete Revive Trigger on "({_QUOTED_CONTENT})" that is related to "({_QUOTED_CONTENT})"'
+    rf'(?: via "(?P<foreign_key>{_QUOTED_CONTENT})")?'
+)
+_RE_SOFT_DELETE_REVIVE_RETIRED = re.compile(
+    rf'# Soft Delete Revive Trigger retired on "({_QUOTED_CONTENT})" '
     rf'that is related to "({_QUOTED_CONTENT})"'
     rf'(?: via "(?P<foreign_key>{_QUOTED_CONTENT})")?'
 )

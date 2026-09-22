@@ -111,3 +111,92 @@ def test_the_rule_is_gone_from_a_database_that_applied_the_pair():
     # incrementally-migrated database holds, the property ADR 0006 is about.
     assert 'soft_delete_related_crossapp_retire_child_dependant' not in rules
     assert 'soft_delete' in rules
+
+
+def test_the_note_names_the_rule_of_the_family_whose_site_it_is():
+    """A ``CascadeRetirementSite`` carries no family, and the two resolve to *different*
+    creates -- this repo's own shape, the cascade in 0057 and the revive in 0058. One shared
+    minter sends the reader grepping for a name the `migrate` failure never prints."""
+    from guitars.management.enforcement.command import Command
+    from guitars.management.enforcement.scanning import CascadeRetirementSite
+
+    command = Command()
+    command.existing.cascade_retirement_sites.clear()
+    command.existing.revive_retirement_sites.clear()
+    site = CascadeRetirementSite('testapp', '0059_retirement_host', ('testapp_album', 'testapp_band', None), _CREATE)
+    command.existing.revive_retirement_sites.append(site)
+
+    (note,) = command._missing_retirement_edge_notes(set())
+
+    assert 'soft_delete_revive_12_testapp_band_13_testapp_album' in note
+    assert 'soft_delete_related_testapp_album' not in note
+
+
+def test_a_revive_retirement_settles_against_its_own_create_not_the_cascades():
+    """A **contract** test of the second ``_settle_retirement_sites`` call, not end-to-end: no
+    committed migration carries a revive-retired header, so that family's scan never fires here.
+    What it pins is that the function honours the provenance handed to it."""
+    from django.db.migrations.loader import MigrationLoader
+
+    from guitars.management.enforcement.scanning import (
+        CascadeRetirementSite,
+        _settle_retirement_sites,
+    )
+
+    key = ('testapp_album', 'testapp_band', None)
+    cascade_create = ('testapp', '0057_auto_enforcement')
+    revive_create = ('testapp', '0058_auto_enforcement')
+    drop = CascadeRetirementSite('testapp', '0059_retirement_host', key, None)
+
+    settled = _settle_retirement_sites(
+        [drop],
+        {key: 'digest'},
+        {key: [revive_create]},
+        {},
+        {'testapp_album', 'testapp_band'},
+        lambda: MigrationLoader(None, ignore_no_migrations=True),
+    )
+
+    (site,) = settled
+    # Its *own* family's create. Passing the cascade's provenance here would order the revive
+    # drop against 0057, and a fresh `migrate` would then reach it before 0058's CREATE.
+    assert site.created == revive_create
+    assert site.created != cascade_create
+
+
+def test_the_scan_reads_a_revive_retirement_off_a_migration(monkeypatch):
+    """The scan half of the inverse family's retirement, which no committed migration reaches:
+    the corpus has none, so this feeds one synthetic file through the real walk rather than
+    editing a fixture whose history never created the trigger to drop."""
+    from pathlib import Path
+
+    from guitars.management import _generator
+    from guitars.management.enforcement import scanning
+
+    header = (
+        '# Soft Delete Revive Trigger retired on "testapp_album" '
+        'that is related to "testapp_band"!'
+    )
+    real = _generator.iter_migration_files
+
+    create = (
+        '# Soft Delete Revive Trigger on "testapp_album" that is related to "testapp_band"!'
+    )
+
+    def _walk(app):
+        if app.label == 'testapp':
+            # The create twice, so the provenance list's dedupe is exercised: one file can
+            # name one key more than once, and a repeat must not order the drop twice.
+            yield Path('0999_pretend.py'), f'{create}\n{create}\n{header}\n'
+            return
+        yield from real(app)
+
+    monkeypatch.setattr(scanning._generator, 'iter_migration_files', _walk)
+
+    existing = scanning.scan_existing_operations()
+
+    key = ('testapp_album', 'testapp_band', None)
+    (site,) = [s for s in existing.revive_retirement_sites if s.migration == '0999_pretend']
+    assert site.key == key
+    assert site.app_label == 'testapp'
+    assert existing.soft_delete_revive_dependencies[key] == [('testapp', '0999_pretend')]

@@ -13,6 +13,7 @@ from django.db import DEFAULT_DB_ALIAS, connections
 
 from guitars.gucs import GUC_PREFIX
 from guitars.management import _generator
+from guitars.routing import ENFORCEMENT_VENDOR
 from guitars.sql import triggers as _triggers
 from guitars.sql.policy import TENANT_POLICY
 from guitars.tenancy import TenantEnforcement
@@ -20,6 +21,7 @@ from guitars.tenancy.discovery import (
     AUTOFILL_FUNCTION_PREFIX,
     autofill_function_name,
     expected_coverage,
+    routed_away_tables,
 )
 
 
@@ -441,6 +443,15 @@ class Command(BaseCommand):
 
     def handle(self, *app_labels, **options):
         connection = connections[options['database']]
+        # Every probe below reads a PostgreSQL catalog, so on another backend this reports
+        # nothing rather than passing vacuously -- the one failure an audit must not have.
+        if connection.vendor != ENFORCEMENT_VENDOR:
+            raise CommandError(
+                f"Database '{options['database']}' is {connection.vendor}, not "
+                f'{ENFORCEMENT_VENDOR}, and every check below reads a PostgreSQL catalog. '
+                f'If this project keeps its guitars models on another alias, audit that one: '
+                f'--database=<alias>.'
+            )
         require_force = options['require_force']
         require_match = options['require_match']
         requested = set(app_labels)
@@ -492,11 +503,16 @@ class Command(BaseCommand):
 
         # The other direction: a scoped run can't tell "not mine" from "gone", so only a
         # full-repo audit may claim a policy is unexpected.
+
+        # A routed-away model is absent from ``expected.tables`` because nothing writes it a
+        # policy *now*, not because the models stopped expecting one -- its applied policy is
+        # real, as ``docs/migrations.md``'s "Routing" says.
+        routed_away = routed_away_tables()
         unexpected = (
             sorted(
                 table
                 for table, state in live.items()
-                if state.has_policy and table not in expected.tables
+                if state.has_policy and table not in expected.tables and table not in routed_away
             )
             if not requested
             else []

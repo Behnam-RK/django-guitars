@@ -44,6 +44,17 @@ _BASELINE = {
         r'# Soft Delete Related Rule retired on "([^"]+)" that is related to "([^"]+)"'
         r'(?: via "(?P<foreign_key>[^"]+)")?'
     ),
+    # Born hand-written in 2.11.0, baselined naively for the cascade pair's reason.
+    # Disjointness is *not* provable here -- a widened scanner widens its own baseline
+    # identically -- so ``test_enforcement_identity.py`` asserts it, as for the other pairs.
+    '_RE_SOFT_DELETE_REVIVE': re.compile(
+        r'# Soft Delete Revive Trigger on "([^"]+)" that is related to "([^"]+)"'
+        r'(?: via "(?P<foreign_key>[^"]+)")?'
+    ),
+    '_RE_SOFT_DELETE_REVIVE_RETIRED': re.compile(
+        r'# Soft Delete Revive Trigger retired on "([^"]+)" that is related to "([^"]+)"'
+        r'(?: via "(?P<foreign_key>[^"]+)")?'
+    ),
     # Born derived in 2.8.0, baselined naively for its siblings' reason -- and because it is
     # the one family whose header must not read as any of the three above, which the corpus
     # (carrying all four on real files) is where that gets proved rather than argued.
@@ -71,7 +82,12 @@ _BASELINE = {
 #: No committed migration has ever gone through the ``--force-rls`` retrofit stage, nor had
 #: an autofill trigger retired, so these are the scanners with nothing to match in the real
 #: corpus -- baseline and current agreeing on zero is the whole assertion, not a weaker check.
-_EXPECTED_EMPTY = {'_RE_TENANT_FORCE', '_RE_TENANT_AUTOFILL_RETIRED'}
+_EXPECTED_EMPTY = {
+    '_RE_TENANT_FORCE',
+    '_RE_TENANT_AUTOFILL_RETIRED',
+    # No committed migration retires a revive trigger either -- the family is new in 2.11.0.
+    '_RE_SOFT_DELETE_REVIVE_RETIRED',
+}
 
 #: ``_RE_TENANT_POLICY``'s baseline captures ``[POLICY:...]`` inline; current reads it via
 #: a tail search instead -- shape changed on purpose, so this is checked by round-tripping

@@ -14,6 +14,8 @@ from django.db.models import CASCADE, SET_NULL
 from django.test import override_settings
 from django.test.utils import isolate_apps
 
+from tests.conftest import clear_cascade_coverage
+
 from guitars.models import OwningForeignKey, SetarModel
 
 from guitars.management import _generator
@@ -33,9 +35,10 @@ from guitars.management.enforcement.scanning import (
 @pytest.fixture
 def command():
     """A command whose recorded cascade rules the test sets by hand, so a retirement can be
-    arranged without a migration that would really drop one."""
+    arranged without a migration that would really drop one. Both families are cleared: since
+    2.11.0 a key is normally recorded in each, and a retirement has to drop whichever it has."""
     built = Command()
-    built.existing.soft_delete_related.clear()
+    clear_cascade_coverage(built)
     return built
 
 
@@ -45,6 +48,15 @@ def _retirements(built: Command, app: str = 'testapp') -> list[str]:
         operation
         for operation in built._retired_cascade_operations(app)
         if operation.startswith('# Soft Delete Related Rule retired')
+    ]
+
+
+def _revive_retirements(built: Command, app: str = 'testapp') -> list[str]:
+    app = apps.get_app_config(app)
+    return [
+        operation
+        for operation in built._retired_cascade_operations(app)
+        if operation.startswith('# Soft Delete Revive Trigger retired')
     ]
 
 
@@ -849,3 +861,137 @@ def test_a_brand_new_key_with_no_retirement_history_does_not_taint_the_app(comma
     command._record_readoption_edge('testapp', ('testapp_album', 'testapp_genre', None))
 
     assert 'testapp' not in command.existing.retirement_apps
+
+
+def test_a_relaxed_key_retires_both_of_its_rules(command):
+    """The obligation the inverse family created: dropping only the cascade leaves the revive
+    live on the same column, and the consumer's ``RemoveField`` then fails on it."""
+    key = ('testapp_callbacks', 'testapp_band', None)
+    command.existing.soft_delete_related[key] = 'abc'
+    command.existing.soft_delete_revive[key] = 'def'
+
+    (cascade,) = _retirements(command)
+    (revive,) = _revive_retirements(command)
+
+    assert 'DROP RULE IF EXISTS "soft_delete_related_testapp_callbacks" ON "testapp_band"' in (
+        cascade
+    )
+    # Sized name, and every prior spelling of the renamed table, exactly as the cascade does.
+    assert (
+        'DROP TRIGGER IF EXISTS "soft_delete_revive_12_testapp_band_17_testapp_callbacks" '
+        'ON "testapp_band"'
+    ) in revive
+    assert (
+        'DROP TRIGGER IF EXISTS "soft_delete_revive_12_testapp_band_14_testapp_encore" '
+        'ON "testapp_band"'
+    ) in revive
+    # And the reverse rebuilds the inverse form, not a second copy of the cascade.
+    assert 'guitars_before._deleted_at IS NOT NULL' in revive
+    assert 'guitars_after._deleted_at IS NULL' in revive
+    assert '_deleted_at = guitars_revived._deleted_at' in revive
+
+
+def test_a_key_recorded_before_the_inverse_family_existed_retires_only_the_cascade(command):
+    """Every project upgrading to 2.11.0 is in this state for any key it had already retired
+    or is about to. Emitting a ``DROP RULE`` for a revive that was never created fails
+    ``migrate``, which is why each arm tests its own recorded map rather than a shared one."""
+    command.existing.soft_delete_related[('testapp_album', 'testapp_genre', None)] = 'abc'
+
+    assert len(_retirements(command)) == 1
+    assert _revive_retirements(command) == []
+
+
+def test_a_key_recorded_only_as_a_revive_retires_only_the_revive(command):
+    """The mirror, and the reason the loop iterates the union rather than either family: a key
+    whose cascade was retired earlier still has an inverse to drop."""
+    command.existing.soft_delete_revive[('testapp_album', 'testapp_genre', None)] = 'abc'
+    command.existing.retirement_apps.discard('testapp')
+
+    assert _retirements(command) == []
+    assert len(_revive_retirements(command)) == 1
+    # And the digest guard is waived for the app either way: a drop genuinely written here
+    # means this app's operation set can recur, whichever family the key was recorded in.
+    assert 'testapp' in command.existing.retirement_apps
+
+
+def test_the_via_form_retires_both_under_their_own_names(command):
+    key = ('testapp_callbacks', 'testapp_band', 'band_id')
+    command.existing.soft_delete_related[key] = 'abc'
+    command.existing.soft_delete_revive[key] = 'def'
+
+    (cascade,) = _retirements(command)
+    (revive,) = _revive_retirements(command)
+
+    assert 'soft_delete_related_testapp_callbacks_band_id' in cascade
+    assert 'soft_delete_revive_via_12_testapp_band_17_testapp_ca_c0a6f2b114' in revive
+    assert 'via "band_id"!' in cascade and 'via "band_id"!' in revive
+
+
+def test_an_unrecoverable_column_refuses_to_reverse_either_rule(command):
+    """Both halves refuse together: a reverse that silently rebuilt one of the two would leave
+    history claiming a pair the database has half of."""
+    key = ('testapp_genre', 'testapp_band', None)
+    command.existing.soft_delete_related[key] = 'abc'
+    command.existing.soft_delete_revive[key] = 'def'
+
+    (cascade,) = _retirements(command)
+    (revive,) = _revive_retirements(command)
+
+    assert 'RAISE' in cascade and 'RAISE' in revive
+
+
+def test_an_unretirable_key_names_both_halves_to_drop_by_hand(command):
+    """The precedent the owned pair set: naming the cascade alone leaves the revive live on a
+    table nothing cascades into, and a later un-archive of the parent then revives children
+    whose stamp still matches it -- the exposing direction ADR 0024 exists to avoid."""
+    key = ('gone_child', 'gone_owner', None)
+    command.existing.soft_delete_related[key] = 'abc'
+    command.existing.soft_delete_revive[key] = 'def'
+
+    (note,) = command._unmapped_cascade_notes()
+
+    assert 'DROP RULE "soft_delete_related_gone_child" ON "gone_owner"' in note
+    assert (
+        'DROP TRIGGER "soft_delete_revive_10_gone_owner_10_gone_child" ON "gone_owner"' in note
+    )
+    assert 'DROP FUNCTION "soft_delete_revive_10_gone_owner_10_gone_child"()' in note
+
+
+def test_an_unretirable_key_names_only_the_half_the_project_recorded(command):
+    """A project that never generated under 2.11.0 has no revive rule, and telling it to drop
+    one sends it to `psql` for an object that was never created."""
+    key = ('gone_child', 'gone_owner', None)
+    command.existing.soft_delete_related[key] = 'abc'
+
+    (note,) = command._unmapped_cascade_notes()
+
+    assert 'soft_delete_related_gone_child' in note
+    assert 'soft_delete_revive' not in note
+    # And it opens on the family whose DROP it prints, or it reads as a stale warning about
+    # a rule the project's migrations still carry.
+    assert note.startswith('Cascade rule on')
+
+
+def test_an_unretirable_revive_only_key_opens_on_the_revive(command):
+    key = ('gone_child', 'gone_owner', None)
+    command.existing.soft_delete_revive[key] = 'def'
+
+    (note,) = command._unmapped_cascade_notes()
+
+    assert note.startswith('Revive rule on')
+    assert 'soft_delete_related' not in note
+
+
+def test_the_unretirable_note_actually_reaches_the_operator(monkeypatch):
+    """It did not, from 2.9.0 until a review found it: the note was defined, tested directly and
+    never printed, while ``_retired_cascade_operations`` promised the key it withholds is named
+    there. Both rules stayed live on a table no model claims, with ``--check`` green."""
+    sentinel = 'SENTINEL-unretirable-cascade-note'
+    monkeypatch.setattr(
+        OperationsMixin, '_unmapped_cascade_notes', lambda self: [sentinel], raising=True
+    )
+    out, err = StringIO(), StringIO()
+
+    call_command('makeguitarmigrations', 'testapp', stdout=out, stderr=err)
+
+    assert sentinel in out.getvalue() + err.getvalue()

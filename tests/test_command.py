@@ -16,14 +16,16 @@ from django.db.models import CASCADE, DO_NOTHING, SET_NULL
 from django.test import override_settings
 from django.test.utils import isolate_apps
 
+from tests.conftest import clear_cascade_coverage
+
 from guitars import sql
-from guitars.models import OwningForeignKey, SetarModel
 from guitars.management import _generator
 from guitars.management.enforcement import command as command_module
 from guitars.management.enforcement import headers as headers_module
 from guitars.management.enforcement import identity as identity_module
 from guitars.management.enforcement import operations as operations_module
 from guitars.management.enforcement.command import Command
+from guitars.models import OwningForeignKey, SetarModel
 from guitars.sql import _identifiers
 from guitars.tenancy.discovery import app_coverage, autofill_function_name
 from tests.testapp.models import Album, Band, Ensemble, Foyer, Kiosk, Merch, Orchestra
@@ -65,7 +67,7 @@ def test_build_operations_emits_trigger_rule_and_cascade_ops():
     # Pretend nothing has been generated yet so every operation is produced.
     command.existing.triggers.clear()
     command.existing.soft_deletes.clear()
-    command.existing.soft_delete_related.clear()
+    clear_cascade_coverage(command)
 
     ops = '\n'.join(command._build_operations(apps.get_app_config('testapp')))
 
@@ -78,7 +80,7 @@ def test_build_operations_emits_mti_ops_for_child_models():
     command = Command()
     command.existing.triggers.clear()
     command.existing.soft_deletes.clear()
-    command.existing.soft_delete_related.clear()
+    clear_cascade_coverage(command)
     command.existing.mti_triggers.clear()
     command.existing.mti_soft_deletes.clear()
 
@@ -182,7 +184,7 @@ def test_cascade_operations_skip_non_cascade_and_non_deletable_relations():
     (SET_NULL -- skipped, wrong on_delete) and Riff.band (CASCADE, but Riff has no
     _deleted_at -- skipped, nothing to cascade to)."""
     command = Command()
-    command.existing.soft_delete_related.clear()
+    clear_cascade_coverage(command)
 
     ops = '\n'.join(command._cascade_operations(Band))
 
@@ -214,23 +216,31 @@ def test_cascade_operations_disambiguates_two_fks_to_the_same_related_table():
     """Merch has two CASCADE FKs to Album -- the exact shape ``_via`` naming exists for:
     without disambiguation, the second FK's rule would silently replace the first's."""
     command = Command()
-    command.existing.soft_delete_related.clear()
+    clear_cascade_coverage(command)
 
     ops = command._cascade_operations(Album)
     merch_ops = [op for op in ops if 'testapp_merch' in op]
 
-    assert len(merch_ops) == 2
+    # Four, not two: each cascade rule carries its inverse, facing the same collision. This
+    # read 2 until the helper cleared both maps -- the committed revive records suppressed
+    # those operations, so the shape this test exists for went unchecked on the new family.
+    assert len(merch_ops) == 4
     headers = [op.splitlines()[0] for op in merch_ops]
     assert any(
         '# Soft Delete Related Rule on "testapp_merch" that is related to "testapp_album"!' in h
         for h in headers
     )
-    assert any('via "bonus_album_id"!' in h for h in headers)
-    # Two distinct rule names -- neither op's CREATE OR REPLACE can silently clobber the
-    # other's.
+    assert any(
+        '# Soft Delete Revive Trigger on "testapp_merch" that is related to "testapp_album"!' in h
+        for h in headers
+    )
+    assert len([h for h in headers if 'via "bonus_album_id"!' in h]) == 2
+    # Distinct rule names per family -- no op's CREATE OR REPLACE can clobber another's.
     blob = '\n'.join(merch_ops)
     assert 'RULE "soft_delete_related_testapp_merch"\n' in blob
     assert 'RULE "soft_delete_related_testapp_merch_bonus_album_id"' in blob
+    assert 'TRIGGER "soft_delete_revive_13_testapp_album_13_testapp_merch"\n' in blob
+    assert 'TRIGGER "soft_delete_revive_via_13_testapp_album_13_testapp_m_8576eb3445"' in blob
 
 
 def test_cascade_operation_warns_when_related_model_is_mti_child_without_own_deleted_at(
@@ -241,7 +251,7 @@ def test_cascade_operation_warns_when_related_model_is_mti_child_without_own_del
     reverse-relation, not a new schema field: purely about the command's own logic."""
     command = Command()
     command._skipped_rule_notes.clear()
-    command.existing.soft_delete_related.clear()
+    clear_cascade_coverage(command)
 
     class _FakeFKField:
         column = 'sponsor_id'
@@ -543,7 +553,7 @@ def test_cascade_operation_emits_a_trigger_for_a_self_referential_cascade_foreig
     A statement-level trigger takes no part in rewriting, so this shape cascades (ADR 0018)."""
     command = Command()
     command._skipped_rule_notes.clear()
-    command.existing.soft_delete_related.clear()
+    clear_cascade_coverage(command)
     command.existing.soft_delete_self_cascade.clear()
 
     class _SelfReferentialFKField:
@@ -571,7 +581,7 @@ def test_self_cascade_operation_is_idempotent_across_two_runs():
     """A run reading its own output back must emit nothing: the header, its ``[SQL:...]``
     identity and the ``(table, foreign_key)`` dedupe key all have to agree."""
     command = Command()
-    command.existing.soft_delete_related.clear()
+    clear_cascade_coverage(command)
     command.existing.soft_delete_self_cascade.clear()
 
     class _SelfReferentialFKField:
@@ -598,7 +608,7 @@ def test_self_cascade_operation_replaces_a_recorded_but_stale_trigger():
     """A recorded key whose ``[SQL:...]`` does not match re-emits in the *replace* form: DROP
     TRIGGER then CREATE, no IF EXISTS, the recorded digest having proved it is there."""
     command = Command()
-    command.existing.soft_delete_related.clear()
+    clear_cascade_coverage(command)
     command.existing.soft_delete_self_cascade.clear()
     command.existing.soft_delete_self_cascade[('testapp_band', 'parent_id')] = 'stale00000000'
 
@@ -680,7 +690,7 @@ def test_self_cascade_operation_under_adopt_drops_if_exists_first():
     IF EXISTS. The function stays CREATE OR REPLACE: DROP FUNCTION refuses while a trigger
     depends on it, and CASCADE would take that trigger with it."""
     command = Command()
-    command.existing.soft_delete_related.clear()
+    clear_cascade_coverage(command)
     command.existing.soft_delete_self_cascade.clear()
 
     class _SelfReferentialFKField:
@@ -919,7 +929,7 @@ def test_handle_generates_only_for_named_apps(monkeypatch):
         # Pretend nothing exists yet so generation would otherwise fire...
         command.existing.triggers.clear()
         command.existing.soft_deletes.clear()
-        command.existing.soft_delete_related.clear()
+        clear_cascade_coverage(command)
         # ...and the shared trigger-function migration is already in place.
         command.trigger_function_dependency = ('testapp', '0001_pretend')
         command.existing.existing_digests.clear()
@@ -950,7 +960,7 @@ def test_handle_skips_an_in_scope_app_with_no_operations(monkeypatch):
     command.stdout = StringIO()
     command.existing.triggers.clear()
     command.existing.soft_deletes.clear()
-    command.existing.soft_delete_related.clear()
+    clear_cascade_coverage(command)
     command.trigger_function_dependency = ('testapp', '0001_pretend')
     monkeypatch.setattr(command, '_build_operations', lambda app, **kwargs: [])
     monkeypatch.setattr(
@@ -989,6 +999,18 @@ def _sponsor_fk_reverse_relation():
         remote_field = types.SimpleNamespace(parent_link=False)
 
     return {(Orchestra, _FakeFKField(), CASCADE)}
+
+
+def _record_cascade_key(*, both: bool):
+    """Seed the Album->Band cascade key, optionally in the inverse family too."""
+
+    def setup(command):
+        key = (Album._meta.db_table, Band._meta.db_table, None)
+        command.existing.soft_delete_related[key] = None
+        if both:
+            command.existing.soft_delete_revive[key] = None
+
+    return setup
 
 
 @pytest.mark.parametrize(
@@ -1075,12 +1097,25 @@ def _sponsor_fk_reverse_relation():
                 _fake_app_config('fake.banda', 'banda', [Band]),
                 _fake_app_config('fake.albumb', 'albumb', [Album]),
             ],
-            lambda command: command.existing.soft_delete_related.__setitem__(
-                (Album._meta.db_table, Band._meta.db_table, None), None
-            ),
+            _record_cascade_key(both=True),
             {'albumb'},
             [],
-            id='skipped_when_rule_already_exists',
+            id='skipped_when_both_rules_already_exist',
+        ),
+        pytest.param(
+            ['fake.banda', 'fake.albumb'],
+            lambda: [
+                _fake_app_config('fake.banda', 'banda', [Band]),
+                _fake_app_config('fake.albumb', 'albumb', [Album]),
+            ],
+            # The shape every project upgrading to 2.11.0 is in: the cascade recorded, the
+            # inverse not. The scoped run is still failing to create one, so it is a gap.
+            _record_cascade_key(both=False),
+            {'albumb'},
+            # "Revive", not "Cascade": the cascade rule is in their migrations already, and
+            # naming it sends the operator to an object that is not the missing one.
+            ["Revive rule on 'testapp_album' related to 'testapp_band' skipped"],
+            id='reported_when_only_the_cascade_half_exists',
         ),
     ],
 )
@@ -1089,7 +1124,7 @@ def test_scoped_cascade_gap_notes(
 ):
     with override_settings(LOCAL_APPS=local_apps):
         command = Command()
-        command.existing.soft_delete_related.clear()
+        clear_cascade_coverage(command)
         if setup is not None:
             setup(command)
         monkeypatch.setattr(command_module.django_apps, 'get_app_configs', app_configs)
@@ -1109,7 +1144,7 @@ def test_handle_skips_app_when_digest_already_exists(monkeypatch):
     command.stdout = StringIO()
     command.existing.triggers.clear()
     command.existing.soft_deletes.clear()
-    command.existing.soft_delete_related.clear()
+    clear_cascade_coverage(command)
     command.trigger_function_dependency = ('testapp', '0001_pretend')
     # The exact digest handle() will compute for this app's operations, given the state
     # above -- recorded ahead of time rather than faked, so _sql_digest (which the
@@ -1135,7 +1170,7 @@ def test_handle_check_only_reports_missing_migrations_and_rule_warnings(monkeypa
     command.stderr = StringIO()
     command.existing.triggers.clear()
     command.existing.soft_deletes.clear()
-    command.existing.soft_delete_related.clear()
+    clear_cascade_coverage(command)
     command.existing.mti_triggers.clear()
     command.existing.mti_soft_deletes.clear()
     command.trigger_function_dependency = ('testapp', '0001_pretend')
@@ -1165,7 +1200,7 @@ def test_check_reports_both_function_and_app_level_gaps_in_one_run():
     command.stderr = StringIO()
     command.existing.triggers.clear()
     command.existing.soft_deletes.clear()
-    command.existing.soft_delete_related.clear()
+    clear_cascade_coverage(command)
     # Overridden after touching .existing above, which is what populates these from the
     # real scan -- setting them first would just be clobbered by that scan.
     command.trigger_function_dependency = None
@@ -1190,7 +1225,7 @@ def test_check_reports_a_missing_parent_trigger_function_migration_alongside_app
     command.stderr = StringIO()
     command.existing.triggers.clear()
     command.existing.soft_deletes.clear()
-    command.existing.soft_delete_related.clear()
+    clear_cascade_coverage(command)
     command.existing.mti_triggers.clear()
     command.existing.mti_soft_deletes.clear()
     # The base function migration is current, so only the parent one is missing.
@@ -1231,7 +1266,7 @@ def test_handle_writes_scoped_cascade_gap_warning_to_stdout(monkeypatch):
     command = Command()
     command.stdout = StringIO()
     command.stderr = StringIO()
-    command.existing.soft_delete_related.clear()
+    clear_cascade_coverage(command)
     # Both singleton function migrations already exist and are current, so the per-app loop
     # is the only thing left to exercise.
     _pretend_function_migrations_are_current(command)
@@ -1877,7 +1912,7 @@ def test_cascade_operation_warns_when_an_owned_rule_closes_the_cycle():
         command._skipped_rule_notes.clear()
         command.existing.soft_delete_owned.clear()
         command.existing.soft_delete_owned_sweep.clear()
-        command.existing.soft_delete_related.clear()
+        clear_cascade_coverage(command)
         command.all_models = [Held, Holder]
         command.reverse_relations_mapping[Held] = {
             (Holder, Holder._meta.get_field('parent'), CASCADE)
@@ -1926,7 +1961,7 @@ def test_cascade_operations_report_two_relations_that_would_share_a_rule_name():
 
         command = Command()
         command._rule_name_clashes.clear()
-        command.existing.soft_delete_related.clear()
+        clear_cascade_coverage(command)
         command.all_models = [Parent, Child, Namesake]
         command.reverse_relations_mapping[Parent] = {
             (Child, Child._meta.get_field('a'), CASCADE),
@@ -1938,8 +1973,12 @@ def test_cascade_operations_report_two_relations_that_would_share_a_rule_name():
     command, ops = _build()
 
     # Emitted anyway: what ships works for one of the two, which is the whole problem.
-    assert len(ops) == 3
+    # Six operations, not three: each cascade rule is paired with its inverse since 2.11.0.
+    assert len(ops) == 6
+    # Still one clash, and it is the *cascade* family's: the revive names size every segment,
+    # so the two relations that meet on one cascade name cannot meet on a revive one.
     assert len(command._rule_name_clashes) == 1
+    assert not any('soft_delete_revive' in note for note in command._rule_name_clashes)
     clash = command._rule_name_clashes[0]
     assert 'soft_delete_related_c_a_b_id' in clash
     assert "'c_a' via 'b_id'" in clash and "'c_a_b_id'" in clash
@@ -1970,7 +2009,7 @@ def test_cascade_operations_report_an_mti_parent_and_child_sharing_a_rule_name()
 
         command = Command()
         command._rule_name_clashes.clear()
-        command.existing.soft_delete_related.clear()
+        clear_cascade_coverage(command)
         command.all_models = [Parent, Child, Referrer]
         command.reverse_relations_mapping[Parent] = {
             (Referrer, Referrer._meta.get_field('p'), CASCADE),
@@ -1983,8 +2022,17 @@ def test_cascade_operations_report_an_mti_parent_and_child_sharing_a_rule_name()
 
     command, ops = _build()
 
-    assert len(ops) == 2
-    assert len(command._rule_name_clashes) == 1
+    # Four, not two: the inverse rule goes with each cascade.
+    assert len(ops) == 4
+    # *Two* clashes here, one per family -- unlike the sibling test above, where sizing every
+    # segment keeps the revive names apart. Sizing cannot help this shape: both keys reach one
+    # owner table and each is the primary of its own call, so both ask for the plain form.
+    assert len(command._rule_name_clashes) == 2
+    (revive_clash,) = [n for n in command._rule_name_clashes if 'soft_delete_revive' in n]
+    # Reported on the *name* alone, as the owned sweep's function is: a function is namespaced
+    # per schema where a rule is per table, so the clash is not about one table.
+    assert revive_clash.startswith('Revive function')
+    assert "'testapp_referrer'" in revive_clash
     clash = command._rule_name_clashes[0]
     assert "via 'p_id'" in clash and "via 'c_id'" in clash
     assert 'the second replaces the first' in clash
@@ -3083,3 +3131,98 @@ def test_a_refused_sweep_does_not_claim_its_function_name():
     command = _build()
 
     assert command._claimed_sweep_names == {}
+
+
+@pytest.mark.parametrize('adopt', [False, True])
+def test_upgrading_to_the_revive_family_never_drops_the_cascade_rule_first(adopt):
+    """The upgrade every consumer takes: recorded under the pre-2.11.0 cascade digest, with no
+    revive at all. Count and order bite, and so does the shape of each forward: the rule needs
+    no drop and the trigger needs one on ``--adopt``, ``CREATE TRIGGER`` having no replace."""
+    command = Command()
+    command.existing.soft_delete_related[('testapp_album', 'testapp_band', None)] = 'stale0000000'
+    command.existing.soft_delete_revive.clear()
+
+    ops = [
+        operation
+        for operation in command._build_operations(apps.get_app_config('testapp'), adopt=adopt)
+        if 'testapp_album" that is related to "testapp_band' in operation
+    ]
+
+    assert len(ops) == 2
+    assert [operation.splitlines()[0].split(' on ')[0] for operation in ops] == [
+        '# Soft Delete Related Rule',
+        '# Soft Delete Revive Trigger',
+    ]
+    cascade, revive = ops
+    # The cascade is a rule, idempotent by construction, so it drops nothing on either path.
+    assert 'DROP RULE' not in cascade.split('reverse_sql')[0]
+    assert 'CREATE OR REPLACE RULE' in cascade
+
+    # ``CREATE TRIGGER`` has no ``OR REPLACE``. The plain path's key is unrecorded, so a bare
+    # create is right; ``--adopt`` re-emits every operation, so it must drop first or a
+    # project that already has the trigger gets a migration that aborts.
+    revive_forward = revive.split('reverse_sql')[0]
+    assert 'CREATE OR REPLACE FUNCTION' in revive
+    assert 'CREATE TRIGGER' in revive
+    if adopt:
+        assert 'DROP TRIGGER IF EXISTS' in revive_forward
+    else:
+        assert 'DROP TRIGGER' not in revive_forward
+
+
+def _revive_dollar_command(recorded: bool):
+    """A cascade child whose ``db_table`` carries ``$$``, for the revive family's two refusal
+    branches. The cascade *rule* beside it needs no dollar quoting and is emitted regardless."""
+
+    @isolate_apps('tests.testapp')
+    def _build():
+        class DollarOwner(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+                db_table = 'testapp_dollar_owner'
+
+        class DollarChild(SetarModel):
+            owner = models.ForeignKey(DollarOwner, on_delete=CASCADE, related_name='+')
+
+            class Meta:
+                app_label = 'testapp'
+                db_table = 'testapp_dollar$$child'
+
+        command = Command()
+        command._skipped_rule_notes.clear()
+        command._refusals_over_live_rules.clear()
+        clear_cascade_coverage(command)
+        key = ('testapp_dollar$$child', 'testapp_dollar_owner', None)
+        if recorded:
+            command.existing.soft_delete_revive[key] = 'deadbeefcafe'
+        command.reverse_relations_mapping[DollarOwner] = {
+            (DollarChild, DollarChild._meta.get_field('owner'), CASCADE)
+        }
+        return command, command._cascade_operations(DollarOwner)
+
+    return _build()
+
+
+def test_a_revive_refused_for_dollar_quoting_leaves_the_cascade_rule_alone():
+    """The inverse is a dollar-quoted function and the cascade beside it is a rule, so only one
+    of the pair is refused -- the reason the refusal returns rather than skipping the relation."""
+    command, ops = _revive_dollar_command(recorded=False)
+
+    assert len(ops) == 1
+    assert ops[0].startswith('# Soft Delete Related Rule on')
+    assert len(command._skipped_rule_notes) == 1
+    assert 'Revive trigger' in command._skipped_rule_notes[0]
+    assert '"$$"' in command._skipped_rule_notes[0]
+    assert command._refusals_over_live_rules == []
+
+
+def test_a_revive_refused_for_dollar_quoting_escalates_over_its_own_live_trigger():
+    """Recorded already, so it is live in every migrated database and this run will not replace
+    it. Both objects named, the trigger alone leaving its function behind."""
+    command, _ops = _revive_dollar_command(recorded=True)
+
+    assert len(command._refusals_over_live_rules) == 1
+    escalation = command._refusals_over_live_rules[0]
+    assert "Revive trigger on 'testapp_dollar_owner'" in escalation
+    assert 'DROP TRIGGER' in escalation
+    assert 'DROP FUNCTION' in escalation

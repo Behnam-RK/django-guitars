@@ -64,6 +64,9 @@ DROP_SOFT_DELETE_RELATED_OBJECTS_RULE_VIA = """
 # NAMEDATALEN-safe ``rule_name`` (operations.py's ``_related_rule_name``), serving both
 # plain and VIA cases since only the name differed. Not exported. ----
 
+# ``new._deleted_at``, not ``NOW()``, and guarded on ``IS NULL`` as every other family is
+# (issue #53): unguarded this overwrote a child archived earlier, and the copy makes the
+# surviving value the parent's own -- one timestamp per archive, chaining down each level.
 _CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE = """
     CREATE OR REPLACE RULE {rule_name}
         AS ON UPDATE TO {table}
@@ -71,14 +74,95 @@ _CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE = """
               COALESCE(current_setting('rules.hard_deletion', true), '') <> 'on'
         DO ALSO (
             UPDATE {related_table}
-            SET _deleted_at = NOW()
+            SET _deleted_at = new._deleted_at
             WHERE "{foreign_key}" = old."{primary_key}"
+              AND _deleted_at IS NULL
         );
 """
 
 _DROP_SOFT_DELETE_RELATED_OBJECTS_RULE = """
     DROP RULE {rule_name} ON {table};
 """
+
+# The inverse (issue #51), statement-level for the reason ADR 0018 converted the self cascade:
+# a second ``ON UPDATE`` rule beside the cascade one doubles the rewriter's expansion per
+# cascade level -- 2^depth query trees on *every* UPDATE, a plain ``save()`` included.
+
+# The provenance test is the archive timestamp, exact since 2.11.0 stamped a child with its
+# parent's own value. Reviving a parent while rewriting its key in one statement leaves the join
+# unable to pair the rows, so children stay archived -- hiding, so no refusal, unlike the sweep.
+_CREATE_SOFT_DELETE_REVIVE_FUNCTION = """
+    CREATE OR REPLACE FUNCTION {function}()
+       RETURNS TRIGGER
+       LANGUAGE PLPGSQL
+    AS
+    $$
+    BEGIN
+        IF COALESCE(current_setting('rules.hard_deletion', true), '') <> 'on' THEN
+            UPDATE {related_table} AS guitars_child
+            SET _deleted_at = NULL{updated_at_assignment}
+            FROM (
+                SELECT guitars_before.*
+                FROM guitars_revive_before AS guitars_before
+                JOIN guitars_revive_after AS guitars_after
+                    ON guitars_after."{primary_key}" = guitars_before."{primary_key}"
+                WHERE guitars_before._deleted_at IS NOT NULL
+                  AND guitars_after._deleted_at IS NULL
+            ) AS guitars_revived
+            WHERE guitars_child."{foreign_key}" = guitars_revived."{primary_key}"
+              AND guitars_child._deleted_at = guitars_revived._deleted_at;
+        END IF;
+        RETURN NULL;
+    END;
+    $$;
+"""
+
+#: Spliced where the child owns the column, for ``_SOFT_DELETE_OWNED_SWEEP_UPDATED_AT``'s
+#: reason: this runs at trigger depth 1, where ``updated_at_trigger``'s ``WHEN`` suppresses it.
+_SOFT_DELETE_REVIVE_UPDATED_AT = ', _updated_at = NOW()'
+
+_DROP_SOFT_DELETE_REVIVE_FUNCTION = """
+    DROP FUNCTION {function}();
+"""
+
+# No ``WHEN (pg_trigger_depth() = 0)``, for the owned sweep's reason: the UPDATE above revives
+# children that are parents themselves, whose triggers fire at depth 1. Recursion ends on the
+# provenance test, no row below carrying the stamp once it has been cleared.
+_CREATE_SOFT_DELETE_REVIVE_TRIGGER = """
+    CREATE TRIGGER {trigger}
+        AFTER UPDATE ON {table}
+        REFERENCING OLD TABLE AS guitars_revive_before NEW TABLE AS guitars_revive_after
+        FOR EACH STATEMENT
+        EXECUTE FUNCTION {function}();
+"""
+
+_DROP_SOFT_DELETE_REVIVE_TRIGGER = """
+    DROP TRIGGER {trigger} ON {table};
+"""
+
+# The owned sweep's two-form split, for its reason: ``IF EXISTS`` is a knowledge claim, and the
+# function stays ``CREATE OR REPLACE`` either way -- ``DROP FUNCTION`` refuses while a trigger
+# depends on it, and ``CASCADE`` would take that trigger with it.
+_CREATE_SOFT_DELETE_REVIVE = (
+    _CREATE_SOFT_DELETE_REVIVE_FUNCTION + _CREATE_SOFT_DELETE_REVIVE_TRIGGER
+)
+
+_DROP_SOFT_DELETE_REVIVE = _DROP_SOFT_DELETE_REVIVE_TRIGGER + _DROP_SOFT_DELETE_REVIVE_FUNCTION
+
+# ``CREATE TRIGGER`` has no ``OR REPLACE``, so a re-emission needs the drop in front of it or
+# it aborts with *trigger ... already exists* -- and the operation being atomic, it takes
+# whatever rule sits beside it in that migration down too.
+_REPLACE_SOFT_DELETE_REVIVE = _DROP_SOFT_DELETE_REVIVE_TRIGGER + _CREATE_SOFT_DELETE_REVIVE
+
+# ``--adopt`` is the one path that may claim nothing about what the database holds. The
+# function stays ``CREATE OR REPLACE`` in both: ``DROP FUNCTION`` refuses while a trigger
+# depends on it, and ``CASCADE`` would take that trigger with it.
+_ADOPT_SOFT_DELETE_REVIVE = (
+    """
+    DROP TRIGGER IF EXISTS {trigger} ON {table};
+"""
+    + _CREATE_SOFT_DELETE_REVIVE
+)
 
 # ---- Private, non-frozen owned-rule templates: the cascade pair above with the predicate
 # sides swapped, the FK living on the owner. The NOT EXISTS is the last-owner guard, always

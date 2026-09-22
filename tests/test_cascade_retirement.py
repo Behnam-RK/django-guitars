@@ -36,7 +36,7 @@ from guitars.management.enforcement.scanning import (
 def command():
     """A command whose recorded cascade rules the test sets by hand, so a retirement can be
     arranged without a migration that would really drop one. Both families are cleared: since
-    2.13.0 a key is normally recorded in each, and a retirement has to drop whichever it has."""
+    2.11.0 a key is normally recorded in each, and a retirement has to drop whichever it has."""
     built = Command()
     clear_cascade_coverage(built)
     return built
@@ -892,7 +892,7 @@ def test_a_relaxed_key_retires_both_of_its_rules(command):
 
 
 def test_a_key_recorded_before_the_inverse_family_existed_retires_only_the_cascade(command):
-    """Every project upgrading to 2.13.0 is in this state for any key it had already retired
+    """Every project upgrading to 2.11.0 is in this state for any key it had already retired
     or is about to. Emitting a ``DROP RULE`` for a revive that was never created fails
     ``migrate``, which is why each arm tests its own recorded map rather than a shared one."""
     command.existing.soft_delete_related[('testapp_album', 'testapp_genre', None)] = 'abc'
@@ -958,7 +958,7 @@ def test_an_unretirable_key_names_both_halves_to_drop_by_hand(command):
 
 
 def test_an_unretirable_key_names_only_the_half_the_project_recorded(command):
-    """A project that never generated under 2.13.0 has no revive rule, and telling it to drop
+    """A project that never generated under 2.11.0 has no revive rule, and telling it to drop
     one sends it to `psql` for an object that was never created."""
     key = ('gone_child', 'gone_owner', None)
     command.existing.soft_delete_related[key] = 'abc'

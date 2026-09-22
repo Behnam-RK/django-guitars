@@ -1108,7 +1108,7 @@ def _record_cascade_key(*, both: bool):
                 _fake_app_config('fake.banda', 'banda', [Band]),
                 _fake_app_config('fake.albumb', 'albumb', [Album]),
             ],
-            # The shape every project upgrading to 2.13.0 is in: the cascade recorded, the
+            # The shape every project upgrading to 2.11.0 is in: the cascade recorded, the
             # inverse not. The scoped run is still failing to create one, so it is a gap.
             _record_cascade_key(both=False),
             {'albumb'},
@@ -1973,7 +1973,7 @@ def test_cascade_operations_report_two_relations_that_would_share_a_rule_name():
     command, ops = _build()
 
     # Emitted anyway: what ships works for one of the two, which is the whole problem.
-    # Six operations, not three: each cascade rule is paired with its inverse since 2.13.0.
+    # Six operations, not three: each cascade rule is paired with its inverse since 2.11.0.
     assert len(ops) == 6
     # Still one clash, and it is the *cascade* family's: the revive names size every segment,
     # so the two relations that meet on one cascade name cannot meet on a revive one.
@@ -3135,7 +3135,7 @@ def test_a_refused_sweep_does_not_claim_its_function_name():
 
 @pytest.mark.parametrize('adopt', [False, True])
 def test_upgrading_to_the_revive_family_never_drops_the_cascade_rule_first(adopt):
-    """The upgrade every consumer takes: recorded under the pre-2.12.0 cascade digest, with no
+    """The upgrade every consumer takes: recorded under the pre-2.11.0 cascade digest, with no
     revive at all. Count and order bite, and so does the shape of each forward: the rule needs
     no drop and the trigger needs one on ``--adopt``, ``CREATE TRIGGER`` having no replace."""
     command = Command()

@@ -85,7 +85,7 @@ class ExistingOperations(NamedTuple):
     cascade_retirement_sites: list[CascadeRetirementSite]
     #: The inverse rule for that same cascade key, tracked separately for the sweep's reason:
     #: a cascade already recorded must not read as a revive recorded, or a project upgrading
-    #: to 2.13.0 never receives one. Same key shape, so retirement and renames see one key.
+    #: to 2.11.0 never receives one. Same key shape, so retirement and renames see one key.
     soft_delete_revive: dict[tuple[str, str, str | None], str | None]
     #: Its creates, and its retirements already written -- the two halves ADR 0021 needs, per
     #: family, because a revive's drop is ordered against the migration that created *it*.
@@ -629,7 +629,7 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
         _ensure_loader,
     )
     # Twice, once per family: the helper is already generic over its six arguments, and the
-    # two answers are independent -- a key retired before 2.13.0 has a drop for the cascade
+    # two answers are independent -- a key retired before 2.11.0 has a drop for the cascade
     # and no revive to pair with, so sharing one settle would read that as a missing create.
     revive_retirement_sites = _settle_retirement_sites(
         revive_retirement_sites,

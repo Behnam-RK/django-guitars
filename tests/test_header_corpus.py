@@ -44,7 +44,7 @@ _BASELINE = {
         r'# Soft Delete Related Rule retired on "([^"]+)" that is related to "([^"]+)"'
         r'(?: via "(?P<foreign_key>[^"]+)")?'
     ),
-    # Born hand-written in 2.13.0, baselined naively for the cascade pair's reason.
+    # Born hand-written in 2.11.0, baselined naively for the cascade pair's reason.
     # Disjointness is *not* provable here -- a widened scanner widens its own baseline
     # identically -- so ``test_enforcement_identity.py`` asserts it, as for the other pairs.
     '_RE_SOFT_DELETE_REVIVE': re.compile(
@@ -85,7 +85,7 @@ _BASELINE = {
 _EXPECTED_EMPTY = {
     '_RE_TENANT_FORCE',
     '_RE_TENANT_AUTOFILL_RETIRED',
-    # No committed migration retires a revive trigger either -- the family is new in 2.13.0.
+    # No committed migration retires a revive trigger either -- the family is new in 2.11.0.
     '_RE_SOFT_DELETE_REVIVE_RETIRED',
 }
 

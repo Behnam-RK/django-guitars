@@ -869,7 +869,7 @@ class OperationsMixin:
 
     def _retired_cascade_families(self, key: tuple[str, str, str | None]) -> list[_RetiredFamily]:
         """The cascade rule and its inverse, as the retirement loop needs to see them. Both or
-        neither is the wrong answer -- a key recorded before 2.13.0 has no revive to drop -- so
+        neither is the wrong answer -- a key recorded before 2.11.0 has no revive to drop -- so
         each carries the recorded map its arm tests against."""
         return [
             _RetiredFamily(
@@ -924,7 +924,7 @@ class OperationsMixin:
         required, models_by_table = self._cascade_key_maps()
         operations: list[str] = []
         # The union, because the two families can be recorded apart: a key retired before
-        # 2.13.0 has a cascade to drop and no revive. Each arm emits only where *its* family
+        # 2.11.0 has a cascade to drop and no revive. Each arm emits only where *its* family
         # recorded the key, which a bundled drop could never say -- see ``_append_cascade_revive``.
         recorded = set(self.existing.soft_delete_related) | set(self.existing.soft_delete_revive)
         for key in sorted(recorded - set(required), key=lambda k: (k[0], k[1], k[2] or '')):
@@ -2505,7 +2505,7 @@ class OperationsMixin:
                         continue
                     related_table = related_model._meta.db_table
                     key = (related_table, table, None if is_primary else fk_field.column)
-                    # Both families: every project upgrading to 2.13.0 has the cascade recorded
+                    # Both families: every project upgrading to 2.11.0 has the cascade recorded
                     # and the revive not, so asking about the cascade alone reports no gap for
                     # the inverse rule this scoped run is equally failing to create.
                     if (
@@ -2514,7 +2514,7 @@ class OperationsMixin:
                     ):
                         continue
                     # Which half is missing, not "Cascade" flat: every project upgrading to
-                    # 2.13.0 has the cascade recorded and the inverse not, so naming the
+                    # 2.11.0 has the cascade recorded and the inverse not, so naming the
                     # cascade sends the reader to a rule their migrations already carry.
                     absent = [
                         label

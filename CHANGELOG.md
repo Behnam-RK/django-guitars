@@ -10,8 +10,11 @@ Full history and diffs: [GitHub releases](https://github.com/Behnam-RK/django-gu
 
 ## [Unreleased]
 
-### Added
+## [2.11.0] - 2026-09-22
 
+One release rather than the three it was planned as: a review loop's fixes spanned all three changes, so splitting them would have shipped two releases the loop had already proved defective. The three headings below are what a consumer would otherwise have read separately.
+
+### Added
 
 - **Reviving a parent now revives the children that archive took** (#51). Every cascade family was gated on the archive transition alone, so clearing a parent's `_deleted_at` left its children archived — the parent read healthy, its children were invisible to every live-manager query, and nothing raised or logged. Re-ingest is the motivating path: a webhook meets a soft-deleted row on the same natural key and has to revive it, and inserting beside it is impossible because the archived row still holds the unique key. A new private family, `soft_delete_revive_*`, is emitted from inside the cascade loop against the same key and after the same refusals, so which relations carry a revive **is** which carry a cascade. It is a **statement-level `AFTER UPDATE` trigger**, not a second `ON UPDATE` rule: two rules on one table double PostgreSQL's rewriter expansion per cascade level, so a chain of depth 6 cost 127 query trees and 93 ms to plan a plain `save()` against 7 and 2 ms. That is the cost [ADR 0018](docs/adr/0018-self-referential-cascade-trigger.md) converted the self-referential cascade to avoid. The trigger has a standing cost of its own, measured rather than assumed: it fires on every `UPDATE` to a table carrying one, so a 200-row update over a depth-6 chain runs 17.9 ms against 4.8 ms with the cascade rules alone — and 67.0 ms had it stayed a rule.
 - Not a predicate flip. A bare inverse would also resurrect a child the caller archived *before* the parent went, which fails toward **exposing** data — worse than the stranding it replaces. The guard is the archive timestamp, which the release before this one made exact by stamping a cascaded child with its parent's own value. It implies `IS NOT NULL`, chains level by level because each level's rule fires on the level above's `UPDATE`, and stays correct for a multi-row statement, whose rule action expands as a join rather than one broadcast value.
@@ -281,7 +284,8 @@ First stable release. **BREAKING:** the instrument ladder shifted down one rung 
 
 - Added: initial release — `SetarModel`, `GuitarModel`, `SoftDeletableModel`, `DisableSignals`, `makeguitarmigrations`.
 
-[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.10.0...HEAD
+[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.11.0...HEAD
+[2.11.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.11.0
 [2.10.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.10.0
 [2.9.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.9.1
 [2.9.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.9.0

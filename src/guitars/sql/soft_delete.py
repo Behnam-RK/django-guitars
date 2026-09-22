@@ -88,7 +88,7 @@ _DROP_SOFT_DELETE_RELATED_OBJECTS_RULE = """
 # a second ``ON UPDATE`` rule beside the cascade one doubles the rewriter's expansion per
 # cascade level -- 2^depth query trees on *every* UPDATE, a plain ``save()`` included.
 
-# The provenance test is the archive timestamp, exact since 2.12.0 stamped a child with its
+# The provenance test is the archive timestamp, exact since 2.11.0 stamped a child with its
 # parent's own value. Reviving a parent while rewriting its key in one statement leaves the join
 # unable to pair the rows, so children stay archived -- hiding, so no refusal, unlike the sweep.
 _CREATE_SOFT_DELETE_REVIVE_FUNCTION = """

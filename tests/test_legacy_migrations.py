@@ -50,7 +50,7 @@ def test_upgrading_an_already_migrated_legacy_project():
         # a migration generated today is immune to a future change in the sql.X constants.
         assert 'from guitars import sql' not in content
         # One stamped identity per operation: band trigger, band rule, album trigger,
-        # album rule, the band<->album cascade rule, and since 2.13.0 that cascade's inverse --
+        # album rule, the band<->album cascade rule, and since 2.11.0 that cascade's inverse --
         # a legacy project receives the revive rule on the same upgrade that modernises it.
         assert content.count('[SQL:') == 6, content
         assert content.count('Soft Delete Revive Trigger') == 1, content

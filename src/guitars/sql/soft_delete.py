@@ -64,6 +64,9 @@ DROP_SOFT_DELETE_RELATED_OBJECTS_RULE_VIA = """
 # NAMEDATALEN-safe ``rule_name`` (operations.py's ``_related_rule_name``), serving both
 # plain and VIA cases since only the name differed. Not exported. ----
 
+# ``new._deleted_at``, not ``NOW()``, and guarded on ``IS NULL`` as every other family is
+# (issue #53): unguarded this overwrote a child archived earlier, and the copy makes the
+# surviving value the parent's own -- one timestamp per archive, chaining down each level.
 _CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE = """
     CREATE OR REPLACE RULE {rule_name}
         AS ON UPDATE TO {table}
@@ -71,8 +74,9 @@ _CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE = """
               COALESCE(current_setting('rules.hard_deletion', true), '') <> 'on'
         DO ALSO (
             UPDATE {related_table}
-            SET _deleted_at = NOW()
+            SET _deleted_at = new._deleted_at
             WHERE "{foreign_key}" = old."{primary_key}"
+              AND _deleted_at IS NULL
         );
 """
 

@@ -14,6 +14,8 @@ from django.db.models import CASCADE, SET_NULL
 from django.test import override_settings
 from django.test.utils import isolate_apps
 
+from tests.conftest import clear_cascade_coverage
+
 from guitars.models import OwningForeignKey, SetarModel
 
 from guitars.management import _generator
@@ -36,8 +38,7 @@ def command():
     arranged without a migration that would really drop one. Both families are cleared: since
     2.13.0 a key is normally recorded in each, and a retirement has to drop whichever it has."""
     built = Command()
-    built.existing.soft_delete_related.clear()
-    built.existing.soft_delete_revive.clear()
+    clear_cascade_coverage(built)
     return built
 
 

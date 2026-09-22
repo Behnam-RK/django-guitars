@@ -9,6 +9,8 @@ from django.apps import apps
 from django.core.management import call_command
 from django.test import override_settings
 
+from tests.conftest import clear_cascade_coverage
+
 from guitars import routing
 from tests.crossapp_owner.models import Owner
 from tests.testapp.models import Album, Band, Release
@@ -163,10 +165,7 @@ def _command():
     command = Command()
     command.existing.triggers.clear()
     command.existing.soft_deletes.clear()
-    command.existing.soft_delete_related.clear()
-    # Both cascade families, or a test asserting a note is empty passes because the *other*
-    # family still holds the committed keys rather than because the routing filter fired.
-    command.existing.soft_delete_revive.clear()
+    clear_cascade_coverage(command)
     return command
 
 
@@ -290,3 +289,51 @@ def test_a_routed_away_declaring_model_drops_the_edge_it_would_contribute():
 
     assert edges, 'the fixture registry should still produce edges'
     assert (Band._meta.db_table, Album._meta.db_table) not in edges
+
+
+def test_the_router_is_asked_about_the_concrete_model_not_a_proxy():
+    """``related_model`` for a ``ForeignKey(SomeProxy)`` *is* the proxy, which the generator
+    normalises away before gating -- so a gate asking about the proxy refuses what the
+    generator emits, and a dropped cycle edge bricks every table on that cycle."""
+    from django.db import models as django_models
+    from django.test.utils import isolate_apps
+
+    from guitars.models import SetarModel
+
+    @isolate_apps('tests.testapp')
+    def build():
+        class Concrete(SetarModel):
+            class Meta(SetarModel.Meta):
+                app_label = 'testapp'
+
+        class ConcreteProxy(Concrete):
+            class Meta:
+                app_label = 'testapp'
+                proxy = True
+
+        class Referrer(SetarModel):
+            target = django_models.ForeignKey(
+                ConcreteProxy, on_delete=django_models.CASCADE, related_name='+'
+            )
+
+            class Meta(SetarModel.Meta):
+                app_label = 'testapp'
+
+        return Concrete, ConcreteProxy, Referrer
+
+    concrete, proxy, referrer = build()
+    # The trap itself, asserted rather than assumed.
+    assert referrer._meta.get_field('target').related_model is proxy
+
+    class _ProxyAppToNonPg:
+        """Routes by *model identity*, so it answers for the proxy and not for its concrete."""
+
+        def allow_migrate(self, db, app_label, model_name=None, **hints):
+            if hints.get('model') is proxy:
+                return db == 'nonpg'
+            return None
+
+    with override_settings(DATABASE_ROUTERS=[_ProxyAppToNonPg()]):
+        # The proxy resolves to its concrete model, which no router sends anywhere.
+        assert routing.migrates_to_postgresql(proxy) is True
+        assert routing.migrates_to_postgresql(concrete) is True

@@ -447,8 +447,9 @@ class Command(BaseCommand):
         if connection.vendor != ENFORCEMENT_VENDOR:
             raise CommandError(
                 f"Database '{options['database']}' is {connection.vendor}, not "
-                f'{ENFORCEMENT_VENDOR}: this kit writes no policies there, so there is '
-                f'nothing to audit.'
+                f'{ENFORCEMENT_VENDOR}, and every check below reads a PostgreSQL catalog. '
+                f'If this project keeps its guitars models on another alias, audit that one: '
+                f'--database=<alias>.'
             )
         require_force = options['require_force']
         require_match = options['require_match']

@@ -110,3 +110,11 @@ def _execute(db):
     """Fixture form of :func:`execute`. Depends on ``db`` explicitly so a module that only
     injects this fixture still gets a migrated test database first."""
     return execute
+
+
+def clear_cascade_coverage(command) -> None:
+    """Forget every recorded cascade-family key on *command*, **both** halves. One helper
+    because a test clearing the cascade map and then counting operations reasons about the
+    inverse family too, whose committed records would silently suppress what it counts."""
+    command.existing.soft_delete_related.clear()
+    command.existing.soft_delete_revive.clear()

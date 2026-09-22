@@ -185,8 +185,9 @@ class Command(BaseCommand):
         if connections[using].vendor != ENFORCEMENT_VENDOR:
             raise CommandError(
                 f"Database '{using}' is {connections[using].vendor}, not "
-                f'{ENFORCEMENT_VENDOR}: this kit writes no owned rules there, so there is '
-                f'nothing to sweep.'
+                f'{ENFORCEMENT_VENDOR}, and the owned rules this sweeps live in '
+                f'``pg_rules``. If this project keeps its guitars models on another alias, '
+                f'sweep that one: --database=<alias>.'
             )
         repair = options['repair']
         requested = set(app_labels)

@@ -100,15 +100,12 @@ def _rule_update_edges(candidates: Iterable[type[models.Model]]) -> set[tuple[st
                 field.related_model, '_deleted_at'
             ):
                 continue
-            # The related model *and* the table its column lives on: ``_is_cascade_candidate``
-            # refuses on the former and ``_build_operations`` walks the latter, so an MTI child
-            # routed away while its ancestor stays still leaves no rule to draw an edge for.
-            target = column_owner(field.related_model, '_deleted_at')
-            if not migrates_to_postgresql(field.related_model) or not migrates_to_postgresql(
-                target
-            ):
+            # The related model, and *only* it: the generator gates two models per relation,
+            # the one declaring the key and the one it points at. Asking a third -- this
+            # target's column owner -- dropped edges no rule refusal matches.
+            if not migrates_to_postgresql(field.related_model):
                 continue
-            target_table = target._meta.db_table
+            target_table = column_owner(field.related_model, '_deleted_at')._meta.db_table
             # ``_targets_primary_key`` too: a redirected ``to_field`` gets no rule from either
             # side, and an invented edge is worse than a missing one -- it closes a cycle that
             # cannot form and takes the legitimate rule pointing back down with it.

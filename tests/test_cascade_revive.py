@@ -131,10 +131,30 @@ def test_one_statement_reviving_two_parents_takes_only_each_ones_own():
         )
     )
 
-    _revive(Band, first.pk)
+    _revive(Band, first.pk, second.pk)
 
     assert _stamp(Album, early.pk) is None
-    assert _stamp(Album, late.pk) == T_OTHER
+    assert _stamp(Album, late.pk) is None
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_child_of_another_parent_archived_at_the_same_instant_is_not_revived():
+    """The **correlation**, which timestamp matching alone does not give. Every other test
+    here spares its bystander by stamp, so stripping ``"band_id" = old."id"`` from the rule
+    leaves them all green -- this one archives the bystander's parent at the *same* instant."""
+    revived = Band.objects.create(name='Gong')
+    untouched = Band.objects.create(name='Henry Cow')
+    mine = Album.objects.create(title='Angel', band=revived)
+    theirs = Album.objects.create(title='Legend', band=untouched)
+    # One instant for both families of rows, so only the foreign key can tell them apart.
+    Band._all_objects.filter(pk__in=[revived.pk, untouched.pk]).update(_deleted_at=T_PARENT)
+    assert _stamp(Album, mine.pk) == _stamp(Album, theirs.pk) == T_PARENT
+
+    _revive(Band, revived.pk)
+
+    assert _stamp(Album, mine.pk) is None
+    # Its parent is still archived, so reviving it would expose a row under a dead parent.
+    assert _stamp(Album, theirs.pk) == T_PARENT
 
 
 @pytest.mark.django_db(transaction=True)

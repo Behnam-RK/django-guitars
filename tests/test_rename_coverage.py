@@ -11,6 +11,8 @@ from django.db.migrations.operations import (
     SeparateDatabaseAndState,
 )
 
+from tests.conftest import clear_cascade_coverage
+
 from guitars.management.enforcement import graph, scanning
 from guitars.management.enforcement.command import Command
 from guitars.management.enforcement.scanning import scan_existing_operations
@@ -230,7 +232,7 @@ def test_retiring_a_rule_on_a_renamed_table_drops_both_names():
     under the old name -- and ``DROP RULE`` has no ``IF EXISTS``, so the wrong name fails
     ``migrate``. Which is live depends on ordering, so both are dropped, both ``IF EXISTS``."""
     command = Command()
-    command.existing.soft_delete_related.clear()
+    clear_cascade_coverage(command)
     command.existing.renamed_tables['testapp_callbacks'] = ['testapp_encore']
     command.existing.soft_delete_related[('testapp_callbacks', 'testapp_band', None)] = 'abc'
 

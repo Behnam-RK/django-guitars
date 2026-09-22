@@ -1103,20 +1103,24 @@ class OperationsMixin:
             )
             # Named for the halves actually recorded, not "Cascade" flat: the DROP below is
             # whichever this project has, and a note opening on the wrong one reads as stale.
-            families = ' and '.join(
+            recorded_families = [
                 label
                 for label, recorded_in in (
                     ('Cascade', self.existing.soft_delete_related),
                     ('Revive', self.existing.soft_delete_revive),
                 )
                 if key in recorded_in
-            )
+            ]
+            families = ' and '.join(recorded_families)
+            # Agreement on the combined branch: "Cascade and Revive rule ... is recorded"
+            # reads as one object where the note is about two.
+            noun, verb = ('rules', 'are') if len(recorded_families) > 1 else ('rule', 'is')
             notes.append(
-                f"{families} rule on '{owner_table}' related to '{related_table}' is recorded but "
-                f'the models no longer call for it, and one of those tables maps to no local '
-                f'model -- so this run cannot tell a deleted model from an app outside '
-                f'LOCAL_APPS, and will not retire it. If the rule is really gone, drop it by '
-                f'hand: {drop}'
+                f"{families} {noun} on '{owner_table}' related to '{related_table}' {verb} "
+                f'recorded but the models no longer call for it, and one of those tables maps '
+                f'to no local model -- so this run cannot tell a deleted model from an app '
+                f'outside LOCAL_APPS, and will not retire it. If the rule is really gone, '
+                f'drop it by hand: {drop}'
             )
         return notes
 
@@ -2413,17 +2417,19 @@ class OperationsMixin:
                     # Which half is missing, not "Cascade" flat: every project upgrading to
                     # 2.13.0 has the cascade recorded and the inverse not, so naming the
                     # cascade sends the reader to a rule their migrations already carry.
-                    missing = ' and '.join(
+                    absent = [
                         label
                         for label, recorded_in in (
                             ('Cascade', self.existing.soft_delete_related),
                             ('Revive', self.existing.soft_delete_revive),
                         )
                         if key not in recorded_in
-                    )
+                    ]
+                    missing = ' and '.join(absent)
                     notes.append(
-                        f"{missing} rule on '{related_table}' related to '{table}' skipped: "
-                        f"parent app '{app.label}' is not in this scoped run."
+                        f"{missing} rule{'s' if len(absent) > 1 else ''} on '{related_table}' "
+                        f"related to '{table}' skipped: parent app '{app.label}' is not "
+                        f'in this scoped run.'
                     )
         return notes + self._scoped_cascade_retirement_notes(requested)
 

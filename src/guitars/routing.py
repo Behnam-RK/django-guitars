@@ -30,6 +30,10 @@ def migrates_to_postgresql(model: type[Model]) -> bool:
     """Whether any alias *model* migrates onto is PostgreSQL, so enforcement is worth
     generating. ``any``, not ``all``: a model on a PostgreSQL alias and another still needs
     its rules there, and withholding them leaves ``.delete()`` destroying rows."""
+    # The **concrete** model, centrally so every caller agrees, as ``is_mti_child`` guards
+    # the proxy question. ``related_model`` for a ``ForeignKey(SomeProxy)`` *is* the proxy,
+    # which owns no table -- so routing one is a question about nothing. See ADR 0020.
+    model = model._meta.concrete_model or model
     # No router means no routing to consult, and returning early keeps the common case from
     # constructing a wrapper or importing a backend -- so the generator still opens nothing.
     if not getattr(settings, 'DATABASE_ROUTERS', None):

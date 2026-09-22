@@ -45,6 +45,10 @@ from guitars.management.enforcement.headers import (
     HEADER_SOFT_DELETE_RELATED_RETIRED,
     HEADER_SOFT_DELETE_RELATED_VIA,
     HEADER_SOFT_DELETE_RELATED_VIA_RETIRED,
+    HEADER_SOFT_DELETE_REVIVE,
+    HEADER_SOFT_DELETE_REVIVE_RETIRED,
+    HEADER_SOFT_DELETE_REVIVE_VIA,
+    HEADER_SOFT_DELETE_REVIVE_VIA_RETIRED,
     HEADER_SOFT_DELETE_SELF_CASCADE,
     HEADER_TENANT_AUTOFILL,
     HEADER_TENANT_AUTOFILL_RETIRED,
@@ -75,8 +79,21 @@ if TYPE_CHECKING:
     from django.core.management.base import OutputWrapper
     from django.core.management.color import Style
 
-    from guitars.management.enforcement.scanning import ExistingOperations
+    from guitars.management.enforcement.scanning import CascadeRetirementSite, ExistingOperations
     from guitars.tenancy.discovery import TableCoverage
+
+
+class _RetiredFamily(NamedTuple):
+    """One rule family the retirement loop drops: what it recorded, what created it, and the
+    four templates that spell its drop, its reverse and its two header forms."""
+
+    recorded: dict[tuple[str, str, str | None], str | None]
+    creates: dict[tuple[str, str, str | None], list[tuple[str, str]]]
+    name: Callable[[str, str | None], str]
+    drop_template: str
+    create_template: str
+    header: str
+    via_header: str
 
 
 class _OperationRow(NamedTuple):
@@ -120,6 +137,20 @@ def _sized(segment: str) -> str:
     """One name segment with its length in front of it, so a left-to-right read finds where it
     ends -- the only way concatenating variable-length identifiers stays reversible."""
     return f'{len(segment)}_{segment}'
+
+
+def _revive_rule_name(related_table: str, foreign_key: str | None = None) -> str:
+    """The inverse cascade rule's identifier: **every** variable segment sized, for the reason
+    :func:`_owned_rule_name` gives -- nothing predates this family, so it is free to be
+    unambiguous where the frozen cascade spelling beside it cannot be."""
+    # The primary/VIA split is kept even so, rather than always embedding the key: retirement
+    # must spell the ``DROP RULE`` from the dedupe key, whose third element is ``None`` on the
+    # primary form, so the name has to stay a pure function of that key.
+    schema, bare_table = _identifiers._split_qualified('table', related_table)
+    sized_schema = [] if schema is None else [_sized(schema)]
+    sized_key = [] if foreign_key is None else [_sized(foreign_key)]
+    parts = ['soft_delete_revive', *sized_schema, _sized(bare_table), *sized_key]
+    return _identifiers._safe_ident('_'.join(parts))
 
 
 def _owned_rule_name(dependent_table: str, foreign_key: str) -> str:
@@ -821,6 +852,31 @@ class OperationsMixin:
         )
         return columns[0] if len(columns) == 1 else None
 
+    def _retired_cascade_families(self, key: tuple[str, str, str | None]) -> list[_RetiredFamily]:
+        """The cascade rule and its inverse, as the retirement loop needs to see them. Both or
+        neither is the wrong answer -- a key recorded before 2.13.0 has no revive to drop -- so
+        each carries the recorded map its arm tests against."""
+        return [
+            _RetiredFamily(
+                recorded=self.existing.soft_delete_related,
+                creates=self.existing.soft_delete_related_dependencies,
+                name=_related_rule_name,
+                drop_template=_soft_delete._DROP_SOFT_DELETE_RELATED_OBJECTS_RULE,
+                create_template=_soft_delete._CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE,
+                header=HEADER_SOFT_DELETE_RELATED_RETIRED,
+                via_header=HEADER_SOFT_DELETE_RELATED_VIA_RETIRED,
+            ),
+            _RetiredFamily(
+                recorded=self.existing.soft_delete_revive,
+                creates=self.existing.soft_delete_revive_dependencies,
+                name=_revive_rule_name,
+                drop_template=_soft_delete._DROP_SOFT_DELETE_REVIVE_RELATED_OBJECTS_RULE,
+                create_template=_soft_delete._CREATE_SOFT_DELETE_REVIVE_RELATED_OBJECTS_RULE,
+                header=HEADER_SOFT_DELETE_REVIVE_RETIRED,
+                via_header=HEADER_SOFT_DELETE_REVIVE_VIA_RETIRED,
+            ),
+        ]
+
     def _retired_cascade_operations(self, app: AppConfig, *, adopt: bool = False) -> list[str]:
         """Drop cascade rules *app*'s tables record but the models no longer call for -- a
         ``CASCADE`` key relaxed to ``SET_NULL``, made owning, or removed. Positive evidence
@@ -828,80 +884,84 @@ class OperationsMixin:
         hosting = self._table_app_labels()
         required, models_by_table = self._cascade_key_maps()
         operations: list[str] = []
-        for key in sorted(
-            set(self.existing.soft_delete_related) - set(required),
-            key=lambda k: (k[0], k[1], k[2] or ''),
-        ):
+        # The union, because the two families can be recorded apart: a key retired before
+        # 2.13.0 has a cascade to drop and no revive. Each arm emits only where *its* family
+        # recorded the key, which a bundled drop could never say -- see ``_append_cascade_revive``.
+        recorded = set(self.existing.soft_delete_related) | set(self.existing.soft_delete_revive)
+        for key in sorted(recorded - set(required), key=lambda k: (k[0], k[1], k[2] or '')):
             related_table, owner_table, via = key
             # Both, not just the host: a table mapping to nothing is a *deleted* model on one
             # reading and an app dropped from LOCAL_APPS on another, and this cannot tell them
             # apart. Named in ``_unmapped_cascade_notes`` instead.
             if hosting.get(owner_table) != app.label or related_table not in hosting:
                 continue
-            self._record_retirement_edge(app.label, key)
-            rule_name = _related_rule_name(related_table, via)
-            ident_owner_table = _identifiers._quote_table(owner_table)
-            drop = _soft_delete._DROP_SOFT_DELETE_RELATED_OBJECTS_RULE.format(
-                rule_name=rule_name, table=ident_owner_table
-            )
-            if self._renamed(related_table):
-                # Which spelling is live depends on when a generation last ran, so every one
-                # goes, ``IF EXISTS``. A bare DROP of a name nothing has fails ``migrate``.
-                drop = self._drop_prior_rules(
-                    ident_owner_table,
-                    [
-                        _related_rule_name(name, via)
-                        for name in (*self._prior_names(related_table), related_table)
-                    ],
-                )
             column = self._retired_cascade_column(key, models_by_table)
             owner = models_by_table[owner_table]
-            reverse = (
-                _soft_delete._CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE.format(
-                    rule_name=rule_name,
-                    table=ident_owner_table,
-                    related_table=_identifiers._quote_table(related_table),
-                    primary_key=_identifiers._escape_ident(cast(str, owner._meta.pk.column)),
-                    foreign_key=_identifiers._escape_ident(column),
+            ident_owner_table = _identifiers._quote_table(owner_table)
+            for family in self._retired_cascade_families(key):
+                if key not in family.recorded:
+                    continue
+                self._record_retirement_edge(app.label, key, family.creates)
+                rule_name = family.name(related_table, via)
+                drop = family.drop_template.format(rule_name=rule_name, table=ident_owner_table)
+                if self._renamed(related_table):
+                    # Which spelling is live depends on when a generation last ran, so every
+                    # one goes, ``IF EXISTS``. A bare DROP of a name nothing has fails
+                    # ``migrate``.
+                    drop = self._drop_prior_rules(
+                        ident_owner_table,
+                        [
+                            family.name(name, via)
+                            for name in (*self._prior_names(related_table), related_table)
+                        ],
+                    )
+                reverse = (
+                    family.create_template.format(
+                        rule_name=rule_name,
+                        table=ident_owner_table,
+                        related_table=_identifiers._quote_table(related_table),
+                        primary_key=_identifiers._escape_ident(cast(str, owner._meta.pk.column)),
+                        foreign_key=_identifiers._escape_ident(column),
+                    )
+                    if column is not None
+                    # Passed as ``RAISE`` arguments, not interpolated into the literal: the
+                    # quoted forms escape ``"`` but not ``'``, so a db_table carrying one
+                    # would break it.
+                    else _soft_delete._REFUSE_RECREATING_RETIRED_RULE.format(
+                        literal_rule_name=_identifiers._quote_literal(rule_name),
+                        literal_table=_identifiers._quote_literal(owner_table),
+                    )
                 )
-                if column is not None
-                # Passed as ``RAISE`` arguments, not interpolated into the literal: the quoted
-                # forms escape ``"`` but not ``'``, so a db_table carrying one would break it.
-                else _soft_delete._REFUSE_RECREATING_RETIRED_RULE.format(
-                    literal_rule_name=_identifiers._quote_literal(rule_name),
-                    literal_table=_identifiers._quote_literal(owner_table),
+                header = (
+                    family.header.format(
+                        related_table=_identifiers._escape_ident(related_table),
+                        table=_identifiers._escape_ident(owner_table),
+                    )
+                    if via is None
+                    else family.via_header.format(
+                        related_table=_identifiers._escape_ident(related_table),
+                        table=_identifiers._escape_ident(owner_table),
+                        foreign_key=_identifiers._escape_ident(via),
+                    )
                 )
-            )
-            header = (
-                HEADER_SOFT_DELETE_RELATED_RETIRED.format(
-                    related_table=_identifiers._escape_ident(related_table),
-                    table=_identifiers._escape_ident(owner_table),
-                )
-                if via is None
-                else HEADER_SOFT_DELETE_RELATED_VIA_RETIRED.format(
-                    related_table=_identifiers._escape_ident(related_table),
-                    table=_identifiers._escape_ident(owner_table),
-                    foreign_key=_identifiers._escape_ident(via),
-                )
-            )
-            # Not ``_append_if_stale``, for ``_retired_autofill_operations``' reason: the set
-            # difference above is the whole idempotency mechanism, and "recorded digest differs
-            # -> replace" means nothing for a drop.
+                # Not ``_append_if_stale``, for ``_retired_autofill_operations``' reason: the
+                # set difference above is the whole idempotency mechanism, and "recorded digest
+                # differs -> replace" means nothing for a drop.
 
-            # ``--adopt`` is honest about not knowing what the database holds, so it is the one
-            # path that may say ``IF EXISTS``, the swap the autofill retirement also makes.
-            source, _ = _operation(
-                header,
-                drop,
-                reverse,
-                # Where a rename already made ``drop`` all-``IF EXISTS`` over every
-                # spelling, that *is* the adopt form -- overriding it would leave adopt
-                # strictly weaker than the plain path in the one case the old name is live.
-                emit=self._drop_prior_rules(ident_owner_table, [rule_name])
-                if adopt and not self._renamed(related_table)
-                else drop,
-            )
-            operations.append(source)
+                # ``--adopt`` is honest about not knowing what the database holds, so it is the
+                # one path that may say ``IF EXISTS``, the swap the autofill retirement makes.
+                source, _ = _operation(
+                    header,
+                    drop,
+                    reverse,
+                    # Where a rename already made ``drop`` all-``IF EXISTS`` over every
+                    # spelling, that *is* the adopt form -- overriding it would leave adopt
+                    # strictly weaker than the plain path in the one case the old name is live.
+                    emit=self._drop_prior_rules(ident_owner_table, [rule_name])
+                    if adopt and not self._renamed(related_table)
+                    else drop,
+                )
+                operations.append(source)
         return operations
 
     def _orphaned_mti_notes(self) -> list[str]:
@@ -1005,10 +1065,10 @@ class OperationsMixin:
         hosting = self._table_app_labels()
         required, _models = self._cascade_key_maps()
         notes: list[str] = []
-        for key in sorted(
-            set(self.existing.soft_delete_related) - set(required),
-            key=lambda k: (k[0], k[1], k[2] or ''),
-        ):
+        # Deduped by key across both families: one unretirable cascade key is one finding, and
+        # the ``DROP RULE`` printed is the cascade's because that is the rule 0.x shipped.
+        recorded = set(self.existing.soft_delete_related) | set(self.existing.soft_delete_revive)
+        for key in sorted(recorded - set(required), key=lambda k: (k[0], k[1], k[2] or '')):
             related_table, owner_table, via = key
             if owner_table in hosting and related_table in hosting:
                 continue
@@ -1159,35 +1219,52 @@ class OperationsMixin:
         if ref not in refs:
             refs.append(ref)
 
-    def _record_retirement_edge(self, app_label: str, key: tuple[str, str, str | None]) -> None:
+    def _record_retirement_edge(
+        self,
+        app_label: str,
+        key: tuple[str, str, str | None],
+        creates_by_key: dict[tuple[str, str, str | None], list[tuple[str, str]]] | None = None,
+    ) -> None:
         """Order a cascade retirement against the migration that created the rule it drops.
         Read off the scan rather than resolved: a rule is a ``RunSQL``, so migration state has
         nothing to resolve, and the drop is hosted by the owner table's app either way."""
+        # Per family, not shared: the cascade's creates cannot order the revive's drop. The two
+        # land in one migration today and nothing enforces that, and the failure -- a DROP RULE
+        # reached before its CREATE on a fresh database -- is silent until that migrate.
+        if creates_by_key is None:
+            creates_by_key = self.existing.soft_delete_related_dependencies
         # This drop is genuinely being written, so its operation set may recur if the key is
         # re-adopted and retired again -- tainted here, not for every app that has ever retired
         # anything, or a one-time retirement disables the guard forever needlessly.
         self.existing.retirement_apps.add(app_label)
-        creates = self.existing.soft_delete_related_dependencies.get(key, [])
+        creates = creates_by_key.get(key, [])
         # The newest: the drop being written now comes after every one of them, so the last is
         # the one whose rule is live. Own-app creates are ordered by that app's own history.
         if not creates or creates[-1][0] == app_label:
             return
         self._record_edge(self._retirement_edges, app_label, creates[-1])
 
-    def _record_readoption_edge(self, app_label: str, key: tuple[str, str, str | None]) -> None:
+    def _record_readoption_edge(
+        self,
+        app_label: str,
+        key: tuple[str, str, str | None],
+        recorded: dict[tuple[str, str, str | None], str | None] | None = None,
+        retirement_sites: list[CascadeRetirementSite] | None = None,
+    ) -> None:
         """Order a cascade create against the retirement it revives. Without it a fresh
         ``migrate`` can run the ``CREATE`` before that ``DROP`` and end with no rule, where an
         incremental database has one -- the mirror of the drop's own edge. See ADR 0021."""
+        # Per family, for :meth:`_record_retirement_edge`'s reason.
+        if recorded is None:
+            recorded = self.existing.soft_delete_related
+        if retirement_sites is None:
+            retirement_sites = self.existing.cascade_retirement_sites
         # Only where the key is *not* recorded: it was retired and this run is reviving it. A
         # key still recorded was never dropped, and an edge for it is one the app's own history
         # already implies -- which ``drop_implied_edges`` cannot see, comparing only candidates.
-        if key in self.existing.soft_delete_related:
+        if key in recorded:
             return
-        sites = [
-            (site.app_label, site.migration)
-            for site in self.existing.cascade_retirement_sites
-            if site.key == key
-        ]
+        sites = [(site.app_label, site.migration) for site in retirement_sites if site.key == key]
         # Genuinely absent with no retirement history is a brand new key, not a re-adoption --
         # its create has never recurred, so the digest guard has nothing to yield for.
         if not sites:
@@ -1446,6 +1523,70 @@ class OperationsMixin:
                 'column or a table so the two names differ.'
             )
 
+    def _append_cascade_revive(
+        self,
+        ops: list[str],
+        *,
+        key: tuple[str, str, str | None],
+        is_primary: bool,
+        related_table: str,
+        header_related_table: str,
+        header_owner_table: str,
+        ident_owner_table: str,
+        ident_owner_pk: str,
+        ident_related_table: str,
+        ident_foreign_key: str,
+        foreign_key: str,
+        adopt: bool,
+    ) -> None:
+        """The inverse of the cascade rule just appended, from that loop, against the same key
+        and after the same refusals -- so which relations carry a revive **is** which carry a
+        cascade, the precedent :meth:`_append_owned_sweep` set for its own family."""
+        # Its own operation, not more SQL in the cascade's: bundled, a retirement would drop a
+        # revive for keys whose project never created one, and the escapes are ``IF EXISTS`` --
+        # reserved for ``--adopt`` -- or guessing from a recorded digest. See ADR 0024.
+        column = None if is_primary else foreign_key
+        rule_name = _revive_rule_name(related_table, column)
+        header_template = (
+            HEADER_SOFT_DELETE_REVIVE if is_primary else HEADER_SOFT_DELETE_REVIVE_VIA
+        )
+        header_slots = {'related_table': header_related_table, 'table': header_owner_table}
+        if not is_primary:
+            header_slots['foreign_key'] = ident_foreign_key
+        # No object refs of its own: the cascade records the related table and its
+        # ``_deleted_at`` per candidate *before* this runs, so a migration carrying only revive
+        # operations still gets both edges. The two rules name exactly the same objects.
+        self._claim_rule_name(ident_owner_table, rule_name, (related_table, key[1], foreign_key))
+        forward = _soft_delete._CREATE_SOFT_DELETE_REVIVE_RELATED_OBJECTS_RULE.format(
+            rule_name=rule_name,
+            table=ident_owner_table,
+            related_table=ident_related_table,
+            primary_key=ident_owner_pk,
+            foreign_key=ident_foreign_key,
+        )
+        replace = forward
+        if self._renamed(related_table):
+            replace = (
+                self._drop_prior_rules(
+                    ident_owner_table,
+                    [_revive_rule_name(name, column) for name in self._prior_names(related_table)],
+                )
+                + forward
+            )
+        reverse = _soft_delete._DROP_SOFT_DELETE_REVIVE_RELATED_OBJECTS_RULE.format(
+            rule_name=rule_name, table=ident_owner_table
+        )
+        self._append_if_stale(
+            ops,
+            self.existing.soft_delete_revive,
+            key,
+            header_template.format(**header_slots),
+            forward,
+            reverse,
+            is_adopt=adopt,
+            replace=replace,
+        )
+
     def _cascade_operations(self, model: type[models.Model], *, adopt: bool = False) -> list[str]:
         """Cascade soft-delete rules for CASCADE FKs pointing at *model*. Lives on the table
         whose ``_deleted_at`` actually flips: *model*'s own, or the owning MTI ancestor --
@@ -1536,6 +1677,20 @@ class OperationsMixin:
                 reverse,
                 is_adopt=adopt,
                 replace=replace,
+            )
+            self._append_cascade_revive(
+                ops,
+                key=key,
+                is_primary=is_primary,
+                related_table=related_table,
+                header_related_table=header_related_table,
+                header_owner_table=header_owner_table,
+                ident_owner_table=ident_owner_table,
+                ident_owner_pk=ident_owner_pk,
+                ident_related_table=ident_related_table,
+                ident_foreign_key=ident_foreign_key,
+                foreign_key=fk_field.column,
+                adopt=adopt,
             )
         for fk_field in self_cascades:
             self._self_cascade_operation(
@@ -2216,10 +2371,10 @@ class OperationsMixin:
         hosting = self._table_app_labels()
         required, _models = self._cascade_key_maps()
         notes = []
-        for key in sorted(
-            set(self.existing.soft_delete_related) - set(required),
-            key=lambda k: (k[0], k[1], k[2] or ''),
-        ):
+        # Both families, deduped by key: one out-of-scope owner leaves one live cascade, and
+        # naming it twice would read as two rules still archiving rows.
+        recorded = set(self.existing.soft_delete_related) | set(self.existing.soft_delete_revive)
+        for key in sorted(recorded - set(required), key=lambda k: (k[0], k[1], k[2] or '')):
             related_table, owner_table, _via = key
             owner_app = hosting.get(owner_table)
             if owner_app is None or owner_app in requested or related_table not in hosting:
@@ -2317,9 +2472,15 @@ class OperationsMixin:
         file the digest guard skips, so for those histories this note is the only channel."""
         # Scoped like every other refusal: the scan reads all of LOCAL_APPS, and a per-app CI
         # job going red over a file it was not asked about has no fix available from that job.
+
+        # Both families: a revive's drop is ordered against the migration that created the
+        # *revive*, so a history missing that edge is missing it just as silently.
         sites = [
             site
-            for site in self.existing.cascade_retirement_sites
+            for site in (
+                *self.existing.cascade_retirement_sites,
+                *self.existing.revive_retirement_sites,
+            )
             if not requested or site.app_label in requested
         ]
         if not sites:

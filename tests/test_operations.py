@@ -222,7 +222,17 @@ def _stem_after_every_create() -> str:
     one cannot serve, a file that both creates and retires a key not being its own evidence.
     Read, not spelled: the tests below mean "after everything that asserts this key"."""
     migrations_dir = Path(__file__).parent / 'testapp' / 'migrations'
-    return sorted(path.stem for path in migrations_dir.glob('0*.py'))[-1]
+    stems = sorted(path.stem for path in migrations_dir.glob('0*.py'))
+    newest_create = max(stem for stem in stems if stem.endswith('_auto_enforcement'))
+    host = stems[-1]
+    # Asserted rather than assumed: regenerating puts a new create last, and these tests then
+    # pretend a retirement into the file that asserts the key -- which reads as no retirement
+    # at all, and fails with an assertion about the key rather than about the ordering.
+    assert host > newest_create, (
+        f'{host!r} must sort after {newest_create!r}: add an empty migration after it, as '
+        f'0059_retirement_host is, or these tests pretend a retirement into its own create.'
+    )
+    return host
 
 
 def _retire_at(monkeypatch, stem: str, table: str, column: str | None = None) -> None:

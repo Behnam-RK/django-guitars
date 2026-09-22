@@ -181,9 +181,9 @@ def test_a_bulk_update_of_an_unrelated_column_archives_nothing(tree):
 
 
 def test_restoring_a_parent_cascades_nothing_either_way(tree):
-    """The trigger reads the live-to-archived transition only, so an un-archive is never a
-    cascade. Children left **live** under an archived parent on purpose: with them already
-    archived, a trigger firing on either direction would find nothing to touch and still pass."""
+    """The *trigger* reads the live-to-archived transition only, so an un-archive is never a
+    self cascade -- unlike the plain cascade rules, which carry an inverse since 2.13.0. This
+    asserts over ``Setlist`` alone; ``tests/test_cascade_revive.py`` pins the other side."""
     root, middle, leaf = tree
     _raw_delete(root.pk)
     Setlist._all_objects.filter(pk__in=[middle.pk, leaf.pk]).update(_deleted_at=None)

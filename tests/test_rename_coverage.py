@@ -173,6 +173,26 @@ def test_a_renamed_cascade_child_drops_the_rule_it_left_behind():
     assert 'CREATE OR REPLACE RULE "soft_delete_related_testapp_album"' in operation
 
 
+def test_a_renamed_cascade_child_drops_its_inverse_rules_old_name_too():
+    """The inverse rule's name embeds the child's table as the cascade's does, so a rename
+    strands it the same way -- and it sizes the table, so the old spelling carries the old
+    length and cannot be produced by truncating the new one."""
+    command = Command()
+    command.existing.renamed_tables['testapp_album'] = ['testapp_oldalbum']
+    command.existing.soft_delete_revive[('testapp_album', 'testapp_band', None)] = 'stale00000'
+
+    (operation,) = [
+        candidate
+        for candidate in command._build_operations(apps.get_app_config('testapp'))
+        if candidate.startswith('# Soft Delete Revive Rule on "testapp_album"')
+    ]
+
+    assert 'DROP RULE IF EXISTS "soft_delete_revive_16_testapp_oldalbum" ON "testapp_band"' in (
+        operation
+    )
+    assert 'CREATE OR REPLACE RULE "soft_delete_revive_13_testapp_album"' in operation
+
+
 def test_a_rename_wrapped_in_separate_database_and_state_is_still_seen():
     """The standard idiom for a change the database already has, and what a hand-tuned squash
     carries -- read past exactly as the object-reference resolver reads past it."""

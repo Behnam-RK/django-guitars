@@ -84,6 +84,26 @@ _DROP_SOFT_DELETE_RELATED_OBJECTS_RULE = """
     DROP RULE {rule_name} ON {table};
 """
 
+# The inverse (issue #51). ``_deleted_at = old._deleted_at`` is the provenance test -- exact
+# since 2.12.0 stamped a child with its parent's own value -- and implies IS NOT NULL, since
+# ``NULL = x`` never holds. ``<> 'on'`` fails safe here too: ``'on'`` leaves rows hidden.
+_CREATE_SOFT_DELETE_REVIVE_RELATED_OBJECTS_RULE = """
+    CREATE OR REPLACE RULE {rule_name}
+        AS ON UPDATE TO {table}
+        WHERE old._deleted_at IS NOT NULL AND new._deleted_at IS NULL AND
+              COALESCE(current_setting('rules.hard_deletion', true), '') <> 'on'
+        DO ALSO (
+            UPDATE {related_table}
+            SET _deleted_at = NULL
+            WHERE "{foreign_key}" = old."{primary_key}"
+              AND _deleted_at = old._deleted_at
+        );
+"""
+
+_DROP_SOFT_DELETE_REVIVE_RELATED_OBJECTS_RULE = """
+    DROP RULE {rule_name} ON {table};
+"""
+
 # ---- Private, non-frozen owned-rule templates: the cascade pair above with the predicate
 # sides swapped, the FK living on the owner. The NOT EXISTS is the last-owner guard, always
 # emitted -- see ADR 0011 for why it is never derived from a unique constraint. ----

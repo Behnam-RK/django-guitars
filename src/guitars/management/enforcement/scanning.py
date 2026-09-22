@@ -25,6 +25,8 @@ from guitars.management.enforcement.headers import (
     _RE_SOFT_DELETE_OWNED_SWEEP,
     _RE_SOFT_DELETE_RELATED,
     _RE_SOFT_DELETE_RELATED_RETIRED,
+    _RE_SOFT_DELETE_REVIVE,
+    _RE_SOFT_DELETE_REVIVE_RETIRED,
     _RE_SOFT_DELETE_SELF_CASCADE,
     _RE_TENANT_AUTOFILL,
     _RE_TENANT_AUTOFILL_FUNCTION,
@@ -81,6 +83,14 @@ class ExistingOperations(NamedTuple):
     #: Every cascade retirement already written, with the create it drops. The ``--check``
     #: half of ADR 0021: the emitter cannot reach a file it will never rewrite.
     cascade_retirement_sites: list[CascadeRetirementSite]
+    #: The inverse rule for that same cascade key, tracked separately for the sweep's reason:
+    #: a cascade already recorded must not read as a revive recorded, or a project upgrading
+    #: to 2.13.0 never receives one. Same key shape, so retirement and renames see one key.
+    soft_delete_revive: dict[tuple[str, str, str | None], str | None]
+    #: Its creates, and its retirements already written -- the two halves ADR 0021 needs, per
+    #: family, because a revive's drop is ordered against the migration that created *it*.
+    soft_delete_revive_dependencies: dict[tuple[str, str, str | None], list[tuple[str, str]]]
+    revive_retirement_sites: list[CascadeRetirementSite]
     #: Keyed on (dependent_table, table, foreign_key) -- the owner-side mirror of the above.
     #: The FK is never ``None`` here: an owned rule is always named after its column, there
     #: being no pre-2.3.0 plain form to stay compatible with.
@@ -317,6 +327,9 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
     existing_soft_delete_related: dict[tuple[str, str, str | None], str | None] = {}
     cascade_deps: dict[tuple[str, str, str | None], list[tuple[str, str]]] = {}
     retirement_sites: list[CascadeRetirementSite] = []
+    existing_soft_delete_revive: dict[tuple[str, str, str | None], str | None] = {}
+    revive_deps: dict[tuple[str, str, str | None], list[tuple[str, str]]] = {}
+    revive_retirement_sites: list[CascadeRetirementSite] = []
     existing_soft_delete_owned: dict[tuple[str, str, str], str | None] = {}
     existing_soft_delete_owned_sweep: dict[tuple[str, str, str], str | None] = {}
     existing_soft_delete_self_cascade: dict[tuple[str, str], str | None] = {}
@@ -336,6 +349,7 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
             lambda m: _identifiers._unescape_ident(m.group(1)),
         ),
         (_RE_SOFT_DELETE_RELATED, existing_soft_delete_related, _cascade_key),
+        (_RE_SOFT_DELETE_REVIVE, existing_soft_delete_revive, _cascade_key),
         (
             _RE_SOFT_DELETE_OWNED,
             existing_soft_delete_owned,
@@ -418,6 +432,7 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
     # rest of the scan -- which is the point: a later migration re-recording a key wins again.
     keyed_families = {
         'soft_delete_related': existing_soft_delete_related,
+        'soft_delete_revive': existing_soft_delete_revive,
         'soft_delete_owned': existing_soft_delete_owned,
         'soft_delete_owned_sweep': existing_soft_delete_owned_sweep,
         'soft_delete_self_cascade': existing_soft_delete_self_cascade,
@@ -442,6 +457,8 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
             existing_triggers,
             existing_soft_deletes,
             existing_soft_delete_related,
+            existing_soft_delete_revive,
+            revive_deps,
             existing_soft_delete_owned,
             existing_soft_delete_owned_sweep,
             existing_soft_delete_self_cascade,
@@ -523,6 +540,14 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
                 if (app.label, path.stem) not in creates:
                     creates.append((app.label, path.stem))
 
+            # The same, for the inverse family: its drop is ordered against the migration that
+            # created *it*, which the cascade's own creates cannot answer -- the two land
+            # together today, but nothing enforces that, and a mis-ordered DROP is silent.
+            for match in _RE_SOFT_DELETE_REVIVE.finditer(content):
+                creates = revive_deps.setdefault(_cascade_key(match), [])
+                if (app.label, path.stem) not in creates:
+                    creates.append((app.label, path.stem))
+
             # Recorded per file, not per family: a repeat is only visible while the file is
             # open, and the key it writes is the one a real MTI child writes too.
             for pattern, kind in (
@@ -553,6 +578,10 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
             cascade_retirements = list(_RE_SOFT_DELETE_RELATED_RETIRED.finditer(content))
             for match in cascade_retirements:
                 retirement_sites.append(
+                    CascadeRetirementSite(app.label, path.stem, _cascade_key(match), None)
+                )
+            for match in _RE_SOFT_DELETE_REVIVE_RETIRED.finditer(content):
+                revive_retirement_sites.append(
                     CascadeRetirementSite(app.label, path.stem, _cascade_key(match), None)
                 )
             retirements = list(_RE_TENANT_AUTOFILL_RETIRED.finditer(content))
@@ -599,6 +628,17 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
         live_tables,
         _ensure_loader,
     )
+    # Twice, once per family: the helper is already generic over its six arguments, and the
+    # two answers are independent -- a key retired before 2.13.0 has a drop for the cascade
+    # and no revive to pair with, so sharing one settle would read that as a missing create.
+    revive_retirement_sites = _settle_retirement_sites(
+        revive_retirement_sites,
+        existing_soft_delete_revive,
+        revive_deps,
+        _pending_renames,
+        live_tables,
+        _ensure_loader,
+    )
 
     # One map across every local app: a cascade rule's key names two tables, and they can
     # belong to different apps, so translating per app would leave half a key behind.
@@ -610,6 +650,9 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
         soft_delete_related=existing_soft_delete_related,
         soft_delete_related_dependencies=cascade_deps,
         cascade_retirement_sites=retirement_sites,
+        soft_delete_revive=existing_soft_delete_revive,
+        soft_delete_revive_dependencies=revive_deps,
+        revive_retirement_sites=revive_retirement_sites,
         soft_delete_owned=existing_soft_delete_owned,
         soft_delete_owned_sweep=existing_soft_delete_owned_sweep,
         soft_delete_self_cascade=existing_soft_delete_self_cascade,

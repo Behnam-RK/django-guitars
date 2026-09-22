@@ -1938,8 +1938,12 @@ def test_cascade_operations_report_two_relations_that_would_share_a_rule_name():
     command, ops = _build()
 
     # Emitted anyway: what ships works for one of the two, which is the whole problem.
-    assert len(ops) == 3
+    # Six operations, not three: each cascade rule is paired with its inverse since 2.13.0.
+    assert len(ops) == 6
+    # Still one clash, and it is the *cascade* family's: the revive names size every segment,
+    # so the two relations that meet on one cascade name cannot meet on a revive one.
     assert len(command._rule_name_clashes) == 1
+    assert not any('soft_delete_revive' in note for note in command._rule_name_clashes)
     clash = command._rule_name_clashes[0]
     assert 'soft_delete_related_c_a_b_id' in clash
     assert "'c_a' via 'b_id'" in clash and "'c_a_b_id'" in clash
@@ -1983,8 +1987,13 @@ def test_cascade_operations_report_an_mti_parent_and_child_sharing_a_rule_name()
 
     command, ops = _build()
 
-    assert len(ops) == 2
-    assert len(command._rule_name_clashes) == 1
+    # Four, not two: the inverse rule goes with each cascade.
+    assert len(ops) == 4
+    # *Two* clashes here, one per family -- unlike the sibling test above, where sizing every
+    # segment keeps the revive names apart. Sizing cannot help this shape: both keys reach one
+    # owner table and each is the primary of its own call, so both ask for the plain form.
+    assert len(command._rule_name_clashes) == 2
+    assert any('soft_delete_revive' in note for note in command._rule_name_clashes)
     clash = command._rule_name_clashes[0]
     assert "via 'p_id'" in clash and "via 'c_id'" in clash
     assert 'the second replaces the first' in clash

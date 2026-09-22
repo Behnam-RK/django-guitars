@@ -33,9 +33,11 @@ from guitars.management.enforcement.scanning import (
 @pytest.fixture
 def command():
     """A command whose recorded cascade rules the test sets by hand, so a retirement can be
-    arranged without a migration that would really drop one."""
+    arranged without a migration that would really drop one. Both families are cleared: since
+    2.13.0 a key is normally recorded in each, and a retirement has to drop whichever it has."""
     built = Command()
     built.existing.soft_delete_related.clear()
+    built.existing.soft_delete_revive.clear()
     return built
 
 
@@ -45,6 +47,15 @@ def _retirements(built: Command, app: str = 'testapp') -> list[str]:
         operation
         for operation in built._retired_cascade_operations(app)
         if operation.startswith('# Soft Delete Related Rule retired')
+    ]
+
+
+def _revive_retirements(built: Command, app: str = 'testapp') -> list[str]:
+    app = apps.get_app_config(app)
+    return [
+        operation
+        for operation in built._retired_cascade_operations(app)
+        if operation.startswith('# Soft Delete Revive Rule retired')
     ]
 
 
@@ -849,3 +860,73 @@ def test_a_brand_new_key_with_no_retirement_history_does_not_taint_the_app(comma
     command._record_readoption_edge('testapp', ('testapp_album', 'testapp_genre', None))
 
     assert 'testapp' not in command.existing.retirement_apps
+
+
+def test_a_relaxed_key_retires_both_of_its_rules(command):
+    """The obligation the inverse family created: dropping only the cascade leaves the revive
+    live on the same column, and the consumer's ``RemoveField`` then fails on it."""
+    key = ('testapp_callbacks', 'testapp_band', None)
+    command.existing.soft_delete_related[key] = 'abc'
+    command.existing.soft_delete_revive[key] = 'def'
+
+    (cascade,) = _retirements(command)
+    (revive,) = _revive_retirements(command)
+
+    assert 'DROP RULE IF EXISTS "soft_delete_related_testapp_callbacks" ON "testapp_band"' in (
+        cascade
+    )
+    # Sized name, and every prior spelling of the renamed table, exactly as the cascade does.
+    assert 'DROP RULE IF EXISTS "soft_delete_revive_17_testapp_callbacks" ON "testapp_band"' in (
+        revive
+    )
+    assert 'DROP RULE IF EXISTS "soft_delete_revive_14_testapp_encore" ON "testapp_band"' in (
+        revive
+    )
+    # And the reverse rebuilds the inverse rule, not a second copy of the cascade.
+    assert 'old._deleted_at IS NOT NULL AND new._deleted_at IS NULL' in revive
+    assert '_deleted_at = old._deleted_at' in revive
+
+
+def test_a_key_recorded_before_the_inverse_family_existed_retires_only_the_cascade(command):
+    """Every project upgrading to 2.13.0 is in this state for any key it had already retired
+    or is about to. Emitting a ``DROP RULE`` for a revive that was never created fails
+    ``migrate``, which is why each arm tests its own recorded map rather than a shared one."""
+    command.existing.soft_delete_related[('testapp_album', 'testapp_genre', None)] = 'abc'
+
+    assert len(_retirements(command)) == 1
+    assert _revive_retirements(command) == []
+
+
+def test_a_key_recorded_only_as_a_revive_retires_only_the_revive(command):
+    """The mirror, and the reason the loop iterates the union rather than either family: a key
+    whose cascade was retired earlier still has an inverse to drop."""
+    command.existing.soft_delete_revive[('testapp_album', 'testapp_genre', None)] = 'abc'
+
+    assert _retirements(command) == []
+    assert len(_revive_retirements(command)) == 1
+
+
+def test_the_via_form_retires_both_under_their_own_names(command):
+    key = ('testapp_callbacks', 'testapp_band', 'band_id')
+    command.existing.soft_delete_related[key] = 'abc'
+    command.existing.soft_delete_revive[key] = 'def'
+
+    (cascade,) = _retirements(command)
+    (revive,) = _revive_retirements(command)
+
+    assert 'soft_delete_related_testapp_callbacks_band_id' in cascade
+    assert 'soft_delete_revive_17_testapp_callbacks_7_band_id' in revive
+    assert 'via "band_id"!' in cascade and 'via "band_id"!' in revive
+
+
+def test_an_unrecoverable_column_refuses_to_reverse_either_rule(command):
+    """Both halves refuse together: a reverse that silently rebuilt one of the two would leave
+    history claiming a pair the database has half of."""
+    key = ('testapp_genre', 'testapp_band', None)
+    command.existing.soft_delete_related[key] = 'abc'
+    command.existing.soft_delete_revive[key] = 'def'
+
+    (cascade,) = _retirements(command)
+    (revive,) = _revive_retirements(command)
+
+    assert 'RAISE' in cascade and 'RAISE' in revive

@@ -66,6 +66,26 @@ HEADER_SCANNERS = [
         {'related_table': 'shop_line', 'table': 'shop_order', 'foreign_key': 'bonus_order_id'},
     ),
     (
+        headers_module.HEADER_SOFT_DELETE_REVIVE,
+        headers_module._RE_SOFT_DELETE_REVIVE,
+        {'related_table': 'shop_line', 'table': 'shop_order'},
+    ),
+    (
+        headers_module.HEADER_SOFT_DELETE_REVIVE_VIA,
+        headers_module._RE_SOFT_DELETE_REVIVE,
+        {'related_table': 'shop_line', 'table': 'shop_order', 'foreign_key': 'bonus_order_id'},
+    ),
+    (
+        headers_module.HEADER_SOFT_DELETE_REVIVE_RETIRED,
+        headers_module._RE_SOFT_DELETE_REVIVE_RETIRED,
+        {'related_table': 'shop_line', 'table': 'shop_order'},
+    ),
+    (
+        headers_module.HEADER_SOFT_DELETE_REVIVE_VIA_RETIRED,
+        headers_module._RE_SOFT_DELETE_REVIVE_RETIRED,
+        {'related_table': 'shop_line', 'table': 'shop_order', 'foreign_key': 'bonus_order_id'},
+    ),
+    (
         headers_module.HEADER_SOFT_DELETE_SELF_CASCADE,
         headers_module._RE_SOFT_DELETE_SELF_CASCADE,
         {'table': 'shop_order', 'foreign_key': 'parent_id'},

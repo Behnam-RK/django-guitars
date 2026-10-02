@@ -846,8 +846,6 @@ class OperationsMixin:
         """The column a retired rule read, so its ``reverse_sql`` can recreate it. The ``_via``
         form spells it in the key; the primary form does not, so it is recovered as the first
         remaining foreign key from the child to that owner -- the same order that picked it."""
-        if key[2] is not None:
-            return key[2]
         related_model = models_by_table.get(key[0])
         if related_model is None:  # pragma: no cover - the caller checks hosting first
             return None
@@ -855,6 +853,12 @@ class OperationsMixin:
         # earlier. Its ``local_fields`` are empty, so the scan below would recover nothing and
         # the reverse would refuse where it could have rebuilt the rule.
         related_model = related_model._meta.concrete_model or related_model
+        # A joined rule updates the ancestor, which the key does not name: the flat template
+        # would rebuild it against a table with no ``_deleted_at``. So the reverse refuses.
+        if not owns_column(related_model, '_deleted_at'):
+            return None
+        if key[2] is not None:
+            return key[2]
         # Not filtered to cascade candidates: the relaxed field is the one that stopped being
         # one, and is the common case. So the net is wide, and where it catches more than one
         # the reverse refuses -- guessing rebuilds the rule on a column it never read.
@@ -1450,27 +1454,26 @@ class OperationsMixin:
             if related_table == owner_table:
                 self_cascades.append(fk_field)
                 continue
-            # The same rejection one hop further out: two tables whose rules update each
-            # other are rewritten into each other. Checked against the whole-registry graph,
-            # so a cycle closed through another app's model is still caught.
-            if (owner_table, related_table) in self._rule_cycle_edges():
+            # The table the rule *updates*: the child's own for the flat form, the ancestor
+            # holding ``_deleted_at`` for the joined one (a key declared on an MTI descendant).
+            joined = not owns_column(related_model, '_deleted_at')
+            target = column_owner(related_model, '_deleted_at')
+            target_table = target._meta.db_table
+            # The rule names the ancestor too, so a router sending it elsewhere is a table this
+            # DDL cannot name -- the gate ``_is_cascade_candidate`` applies to the child.
+            if joined and not migrates_to_postgresql(target):
+                continue
+            # The same rejection one hop out, against the whole-registry graph. A joined key
+            # cascading to its own root is the one-node cycle, asked directly: *model* may not
+            # be in that graph.
+            if (owner_table, target_table) in self._rule_cycle_edges() or (
+                joined and target_table == owner_table
+            ):
                 if report:
                     self._skipped_rule_notes.append(
                         self._cycle_warning(
-                            'Cascade', f"'{related_table}'", owner_table, related_table
+                            'Cascade', f"'{related_table}'", owner_table, target_table
                         )
-                    )
-                continue
-            # The flat rule does UPDATE related_table SET _deleted_at -- only valid when the
-            # related child owns that column on the table its FK lives on. An FK whose
-            # _deleted_at lives on a farther MTI ancestor needs a join form not emitted yet.
-            if not owns_column(related_model, '_deleted_at'):
-                if report:
-                    self._skipped_rule_notes.append(
-                        f"Cascade rule for '{related_table}' -> '{owner_table}' skipped: "
-                        f"'{related_model.__name__}' declares this foreign key on its own table "
-                        'but inherits _deleted_at from a multi-table-inheritance ancestor, '
-                        'which needs a join form the generator does not emit yet.'
                     )
                 continue
             is_primary = related_table not in seen_related_tables
@@ -1530,6 +1533,7 @@ class OperationsMixin:
         foreign_key: str | None,
         *,
         unrenamed: str,
+        adopt_template: str = _soft_delete._ADOPT_SOFT_DELETE_REVIVE,
     ) -> str:
         """:meth:`_owned_sweep_form` for the inverse family, whose name folds in **two** tables
         since ``d5aa8e6`` -- either of which a rename can have moved, and each through its own
@@ -1544,9 +1548,7 @@ class OperationsMixin:
             for related in relateds
             if (owner, related) != (owner_table, related_table)
         ]
-        return self._drop_prior_triggers(
-            slots, names
-        ) + _soft_delete._ADOPT_SOFT_DELETE_REVIVE.format(**slots)
+        return self._drop_prior_triggers(slots, names) + adopt_template.format(**slots)
 
     def _self_cascade_form(
         self, slots: dict, owner_table: str, foreign_key: str, *, unrenamed: str
@@ -1639,10 +1641,11 @@ class OperationsMixin:
         ident_foreign_key: str,
         foreign_key: str,
         adopt: bool,
+        target_model: type[models.Model] | None = None,
     ) -> None:
-        """The inverse of the cascade rule just appended, from that loop, against the same key
-        and after the same refusals -- so which relations carry a revive **is** which carry a
-        cascade, the precedent :meth:`_append_owned_sweep` set for its own family."""
+        """The inverse of the cascade rule just appended, against the same key and after the same
+        refusals (the precedent :meth:`_append_owned_sweep` set). A *target_model* is the ancestor
+        a joined rule stamps, and selects the joined templates."""
         # Statement-level, not a second ``ON UPDATE`` rule: two rules on one table double the
         # rewriter's expansion per cascade level, so depth 6 cost 127 query trees and 93ms to
         # plan a plain ``save()`` against 7 and 2ms. ADR 0018 converted for this reason.
@@ -1678,10 +1681,16 @@ class OperationsMixin:
             'foreign_key': ident_foreign_key,
             'updated_at_assignment': (
                 _soft_delete._SOFT_DELETE_REVIVE_UPDATED_AT
-                if owns_column(related_model, '_updated_at')
+                if owns_column(target_model or related_model, '_updated_at')
                 else ''
             ),
         }
+        if target_model is not None:
+            slots |= {
+                'target_table': _identifiers._quote_table(target_model._meta.db_table),
+                'target_pk': _identifiers._escape_ident(cast(str, target_model._meta.pk.column)),
+                'child_pk': _identifiers._escape_ident(cast(str, related_model._meta.pk.column)),
+            }
         # Refused rather than escaped, as the sweep and the self cascade refuse it: an
         # identifier admits '$', so a db_table like 'a$$b' closes this template's dollar
         # quoting early and the generated migration fails `migrate` with a syntax error.
@@ -1702,7 +1711,18 @@ class OperationsMixin:
                     f'{ident_owner_table}; DROP FUNCTION {name}();'
                 )
             return
-        forward = _soft_delete._CREATE_SOFT_DELETE_REVIVE.format(**slots)
+        joined = target_model is not None
+        adopt_template = (
+            _soft_delete._ADOPT_SOFT_DELETE_REVIVE_JOINED
+            if joined
+            else _soft_delete._ADOPT_SOFT_DELETE_REVIVE
+        )
+        create_template = (
+            _soft_delete._CREATE_SOFT_DELETE_REVIVE_JOINED
+            if joined
+            else _soft_delete._CREATE_SOFT_DELETE_REVIVE
+        )
+        forward = create_template.format(**slots)
         reverse = _soft_delete._DROP_SOFT_DELETE_REVIVE.format(**slots)
         self._append_if_stale(
             ops,
@@ -1719,14 +1739,20 @@ class OperationsMixin:
                 key[1],
                 related_table,
                 column,
-                unrenamed=_soft_delete._REPLACE_SOFT_DELETE_REVIVE,
+                unrenamed=(
+                    _soft_delete._REPLACE_SOFT_DELETE_REVIVE_JOINED
+                    if joined
+                    else _soft_delete._REPLACE_SOFT_DELETE_REVIVE
+                ),
+                adopt_template=adopt_template,
             ),
             adopt=self._revive_form(
                 slots,
                 key[1],
                 related_table,
                 column,
-                unrenamed=_soft_delete._ADOPT_SOFT_DELETE_REVIVE,
+                unrenamed=adopt_template,
+                adopt_template=adopt_template,
             ),
         )
 
@@ -1772,10 +1798,17 @@ class OperationsMixin:
             # field ref covers both. Pre-existing gap, not new in 2.4.0: a CASCADE crossing
             # apps has always emitted a rule naming a table nothing ordered it against.
             self._record_object_ref(model, related_model, fk_field.name)
+            # A joined rule stamps the ancestor and reads the descendant's parent link, so it
+            # names the ancestor's table and the link column too -- on neither of which the key
+            # alone says anything. ``target`` is ``related_model`` itself for the flat form.
+            joined = not owns_column(related_model, '_deleted_at')
+            target = column_owner(related_model, '_deleted_at')
+            if joined:
+                self._record_object_ref(model, related_model, related_model._meta.pk.name)
             # ``SET _deleted_at`` is a second column, and not necessarily as old as the table:
             # a model promoted to ``SetarModel`` gains it in a later migration, and an edge to
             # the creation alone would let the rule be created before the column exists.
-            self._record_object_ref(model, related_model, '_deleted_at')
+            self._record_object_ref(model, target, '_deleted_at')
             # And, where this key was retired before, the drop that retired it: a re-adopted
             # create reaching a fresh database first leaves the rule dropped and never rebuilt.
             self._record_readoption_edge(model._meta.app_label, key)
@@ -1787,13 +1820,25 @@ class OperationsMixin:
             # One template pair for both cases -- see soft_delete.py's private
             # _CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE for why the public, frozen constants
             # of the same name (the old rule_name-less signature) aren't used here.
-            forward = _soft_delete._CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE.format(
-                rule_name=rule_name,
-                table=ident_owner_table,
-                related_table=ident_related_table,
-                primary_key=ident_owner_pk,
-                foreign_key=ident_foreign_key,
-            )
+            if joined:
+                forward = _soft_delete._CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE_JOINED.format(
+                    rule_name=rule_name,
+                    table=ident_owner_table,
+                    related_table=ident_related_table,
+                    primary_key=ident_owner_pk,
+                    foreign_key=ident_foreign_key,
+                    target_table=_identifiers._quote_table(target._meta.db_table),
+                    target_pk=_identifiers._escape_ident(cast(str, target._meta.pk.column)),
+                    child_pk=_identifiers._escape_ident(cast(str, related_model._meta.pk.column)),
+                )
+            else:
+                forward = _soft_delete._CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE.format(
+                    rule_name=rule_name,
+                    table=ident_owner_table,
+                    related_table=ident_related_table,
+                    primary_key=ident_owner_pk,
+                    foreign_key=ident_foreign_key,
+                )
             # A rule's name embeds the child's table, so a rename leaves the carried-over rule
             # live beside the new one -- both cascading, and nothing later retires either.
             replace = forward
@@ -1836,6 +1881,7 @@ class OperationsMixin:
                 ident_foreign_key=ident_foreign_key,
                 foreign_key=fk_field.column,
                 adopt=adopt,
+                target_model=target if joined else None,
             )
         for fk_field in self_cascades:
             self._self_cascade_operation(

@@ -85,9 +85,11 @@ def _rule_update_edges(candidates: Iterable[type[models.Model]]) -> set[tuple[st
 
     edges: set[tuple[str, str]] = set()
     for model in candidates:
-        # Both rule kinds live on the table whose ``_deleted_at`` actually flips, so a model
-        # that inherits the column declares no rule of its own -- its ancestor does.
-        if not owns_column(model, '_deleted_at'):
+        # The owned rule lives on the table whose ``_deleted_at`` flips, so a model that
+        # inherits the column declares none. A cascade key it declares still has one -- joined,
+        # firing on the target and updating the ancestor holding the column.
+        owns = owns_column(model, '_deleted_at')
+        if not owns and not is_mti_child(model, '_deleted_at'):
             continue
         # And a model this kit writes no rule for at all: an edge from one is invented,
         # which the note below calls worse than a missing one. Routing, never *scoping* --
@@ -95,6 +97,10 @@ def _rule_update_edges(candidates: Iterable[type[models.Model]]) -> set[tuple[st
         if not migrates_to_postgresql(model):
             continue
         table = model._meta.db_table
+        holder = column_owner(model, '_deleted_at')
+        if not owns and not migrates_to_postgresql(holder):
+            continue
+        updates_table = holder._meta.db_table
         for field in model._meta.local_fields:
             if not isinstance(field, ForeignKey) or not has_column(
                 field.related_model, '_deleted_at'
@@ -109,7 +115,7 @@ def _rule_update_edges(candidates: Iterable[type[models.Model]]) -> set[tuple[st
             # ``_targets_primary_key`` too: a redirected ``to_field`` gets no rule from either
             # side, and an invented edge is worse than a missing one -- it closes a cycle that
             # cannot form and takes the legitimate rule pointing back down with it.
-            if isinstance(field, OwningForeignKey) and _targets_primary_key(field):
+            if owns and isinstance(field, OwningForeignKey) and _targets_primary_key(field):
                 edges.add((table, target_table))  # owned: fires here, updates the target
             # Not ``elif``: one field reaches both generators. ``CASCADE`` on an
             # OwningForeignKey is ``guitars.E001``, but ``--skip-checks`` still reaches the
@@ -117,7 +123,7 @@ def _rule_update_edges(candidates: Iterable[type[models.Model]]) -> set[tuple[st
             if field.remote_field.on_delete is CASCADE and not getattr(
                 field.remote_field, 'parent_link', False
             ):
-                edges.add((target_table, table))  # cascade: fires on the target, updates here
+                edges.add((target_table, updates_table))  # fires on the target, updates here
     return edges
 
 

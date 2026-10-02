@@ -243,32 +243,6 @@ def test_cascade_operations_disambiguates_two_fks_to_the_same_related_table():
     assert 'TRIGGER "soft_delete_revive_via_13_testapp_album_13_testapp_m_8576eb3445"' in blob
 
 
-def test_cascade_operation_warns_when_related_model_is_mti_child_without_own_deleted_at(
-    monkeypatch,
-):
-    """Cascading into an MTI child whose ``_deleted_at`` lives on a farther ancestor isn't
-    supported (needs a join form) -- must warn, not emit a broken rule. Synthetic
-    reverse-relation, not a new schema field: purely about the command's own logic."""
-    command = Command()
-    command._skipped_rule_notes.clear()
-    clear_cascade_coverage(command)
-
-    class _FakeFKField:
-        column = 'sponsor_id'
-        model = Orchestra
-        remote_field = types.SimpleNamespace(parent_link=False)
-
-    command.reverse_relations_mapping[Band] = {(Orchestra, _FakeFKField(), CASCADE)}
-
-    ops = command._cascade_operations(Band)
-
-    assert ops == []
-    assert len(command._skipped_rule_notes) == 1
-    warning = command._skipped_rule_notes[0]
-    assert 'testapp_orchestra' in warning
-    assert 'multi-table-inheritance ancestor' in warning
-
-
 def test_owned_rule_name_folds_a_hostile_schema_qualified_table_like_its_cascade_twin():
     """Same length-prefixed folding as ``_related_rule_name``'s stem, under its own prefix -- a
     rule is namespaced by name alone, so the two families must not be able to meet. The FK is
@@ -989,9 +963,9 @@ def _fake_app_config(name: str, label: str, model_list: list) -> types.SimpleNam
     return types.SimpleNamespace(name=name, label=label, get_models=lambda: model_list)
 
 
-def _sponsor_fk_reverse_relation():
-    """Synthetic shape: an FK on an MTI child's own table while ``_deleted_at`` lives on
-    an ancestor -- the generator-refuses-this-rule case."""
+def _self_root_fk_reverse_relation():
+    """Synthetic shape that is still refused: an MTI child's own key cascading to its own
+    root. The joined rule would sit on, and update, the root's table -- a one-node rule cycle."""
 
     class _FakeFKField:
         column = 'sponsor_id'
@@ -1068,13 +1042,13 @@ def _record_cascade_key(*, both: bool):
             id='silent_when_child_app_also_out_of_scope',
         ),
         pytest.param(
-            ['fake.banda', 'fake.orchestrab'],
+            ['fake.ensemblea', 'fake.orchestrab'],
             lambda: [
-                _fake_app_config('fake.banda', 'banda', [Band]),
+                _fake_app_config('fake.ensemblea', 'ensemblea', [Ensemble]),
                 _fake_app_config('fake.orchestrab', 'orchestrab', [Orchestra]),
             ],
             lambda command: command.reverse_relations_mapping.__setitem__(
-                Band, _sponsor_fk_reverse_relation()
+                Ensemble, _self_root_fk_reverse_relation()
             ),
             {'orchestrab'},
             [],

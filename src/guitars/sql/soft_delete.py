@@ -164,6 +164,69 @@ _ADOPT_SOFT_DELETE_REVIVE = (
     + _CREATE_SOFT_DELETE_REVIVE
 )
 
+# ---- The joined pair: a CASCADE key on an MTI descendant's table, ``_deleted_at`` on an
+# ancestor's. A chain stores one pk value in every table, so the descendant's parent-link column
+# names the ancestor's row directly -- one subselect, however deep. ----
+
+_CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE_JOINED = """
+    CREATE OR REPLACE RULE {rule_name}
+        AS ON UPDATE TO {table}
+        WHERE old._deleted_at IS NULL AND new._deleted_at IS NOT NULL AND
+              COALESCE(current_setting('rules.hard_deletion', true), '') <> 'on'
+        DO ALSO (
+            UPDATE {target_table}
+            SET _deleted_at = new._deleted_at
+            WHERE "{target_pk}" IN (
+                SELECT "{child_pk}" FROM {related_table} WHERE "{foreign_key}" = old."{primary_key}"
+            )
+              AND _deleted_at IS NULL
+        );
+"""
+
+_CREATE_SOFT_DELETE_REVIVE_FUNCTION_JOINED = """
+    CREATE OR REPLACE FUNCTION {function}()
+       RETURNS TRIGGER
+       LANGUAGE PLPGSQL
+    AS
+    $$
+    BEGIN
+        IF COALESCE(current_setting('rules.hard_deletion', true), '') <> 'on' THEN
+            UPDATE {target_table} AS guitars_child
+            SET _deleted_at = NULL{updated_at_assignment}
+            FROM (
+                SELECT guitars_before.*
+                FROM guitars_revive_before AS guitars_before
+                JOIN guitars_revive_after AS guitars_after
+                    ON guitars_after."{primary_key}" = guitars_before."{primary_key}"
+                WHERE guitars_before._deleted_at IS NOT NULL
+                  AND guitars_after._deleted_at IS NULL
+            ) AS guitars_revived
+            WHERE guitars_child."{target_pk}" IN (
+                    SELECT guitars_link."{child_pk}" FROM {related_table} AS guitars_link
+                    WHERE guitars_link."{foreign_key}" = guitars_revived."{primary_key}"
+                )
+              AND guitars_child._deleted_at = guitars_revived._deleted_at;
+        END IF;
+        RETURN NULL;
+    END;
+    $$;
+"""
+
+_CREATE_SOFT_DELETE_REVIVE_JOINED = (
+    _CREATE_SOFT_DELETE_REVIVE_FUNCTION_JOINED + _CREATE_SOFT_DELETE_REVIVE_TRIGGER
+)
+
+_REPLACE_SOFT_DELETE_REVIVE_JOINED = (
+    _DROP_SOFT_DELETE_REVIVE_TRIGGER + _CREATE_SOFT_DELETE_REVIVE_JOINED
+)
+
+_ADOPT_SOFT_DELETE_REVIVE_JOINED = (
+    """
+    DROP TRIGGER IF EXISTS {trigger} ON {table};
+"""
+    + _CREATE_SOFT_DELETE_REVIVE_JOINED
+)
+
 # ---- Private, non-frozen owned-rule templates: the cascade pair above with the predicate
 # sides swapped, the FK living on the owner. The NOT EXISTS is the last-owner guard, always
 # emitted -- see ADR 0011 for why it is never derived from a unique constraint. ----

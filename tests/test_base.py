@@ -268,6 +268,20 @@ def test_repr_shows_a_foreign_key_by_id_without_loading_it():
 
 
 @pytest.mark.django_db
+def test_repr_does_not_load_deferred_fields():
+    band = Band.objects.create(name='Rush')
+    for number in range(3):
+        Album.objects.create(title=f'album-{number}', band=band)
+    loaded = list(Album.objects.only('id'))  # every other field deferred
+
+    with CaptureQueriesContext(connection) as captured:
+        texts = [repr(album) for album in loaded]
+
+    assert len(captured) == 0
+    assert all('title' not in text for text in texts)
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize('albums', [1, 8])
 def test_repr_of_a_queryset_issues_no_query_per_row(albums):
     band = Band.objects.create(name='Rush')

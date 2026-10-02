@@ -241,8 +241,9 @@ class DutarModel(DatedModel, TarModel):
         # instance raise ValueError formatted with the instance itself, which
         # would recurse back into __repr__.
         representation = f'<{self.__class__.__name__} ID:{self.pk} - '
+        deferred = self.get_deferred_fields()  # reading one loads it: a query per field
         for field in self._meta.fields:
-            if not field.editable:
+            if not field.editable or field.attname in deferred:
                 continue
             # attname, not name: `name` on a relation lazy-loads the row (a query per FK per
             # instance). The two are identical for every other field.

@@ -4,11 +4,12 @@ import types
 
 import pytest
 from asgiref.sync import async_to_sync
-from django.db import transaction
+from django.db import connection, transaction
 from django.db.models.signals import post_save, pre_save
+from django.test.utils import CaptureQueriesContext
 
 from guitars.models.base import DutarModel
-from tests.testapp.models import Band, Genre, Riff
+from tests.testapp.models import Album, Band, Genre, Riff
 
 
 @pytest.mark.django_db
@@ -251,6 +252,34 @@ def test_repr_skips_none_valued_fields():
     band = Band.objects.create(name='Rush')  # nickname left as None
 
     assert 'nickname' not in repr(band)
+
+
+@pytest.mark.django_db
+def test_repr_shows_a_foreign_key_by_id_without_loading_it():
+    band = Band.objects.create(name='Rush')
+    Album.objects.create(title='2112', band=band)
+    album = Album.objects.get(title='2112')  # band not cached on this instance
+
+    with CaptureQueriesContext(connection) as captured:
+        text = repr(album)
+
+    assert f'band_id: {band.pk}' in text
+    assert len(captured) == 0
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize('albums', [1, 8])
+def test_repr_of_a_queryset_issues_no_query_per_row(albums):
+    band = Band.objects.create(name='Rush')
+    for number in range(albums):
+        Album.objects.create(title=f'album-{number}', band=band)
+    loaded = list(Album.objects.all())  # evaluated here, so only repr() is measured below
+
+    with CaptureQueriesContext(connection) as captured:
+        for album in loaded:
+            repr(album)
+
+    assert len(captured) == 0
 
 
 @pytest.mark.django_db

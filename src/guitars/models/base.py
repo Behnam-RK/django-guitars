@@ -244,10 +244,12 @@ class DutarModel(DatedModel, TarModel):
         for field in self._meta.fields:
             if not field.editable:
                 continue
-            value = getattr(self, field.name)
+            # attname, not name: `name` on a relation lazy-loads the row (a query per FK per
+            # instance). The two are identical for every other field.
+            value = getattr(self, field.attname)
             if value is None:
                 continue
-            representation += f'{field.name}: {value} - '
+            representation += f'{field.attname}: {value} - '
         return representation + '>'
 
 

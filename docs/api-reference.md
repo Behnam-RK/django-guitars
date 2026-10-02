@@ -59,6 +59,8 @@ blocks nest instead of clobbering each other's restore.
 | `AllObjectsManager` | `_all_objects` — every row regardless of `_deleted_at`. |
 | `LiveQuerySet` | Queryset backing `LiveManager`. |
 | `HardDeletableQuerySet` | `LiveQuerySet` subclass adding `.hard_delete()` in bulk; backs `ArchiveManager` / `AllObjectsManager`. |
+| `LiveQuerySet.soft_delete()` / `asoft_delete()` | Archive in one `UPDATE`, returning the rows stamped; queryset-only, denied unscoped. See [soft_delete()](soft-delete-api.md). |
+| `SoftDeletableModel.soft_delete()` / `asoft_delete()` | Instance form; keeps the pk, sets `_deleted_at`. Raises `SoftDeleteUnsupportedError` where the rules alone would leave rows live. |
 
 ## Tenancy public API (`guitars.tenancy`)
 
@@ -107,6 +109,7 @@ settings the enforcement generator reads:
 | `GUITARS_RLS_FORCE` | `True` | `False` ships policies inert, for a staged retrofit; `makeguitarmigrations --force-rls` lands `FORCE` later. |
 | `GUITARS_RLS_EXEMPT_ROLES` | `[]` | Roles granted a `SELECT`-only exemption policy, guarded on the role existing. |
 | `GUITARS_AUTO_MAKE_MIGRATIONS` | `True` | `False` disables the `makemigrations` override's enforcement step; use the standalone `makeguitarmigrations` instead. |
+| `GUITARS_DELETE_FAST_PATH` | `True` | `False` makes `.delete()` always run Django's collector. See [soft_delete()](soft-delete-api.md). |
 | `LOCAL_APPS` | *(required)* | Not `GUITARS_`-prefixed. First-party apps the generator scans for `_updated_at` / `_deleted_at`, matched against each `AppConfig.name` — so entries are the same strings `INSTALLED_APPS` holds (`"blog"` for a top-level app, `"myproject.blog"` for a nested one), not app *labels*. A short label for an app whose `name` is dotted matches nothing, and the scan is then silently empty. |
 | `TRIGGER_FUNCTION_APP` | `LOCAL_APPS[0]` | Not `GUITARS_`-prefixed. Which app hosts the shared trigger-function migration. |
 

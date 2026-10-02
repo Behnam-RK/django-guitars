@@ -10,6 +10,17 @@ Full history and diffs: [GitHub releases](https://github.com/Behnam-RK/django-gu
 
 ## [Unreleased]
 
+## [2.11.1] - 2026-10-02
+
+### Fixed
+
+- **Nested `atomic()` blocks no longer republish the tenant GUCs at both ends.** The publisher's cache key included `connection.savepoint_ids`, so the first statement inside every savepoint and the `RELEASE` that closed it each sent a `SELECT set_config(...)`. `update()` wraps its own `atomic()`, so N calls inside an outer transaction cost about 2N extra round trips. A push or release reverts no `SET LOCAL`, so the key is now only whether a transaction is open. The one revert that matters, a `ROLLBACK TO SAVEPOINT` past the publish, is seen through the transaction marker, because Django drops the `on_commit` hooks registered inside a rolled-back savepoint. Checked on Django 5.0, 5.2 and 6.0.
+- **A tenant scope held open across a savepoint rollback no longer leaves the previous tenant live.** Found while testing the change above, and present in 2.11.0: when a scope entered *inside* a savepoint was still active as that savepoint rolled back, the old key republished on the `ROLLBACK TO SAVEPOINT` statement itself, the rollback reverted that publish, and the cache then trusted it, so queries ran as the previous tenant. The shape is narrow (a scope that outlives its block, which lexical `with` nesting cannot produce) and is pinned in `tests/test_tenancy_guc_cache.py`.
+
+### Changed
+
+- **`DutarModel.__repr__` prints a foreign key as `band_id: 5`** instead of the related object's `str()`. Reading the descriptor lazy-loaded the row, one query per uncached FK per instance, so `repr(queryset)` ran up to 20 x FKs of them. The text changes for any model with an editable foreign key.
+
 ## [2.11.0] - 2026-09-22
 
 One release rather than the three it was planned as: a review loop's fixes spanned all three changes, so splitting them would have shipped two releases the loop had already proved defective. The three headings below are what a consumer would otherwise have read separately.
@@ -284,7 +295,8 @@ First stable release. **BREAKING:** the instrument ladder shifted down one rung 
 
 - Added: initial release — `SetarModel`, `GuitarModel`, `SoftDeletableModel`, `DisableSignals`, `makeguitarmigrations`.
 
-[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.11.0...HEAD
+[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.11.1...HEAD
+[2.11.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.11.1
 [2.11.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.11.0
 [2.10.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.10.0
 [2.9.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.9.1

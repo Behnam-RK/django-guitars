@@ -1,6 +1,6 @@
 [project]
 name = "django-guitars"
-version = "2.11.0"
+version = "2.11.1"
 description = "A kit of reusable Django utilities: base models, PostgreSQL soft deletion, and more."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -74,6 +74,7 @@ dev = [
     "hypothesis>=6.140",  # property-based fuzzing (identifiers, update() flag combinatorics)
     "syrupy>=5.0",  # snapshot testing for generated-migration text
     "pglast>=8.0",  # structural (not textual) parsing of generated policy SQL
+    "django-zeal>=2.2.4,<3.0.0",
 ]
 
 [build-system]

@@ -15,7 +15,9 @@ from django.db.migrations.loader import MigrationLoader
 from guitars import sql
 from guitars.checks import refuses_soft_delete_rule
 from guitars.introspection import (
+    CascadeKind,
     OwnerArm,
+    classify_cascade,
     column_owner,
     has_column,
     is_mti_child,
@@ -1591,25 +1593,6 @@ class OperationsMixin:
             'steps in Python.'
         )
 
-    @staticmethod
-    def _is_cascade_candidate(related_model, fk_field, on_delete) -> bool:
-        """Whether this reverse relation gets a cascade soft-delete rule. Shared by
-        :meth:`_cascade_operations` (writes the rules) and :meth:`_scoped_cascade_gap_notes`
-        (reports what a scoped run left out) so the two can't drift apart on which FKs count."""
-        return (
-            on_delete == models.CASCADE
-            and has_column(related_model, '_deleted_at')
-            # Both ends, not just the owner `_build_operations` already gated: the rule fires
-            # on the owner's table and its action updates the child's, so a child the router
-            # sends elsewhere is a table this DDL cannot name.
-            and migrates_to_postgresql(related_model)
-            # The MTI parent-link (a CASCADE OneToOne) is structural, not a user cascade FK.
-            and not getattr(fk_field.remote_field, 'parent_link', False)
-            # An FK reached through MTI is not a second FK: it is the *same physical column*
-            # on the ancestor's table, which appears in the caller's loop in its own right.
-            and fk_field.model is related_model
-        )
-
     def _cascade_candidates(
         self, model: type[models.Model], owner_table: str, *, report: bool = True
     ) -> tuple[list[tuple[type[models.Model], models.ForeignKey, bool]], list[models.ForeignKey]]:
@@ -1626,34 +1609,23 @@ class OperationsMixin:
             # Structural parent-links and MTI-inherited FKs are excluded there: the MTI
             # redirect rule already ties a child's deletion to the owner, and every table in
             # an MTI chain shares one ``_deleted_at``, so that rule already archives them.
-            if not self._is_cascade_candidate(related_model, fk_field, on_delete):
+            kind = classify_cascade(
+                related_model, fk_field, on_delete, owner_table, self._rule_cycle_edges()
+            )
+            if kind is CascadeKind.NONE:
                 continue
             related_table = related_model._meta.db_table
-            # A self key takes a trigger (ADR 0018): a rule updating the table it fires on is
-            # rewritten into itself, and PostgreSQL then refuses *every* UPDATE there. Routed
-            # before the cycle check, which still holds this edge for the owned family.
-            if related_table == owner_table:
+            if kind is CascadeKind.SELF:
                 self_cascades.append(fk_field)
                 continue
-            # The table the rule *updates*: the child's own for the flat form, the ancestor
-            # holding ``_deleted_at`` for the joined one (a key declared on an MTI descendant).
-            joined = not owns_column(related_model, '_deleted_at')
-            target = column_owner(related_model, '_deleted_at')
-            target_table = target._meta.db_table
-            # The rule names the ancestor too, so a router sending it elsewhere is a table this
-            # DDL cannot name -- the gate ``_is_cascade_candidate`` applies to the child.
-            if joined and not migrates_to_postgresql(target):
-                continue
-            # The same rejection one hop out, against the whole-registry graph. A joined key
-            # cascading to its own root is the one-node cycle, asked directly: *model* may not
-            # be in that graph.
-            if (owner_table, target_table) in self._rule_cycle_edges() or (
-                joined and target_table == owner_table
-            ):
+            if kind is CascadeKind.CYCLE:
                 if report:
                     self._skipped_rule_notes.append(
                         self._cycle_warning(
-                            'Cascade', f"'{related_table}'", owner_table, target_table
+                            'Cascade',
+                            f"'{related_table}'",
+                            owner_table,
+                            column_owner(related_model, '_deleted_at')._meta.db_table,
                         )
                     )
                 continue
@@ -2204,7 +2176,7 @@ class OperationsMixin:
     @staticmethod
     def _is_owned_candidate(model: type[models.Model], fk_field: models.Field) -> bool:
         """Whether this outbound FK gets an owned soft-delete rule -- the mirror of
-        :meth:`_is_cascade_candidate`, read off the declaration rather than ``on_delete``,
+        :func:`~guitars.introspection.is_cascade_candidate`, read off the declaration rather than ``on_delete``,
         which describes the opposite direction and cannot express ownership."""
         # Spelled out again in ``introspection.owner_arms`` and ``owned_tenancy_refusals``,
         # which cannot call this without losing the ``isinstance`` narrowing ``ty`` reads
@@ -2212,7 +2184,7 @@ class OperationsMixin:
         return (
             isinstance(fk_field, OwningForeignKey)
             # An FK reached through MTI is the same physical column on the ancestor's table,
-            # covered by that ancestor's own pass -- as in _is_cascade_candidate.
+            # covered by that ancestor's own pass -- as in is_cascade_candidate.
             and fk_field.model is model
             # Both ends again: the rule fires on the owner's table and its action stamps the
             # dependent's, so either one routed off PostgreSQL leaves it unwritable.

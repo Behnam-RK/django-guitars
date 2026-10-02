@@ -16,7 +16,6 @@ from django.test.utils import isolate_apps
 
 from guitars import introspection
 from guitars.introspection import _rule_update_edges, rule_update_cycle_edges
-from guitars.management.enforcement import operations as operations_module
 from guitars.management.enforcement.command import Command
 from guitars.models import SetarModel
 from guitars.tenancy import tenancy_bypassed
@@ -121,9 +120,7 @@ class TestAnAncestorRoutedOffPostgresqlIsLeftAlone:
     cannot name -- the gate the descendant already gets, asked of the second end too."""
 
     def test_the_generator_writes_no_joined_rule(self, monkeypatch):
-        monkeypatch.setattr(
-            operations_module, 'migrates_to_postgresql', lambda m: m is not Festival
-        )
+        monkeypatch.setattr(introspection, 'migrates_to_postgresql', lambda m: m is not Festival)
 
         _, blob = _label_operations()
 

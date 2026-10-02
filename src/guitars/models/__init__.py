@@ -15,6 +15,7 @@ from .soft_deletion import (
     LiveManager,
     LiveQuerySet,
     SoftDeletableModel,
+    SoftDeleteUnsupportedError,
 )
 
 
@@ -31,6 +32,7 @@ __all__ = [
     'OwningForeignKey',
     'SetarModel',
     'SoftDeletableModel',
+    'SoftDeleteUnsupportedError',
     'TarModel',
     'UpdatableModel',
 ]

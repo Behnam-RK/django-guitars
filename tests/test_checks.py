@@ -2,6 +2,7 @@
 A shape it emits a rule for anyway is worse than one it refuses: the rule keeps the child's
 row while the ancestor's unguarded DELETE removes what that row points at."""
 
+import pytest
 from django.core.checks import registry
 from django.db.models import AutoField, Model
 from django.test.utils import isolate_apps
@@ -416,3 +417,23 @@ def test_the_hint_over_two_direct_plain_parents_names_both_and_says_restructure(
     count, hints = _build()
     assert count == 2  # one finding per plain parent it sits over
     assert hints == [(True, True, False)] * 2
+
+
+class TestTheFastPathSetting:
+    def test_booleans_and_the_default_are_accepted(self, settings):
+        from guitars.checks import check_delete_fast_path_setting  # noqa: PLC0415
+
+        assert check_delete_fast_path_setting(None) == []
+        for value in (True, False):
+            settings.GUITARS_DELETE_FAST_PATH = value
+            assert check_delete_fast_path_setting(None) == []
+
+    @pytest.mark.parametrize('value', ['False', 0, None, 'no'])
+    def test_anything_else_is_an_error_naming_the_value(self, settings, value):
+        from guitars.checks import FAST_PATH_SETTING_ID, check_delete_fast_path_setting  # noqa: PLC0415
+
+        settings.GUITARS_DELETE_FAST_PATH = value
+
+        (error,) = check_delete_fast_path_setting(None)
+        assert error.id == FAST_PATH_SETTING_ID
+        assert repr(value) in error.msg

@@ -40,6 +40,8 @@ MUST_BE_DENIED = {
     'hard_delete',
     '_hard_delete_own_table',
     '_raw_delete',
+    'soft_delete',
+    'asoft_delete',
 }
 
 _QUERYSETS = [LiveQuerySet, HardDeletableQuerySet]

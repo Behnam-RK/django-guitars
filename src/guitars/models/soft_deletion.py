@@ -2,8 +2,10 @@ import contextlib
 from collections import defaultdict
 from typing import cast
 
+from asgiref.sync import sync_to_async
 from django.apps import apps as django_apps
-from django.db import connections, transaction
+from django.conf import settings
+from django.db import connections, router, transaction
 from django.db.models import (
     CASCADE,
     DateTimeField,
@@ -17,6 +19,8 @@ from django.db.models import (
     sql,
 )
 from django.db.models.base import Model
+from django.db.models.functions import Now
+from django.db.models.signals import post_delete, pre_delete
 
 from guitars.introspection import (
     column_owner,
@@ -29,6 +33,7 @@ from guitars.introspection import (
 from guitars.routing import migrates_to_postgresql
 from guitars.sql import SWITCH_OFF_HARD_DELETION, SWITCH_ON_HARD_DELETION
 
+from ._cascade_coverage import cascade_plan
 from .fields import OwningForeignKey, _targets_primary_key
 
 
@@ -305,12 +310,82 @@ def _mti_table_chain(model: type[Model]) -> list[tuple[str, str]]:
     return [(m._meta.db_table, _pk_column(m)) for m in _mti_model_chain(model)]
 
 
+class SoftDeleteUnsupportedError(Exception):
+    """``soft_delete()`` on a model whose cascade reaches an edge no rule carries, so archiving
+    in SQL would leave rows **live** under an archived parent. Use ``.delete()``."""
+
+
+def _require_covered(model: type[Model]) -> None:
+    blocking = [gap for gap in cascade_plan(model)[0] if gap.blocking]
+    if blocking:
+        listed = '; '.join(f'{gap.edge} ({gap.reason})' for gap in blocking)
+        raise SoftDeleteUnsupportedError(
+            f'{model._meta.label}.soft_delete() would leave rows live under an archived parent: '
+            f'{listed}. Use .delete(), which applies them in Python.'
+        )
+
+
+def _fast_delete_applies(model: type[Model], using: str) -> bool:
+    """Whether ``.delete()`` can be one ``DELETE`` the rules rewrite, ending where Django's
+    collector would have. Asked per call: a receiver can be connected at runtime."""
+    if not getattr(settings, 'GUITARS_DELETE_FAST_PATH', True):
+        return False
+    if connections[using].vendor != 'postgresql':
+        return False
+    gaps, reached = cascade_plan(model)
+    if gaps:
+        return False
+    return not any(
+        pre_delete.has_listeners(sender) or post_delete.has_listeners(sender) for sender in reached
+    )
+
+
 class LiveQuerySet(QuerySet):
     """QuerySet scoped to live (non-deleted) records via ``_deleted_at IS NULL``."""
 
     @property
     def lives(self):
         return self.filter(_deleted_at__isnull=True)
+
+    def soft_delete(self) -> int:
+        """Archive the matching live rows in one ``UPDATE``; the rules cascade it. Returns the
+        number stamped. Skips ``on_delete`` and the delete signals, and raises
+        ``SoftDeleteUnsupportedError`` where the rules alone leave rows live. See ``docs/soft-delete-api.md``."""
+        _require_covered(self.model)
+        return self.filter(_deleted_at__isnull=True).update(_deleted_at=Now())
+
+    async def asoft_delete(self) -> int:
+        _require_covered(self.model)
+        return await self.filter(_deleted_at__isnull=True).aupdate(_deleted_at=Now())
+
+    # Never reachable from a manager: `Model.objects.soft_delete()` would archive the table.
+    soft_delete.queryset_only = True  # ty: ignore[unresolved-attribute]
+    asoft_delete.queryset_only = True  # ty: ignore[unresolved-attribute]
+
+    def delete(self):
+        """Django's ``delete()``, as one ``DELETE`` the rules rewrite where nothing is lost by it
+        (``_fast_delete_applies``). Same return value, same guards, same end state."""
+        if not _fast_delete_applies(self.model, self.db):
+            return super().delete()
+        # Django's own guards, ahead of the shortcut: `.update()` raises differently on these.
+        self._not_support_combined_queries('delete')  # ty: ignore[unresolved-attribute]
+        if self.query.is_sliced:
+            raise TypeError("Cannot use 'limit' or 'offset' with delete().")
+        if self.query.distinct_fields:
+            raise TypeError('Cannot call delete() after .distinct(*fields).')
+        if self._fields is not None:  # ty: ignore[unresolved-attribute]
+            raise TypeError('Cannot call delete() after .values() or .values_list()')
+        doomed = self._chain()  # ty: ignore[unresolved-attribute]
+        doomed._for_write = True
+        doomed.query.select_for_update = False
+        doomed.query.select_related = False
+        doomed.query.clear_ordering(force=True)
+        doomed._raw_delete(using=doomed.db)
+        self._result_cache = None
+        return 0, {}
+
+    delete.alters_data = True  # ty: ignore[unresolved-attribute]
+    delete.queryset_only = True  # ty: ignore[unresolved-attribute]
 
 
 class LiveManager(Manager):
@@ -464,6 +539,46 @@ class SoftDeletableModel(Model):
     @property
     def is_alive(self):
         return not self.is_deleted
+
+    def delete(self, using=None, keep_parents=False):
+        """Django's ``delete()``, as one ``DELETE`` the rules rewrite where nothing is lost by it
+        -- see :meth:`LiveQuerySet.delete`. Clears the pk as Django does."""
+        using = using or router.db_for_write(self.__class__, instance=self)
+        if self.pk is None or not _fast_delete_applies(type(self), using):
+            return super().delete(using=using, keep_parents=keep_parents)
+        type(self)._base_manager.using(using).filter(pk=self.pk)._raw_delete(using)
+        setattr(self, self._meta.pk.attname, None)
+        return 0, {}
+
+    delete.alters_data = True  # ty: ignore[unresolved-attribute]
+
+    def soft_delete(self, using=None) -> int:
+        """Archive this row in one ``UPDATE`` and set ``_deleted_at`` (and ``_updated_at``) on
+        the instance, keeping the pk -- the row still exists. Returns 1, or 0 if already archived.
+        Same contract as :meth:`LiveQuerySet.soft_delete`."""
+        if self.pk is None:
+            raise ValueError(
+                f"{self.__class__.__name__} object can't be soft-deleted because its "
+                f'{self._meta.pk.attname} attribute is set to None.'
+            )
+        _require_covered(type(self))
+        using = using or router.db_for_write(self.__class__, instance=self)
+        stamped = (
+            type(self)
+            ._base_manager.using(using)
+            .filter(pk=self.pk, _deleted_at__isnull=True)
+            .update(_deleted_at=Now())
+        )
+        fields = ['_deleted_at', *(['_updated_at'] if hasattr(self, '_updated_at') else [])]
+        self.refresh_from_db(using=using, fields=fields)
+        return stamped
+
+    soft_delete.alters_data = True  # ty: ignore[unresolved-attribute]
+
+    async def asoft_delete(self, using=None) -> int:
+        return await sync_to_async(self.soft_delete)(using=using)
+
+    asoft_delete.alters_data = True  # ty: ignore[unresolved-attribute]
 
     def hard_delete(self):
         """Soft-delete first, then permanently remove this instance, its CASCADE-related rows,

@@ -76,9 +76,10 @@ def desired_state() -> dict[str, str]:
 
 
 def _fingerprint(connection: BaseDatabaseWrapper) -> tuple:
-    # savepoint_ids shrinks on ROLLBACK TO SAVEPOINT, which also reverts any SET made
-    # after that savepoint -- so its shape is part of the signal we need.
-    return (connection.in_atomic_block, tuple(connection.savepoint_ids))
+    # Not savepoint_ids: a push or RELEASE reverts no SET LOCAL, yet keyed on them it cost a
+    # republish at both ends of every nested atomic(). _marker_live sees the one revert that
+    # matters -- Django drops on_commit hooks registered inside a rolled-back savepoint.
+    return (connection.in_atomic_block,)
 
 
 def _transaction_marker(

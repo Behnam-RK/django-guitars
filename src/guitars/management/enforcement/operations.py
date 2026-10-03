@@ -29,6 +29,7 @@ from guitars.management import _generator
 from guitars.management.enforcement.graph import (
     ObjectRef,
     drop_implied_edges,
+    dropped_tables,
     resolve_dependencies,
     resolve_object_migration,
 )
@@ -273,6 +274,7 @@ class OperationsMixin:
         _object_refs: dict[str, list[ObjectRef]]
         _retirement_edges: dict[str, list[tuple[str, str]]]
         _loader_cache: MigrationLoader | None
+        _dropped_tables_cache: tuple[MigrationLoader, set[str]] | None
         _refusals_over_live_rules: list[str]
         _missing_edges: list[str]
         _unresolved_reference_notes: list[str]
@@ -987,11 +989,17 @@ class OperationsMixin:
             # Both, not just the host: a table mapping to nothing is a *deleted* model on one
             # reading and an app dropped from LOCAL_APPS on another, and this cannot tell them
             # apart. Named in ``_unmapped_cascade_notes`` instead.
-            if hosting.get(owner_table) != app.label or related_table not in hosting:
+            if hosting.get(owner_table) != app.label:
                 continue
-            column = self._retired_cascade_column(key, models_by_table)
+            # The one unmapped table with evidence behind it: a ``DeleteModel`` dropped it, which
+            # took the rule and left the owner's revive trigger failing every UPDATE (#63).
+            deleted = related_table not in hosting and related_table in self._dropped_tables()
+            if related_table not in hosting and not deleted:
+                continue
+            column = None if deleted else self._retired_cascade_column(key, models_by_table)
             owner = models_by_table[owner_table]
-            self._note_a_cycle_retirement(key, models_by_table)
+            if not deleted:
+                self._note_a_cycle_retirement(key, models_by_table)
             ident_owner_table = _identifiers._quote_table(owner_table)
             for family in self._retired_cascade_families(key):
                 if key not in family.recorded:
@@ -1000,7 +1008,11 @@ class OperationsMixin:
                 rule_name = family.name(owner_table, related_table, via)
                 slots = family.slots(rule_name, ident_owner_table)
                 drop = family.drop_template.format(**slots)
-                if self._renamed(related_table):
+                if deleted:
+                    # ``DROP TABLE ... CASCADE`` took the rule wherever the deletion ran first,
+                    # and #63's stopgap drops the trigger by hand: gone is the goal. ADR 0029.
+                    drop = family.drop_prior(ident_owner_table, [rule_name])
+                elif self._renamed(related_table):
                     # Which spelling is live depends on when a generation last ran, so every
                     # one goes, ``IF EXISTS``. A bare DROP of a name nothing has fails
                     # ``migrate``.
@@ -1024,7 +1036,9 @@ class OperationsMixin:
                     # quoted forms escape ``"`` but not ``'``, so a db_table carrying one
                     # would break it.
                     else (
-                        _soft_delete._REFUSE_RECREATING_JOINED_RULE
+                        _soft_delete._REFUSE_RECREATING_DROPPED_RULE
+                        if deleted
+                        else _soft_delete._REFUSE_RECREATING_JOINED_RULE
                         if self._retired_key_is_joined(related_table, models_by_table)
                         else _soft_delete._REFUSE_RECREATING_RETIRED_RULE
                     ).format(
@@ -1170,6 +1184,11 @@ class OperationsMixin:
         for key in sorted(recorded - set(required), key=lambda k: (k[0], k[1], k[2] or '')):
             related_table, owner_table, via = key
             if owner_table in hosting and related_table in hosting:
+                continue
+            # Retired above on the evidence of a ``DeleteModel``; or the owner's table itself was
+            # dropped, taking every rule and trigger on it.
+            dropped = self._dropped_tables()
+            if owner_table in dropped or (owner_table in hosting and related_table in dropped):
                 continue
             # A routed-away table maps to nothing by design, and the vendor note already
             # says why. Advising a by-hand drop here would name the same model twice.
@@ -2692,6 +2711,13 @@ class OperationsMixin:
         if self._loader_cache is None:
             self._loader_cache = MigrationLoader(None, ignore_no_migrations=True)
         return self._loader_cache
+
+    def _dropped_tables(self) -> set[str]:
+        """:func:`dropped_tables` over :meth:`_migration_loader`, recomputed with it."""
+        loader = self._migration_loader()
+        if self._dropped_tables_cache is None or self._dropped_tables_cache[0] is not loader:
+            self._dropped_tables_cache = (loader, dropped_tables(loader))
+        return self._dropped_tables_cache[1]
 
     def _drop_cached_migration_loader(self) -> None:
         """Forget the graph after writing a migration file. The file carries edges into other

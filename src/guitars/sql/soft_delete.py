@@ -463,6 +463,20 @@ _REFUSE_RECREATING_JOINED_RULE = """
     $guitars_retired$;
 """
 
+# The same refusal for a key whose child model was deleted (#63): nothing left in the models says
+# which column it read, and the table it fired into is gone.
+_REFUSE_RECREATING_DROPPED_RULE = """
+    DO $guitars_retired$
+    BEGIN
+        RAISE EXCEPTION
+            'guitars: rule % on % cannot be recreated -- the model it cascaded into was '
+            'deleted. Reverse the deletion first, then run makeguitarmigrations.',
+            {literal_rule_name}, {literal_table}
+            USING ERRCODE = 'feature_not_supported';
+    END;
+    $guitars_retired$;
+"""
+
 # ---- Self-referential cascade: a trigger where the family above is a rule. A rule updating the
 # table it fires on is rewritten into itself and PostgreSQL rejects **every** ``UPDATE`` there.
 # Self keys only -- a multi-table cycle has no stable choice of edge. See ADR 0018. ----

@@ -575,6 +575,7 @@ class Command(OperationsMixin, BaseCommand):
             self._scoped_cascade_gap_notes(requested)
             + self._scoped_owned_gap_notes(requested)
             + self._scoped_autofill_gap_notes(requested)
+            + self._scoped_trigger_retirement_notes(requested)
         ):
             self.stdout.write(self.style.WARNING(note))
 

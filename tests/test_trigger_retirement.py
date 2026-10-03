@@ -368,3 +368,41 @@ def test_each_retirement_lands_in_the_app_that_wrote_its_create():
                 label for label, contents in files.items() if any(text in c for c in contents)
             }
             assert writers == {hosting[fires_on(key)]}, key
+
+
+class TestAScopedRunNamesWhatItLeaves:
+    def test_an_owned_sweep_hosted_out_of_scope_is_named(self):
+        command = _command()
+        command.existing.soft_delete_owned_sweep[OWNED] = 'def'
+
+        (note,) = command._scoped_trigger_retirement_notes({'crossapp_owner'})
+
+        assert OWNED[1] in note
+        assert 'testapp' in note
+
+    def test_a_self_cascade_hosted_out_of_scope_is_named(self):
+        command = _command()
+        command.existing.soft_delete_self_cascade[SELF] = 'abc'
+
+        (note,) = command._scoped_trigger_retirement_notes({'crossapp_owner'})
+
+        assert SELF[0] in note
+
+    def test_nothing_is_named_when_the_host_is_in_scope(self):
+        command = _command()
+        command.existing.soft_delete_self_cascade[SELF] = 'abc'
+
+        assert command._scoped_trigger_retirement_notes({'testapp'}) == []
+
+    def test_a_scoped_run_prints_it(self, monkeypatch):
+        from io import StringIO  # noqa: PLC0415
+
+        from django.core.management import call_command  # noqa: PLC0415
+
+        monkeypatch.setattr(
+            Command, '_scoped_trigger_retirement_notes', lambda self, requested: ['LEFT-BEHIND']
+        )
+        out = StringIO()
+        call_command('makeguitarmigrations', 'crossapp_owner', '--check', stdout=out, stderr=StringIO())
+
+        assert 'LEFT-BEHIND' in out.getvalue()

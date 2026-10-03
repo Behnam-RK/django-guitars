@@ -2859,6 +2859,25 @@ class OperationsMixin:
             )
         return notes
 
+    def _scoped_trigger_retirement_notes(self, requested: set[str]) -> list[str]:
+        """#66's retirements a scoped run leaves unwritten because the table they fire on is
+        hosted by an app outside it: each trigger named, since it fails every UPDATE there."""
+        hosting = self._table_app_labels()
+        undeclared = (
+            set(self.existing.soft_delete_owned) | set(self.existing.soft_delete_owned_sweep)
+        ) - self._declared_owned_keys()
+        unrequired = set(self.existing.soft_delete_self_cascade) - self._required_self_cascades()
+        fires_on = [(key, key[1]) for key in sorted(undeclared)] + [
+            (key, key[0]) for key in sorted(unrequired)
+        ]
+        return [
+            f"Enforcement on '{table}' for {key} is recorded but the models no longer call for "
+            f"it, and it cannot be retired here: its app '{hosting[table]}' is not in this "
+            f'scoped run. Until a run includes that app it may fail every UPDATE on the table.'
+            for key, table in fires_on
+            if hosting.get(table) not in (None, *requested)
+        ]
+
     def _migration_loader(self) -> MigrationLoader:
         """The project's migration graph, built at most once between writes. Building one imports
         every migration module in the project, and both readers below ask one question per app --

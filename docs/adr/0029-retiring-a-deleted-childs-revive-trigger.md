@@ -12,15 +12,15 @@ A plpgsql trigger body records no `pg_depend` dependency on the tables and colum
 - the owned rule, its sweep and the self-cascade trigger were never retired at all;
 - the scan read a column `RetireEnforcement` as dropping the owner's revive and sweep, which it never does;
 - every retirement drop was strict, so a drop of a rule `DROP … CASCADE` had already taken failed `migrate`;
-- a table deleted and recreated with no generation between kept headers for objects it no longer had.
+- a table deleted and recreated kept headers for objects it no longer had, so nothing re-created them.
 
 ## Decision
 
 - **Evidence from migration history.** `graph.dropped_tables` walks the migration **graph** forward once, reading state before each operation, and returns each table a top-level `DeleteModel` dropped and no model holds by the end (nor any model of an app without migrations), with the migration that dropped it. A recorded cascade key whose child is in that set is retired, ordered after that migration.
-- **Retire the trigger families.** A recorded owned key no `OwningForeignKey` declares any more, and a self-cascade key the models no longer call for, are retired in the app hosting the table they fire on, which is also the app that wrote the create, so no ordering edge is needed. A declared but refused owned key is left to the existing `--check` failure.
-- **Every retirement says `IF EXISTS`**, over every name the tables have held, and its reverse refuses and points at `--adopt`.
+- **Retire the trigger families.** A recorded owned key no `OwningForeignKey` declares any more, and a self-cascade key the models no longer call for, are retired in the app hosting the table they fire on. Like the cascade family they record their creates, settle their retirements against the graph, and depend on the newest create in another app: an MTI descendant's pass writes a self-cascade trigger into the descendant's app. A declared but refused owned key is left to the existing `--check` failure.
+- **Every retirement says `IF EXISTS`**, over every name the tables have held. The new retirements' reverse, and a deleted child's, refuses and points at `--adopt`; a cascade or autofill retirement still recreates what it can.
 - **The scan forgets only what `RetireEnforcement` drops**: a trigger only on a whole-table retirement of the table it fires on.
-- **A recreated table fails `--check`.** `graph.recreated_tables` names the migration that took a dropped table back; with no enforcement migration naming the table descending from it, `--check` fails and names `makeguitarmigrations --adopt`.
+- **A recreated table fails `--check`.** `graph.recreated_tables` names the migration that took a dropped table back. Where the current model needs enforcement and no create header for an object *on* that table descends from it, `--check` fails and names `makeguitarmigrations --adopt`.
 
 ## Why
 
@@ -28,11 +28,11 @@ A plpgsql trigger body records no `pg_depend` dependency on the tables and colum
 - **Why `IF EXISTS`, against [ADR 0019](0019-migration-lifecycle-objects.md)?** That rule exists because `IF EXISTS` where the answer is known hides a diverged database. For a retirement the answer is not known: `DROP … CASCADE` takes a rule with the column or table it reads, on Django 5.x before the generator's drop runs, and the docs advised hand-dropping sweep and self-cascade triggers. Absent is the goal, and the drop names every spelling the tables held, so tolerating absence cannot hide a live object under another name. Creates keep the strict forms.
 - **Why detect a recreate rather than repair it?** Repair needs a creating migration recorded per key for every family, tenant policies included, plus adopt-form re-emission ordered after the recreate. `--adopt` already does the re-emission, and its object references resolve to the *last* migration establishing a table, the recreate, so its output descends from it and the check goes green.
 - **Why a refusing reverse?** What a retirement dropped reads a column or table the models no longer have. Unapply with `--fake`, restore the models, run `makeguitarmigrations --adopt`: a plain regeneration still reads the key as covered.
-- **Strongest objection.** `IF EXISTS` would also hide a drop that ran before its create on a fresh `migrate`, the create then bringing the object back. The cascade family orders against its create (ADR 0021) and, for a deleted child, its deletion; the other families share one app with their create, which a test pins.
+- **Strongest objection.** `IF EXISTS` would also hide a drop that ran before its create on a fresh `migrate`, the create then bringing the object back. Every family therefore orders its retirement after its create (ADR 0021), and a deleted child's after its deletion too.
 
 ## Consequences
 
-**Accepted costs.** An unscoped `--check` turns red for every project carrying such a leak until the retirements are generated; that is the point. A deletion the loader cannot see, because the deleting app was later removed with its migrations, is still only named. One extra pass over the migration state per run while a recorded key is unmapped. A fresh `migrate` can still order a deleted child's `DeleteModel` before the owner's older enforcement migration (#61).
+**Accepted costs.** An unscoped `--check` turns red for every project carrying such a leak until the retirements are generated; that is the point. A deletion the loader cannot see, because the deleting app was later removed with its migrations, is still only named. One pass over the migration state per run, a few milliseconds on the test project. A fresh `migrate` can still order a deleted child's `DeleteModel` before the owner's older enforcement migration (#61).
 
 **Reversibility.** Restoring strict drops would break `migrate` for every project that followed the hand-drop advice or ran `RemoveField` on Django 5.x. The retirement migrations already written stay valid either way.
 

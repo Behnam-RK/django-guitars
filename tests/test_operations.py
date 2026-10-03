@@ -196,14 +196,12 @@ def test_a_column_retirement_subtracts_only_the_keys_naming_that_column():
     table-keyed ones: dropping `_deleted_at` retires more than a key can name."""
     keyed = {
         'related': {('shop_line', 'shop_order', 'order_id'): 'aaa', ('shop_line', 'x', 'y'): 'b'},
-        'self_cascade': {('shop_line', 'order_id'): 'ccc'},
     }
     whole = {'triggers': {'shop_line': 'ddd'}}
 
     scanning._subtract_retired('shop_line', 'order_id', keyed, whole)
 
     assert keyed['related'] == {('shop_line', 'x', 'y'): 'b'}
-    assert keyed['self_cascade'] == {}
     assert whole['triggers'] == {'shop_line': 'ddd'}
 
 
@@ -215,6 +213,50 @@ def test_a_whole_table_retirement_subtracts_both_shapes():
 
     assert keyed['related'] == {}
     assert whole['triggers'] == {'shop_order': 'eee'}
+
+
+def _triggers():
+    """The trigger families, each with the index of the table its trigger fires on: a revive
+    and a sweep fire on the owner, a self cascade on its own table."""
+    return {
+        'revive': ({('shop_line', 'shop_order', None): 'r'}, 1),
+        'sweep': ({('shop_item', 'shop_order', 'item_id'): 's'}, 1),
+        'self_cascade': ({('shop_line', 'parent_id'): 'c'}, 0),
+    }
+
+
+@pytest.mark.parametrize(
+    ('table', 'column'),
+    [
+        ('shop_line', 'order_id'),  # the child's key: the rule goes, the owner's revive stays
+        ('shop_line', None),  # the child whole: its own triggers go, not the owner's
+        ('shop_order', 'item_id'),  # the owning key: the owned rule goes, not its sweep
+        ('shop_item', None),  # the owned target: nothing on the owner
+        ('shop_line', 'parent_id'),  # the self key: a column form drops no trigger
+    ],
+)
+def test_a_retirement_forgets_no_trigger_it_did_not_drop(table, column):
+    """``RetireEnforcement`` drops rules through ``pg_depend`` and triggers only on the table it
+    names, whole. Forgetting a trigger it left live let the scan read it as gone, and nothing
+    ever retired it -- the owner's revive, for one, then failed every UPDATE (#66)."""
+    triggers = _triggers()
+    keep = {name: dict(recorded) for name, (recorded, _) in triggers.items()}
+
+    scanning._subtract_retired(table, column, {}, {}, triggers)
+
+    survivors = {name: recorded for name, (recorded, _) in triggers.items()}
+    dropped_here = {'self_cascade'} if (table, column) == ('shop_line', None) else set()
+    assert {n for n in keep if survivors[n] != keep[n]} == dropped_here
+
+
+def test_a_whole_table_retirement_of_the_owner_forgets_its_triggers():
+    triggers = _triggers()
+
+    scanning._subtract_retired('shop_order', None, {}, {}, triggers)
+
+    assert triggers['revive'][0] == {}
+    assert triggers['sweep'][0] == {}
+    assert triggers['self_cascade'][0] == {('shop_line', 'parent_id'): 'c'}
 
 
 def _stem_after_every_create() -> str:
@@ -260,6 +302,19 @@ def test_the_scan_forgets_what_a_retirement_dropped(monkeypatch):
     assert ('testapp_setlistentry', 'testapp_setlist', None) not in existing.soft_delete_related
     # Only that table: the tree beside it keeps everything of its own.
     assert 'testapp_setlist' in existing.soft_deletes
+
+
+def test_the_scan_keeps_the_owners_revive_after_the_childs_retirement(monkeypatch):
+    """The wiring for #66: retiring the child drops the cascade rule but not the revive on the
+    owner, so the scan must go on reading that trigger as live for the generator to retire."""
+    key = ('testapp_setlistentry', 'testapp_setlist', None)
+    assert key in scan_existing_operations().soft_delete_revive
+
+    _retire_at(monkeypatch, _stem_after_every_create(), 'testapp_setlistentry')
+
+    existing = scan_existing_operations()
+    assert key not in existing.soft_delete_related
+    assert key in existing.soft_delete_revive
 
 
 def test_a_migration_after_the_retirement_records_the_key_again(monkeypatch):
@@ -378,8 +433,9 @@ def test_a_mixed_case_db_table_resolves(db):
     ``to_regclass`` over the quoted spelling the rest of the kit writes."""
     with connection.cursor() as cursor:
         cursor.execute('CREATE TABLE "MixedCase" (id serial primary key)')
-        cursor.execute('CREATE RULE soft_delete_related_probe AS ON UPDATE TO "MixedCase" '
-                       'DO ALSO SELECT 1')
+        cursor.execute(
+            'CREATE RULE soft_delete_related_probe AS ON UPDATE TO "MixedCase" DO ALSO SELECT 1'
+        )
 
     _apply(RetireEnforcement('MixedCase'))
 
@@ -503,8 +559,12 @@ def test_a_column_retirement_forgets_the_tenant_policy_too(monkeypatch):
     """The SQL drops a tenant policy on **either** path -- it is filed against the column it
     reads. Forgetting it only on the whole-table path leaves the scan reporting a policy the
     database no longer has, so nothing is re-emitted and tenancy is off with ``--check`` green."""
-    _retire_at(monkeypatch, '0056_rename_encore_deleted_at_refrain_deleted_at_and_more',
-               'testapp_troupe', 'label_id')
+    _retire_at(
+        monkeypatch,
+        '0056_rename_encore_deleted_at_refrain_deleted_at_and_more',
+        'testapp_troupe',
+        'label_id',
+    )
 
     existing = scan_existing_operations()
 

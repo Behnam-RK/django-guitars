@@ -268,10 +268,17 @@ def _subtract_retired(
     column: str | None,
     keyed: dict[str, dict],
     whole_table: dict[str, dict],
+    triggers: dict[str, tuple[dict, int]] | None = None,
 ) -> None:
     """Forget what a ``RetireEnforcement`` dropped, so a later run re-emits what the models
-    still call for. *keyed* spell a table **and** a column, so a column form can match them;
-    *whole_table* are keyed on a table alone and only the whole-table form reaches them."""
+    still call for. *keyed* spell a table and column, *whole_table* a table, *triggers* a family
+    with the index of the table it fires on; only a whole-table form reaches the last two."""
+    # Exactly what the operation drops, never more: a trigger only on the table it names, whole.
+    # Forgetting one it left live read it as gone, and nothing retired it again (#66).
+    if column is None:
+        for recorded, fires_on in (triggers or {}).values():
+            for key in [k for k in recorded if k[fires_on] == table]:
+                del recorded[key]
     for recorded in keyed.values():
         # ``k[-1] is None`` is the cascade family's *primary* form, whose key drops the column
         # as the historical rule name does, so a column retirement takes it unseen: over-
@@ -432,10 +439,13 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
     # rest of the scan -- which is the point: a later migration re-recording a key wins again.
     keyed_families = {
         'soft_delete_related': existing_soft_delete_related,
-        'soft_delete_revive': existing_soft_delete_revive,
         'soft_delete_owned': existing_soft_delete_owned,
-        'soft_delete_owned_sweep': existing_soft_delete_owned_sweep,
-        'soft_delete_self_cascade': existing_soft_delete_self_cascade,
+    }
+    # A revive and a sweep fire on the owner (index 1), a self cascade on its own table.
+    trigger_families = {
+        'soft_delete_revive': (existing_soft_delete_revive, 1),
+        'soft_delete_owned_sweep': (existing_soft_delete_owned_sweep, 1),
+        'soft_delete_self_cascade': (existing_soft_delete_self_cascade, 0),
     }
     whole_table_families = {
         'triggers': existing_triggers,
@@ -492,7 +502,9 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
 
             for table, column in retired.get(path.stem, ()):
                 for spelling in spellings[table]:
-                    _subtract_retired(spelling, column, keyed_families, whole_table_families)
+                    _subtract_retired(
+                        spelling, column, keyed_families, whole_table_families, trigger_families
+                    )
                     # A tenant policy is dropped on **either** path -- it is filed against the
                     # column it reads, so a column form takes it too. Forgetting it only on the
                     # whole-table path leaves tenancy off with ``--check`` green.

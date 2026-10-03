@@ -628,7 +628,9 @@ class SoftDeletableModel(Model):
         # row-level policy is asked there (an MTI child's can hide a row the holder's would not),
         # and the guard stays beside the write.
         holder = column_owner(type(self), '_deleted_at')
-        own = type(self)._base_manager.using(using).filter(pk=self.pk)
+        # ``_deleted_at IS NULL`` here too: it joins every table in the chain, so a middle table's
+        # policy is asked as the queryset form asks it, not only the leaf's and the holder's.
+        own = type(self)._base_manager.using(using).filter(pk=self.pk, _deleted_at__isnull=True)
         stamped = (
             holder._base_manager.using(using)
             .filter(pk__in=own.values(holder._meta.pk.name), _deleted_at__isnull=True)

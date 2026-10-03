@@ -12,8 +12,8 @@ It reads the matching keys, then `UPDATE`s by key in batches of 10,000: `SET _de
 
 - **Returns the number of rows stamped**, not `.delete()`'s tuple. `0` for rows already archived, which keep their stamp.
 - **Skips Python.** No `on_delete` (`SET_NULL`, `PROTECT`), no `pre_delete`/`post_delete`, and plain children (no `_deleted_at`, such as an M2M through row) are left in place. Keep `.delete()` where you need those.
-- **Raises `SoftDeleteUnsupportedError`** where a rule-only archive would leave rows **live** under an archived parent: a `GenericRelation`, a cycle-refused or unenforced edge, a `to_field` key (the cascade rule compares the target's primary key, so it would match the wrong rows), a model routed off PostgreSQL, or a non-PostgreSQL connection. It names the edge or the connection. A sliced, `values()` or `distinct(*fields)` queryset raises `TypeError`, and a combined one `NotSupportedError`, as for `.delete()`.
-- `Model.soft_delete()` keeps the pk and sets `_deleted_at`/`_updated_at` from the database (one `SELECT` after the `UPDATE`); a row hidden by row-level security, **including by an MTI child's own policy**, stamps 0 and leaves the instance unchanged. `asoft_delete()` twins both.
+- **Raises `SoftDeleteUnsupportedError`** where a rule-only archive would leave rows **live** under an archived parent: a `GenericRelation`, a cycle-refused or unenforced edge, a `to_field` key (the cascade rule compares the target's primary key, so it would match the wrong rows), a chain `guitars.E003` refuses, a model on the chain outside `LOCAL_APPS` or routed off PostgreSQL **that a `CASCADE` key points at** (its cascade rule is written from its own app), or a non-PostgreSQL connection. It names the edge or the connection. A model nothing cascades into only declines the fast path, since the collector would delete its row where `soft_delete()` leaves nothing live. A sliced, `values()` or `distinct(*fields)` queryset raises `TypeError`, and a combined one `NotSupportedError`, as for `.delete()`.
+- `Model.soft_delete()` keeps the pk and sets `_deleted_at`/`_updated_at` from the database (one `SELECT` after the `UPDATE`); a row hidden by row-level security, **including by an MTI child's own policy or a middle table's**, stamps 0 and leaves the instance unchanged. It asks the database policies only: a dimension kept in Python alone (ADR 0003) and an unscoped call are the queryset form's to refuse, and the instance form stamps what the database lets it. `asoft_delete()` twins both.
 - Unreachable from a manager (`Model.objects.soft_delete()` would archive the table), and denied on an unscoped tenant queryset as `update()` is.
 
 ## The transparent `.delete()` fast path
@@ -28,16 +28,17 @@ When the tree is fully covered, `.delete()` reads the keys, then issues `DELETE`
 | a `GenericRelation`, a `to_field` key, or an edge with no rule | rows would stay live |
 | a self-referential key | `_updated_at` below level one moves only under the collector |
 | a non-PostgreSQL alias | the rules are PostgreSQL DDL |
+| an MTI model whose own app or routing, or whose primary key is not its parent link (#64), leaves it no rule | the collector deletes its row |
 
 ## Where the fast path and the collector part
 
-A row hidden from the caller by an MTI child's own policy: the collector deletes the untenanted root's table directly, a cross-tenant write that exists on main, and the fast path reads the keys through the child, so the row stays live. The fast path is the safer of the two, and the end states differ there. It also declines for an MTI child whose primary key is not its parent link, which the redirect rule joins on wrongly (#64).
+A row hidden from the caller by an MTI child's own policy: the collector deletes the untenanted root's table directly, a cross-tenant write the collector has always made, while the fast path's `DELETE` goes through the child's table, so the row stays live. The fast path is the safer of the two, and the end states differ there. For an MTI child whose primary key is not its parent link (#64) the redirect rule joins on the wrong column, so the fast path declines; `soft_delete()` stamps through the holder's key and is correct there.
 
 ## What both assume
 
 The cascade passes only through rows that *flip* to archived, so a **live row under an already-archived ancestor** (say a child created through `_all_objects` beneath an archived parent) is reached by the collector and left live by the rules. Both assume the tree is consistent, and that the enforcement migrations are applied.
 
-Both read the keys with a plain `SELECT`, so on a very large table the planner needs current statistics (`ANALYZE`) to choose an index for the `IN (…)` batches. `GUITARS_DELETE_FAST_PATH = False` turns the fast path off. Eligibility is read off the registry: each edge through `classify_cascade`, the predicate the generator writes cascade rules by, and each reached model's own rule checked as the generator writes it (its app and its column holder's in `LOCAL_APPS` and on PostgreSQL, and its chain not refused by `guitars.E003`). See [ADR 0026](adr/0026-soft-delete-and-delete-fast-path.md).
+Both read the keys with a plain `SELECT`, so on a very large table the planner needs current statistics (`ANALYZE`) to choose an index for the `IN (…)` batches. `GUITARS_DELETE_FAST_PATH = False` turns the fast path off. Eligibility is read off the registry: each edge through `classify_cascade`, the predicate the generator writes cascade rules by, and each reached model's own rule checked as the generator writes it (every model on its chain in `LOCAL_APPS` and on PostgreSQL, its chain not refused by `guitars.E003`, and its primary key its parent link). See [ADR 0026](adr/0026-soft-delete-and-delete-fast-path.md).
 
 ## Related
 

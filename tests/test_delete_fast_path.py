@@ -467,6 +467,29 @@ class TestTenancy:
         assert not archived_anywhere(arena)
         assert arena._deleted_at is None
 
+    def test_the_queryset_form_is_asked_the_same_policy(self, tenants):
+        with tenant(label=tenants.a):
+            arena = Arena.objects.create(name='a-arena', seats=1)
+
+        with tenant(label=tenants.b):
+            stamped = Arena.objects.filter(pk=arena.pk).soft_delete()
+
+        assert stamped == 0
+        assert not archived_anywhere(arena)
+
+    def test_the_instance_update_reaches_every_table_in_the_chain(self):
+        """The queryset form's ``_deleted_at IS NULL`` joins every table, so each one's policy is
+        asked; the instance form's subquery was trimmed to the leaf. Asserted on the statement:
+        the testapp has no chain whose middle table carries a policy of its own."""
+        from tests.testapp.models import ChamberOrchestra, Orchestra  # noqa: PLC0415
+
+        chamber = ChamberOrchestra.objects.create(name='c')
+        with CaptureQueriesContext(connection) as captured:
+            chamber.soft_delete()
+
+        update = next(q['sql'] for q in captured.captured_queries if q['sql'].startswith('UPDATE'))
+        assert Orchestra._meta.db_table in update
+
     def test_its_own_tenant_archives_it(self, tenants):
         with tenant(label=tenants.a):
             arena = Arena.objects.create(name='a-arena', seats=1)

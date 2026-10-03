@@ -11,7 +11,9 @@ from django.test.utils import CaptureQueriesContext
 from guitars.gucs import guc_name
 from guitars.tenancy import guc
 from guitars.tenancy import tenant
+from guitars.tenancy import tenancy_bypassed
 from tests.conftest import execute, scalar
+from tests.testapp.models import Label
 
 
 _LABEL_GUC = guc_name('label')
@@ -52,8 +54,8 @@ class _Interleaved:
 
 
 # The publisher runs on the SAVEPOINT statement itself, before the savepoint exists, so only a
-# publish made *inside* the block can be reverted by it. Entered via atomic(): a bare
-# transaction.savepoint() never reaches connection.savepoint_ids, so nothing could see it.
+# publish made *inside* the block can be reverted by it. These hold through the marker (via
+# atomic()) *and* through _distrust, so each mechanism alone satisfies them -- see below.
 @pytest.mark.django_db
 class TestARevertedPublishIsRepublished:
     def test_rollback_of_the_savepoint_it_was_published_in(self, tenants):
@@ -159,6 +161,49 @@ class TestARollbackWithTheScopeStillOpen:
             execute('RELEASE SAVEPOINT guitars_probe')
 
 
+@pytest.mark.django_db
+class TestEverySpellingOfARollback:
+    """Django writes ``ROLLBACK TO SAVEPOINT x``, but a hand-written statement, or a wrapper that
+    prefixes a comment to every statement, spells it otherwise -- and PostgreSQL accepts all of it."""
+
+    @pytest.mark.parametrize(
+        'statement',
+        [
+            'ROLLBACK TO SAVEPOINT guitars_probe',
+            'rollback to savepoint guitars_probe',
+            '  ROLLBACK TO SAVEPOINT guitars_probe',
+            '\nROLLBACK TO SAVEPOINT guitars_probe',
+            '/* request-id */ ROLLBACK TO SAVEPOINT guitars_probe',
+            '-- request-id\nROLLBACK TO SAVEPOINT guitars_probe',
+            'ROLLBACK  TO  SAVEPOINT guitars_probe',
+            'ROLLBACK\nTO SAVEPOINT guitars_probe',
+            'ROLLBACK TO guitars_probe',
+            'ROLLBACK WORK TO SAVEPOINT guitars_probe',
+            'ROLLBACK TRANSACTION TO SAVEPOINT guitars_probe',
+            b'ROLLBACK TO SAVEPOINT guitars_probe',
+        ],
+        ids=lambda value: repr(value)[:40],
+    )
+    def test_the_next_statement_republishes(self, tenants, statement):
+        with tenant(label=tenants.a):
+            scalar('SELECT 1')
+            execute('SAVEPOINT guitars_probe')
+            with tenant(label=tenants.b):
+                scalar('SELECT 1')
+                execute(statement)
+
+                assert _published() == str(tenants.b.pk)
+            execute('RELEASE SAVEPOINT guitars_probe')
+
+    def test_a_statement_that_merely_mentions_one_costs_nothing(self, tenants):
+        with tenant(label=tenants.a):
+            scalar('SELECT 1')
+            with CaptureQueriesContext(connection) as captured:
+                scalar("SELECT 'ROLLBACK TO SAVEPOINT x'")
+
+        assert _set_configs(captured.captured_queries) == 0
+
+
 def _set_configs(queries) -> int:
     return sum('set_config' in query['sql'] for query in queries)
 
@@ -205,10 +250,59 @@ class TestARecoveryStatementOnAnAbortedTransaction:
             assert _published() == str(tenants.a.pk)  # and the next block republished A
 
 
-def test_distrusting_a_connection_that_never_published_is_a_no_op(db):
-    """It runs from a ``finally``, so raising here would replace the statement's own error."""
-    setattr(connection, guc._CACHE, None)
+def _setting(name: str) -> str | None:
+    return scalar('SELECT current_setting(%s, true)', [name])
 
-    guc._distrust(connection)
 
-    assert getattr(connection, guc._CACHE) is None
+@pytest.mark.django_db
+class TestADistrustedCacheStillClearsWhatItForgot:
+    """A rollback can restore a dimension the cache has since forgotten, so the republish after one
+    has to clear every dimension ever published, not only the last frame's."""
+
+    def test_a_scope_closed_inside_the_savepoint_which_then_rolls_back(self, tenants):
+        with tenant(label=tenants.a), _Interleaved() as interleaved:
+            scope = interleaved.enter(tenant(other='X'))
+            scalar('SELECT 1')  # `other` published outside the savepoint
+            block = interleaved.enter(transaction.atomic())
+            interleaved.release(scope)
+            scalar('SELECT 1')  # republished with `other` cleared, inside the savepoint
+            interleaved.roll_back(block)  # ...which the rollback undoes
+
+            assert _setting('tenant.other') in ('', None)
+
+    def test_with_no_statement_between_the_rollback_and_the_scope_exit(self, tenants):
+        with tenant(label=tenants.a):
+            with tenant(other='X'):
+                scalar('SELECT 1')
+                sid = transaction.savepoint()
+                scalar('SELECT 1')
+                transaction.savepoint_rollback(sid)
+
+            assert _setting('tenant.other') in ('', None)
+            transaction.savepoint_commit(sid)
+
+    @pytest.mark.parametrize('cache', ['absent', 'none'])
+    def test_a_connection_that_never_published_is_left_alone(self, db, cache):
+        """It runs from a ``finally``, so raising would replace the statement's own error. A
+        connection that never published has no attribute at all (``install_on`` deletes it)."""
+        if cache == 'none':
+            setattr(connection, guc._CACHE, None)
+        elif hasattr(connection, guc._CACHE):
+            delattr(connection, guc._CACHE)
+
+        guc._distrust(connection)
+
+        assert getattr(connection, guc._CACHE, None) is None
+
+
+def test_a_later_transaction_republishes(transactional_db):
+    """The marker's own job: a commit reverts every ``SET LOCAL``, and nothing in the fingerprint
+    differs between two sibling blocks."""
+    with tenancy_bypassed():
+        label = Label.objects.create(name='Sibling Records')
+
+    with tenant(label=label):
+        with transaction.atomic():
+            assert _published() == str(label.pk)
+        with transaction.atomic():
+            assert _published() == str(label.pk)

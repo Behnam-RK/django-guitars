@@ -4,6 +4,7 @@ CLAUDE.md's checklist and :func:`_transaction_marker`."""
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 from django.db import connections, transaction
@@ -37,6 +38,13 @@ __all__ = [
 
 _CACHE = '_guitars_tenant_guc'
 _SYNCING = '_guitars_tenant_guc_syncing'
+_NAMES = '_guitars_tenant_guc_names'
+
+# ``ROLLBACK [WORK|TRANSACTION] TO [SAVEPOINT] x`` behind any comments: PostgreSQL accepts all of it.
+_ROLLBACK_TO = re.compile(
+    r'\A(?:\s|/\*.*?\*/|--[^\n]*(?:\n|\Z))*ROLLBACK\s+(?:(?:WORK|TRANSACTION)\s+)?TO\b',
+    re.I | re.S,
+)
 # SQLSTATE 42501 insufficient_privilege -- what a WITH CHECK violation raises.
 _RLS_SQLSTATE = '42501'
 # SQLSTATE 25P02 in_failed_sql_transaction -- every statement is refused until rollback.
@@ -77,8 +85,8 @@ def desired_state() -> dict[str, str]:
 
 def _fingerprint(connection: BaseDatabaseWrapper) -> tuple:
     # Not savepoint_ids: a push or RELEASE reverts no SET LOCAL, yet keyed on them it cost a
-    # republish at both ends of every nested atomic(). _marker_live sees the one revert that
-    # matters -- Django drops on_commit hooks registered inside a rolled-back savepoint.
+    # republish at both ends of every nested atomic(). A rollback is _distrust()'s; a commit,
+    # which reverts them all, is _marker_live's.
     return (connection.in_atomic_block,)
 
 
@@ -141,6 +149,7 @@ def _publish(connection: BaseDatabaseWrapper, state: dict[str, str]) -> None:
         if is_local
         else None
     )
+    setattr(connection, _NAMES, getattr(connection, _NAMES, frozenset()) | updates.keys())
     setattr(connection, _CACHE, (state, _fingerprint(connection), marker))
 
 
@@ -201,7 +210,18 @@ def _distrust(connection: BaseDatabaseWrapper) -> None:
     cache has already recorded -- including the one just made on that very statement."""
     cached = getattr(connection, _CACHE, None)
     if cached is not None:
-        setattr(connection, _CACHE, (cached[0], None, cached[2]))
+        # Every dimension ever published, not just the last: a rollback can restore one the
+        # cache has since forgotten.
+        names = getattr(connection, _NAMES, frozenset()) | cached[0].keys()
+        setattr(connection, _CACHE, (dict.fromkeys(names, ''), None, cached[2]))
+
+
+def _reverts_a_set(sql: object) -> bool:
+    """Whether *sql* rolls back to a savepoint, however spelled. Text and bytes only: a driver
+    object is not inspected, and cannot be without a connection."""
+    if isinstance(sql, bytes):
+        sql = sql.decode('utf-8', 'replace')
+    return isinstance(sql, str) and _ROLLBACK_TO.match(sql) is not None
 
 
 def _wrapper(
@@ -228,7 +248,7 @@ def _wrapper(
         ) from exc
     finally:
         # In ``finally``: a stale cache fails open, one extra republish does not.
-        if not syncing and isinstance(sql, str) and sql[:21].upper() == 'ROLLBACK TO SAVEPOINT':
+        if not syncing and _reverts_a_set(sql):
             _distrust(connection)
 
 

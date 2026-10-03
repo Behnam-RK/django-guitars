@@ -20,7 +20,7 @@ Full history and diffs: [GitHub releases](https://github.com/Behnam-RK/django-gu
 
 ### Changed
 
-- **`introspection.classify_cascade` is now the one place that decides which keys carry a cascade rule.** The generator is rewritten on top of it, with no change in output, so the runtime reading of "what a rule covers" cannot drift from what the generator writes.
+- **`introspection.classify_cascade` is now the one place that decides which keys carry a cascade rule.** The generator is rewritten on top of it, with no change in what is emitted (a joined key over a chain `guitars.E003` refuses is now reported as skipped rather than passed over silently), so the runtime reading of "what a rule covers" cannot drift from what the generator writes.
 
 **Known, not fixed here:** the cascade rule for a `to_field` foreign key compares the child's column with the target's *primary key*, so it matches the wrong rows. `soft_delete()` and the fast path refuse that shape rather than inherit it.
 

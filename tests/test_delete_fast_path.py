@@ -705,8 +705,8 @@ def test_a_row_archived_between_the_read_and_the_write_keeps_its_stamp(monkeypat
     earlier = timezone.now() - timedelta(days=30)
     real = soft_deletion._matching_pks
 
-    def racing(queryset):
-        pks = real(queryset)
+    def racing(queryset, *field):
+        pks = real(queryset, *field)
         Offer._all_objects.filter(pk=pks[0]).update(_deleted_at=earlier)
         return pks
 
@@ -743,3 +743,43 @@ class TestADeferredInstance:
             release = Release.objects.only('title').get()
         with tenant(label=tenants.b):
             assert release.soft_delete() == 0
+
+
+@pytest.mark.django_db
+class TestAnMtiChildKeepsTheGuardInOneStatement:
+    """``_deleted_at`` is on the root, so Django's ``update()`` on a child reads the child keys
+    and then updates the root by id alone: the ``_deleted_at IS NULL`` guard never reached the
+    ``UPDATE``, and a row archived in between was stamped again and counted."""
+
+    def test_a_row_archived_just_before_the_update_keeps_its_stamp(self):
+        """Archived by another writer after every read and before the ``UPDATE``: only a guard
+        inside that one statement can see it."""
+        _, _, _, conditions = build(3)
+        first = min(c.pk for c in conditions)
+        earlier = timezone.now() - timedelta(days=30)
+        raced = []
+
+        def archive_before_the_update(execute, sql, params, many, context):
+            if not raced and sql.lstrip().upper().startswith('UPDATE'):
+                raced.append(True)
+                Condition._all_objects.filter(pk=first).update(_deleted_at=earlier)
+            return execute(sql, params, many, context)
+
+        with connection.execute_wrapper(archive_before_the_update):
+            stamped = QuantityCondition.objects.filter(
+                pk__in=[c.pk for c in conditions]
+            ).soft_delete()
+
+        assert stamped == 2
+        assert Condition._all_objects.get(pk=first)._deleted_at == earlier
+
+    def test_a_queryset_is_the_keys_then_one_update(self):
+        _, _, _, conditions = build(3)
+        queryset = QuantityCondition.objects.filter(pk__in=[c.pk for c in conditions])
+
+        assert statements(queryset.soft_delete) == 2
+
+    def test_an_instance_is_one_update_then_one_refresh(self):
+        _, _, _, (condition,) = build(1)
+
+        assert statements(condition.soft_delete) == 2

@@ -22,7 +22,7 @@ Both of the last two. **`soft_delete()`** is the opt-in: it reads the keys then 
 
 ## Consequences
 
-**Accepted costs.** Eligibility is read from the registry and assumes the enforcement migrations are applied; a database behind them is already red under `makemigrations --check`. Receivers are checked per call. It is two statements, not one. `Model.soft_delete()` costs one `SELECT` to refresh the stamps. **It assumes a consistent tree:** the rules cascade only through rows that flip, so a live row under an archived ancestor is left live where the collector would reach it. Documented, not enforced. The setting is the escape hatch.
+**Accepted costs.** Eligibility is read from the registry and assumes the enforcement migrations are applied; a database behind them is already red under `makemigrations --check`. Receivers are checked per call. A queryset is a key read plus one `DELETE` per 10,000 keys; an instance is one statement. `Model.soft_delete()` costs one `SELECT` to refresh the stamps. **It assumes a consistent tree:** the rules cascade only through rows that flip, so a live row under an archived ancestor is left live where the collector would reach it. Documented, not enforced. The setting is the escape hatch.
 
 **Reversibility.** `GUITARS_DELETE_FAST_PATH = False` restores the collector. Removing `soft_delete()` would be an API break.
 

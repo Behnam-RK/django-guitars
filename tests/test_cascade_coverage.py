@@ -253,3 +253,47 @@ class TestAJoinedKeyTheGeneratorRefusesIsAGap:
 
     def test_a_key_over_a_chain_guitars_e003_refuses(self):
         assert [g for g in self._over_a_refused_chain() if g.blocking]
+
+
+class TestAReachedModelTheGeneratorWritesNoRuleFor:
+    """The generator writes a child's own rule from the pass over the child's app, so a child
+    outside ``LOCAL_APPS`` or routed away has none even under a covered ancestor; and a chain
+    ``guitars.E003`` refuses has none at all. Each is a blocking gap, or the fast path deletes."""
+
+    def test_a_child_whose_own_app_is_not_local(self, monkeypatch):
+        from tests.crossapp_tenant_child.models import TenantedChild  # noqa: PLC0415
+
+        child_app = TenantedChild._meta.app_label
+        monkeypatch.setattr(coverage, 'is_local', lambda config: config.label != child_app)
+
+        assert [g for g in coverage._enforcement_gaps(TenantedChild) if g.blocking]
+
+    def test_a_child_routed_off_postgresql(self, monkeypatch):
+        monkeypatch.setattr(
+            coverage, 'migrates_to_postgresql', lambda model: model is not QuantityCondition
+        )
+
+        assert [g for g in coverage._enforcement_gaps(QuantityCondition) if g.blocking]
+
+    @staticmethod
+    @isolate_apps('tests.testapp')
+    def _refused():
+        from guitars.models import DutarModel, SoftDeletableModel  # noqa: PLC0415
+
+        class Pylon(DutarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class LitPylon(Pylon, SoftDeletableModel):
+            class Meta(SoftDeletableModel.Meta):
+                app_label = 'testapp'
+
+        class NeonPylon(LitPylon):
+            class Meta(SoftDeletableModel.Meta):
+                app_label = 'testapp'
+
+        return coverage._enforcement_gaps(LitPylon), coverage._enforcement_gaps(NeonPylon)
+
+    def test_a_chain_guitars_e003_refuses(self):
+        for gaps in self._refused():
+            assert [g for g in gaps if g.blocking]

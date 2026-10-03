@@ -33,7 +33,7 @@ When the tree is fully covered, `.delete()` reads the keys, then issues `DELETE`
 
 The cascade passes only through rows that *flip* to archived, so a **live row under an already-archived ancestor** (say a child created through `_all_objects` beneath an archived parent) is reached by the collector and left live by the rules. Both assume the tree is consistent, and that the enforcement migrations are applied.
 
-Both read the keys with a plain `SELECT`, so on a very large table the planner needs current statistics (`ANALYZE`) to choose an index for the `IN (…)` batches. `GUITARS_DELETE_FAST_PATH = False` turns the fast path off. Eligibility is read off the registry through the same predicate the generator writes rules by. See [ADR 0026](adr/0026-soft-delete-and-delete-fast-path.md).
+Both read the keys with a plain `SELECT`, so on a very large table the planner needs current statistics (`ANALYZE`) to choose an index for the `IN (…)` batches. `GUITARS_DELETE_FAST_PATH = False` turns the fast path off. Eligibility is read off the registry: each edge through `classify_cascade`, the predicate the generator writes cascade rules by, and each reached model's own rule checked as the generator writes it (its app and its column holder's in `LOCAL_APPS` and on PostgreSQL, and its chain not refused by `guitars.E003`). See [ADR 0026](adr/0026-soft-delete-and-delete-fast-path.md).
 
 ## Related
 

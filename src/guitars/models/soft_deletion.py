@@ -360,7 +360,7 @@ def _guard_bulk(queryset: QuerySet, name: str) -> None:
         raise TypeError(f'Cannot call {name}() after .values() or .values_list()')
 
 
-def _matching_pks(queryset: QuerySet) -> list:
+def _matching_pks(queryset: QuerySet, field: str = 'pk') -> list:
     """The keys *queryset* matches, read before any rule runs: a rule's cascade runs ahead of the
     statement that fired it, so a ``WHERE`` reading what the cascade changes would skip the
     parent, and an aggregate or window cannot be a ``WHERE`` at all. The collector reads first too."""
@@ -369,7 +369,7 @@ def _matching_pks(queryset: QuerySet) -> list:
     doomed.query.select_for_update = False
     doomed.query.select_related = False
     doomed.query.clear_ordering(force=True)
-    return list(doomed.values_list('pk', flat=True))
+    return list(doomed.values_list(field, flat=True))
 
 
 def _by_pk(model: type[Model], using: str, pks: list):
@@ -411,13 +411,16 @@ class LiveQuerySet(QuerySet):
         using = _write_alias(self)
         _require_covered(self.model, using)
         _guard_bulk(self, 'soft_delete')
-        pks = _matching_pks(self.filter(_deleted_at__isnull=True))
+        # Stamped on the table holding the column, by its own key: through an MTI child, Django's
+        # ``update()`` re-reads the keys and updates the ancestor by id alone, guard dropped.
+        holder = column_owner(self.model, '_deleted_at')
+        pks = _matching_pks(self.filter(_deleted_at__isnull=True), holder._meta.pk.name)
         # One transaction, as the collector's is: a failing batch leaves nothing half-archived,
         # and every batch's ``NOW()`` is the one instant.
         with transaction.atomic(using=using, savepoint=False):
             return sum(
                 batch.filter(_deleted_at__isnull=True).update(_deleted_at=_now())
-                for batch in _by_pk(self.model, using, pks)
+                for batch in _by_pk(holder, using, pks)
             )
 
     async def asoft_delete(self) -> int:
@@ -621,10 +624,12 @@ class SoftDeletableModel(Model):
             )
         using = using or router.db_for_write(self.__class__, instance=self)
         _require_covered(type(self), using)
+        # On the holder by its key, for the queryset form's reason. A child cannot redeclare an
+        # inherited field's name, so the holder's pk attribute on this instance is unambiguous.
+        holder = column_owner(type(self), '_deleted_at')
         stamped = (
-            type(self)
-            ._base_manager.using(using)
-            .filter(pk=self.pk, _deleted_at__isnull=True)
+            holder._base_manager.using(using)
+            .filter(pk=getattr(self, holder._meta.pk.attname), _deleted_at__isnull=True)
             .update(_deleted_at=_now())
         )
         fields = [

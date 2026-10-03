@@ -58,13 +58,25 @@ def clear_cascade_plan_cache() -> None:
 
 def _enforcement_gaps(model: type[Model]) -> list[Gap]:
     """A reached model whose own ``DELETE`` is not rewritten: nothing archives it."""
+    # Deferred: ``guitars.checks`` reaches the models package this module is part of.
+    from guitars.checks import refuses_soft_delete_rule  # noqa: PLC0415
+
     if not has_column(model, '_deleted_at'):
         return [Gap(model._meta.label, 'is not soft-deletable', True)]
     holder = column_owner(model, '_deleted_at')
-    if not is_local(django_apps.get_app_config(holder._meta.app_label)):
-        return [Gap(model._meta.label, f"'{holder._meta.app_label}' is not in LOCAL_APPS", True)]
-    if not migrates_to_postgresql(holder):
-        return [Gap(model._meta.label, 'is routed off PostgreSQL', True)]
+    # Both: a child's redirect rule is written from the pass over the child's *own* app, so
+    # a child outside LOCAL_APPS or routed away has none even under a covered ancestor.
+    for owner in dict.fromkeys((model, holder)):
+        if not is_local(django_apps.get_app_config(owner._meta.app_label)):
+            return [
+                Gap(model._meta.label, f"'{owner._meta.app_label}' is not in LOCAL_APPS", True)
+            ]
+        if not migrates_to_postgresql(owner):
+            return [Gap(model._meta.label, 'is routed off PostgreSQL', True)]
+    if refuses_soft_delete_rule(model):
+        return [
+            Gap(model._meta.label, 'its chain is refused a soft-delete rule (guitars.E003)', True)
+        ]
     return []
 
 

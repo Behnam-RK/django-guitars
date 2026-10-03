@@ -19,7 +19,6 @@ from tests.testapp.models import (
     ChamberOrchestra,
     Offer,
     QuantityCondition,
-    Scribble,
     Setlist,
     Signboard,
     Tier,
@@ -114,9 +113,14 @@ class TestWhereARulesOnlyArchiveLeavesRowsLive:
 
         assert any('testapp.Tier' in line and 'routed off PostgreSQL' in line for line in found)
 
-    def test_a_child_with_no_deleted_at_is_not_blocking_it_is_removed_in_python(self):
-        assert all('Scribble' not in line for line in reasons(Signboard, blocking=False))
-        assert Scribble  # the generic child is reached through the relation, not a key column
+    def test_a_generic_child_is_blocking_through_the_relation_not_a_missing_column(self):
+        """``Scribble`` is soft-deletable and no key column ties it to ``Signboard``: what holds
+        the fast path back is the relation itself, and nothing says it is not soft-deletable."""
+        assert any(
+            'testapp.Signboard.scribbles' in line and 'generic relation' in line
+            for line in reasons(Signboard, blocking=True)
+        )
+        assert all('not soft-deletable' not in line for line in reasons(Signboard))
 
 
 def test_a_model_that_is_not_soft_deletable_is_blocking_and_never_raises():
@@ -266,14 +270,18 @@ class TestAReachedModelTheGeneratorWritesNoRuleFor:
         child_app = TenantedChild._meta.app_label
         monkeypatch.setattr(coverage, 'is_local', lambda config: config.label != child_app)
 
-        assert [g for g in coverage._enforcement_gaps(TenantedChild) if g.blocking]
+        gaps = coverage._enforcement_gaps(TenantedChild, has_inbound_keys=True)
+
+        assert [g.reason for g in gaps if g.blocking] == [f"'{child_app}' is not in LOCAL_APPS"]
 
     def test_a_child_routed_off_postgresql(self, monkeypatch):
         monkeypatch.setattr(
             coverage, 'migrates_to_postgresql', lambda model: model is not QuantityCondition
         )
 
-        assert [g for g in coverage._enforcement_gaps(QuantityCondition) if g.blocking]
+        gaps = coverage._enforcement_gaps(QuantityCondition, has_inbound_keys=True)
+
+        assert [g.reason for g in gaps if g.blocking] == ['is routed off PostgreSQL']
 
     @staticmethod
     @isolate_apps('tests.testapp')
@@ -292,8 +300,127 @@ class TestAReachedModelTheGeneratorWritesNoRuleFor:
             class Meta(SoftDeletableModel.Meta):
                 app_label = 'testapp'
 
-        return coverage._enforcement_gaps(LitPylon), coverage._enforcement_gaps(NeonPylon)
+        return (
+            coverage._enforcement_gaps(LitPylon, has_inbound_keys=False),
+            coverage._enforcement_gaps(NeonPylon, has_inbound_keys=False),
+        )
 
     def test_a_chain_guitars_e003_refuses(self):
         for gaps in self._refused():
-            assert [g for g in gaps if g.blocking]
+            assert [g.reason for g in gaps if g.blocking] == [
+                'its chain is refused a soft-delete rule (guitars.E003)'
+            ]
+
+
+class TestWhatTheModelsOwnAppHasToDoWithIt:
+    def test_a_child_with_no_inbound_keys_only_declines_the_fast_path(self, monkeypatch):
+        """Nothing cascades into it, so ``soft_delete()`` leaves nothing live; but the collector
+        would physically delete its row, so the fast path must still decline (#58)."""
+        from tests.crossapp_tenant_child.models import TenantedChild  # noqa: PLC0415
+
+        child_app = TenantedChild._meta.app_label
+        monkeypatch.setattr(coverage, 'is_local', lambda config: config.label != child_app)
+
+        (gap,) = coverage._enforcement_gaps(TenantedChild, has_inbound_keys=False)
+
+        assert (gap.blocking, gap.reason) == (False, f"'{child_app}' is not in LOCAL_APPS")
+
+    def test_a_root_is_not_refused_because_a_childless_child_is_unenforced(self, monkeypatch):
+        from tests.crossapp_tenant_ancestor.models import TenantedAncestor  # noqa: PLC0415
+        from tests.crossapp_tenant_child.models import TenantedChild  # noqa: PLC0415
+
+        child_app = TenantedChild._meta.app_label
+        monkeypatch.setattr(coverage, 'is_local', lambda config: config.label != child_app)
+        clear_cascade_plan_cache()
+
+        gaps, _ = cascade_plan(TenantedAncestor)
+
+        assert gaps and not [g for g in gaps if g.blocking]
+
+    @staticmethod
+    @isolate_apps('tests.testapp')
+    def _an_intermediate():
+        class Root(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Mid(Root):
+            class Meta:
+                app_label = 'testapp'
+
+        class Kid(Mid):
+            class Meta:
+                app_label = 'testapp'
+
+        return Root, Mid, Kid
+
+    def test_an_intermediate_ancestors_app_is_asked_too(self, monkeypatch):
+        """``Mid``'s own rule is written from ``Mid``'s app pass, between ``Kid`` and ``Root``."""
+        _root, mid, kid = self._an_intermediate()
+        monkeypatch.setattr(coverage, 'migrates_to_postgresql', lambda model: model is not mid)
+
+        gaps = coverage._enforcement_gaps(kid, has_inbound_keys=True)
+
+        assert [g.reason for g in gaps if g.blocking] == ['is routed off PostgreSQL']
+
+    @staticmethod
+    @isolate_apps('tests.testapp')
+    def _explicit_pk():
+        from django.db.models import AutoField, OneToOneField  # noqa: PLC0415
+
+        class Root(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Kid(Root):
+            code = AutoField(primary_key=True)
+            root_link = OneToOneField(Root, on_delete=models.CASCADE, parent_link=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        return Kid
+
+    def test_a_primary_key_that_is_not_the_parent_link_is_a_blocking_gap(self):
+        """The redirect rule joins on the child's own key (#64), so it archives another row."""
+        kid = self._explicit_pk()
+
+        gaps = coverage._enforcement_gaps(kid, has_inbound_keys=False)
+
+        assert [g.blocking for g in gaps] == [True]
+        assert 'parent link' in gaps[0].reason
+
+
+class TestTheJoinedRefusalsAreOneAnswer:
+    """``joined_refusal`` is what the generator, the cycle graph and ``classify_cascade`` all
+    read; each arm needs its own test, since the model-level gap above masks the E003 one."""
+
+    @staticmethod
+    @isolate_apps('tests.testapp')
+    def _over_a_refused_chain():
+        class Owner(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Plain(models.Model):
+            class Meta:
+                app_label = 'testapp'
+
+        class Soft(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Both(Plain, Soft):
+            owner = models.ForeignKey(Owner, on_delete=models.CASCADE, related_name='boths')
+
+            class Meta:
+                app_label = 'testapp'
+
+        return Both, Both._meta.get_field('owner')
+
+    def test_a_chain_guitars_e003_refuses(self):
+        from guitars.introspection import joined_refusal  # noqa: PLC0415
+
+        both, field = self._over_a_refused_chain()
+
+        assert joined_refusal(both, field) == 'its chain is refused a soft-delete rule (guitars.E003)'

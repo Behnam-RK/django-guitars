@@ -13,7 +13,7 @@ It reads the matching keys, then `UPDATE`s by key in batches of 10,000: `SET _de
 - **Returns the number of rows stamped**, not `.delete()`'s tuple. `0` for rows already archived, which keep their stamp.
 - **Skips Python.** No `on_delete` (`SET_NULL`, `PROTECT`), no `pre_delete`/`post_delete`, and plain children (no `_deleted_at`, such as an M2M through row) are left in place. Keep `.delete()` where you need those.
 - **Raises `SoftDeleteUnsupportedError`** where a rule-only archive would leave rows **live** under an archived parent: a `GenericRelation`, a cycle-refused or unenforced edge, a `to_field` key (the cascade rule compares the target's primary key, so it would match the wrong rows), a model routed off PostgreSQL, or a non-PostgreSQL connection. It names the edge or the connection. A sliced, `values()` or `distinct(*fields)` queryset raises `TypeError`, and a combined one `NotSupportedError`, as for `.delete()`.
-- `Model.soft_delete()` keeps the pk and sets `_deleted_at`/`_updated_at` from the database (one `SELECT` after the `UPDATE`); a row hidden by row-level security stamps 0 and leaves the instance unchanged. `asoft_delete()` twins both.
+- `Model.soft_delete()` keeps the pk and sets `_deleted_at`/`_updated_at` from the database (one `SELECT` after the `UPDATE`); a row hidden by row-level security, **including by an MTI child's own policy**, stamps 0 and leaves the instance unchanged. `asoft_delete()` twins both.
 - Unreachable from a manager (`Model.objects.soft_delete()` would archive the table), and denied on an unscoped tenant queryset as `update()` is.
 
 ## The transparent `.delete()` fast path
@@ -28,6 +28,10 @@ When the tree is fully covered, `.delete()` reads the keys, then issues `DELETE`
 | a `GenericRelation`, a `to_field` key, or an edge with no rule | rows would stay live |
 | a self-referential key | `_updated_at` below level one moves only under the collector |
 | a non-PostgreSQL alias | the rules are PostgreSQL DDL |
+
+## Where the fast path and the collector part
+
+A row hidden from the caller by an MTI child's own policy: the collector deletes the untenanted root's table directly, a cross-tenant write that exists on main, and the fast path reads the keys through the child, so the row stays live. The fast path is the safer of the two, and the end states differ there. It also declines for an MTI child whose primary key is not its parent link, which the redirect rule joins on wrongly (#64).
 
 ## What both assume
 

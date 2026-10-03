@@ -624,12 +624,14 @@ class SoftDeletableModel(Model):
             )
         using = using or router.db_for_write(self.__class__, instance=self)
         _require_covered(type(self), using)
-        # On the holder by its key, for the queryset form's reason. A child cannot redeclare an
-        # inherited field's name, so the holder's pk attribute on this instance is unambiguous.
+        # The holder's row, found *through this model's own table*, in one guarded statement: its
+        # row-level policy is asked there (an MTI child's can hide a row the holder's would not),
+        # and the guard stays beside the write.
         holder = column_owner(type(self), '_deleted_at')
+        own = type(self)._base_manager.using(using).filter(pk=self.pk)
         stamped = (
             holder._base_manager.using(using)
-            .filter(pk=getattr(self, holder._meta.pk.attname), _deleted_at__isnull=True)
+            .filter(pk__in=own.values(holder._meta.pk.name), _deleted_at__isnull=True)
             .update(_deleted_at=_now())
         )
         fields = [

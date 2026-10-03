@@ -17,8 +17,9 @@ toward **exposing** data, and a `soft_delete()` that leans on the rules (#55) wo
 Emit a **joined** rule in the existing cascade family. It fires on the target as before and updates
 the ancestor: `UPDATE <ancestor> SET _deleted_at = new._deleted_at WHERE <ancestor pk> IN (SELECT
 <child parent link> FROM <child> WHERE <fk> = old.<pk>) AND _deleted_at IS NULL`. Every table in a
-chain stores one pk value, so the descendant's own parent-link column names the ancestor's row
-directly, one subselect however deep. The revive twin ([ADR 0024](0024-inverse-cascade-revive-rules.md))
+chain stores one value for a row, so the descendant's link to the ancestor (`get_ancestor_link`, not
+its primary key, which can be a column of its own beside `parent_link=True`) names the ancestor's
+row directly, one subselect however deep. A descendant over a refused chain (`guitars.E003`) gets no joined rule. The revive twin ([ADR 0024](0024-inverse-cascade-revive-rules.md))
 gets the same form.
 
 The cycle graph files the edge against the table the rule **updates**, the ancestor. A descendant
@@ -26,10 +27,12 @@ cascading to its **own root** is the one-node cycle, and is refused with the usu
 
 ## Why
 
-- **Same family, same header.** The key, header, rule name and `[SQL:...]` identity are unchanged,
-  so no frozen interface moves; only the body differs. A joined key was skipped before, so no
-  migration recorded it and an upgrade is a plain `CREATE`. A key that was *flat* and becomes
-  joined (the column moves down an inheritance chain) is recorded, and takes the replace path.
+- **Same family, same header.** The key, header and rule name are unchanged, so no frozen
+  interface moves; only the body differs. A joined key was skipped before, so no migration
+  recorded it and an upgrade is a plain `CREATE`. A key that was *flat* and becomes joined is
+  recorded, and its body changes the `[SQL:...]` digest, so it takes the replace path. Moving the
+  column down a chain needs a hand-ordered migration: dropping `_deleted_at` fails while the old
+  rule depends on it, so run `RetireEnforcement` first.
 - **Not a trigger for the self-root shape.** That is the [ADR 0018](0018-self-referential-cascade-trigger.md)
   form, and worth doing, but a second new object family in one release is a second thing to review.
   Refusal is the safe default; #55's `soft_delete()` is to raise on it, not leave children live.

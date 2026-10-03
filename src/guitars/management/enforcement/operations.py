@@ -131,6 +131,21 @@ def _rule_stem(prefix: str, table: str) -> str:
     )
 
 
+def _is_joined(model) -> bool:
+    """A cascade key declared on *model* whose ``_deleted_at`` lives on an ancestor. A model with
+    no such column at all is not joined: it is a flat key that stopped being one."""
+    return has_column(model, '_deleted_at') and not owns_column(model, '_deleted_at')
+
+
+def _parent_link(model, ancestor) -> models.Field:
+    """*model*'s link to *ancestor*. Not its primary key: a descendant can declare an explicit one
+    beside ``parent_link=True``, and a second concrete parent has a link of its own."""
+    link = model._meta.get_ancestor_link(ancestor)
+    if link is None:  # pragma: no cover - the caller took *ancestor* from column_owner
+        raise ValueError(f'{model.__name__} has no link to {ancestor.__name__}')
+    return link
+
+
 def _related_rule_name(related_table: str, foreign_key: str | None = None) -> str:
     """The inbound cascade rule's identifier, NAMEDATALEN-truncated before quoting. One FK per
     pair keeps the bare, unsuffixed form for backward compatibility, so *foreign_key* is
@@ -855,7 +870,7 @@ class OperationsMixin:
         related_model = related_model._meta.concrete_model or related_model
         # A joined rule updates the ancestor, which the key does not name: the flat template
         # would rebuild it against a table with no ``_deleted_at``. So the reverse refuses.
-        if not owns_column(related_model, '_deleted_at'):
+        if _is_joined(related_model):
             return None
         if key[2] is not None:
             return key[2]
@@ -914,6 +929,17 @@ class OperationsMixin:
         updated = column_owner(related._meta.concrete_model or related, '_deleted_at')
         if (owner_table, updated._meta.db_table) not in self._rule_cycle_edges():
             return
+        # The edge is shared by every descendant of one ancestor: only a key still cascading is
+        # on the cycle, a relaxed one is retired for its own reason.
+        if not any(
+            on_delete is models.CASCADE
+            and (rel_model._meta.concrete_model or rel_model)
+            is (related._meta.concrete_model or related)
+            for rel_model, _, on_delete in self.reverse_relations_mapping.get(
+                models_by_table[owner_table], ()
+            )
+        ):
+            return
         note = (
             f"Cascade rules on '{owner_table}' for '{related_table}' are dropped: the key lies "
             'on a rule cycle, where every edge is refused, and a live rule goes with it.'
@@ -926,7 +952,7 @@ class OperationsMixin:
         """Whether the retired rule updated an ancestor -- the one refusal whose cause is not
         an unrecorded column. Through ``concrete_model`` for ``_retired_cascade_column``'s reason."""
         model = models_by_table[related_table]
-        return not owns_column(model._meta.concrete_model or model, '_deleted_at')
+        return _is_joined(model._meta.concrete_model or model)
 
     def _revive_updated_at(self, related_table: str) -> str:
         """The ``_updated_at`` splice for a revive body rebuilt by a retirement's reverse. Its
@@ -1516,6 +1542,10 @@ class OperationsMixin:
                         'Django archives it in Python.'
                     )
                 continue
+            # ``--skip-checks`` reaches the generator: re-asked for the key as it is for the model's
+            # own rule, and the note is the model's. A refused chain's link is not a stable parent.
+            if _is_joined(related_model) and refuses_soft_delete_rule(related_model):
+                continue
             is_primary = related_table not in seen_related_tables
             seen_related_tables.add(related_table)
             candidates.append((related_model, fk_field, is_primary))
@@ -1729,7 +1759,9 @@ class OperationsMixin:
             slots |= {
                 'target_table': _identifiers._quote_table(target_model._meta.db_table),
                 'target_pk': _identifiers._escape_ident(cast(str, target_model._meta.pk.column)),
-                'child_pk': _identifiers._escape_ident(cast(str, related_model._meta.pk.column)),
+                'child_pk': _identifiers._escape_ident(
+                    cast(str, _parent_link(related_model, target_model).column)
+                ),
             }
         # Refused rather than escaped, as the sweep and the self cascade refuse it: an
         # identifier admits '$', so a db_table like 'a$$b' closes this template's dollar
@@ -1844,7 +1876,9 @@ class OperationsMixin:
             joined = not owns_column(related_model, '_deleted_at')
             target = column_owner(related_model, '_deleted_at')
             if joined:
-                self._record_object_ref(model, related_model, related_model._meta.pk.name)
+                self._record_object_ref(
+                    model, related_model, _parent_link(related_model, target).name
+                )
             # ``SET _deleted_at`` is a second column, and not necessarily as old as the table:
             # a model promoted to ``SetarModel`` gains it in a later migration, and an edge to
             # the creation alone would let the rule be created before the column exists.
@@ -1869,7 +1903,9 @@ class OperationsMixin:
                     foreign_key=ident_foreign_key,
                     target_table=_identifiers._quote_table(target._meta.db_table),
                     target_pk=_identifiers._escape_ident(cast(str, target._meta.pk.column)),
-                    child_pk=_identifiers._escape_ident(cast(str, related_model._meta.pk.column)),
+                    child_pk=_identifiers._escape_ident(
+                        cast(str, _parent_link(related_model, target).column)
+                    ),
                 )
             else:
                 forward = _soft_delete._CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE.format(

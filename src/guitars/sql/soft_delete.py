@@ -165,8 +165,8 @@ _ADOPT_SOFT_DELETE_REVIVE = (
 )
 
 # ---- The joined pair: a CASCADE key on an MTI descendant's table, ``_deleted_at`` on an
-# ancestor's. A chain stores one pk value in every table, so the descendant's parent-link column
-# names the ancestor's row directly -- one subselect, however deep. ----
+# ancestor's. A chain stores one value per row in every table, so the descendant's link to the
+# ancestor (not its own pk) names that row directly -- one subselect, however deep. ----
 
 _CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE_JOINED = """
     CREATE OR REPLACE RULE {rule_name}

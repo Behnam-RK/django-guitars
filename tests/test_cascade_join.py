@@ -383,6 +383,20 @@ class TestRetiringAJoinedKey:
             assert 'could not record which column' not in refusal
             assert 'ancestor' in refusal
 
+    def test_a_model_that_lost_its_column_is_not_joined(self):
+        """No ``_deleted_at`` at all is not "the ancestor holds it": such a key was flat, so its
+        column is recoverable and its reverse rebuilds the rule, as it did before 2.12.0."""
+        from tests.testapp.models import Genre  # noqa: PLC0415
+
+        command = Command()
+        by_table = {Genre._meta.db_table: Genre}
+
+        assert (
+            command._retired_cascade_column((Genre._meta.db_table, 'x', 'genre_id'), by_table)
+            == 'genre_id'
+        )
+        assert not command._retired_key_is_joined(Genre._meta.db_table, by_table)
+
     def test_a_flat_key_is_still_reversible_so_the_refusal_is_not_universal(self):
         """The control: the same retirement for a key whose child owns the column rebuilds it."""
         command = self._command_without(Festival)
@@ -455,15 +469,17 @@ class TestARetirementForACycleSaysSo:
     live there is dropped; the note must say so, since "skipped" reads as "left alone"."""
 
     @staticmethod
-    def _retire(monkeypatch, edges):
+    def _retire(monkeypatch, edges, *, relaxed=False):
+        """*relaxed* removes the relation from the command's view, as a key made ``SET_NULL``."""
         command = Command()
         command._skipped_rule_notes.clear()
         clear_cascade_coverage(command)
-        command.reverse_relations_mapping[Label] = {
-            relation
-            for relation in command.reverse_relations_mapping[Label]
-            if relation[0] is not Festival
-        }
+        if relaxed:
+            command.reverse_relations_mapping[Label] = {
+                relation
+                for relation in command.reverse_relations_mapping[Label]
+                if relation[0] is not Festival
+            }
         key = (Festival._meta.db_table, Label._meta.db_table, None)
         command.existing.soft_delete_related[key] = 'abc'
         monkeypatch.setattr(command, '_rule_cycle_edges', lambda: edges)
@@ -481,4 +497,117 @@ class TestARetirementForACycleSaysSo:
         assert 'testapp_label' in note
 
     def test_a_rule_dropped_for_another_reason_adds_no_note(self, monkeypatch):
-        assert self._retire(monkeypatch, set()) == []
+        assert self._retire(monkeypatch, set(), relaxed=True) == []
+
+    def test_a_key_whose_on_delete_changed_on_a_shared_edge_adds_no_note(self, monkeypatch):
+        from django.db.models import SET_NULL  # noqa: PLC0415
+
+        command = Command()
+        command._skipped_rule_notes.clear()
+        clear_cascade_coverage(command)
+        command.reverse_relations_mapping[Label] = {
+            (model, field, SET_NULL if model is Festival else on_delete)
+            for model, field, on_delete in command.reverse_relations_mapping[Label]
+        }
+        command.existing.soft_delete_related[
+            (Festival._meta.db_table, Label._meta.db_table, None)
+        ] = 'abc'
+        edges = {(Label._meta.db_table, Festival._meta.db_table)}
+        monkeypatch.setattr(command, '_rule_cycle_edges', lambda: edges)
+
+        command._retired_cascade_operations(apps.get_app_config('testapp'))
+
+        assert command._skipped_rule_notes == []
+
+    def test_a_key_relaxed_on_a_shared_edge_adds_no_note(self, monkeypatch):
+        """The edge belongs to every descendant of one ancestor, so it being on a cycle says
+        nothing about a key that was relaxed: that one is retired for its own reason."""
+        edges = {(Label._meta.db_table, Festival._meta.db_table)}
+
+        assert self._retire(monkeypatch, edges, relaxed=True) == []
+
+
+class TestTheParentLinkIsTheAncestorsNotTheDescendantsPk:
+    """A descendant's own primary key need not be its link to the ancestor: it can declare an
+    explicit one beside ``parent_link=True``, and a second concrete parent has a link of its own."""
+
+    @staticmethod
+    @isolate_apps('tests.testapp')
+    def _explicit_pk():
+        from django.db.models import AutoField, OneToOneField  # noqa: PLC0415
+
+        class Owner(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Root(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Kid(Root):
+            code = AutoField(primary_key=True)
+            root_link = OneToOneField(Root, on_delete=CASCADE, parent_link=True)
+            owner = ForeignKey(Owner, on_delete=CASCADE, related_name='kids')
+
+            class Meta:
+                app_label = 'testapp'
+
+        return Owner, Kid
+
+    @staticmethod
+    @isolate_apps('tests.testapp')
+    def _second_parent():
+        from django.db import models  # noqa: PLC0415
+
+        class Owner(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Plain(models.Model):
+            class Meta:
+                app_label = 'testapp'
+
+        class Soft(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Both(Plain, Soft):
+            owner = ForeignKey(Owner, on_delete=CASCADE, related_name='boths')
+
+            class Meta:
+                app_label = 'testapp'
+
+        return Owner, Both
+
+    @staticmethod
+    def _operations(owner, kid):
+        command = Command()
+        command._skipped_rule_notes.clear()
+        clear_cascade_coverage(command)
+        command.reverse_relations_mapping[owner] = {(kid, kid._meta.get_field('owner'), CASCADE)}
+        return command, '\n'.join(command._cascade_operations(owner))
+
+    def test_the_rule_reads_the_link_not_the_descendants_own_key(self):
+        owner, kid = self._explicit_pk()
+
+        _, blob = self._operations(owner, kid)
+
+        assert 'SELECT "root_link_id" FROM "testapp_kid"' in blob
+        assert '"code"' not in blob
+
+    def test_the_revive_twin_reads_it_too(self):
+        owner, kid = self._explicit_pk()
+
+        _, blob = self._operations(owner, kid)
+
+        assert 'guitars_link."root_link_id"' in blob
+
+    def test_a_descendant_the_check_refuses_gets_no_rule(self):
+        """``guitars.E003``'s shape: the generator re-asks it for the model's own rule, so it
+        must for a key declared on the model too, or ``--skip-checks`` writes a rule through a
+        link that is the wrong parent's."""
+        owner, both = self._second_parent()
+
+        _, blob = self._operations(owner, both)
+
+        assert blob == ''

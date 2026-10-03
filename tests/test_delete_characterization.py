@@ -7,6 +7,7 @@ from __future__ import annotations
 import pytest
 from django.apps import apps
 from django.db.models.signals import post_delete, pre_delete
+from zeal import zeal_ignore
 
 from tests.testapp.models import (
     Album,
@@ -29,7 +30,11 @@ from tests.testapp.models import (
 @pytest.fixture(autouse=True, params=[True, False], ids=['fastpath', 'collector'])
 def fast_path(request, settings):
     settings.GUITARS_DELETE_FAST_PATH = request.param
-    return request.param
+    if request.param:
+        yield request.param  # still guarded: this is what proves it issues no per-row read
+    else:
+        with zeal_ignore():  # the collector's per-row parent read is the N+1 #55 is about
+            yield request.param
 
 
 def build_tree(conditions: int = 2, rewards: int = 3):

@@ -10,6 +10,8 @@ from django.db import connection
 from django.db.models.signals import pre_delete
 from django.test.utils import CaptureQueriesContext
 
+from zeal import zeal_ignore
+
 from guitars.models import SoftDeleteUnsupportedError
 from guitars.tenancy import tenancy_bypassed, tenant
 from tests.testapp.models import (
@@ -69,9 +71,10 @@ class TestTheFastPathEngages:
         reads = []
         for conditions in (1, 8):
             offer, *_ = build(conditions)
-            reads.append(
-                single_row_reads(lambda offer=offer: Offer.objects.filter(pk=offer.pk).delete())
-            )
+            with zeal_ignore():  # the guard flags this very read, which is what is measured
+                reads.append(
+                    single_row_reads(lambda offer=offer: Offer.objects.filter(pk=offer.pk).delete())
+                )
 
         assert reads == [1, 8]
 
@@ -99,7 +102,8 @@ class TestTheFastPathEngages:
         settings.GUITARS_DELETE_FAST_PATH = False
         offer, *_ = build(2)
 
-        assert statements(lambda: Offer.objects.filter(pk=offer.pk).delete()) > 1
+        with zeal_ignore():
+            assert statements(lambda: Offer.objects.filter(pk=offer.pk).delete()) > 1
 
 
 @pytest.mark.django_db
@@ -173,7 +177,8 @@ class TestSoftDelete:
         first = build(3)
         second = build(3)
 
-        Offer.objects.filter(pk=first[0].pk).delete()
+        with zeal_ignore():
+            Offer.objects.filter(pk=first[0].pk).delete()
         Offer.objects.filter(pk=second[0].pk).soft_delete()
 
         for expected, got in zip((first[0], first[1], first[2], *first[3]), (second[0], second[1], second[2], *second[3]), strict=True):

@@ -15,7 +15,7 @@ The key is only whether a transaction is open, plus the transaction marker. The 
 ## Why
 
 - **Why not keep the savepoint ids?** A push or release reverts no `SET LOCAL`, so the key paid for events that change nothing.
-- **Why distrust rather than track?** The ways a setting disappears are not all visible to Django: `transaction.savepoint_rollback()`, raw SQL, `ROLLBACK AND CHAIN`, a pooled connection checked out again. Reading the statement stream sees all of them; mirroring Django's state sees only the ones it routes.
+- **Why distrust rather than track?** The ways a setting disappears are not all visible to Django: `transaction.savepoint_rollback()`, raw SQL, `ROLLBACK AND CHAIN`. Reading the statement stream catches every revert whichever path sent it; mirroring Django's state sees only the ones it routes. A pooled connection checked out again sends no statement at all, so the stream cannot see it; it is covered instead by each republish clearing every dimension ever published, not only the last frame's.
 - **Why a scanner?** An earlier regex hung on a statement with about 50 block comments. The scan is linear and has a regression test.
 - **Strongest objection.** Distrust is conservative: a false positive costs one republish. A false negative fails open, so a new revert shape must add a test before it adds code.
 

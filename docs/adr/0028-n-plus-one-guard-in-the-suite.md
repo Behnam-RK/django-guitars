@@ -10,12 +10,12 @@ The kit's selling point is that it moves work into PostgreSQL, so a query count 
 
 ## Decision
 
-An autouse, function-scoped fixture wraps every test in `zeal.zeal_context()`, so a lazy related-object load repeated from one call site raises `NPlusOneError`. A test that deliberately runs Django's deletion collector, whose per-row parent read is the N+1 the fast path exists to avoid, opts out with `zeal_ignore()`, and only the collector variant does: the fast-path variants stay guarded, which is what proves they issue no per-row read. Scale-invariance and exact statement-count tests cover what a lazy load does not, such as `set_config` round trips.
+An autouse, function-scoped fixture wraps every test in `zeal.zeal_context()`, so a lazy related-object load repeated from one call site raises `NPlusOneError`. One allow-list entry exists, in `tests/settings.py`: a repeated `QuerySet.get()` from one call site, since tests re-read a row per assertion by design. Canaries in `tests/test_n_plus_one_guard.py` pin that related-object loads stay fatal with that entry in force. A test that deliberately runs a known N+1 opts out locally with `zeal_ignore()`; the first is Django's deletion collector in the `delete()` fast-path tests (#58), where only the collector variant opts out, so the fast-path variants stay guarded and prove they issue no per-row read. Exact statement-count tests cover what a lazy load does not, such as `set_config` round trips.
 
 ## Why
 
 - **Why a library, not hand counts?** A count per test pins one shape; the guard watches every test, including ones written later.
-- **Why opt out rather than allow-list a model or field?** The allow-list would also hide a real regression on that field. An opt-out is local to the test that names the collector.
+- **Why allow-list only `.get()`, and opt out per test otherwise?** An entry for a model or a field would also hide a real regression on it, everywhere. The `.get()` entry is the one shape tests produce on purpose, and the canaries keep it from widening; anything else is excused only inside the test that needs it.
 - **Strongest objection.** A guard that raises on a heuristic can flag a harmless loop. The opt-out is the pressure valve, and each use must say what it is excusing.
 
 ## Consequences
@@ -26,4 +26,4 @@ An autouse, function-scoped fixture wraps every test in `zeal.zeal_context()`, s
 
 ## Related
 
-- [ADR 0026](0026-soft-delete-and-delete-fast-path.md) · issue #55
+- Issue #55 · ADR 0026 (the `delete()` fast path, arriving with #58) · `tests/test_n_plus_one_guard.py`

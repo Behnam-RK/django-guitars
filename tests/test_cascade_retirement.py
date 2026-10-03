@@ -94,16 +94,14 @@ def test_the_via_form_keeps_its_own_header_and_column(command):
     assert 'DROP RULE IF EXISTS "soft_delete_related_testapp_callbacks_band_id" ON ' in operation
 
 
-def test_an_unrenamed_key_is_dropped_by_name_without_if_exists(command):
-    """The other branch. Nothing renamed ``testapp_album``, so the recorded key is evidence the
-    rule is there under exactly that name and the bare form is right -- ``IF EXISTS`` would
-    hide a database that had already diverged."""
+def test_an_unrenamed_key_is_dropped_by_name_if_it_exists(command):
+    """Every retirement says ``IF EXISTS`` (ADR 0029): ``DROP ... CASCADE`` on the column or
+    table a rule reads takes the rule first, and a strict drop then fails ``migrate``."""
     command.existing.soft_delete_related[('testapp_album', 'testapp_genre', None)] = 'abc'
 
     (operation,) = _retirements(command, app='testapp')
 
-    assert 'DROP RULE "soft_delete_related_testapp_album" ON "testapp_genre"' in operation
-    assert 'IF EXISTS' not in operation
+    assert 'DROP RULE IF EXISTS "soft_delete_related_testapp_album" ON "testapp_genre"' in operation
 
 
 def test_a_key_whose_column_cannot_be_recovered_refuses_to_be_reversed(command):
@@ -113,7 +111,7 @@ def test_a_key_whose_column_cannot_be_recovered_refuses_to_be_reversed(command):
 
     (operation,) = _retirements(command)
 
-    assert 'DROP RULE "soft_delete_related_testapp_genre" ON "testapp_band"' in operation
+    assert 'DROP RULE IF EXISTS "soft_delete_related_testapp_genre" ON "testapp_band"' in operation
     assert 'RAISE EXCEPTION' in operation
     # The rule and its table are named, so a consumer hitting this on a rollback can trace it
     # -- passed as RAISE arguments rather than interpolated, which a quote would break.
@@ -131,7 +129,7 @@ def test_a_key_naming_an_unmapped_table_is_named_rather_than_retired(command):
 
     (note,) = command._unmapped_cascade_notes()
     assert "maps to no local model" in note
-    assert 'DROP RULE "soft_delete_related_shop_gone" ON "testapp_band"' in note
+    assert 'DROP RULE IF EXISTS "soft_delete_related_shop_gone" ON "testapp_band"' in note
 
 
 def test_a_key_the_models_still_call_for_is_left_alone(command):
@@ -214,21 +212,19 @@ def test_the_retirement_reaches_a_real_generation(command):
     ]
 
     assert len(retired) == 1
-    assert 'DROP RULE "soft_delete_related_testapp_album" ON "testapp_genre"' in retired[0]
+    assert 'DROP RULE IF EXISTS "soft_delete_related_testapp_album" ON "testapp_genre"' in retired[0]
 
 
-def test_the_adopt_form_says_if_exists(command):
-    """``--adopt`` is honest about not knowing what the database holds, so it is the one path
-    that may assert ``IF EXISTS`` -- the swap the autofill retirement beside it already makes.
-    Without it a rule already dropped by hand fails ``migrate``."""
+def test_the_adopt_form_and_the_plain_form_agree(command):
+    """Both say ``IF EXISTS`` since ADR 0029, so ``--adopt`` has nothing left to swap in."""
     command.existing.soft_delete_related[('testapp_album', 'testapp_genre', None)] = 'abc'
     app = apps.get_app_config('testapp')
 
     plain = command._retired_cascade_operations(app)[0]
     adopted = command._retired_cascade_operations(app, adopt=True)[0]
 
-    assert 'DROP RULE "soft_delete_related_testapp_album"' in plain
-    assert 'DROP RULE IF EXISTS "soft_delete_related_testapp_album"' in adopted
+    assert 'DROP RULE IF EXISTS "soft_delete_related_testapp_album"' in plain
+    assert plain == adopted
 
 
 def test_adopt_keeps_the_prior_name_drops_a_rename_added(command):
@@ -950,11 +946,11 @@ def test_an_unretirable_key_names_both_halves_to_drop_by_hand(command):
 
     (note,) = command._unmapped_cascade_notes()
 
-    assert 'DROP RULE "soft_delete_related_gone_child" ON "gone_owner"' in note
+    assert 'DROP RULE IF EXISTS "soft_delete_related_gone_child" ON "gone_owner"' in note
     assert (
-        'DROP TRIGGER "soft_delete_revive_10_gone_owner_10_gone_child" ON "gone_owner"' in note
+        'DROP TRIGGER IF EXISTS "soft_delete_revive_10_gone_owner_10_gone_child" ON "gone_owner"' in note
     )
-    assert 'DROP FUNCTION "soft_delete_revive_10_gone_owner_10_gone_child"()' in note
+    assert 'DROP FUNCTION IF EXISTS "soft_delete_revive_10_gone_owner_10_gone_child"()' in note
 
 
 def test_an_unretirable_key_names_only_the_half_the_project_recorded(command):

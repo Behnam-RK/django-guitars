@@ -1013,29 +1013,16 @@ class OperationsMixin:
                         self._record_edge(self._retirement_edges, app.label, deleting_node)
                 rule_name = family.name(owner_table, related_table, via)
                 slots = family.slots(rule_name, ident_owner_table)
-                drop = family.drop_template.format(**slots)
-                if deleted:
-                    # ``DROP TABLE ... CASCADE`` took the rule wherever the deletion ran first,
-                    # and #63's stopgap drops the trigger by hand: gone is the goal. Every
-                    # spelling, or a rename before the deletion leaves the live one. ADR 0029.
-                    drop = family.drop_prior(
-                        ident_owner_table,
-                        [
-                            family.name(owner_table, name, via)
-                            for name in (*self._prior_names(related_table), related_table)
-                        ],
-                    )
-                elif self._renamed(related_table):
-                    # Which spelling is live depends on when a generation last ran, so every
-                    # one goes, ``IF EXISTS``. A bare DROP of a name nothing has fails
-                    # ``migrate``.
-                    drop = family.drop_prior(
-                        ident_owner_table,
-                        [
-                            family.name(owner_table, name, via)
-                            for name in (*self._prior_names(related_table), related_table)
-                        ],
-                    )
+                # ``IF EXISTS`` on every retirement, over every name the table has held (ADR
+                # 0029): ``DROP ... CASCADE`` takes a rule with the column or table it reads, and
+                # a hand-drop the docs advised takes a trigger, so absent is the expected case.
+                drop = family.drop_prior(
+                    ident_owner_table,
+                    [
+                        family.name(owner_table, name, via)
+                        for name in (*self._prior_names(related_table), related_table)
+                    ],
+                )
                 reverse = (
                     family.create_template.format(
                         **slots,
@@ -1074,20 +1061,7 @@ class OperationsMixin:
                 # Not ``_append_if_stale``, for ``_retired_autofill_operations``' reason: the
                 # set difference above is the whole idempotency mechanism, and "recorded digest
                 # differs -> replace" means nothing for a drop.
-
-                # ``--adopt`` is honest about not knowing what the database holds, so it is the
-                # one path that may say ``IF EXISTS``, the swap the autofill retirement makes.
-                source, _ = _operation(
-                    header,
-                    drop,
-                    reverse,
-                    # Where a rename already made ``drop`` all-``IF EXISTS`` over every
-                    # spelling, that *is* the adopt form -- overriding it would leave adopt
-                    # strictly weaker than the plain path in the one case the old name is live.
-                    emit=family.drop_prior(ident_owner_table, [rule_name])
-                    if adopt and not self._renamed(related_table)
-                    else drop,
-                )
+                source, _ = _operation(header, drop, reverse)
                 operations.append(source)
         return operations
 
@@ -1207,28 +1181,25 @@ class OperationsMixin:
             # says why. Advising a by-hand drop here would name the same model twice.
             if {owner_table, related_table} & self._routed_away_tables():
                 continue
-            # **Both** halves, the precedent the owned pair set: the cascade alone leaves the
-            # revive live, and a later un-archive then revives children whose stamp still
-            # matches -- the exposing direction. Only halves this project recorded are named.
+            # **Both** halves, as the owned pair set the precedent: the cascade alone leaves the
+            # revive reviving children whose stamp still matches. Only halves recorded here are
+            # named, ``IF EXISTS`` as the generated retirements say it (ADR 0029).
+            quoted_owner = _identifiers._quote_table(owner_table)
             drop = '\n'.join(
-                template.format(**slots).strip()
-                for recorded_in, template, slots in (
+                statement.strip()
+                for recorded_in, statement in (
                     (
                         self.existing.soft_delete_related,
-                        _soft_delete._DROP_SOFT_DELETE_RELATED_OBJECTS_RULE,
-                        {
-                            'rule_name': _related_rule_name(related_table, via),
-                            'table': _identifiers._quote_table(owner_table),
-                        },
+                        self._drop_prior_rules(
+                            quoted_owner, [_related_rule_name(related_table, via)]
+                        ),
                     ),
                     (
                         self.existing.soft_delete_revive,
-                        _soft_delete._DROP_SOFT_DELETE_REVIVE,
-                        {
-                            'function': _revive_name(owner_table, related_table, via),
-                            'trigger': _revive_name(owner_table, related_table, via),
-                            'table': _identifiers._quote_table(owner_table),
-                        },
+                        self._drop_prior_triggers(
+                            {'table': quoted_owner},
+                            [_revive_name(owner_table, related_table, via)],
+                        ),
                     ),
                 )
                 if key in recorded_in
@@ -1270,7 +1241,9 @@ class OperationsMixin:
             if hosting.get(table) != app.label:
                 continue
             slots = self._autofill_slots(table, function)
-            drop = _triggers._DROP_TENANT_AUTOFILL_TRIGGER.format(**slots)
+            # ``IF EXISTS`` as every retirement says it (ADR 0029): a column dropped with
+            # ``CASCADE`` or a hand-drop leaves nothing for a strict drop to find.
+            drop = _triggers._ADOPT_DROP_TENANT_AUTOFILL_TRIGGER.format(**slots)
             # Not _append_if_stale: its "recorded digest differs -> replace" branch is
             # meaningless for a drop. The set difference above is the whole idempotency
             # mechanism, so the [SQL:...] stamped here is written and never read.
@@ -1281,9 +1254,6 @@ class OperationsMixin:
                 ),
                 drop,
                 _triggers._CREATE_TENANT_AUTOFILL_TRIGGER.format(**slots),
-                emit=_triggers._ADOPT_DROP_TENANT_AUTOFILL_TRIGGER.format(**slots)
-                if adopt
-                else drop,
             )
             operations.append(source)
         return operations

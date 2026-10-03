@@ -138,8 +138,8 @@ class TestRetirementEmission:
 
         blob = '\n'.join(operations)
         assert HEADER_TENANT_AUTOFILL_RETIRED.format(table=_TABLE, function=_STALE) in blob
-        assert f'DROP TRIGGER "{autofill_trigger_name(_STALE)}" ON "{_TABLE}";' in blob
-        assert 'IF EXISTS' not in blob
+        # ``IF EXISTS``: a column dropped with ``CASCADE`` or a hand-drop may have taken it.
+        assert f'DROP TRIGGER IF EXISTS "{autofill_trigger_name(_STALE)}" ON "{_TABLE}";' in blob
 
     def test_the_reverse_recreates_the_trigger(self, _command):
         """A genuine inverse, not a noop -- the migration has to be reversible like every

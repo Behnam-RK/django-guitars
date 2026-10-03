@@ -565,9 +565,6 @@ class Command(OperationsMixin, BaseCommand):
         # is never rewritten, so the emitter's edge cannot reach it. Not on the --force-rls path
         # below, which returns before here and writes no rule operation at all. ADR 0021.
         self._missing_edges.extend(self._missing_retirement_edge_notes(requested))
-        # And a table recreated under enforcement it lost (#66): failed like a stale owned rule,
-        # since no generating run can repair it without --adopt.
-        self._refusals_over_live_rules.extend(self._recreated_table_notes())
 
         # Step 3: surface cross-app cascade rules this scoped run intentionally
         # did not create, so the "pragmatic scope" tradeoff is never silent.

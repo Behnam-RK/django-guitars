@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import re
-from operator import itemgetter
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from django.apps import apps as django_apps
@@ -31,22 +30,13 @@ from guitars.management.enforcement.graph import (
     ObjectRef,
     drop_implied_edges,
     dropped_tables,
-    recreated_tables,
     resolve_dependencies,
     resolve_object_migration,
 )
 from guitars.management.enforcement.headers import (
-    _RE_MTI_SOFT_DELETE,
     _RE_MTI_UPDATED_AT,
-    _RE_SOFT_DELETE,
-    _RE_SOFT_DELETE_OWNED,
-    _RE_SOFT_DELETE_OWNED_SWEEP,
-    _RE_SOFT_DELETE_RELATED,
-    _RE_SOFT_DELETE_REVIVE,
-    _RE_SOFT_DELETE_SELF_CASCADE,
     _RE_TENANT_AUTOFILL,
     _RE_TENANT_AUTOFILL_RETIRED,
-    _RE_TENANT_POLICY,
     _RE_UPDATED_AT,
     HEADER_MTI_SOFT_DELETE,
     HEADER_MTI_UPDATED_AT,
@@ -72,7 +62,6 @@ from guitars.management.enforcement.headers import (
     HEADER_TENANT_POLICY_REPLACED,
     HEADER_UPDATED_AT,
     RE_TENANT_AUTOFILL_FUNCTION,
-    RE_TENANT_AUTOFILL_TABLE,
 )
 from guitars.management.enforcement.identity import _literal, _operation
 from guitars.models.fields import OwningForeignKey, _targets_primary_key
@@ -85,8 +74,6 @@ from guitars.tenancy.discovery import (
     app_coverage,
     autofill_function_name,
     autofill_trigger_name,
-    expected_coverage,
-    tenant_policies_enabled,
 )
 
 
@@ -2901,164 +2888,6 @@ class OperationsMixin:
                 },
             )
         return self._dropped_tables_cache[1]
-
-    def _recreated_tables(self) -> dict[str, tuple[str, str]]:
-        """:func:`recreated_tables` over :meth:`_migration_loader`."""
-        return recreated_tables(self._migration_loader())
-
-    def _recreated_table_notes(self) -> list[str]:
-        """A table recreated on its old ``db_table``: every object the old table carried went
-        with it, yet its header still reads as coverage. Named, per object, for ``--adopt`` to
-        repair -- never repaired here (#66)."""
-        recreated = self._recreated_tables()
-        if not recreated:
-            return []
-        loader = self._migration_loader()
-        # A replaced migration stays on disk until the squash is finished, out of the graph.
-        replaced_by = {
-            old: new for new, squash in loader.replacements.items() for old in squash.replaces
-        }
-        _required, models_by_table = self._cascade_key_maps()
-        families = self._families_on_a_table()
-        creates: dict[tuple[int, object], set[tuple[str, str]]] = {}
-        for app in django_apps.get_app_configs():
-            if not _generator.is_local(app):
-                continue
-            for path, content in _generator.iter_migration_files(app):
-                node = replaced_by.get((app.label, path.stem), (app.label, path.stem))
-                if node not in loader.graph.nodes:
-                    continue
-                for index, (pattern, key_of, fires_on, _recorded, _needed) in enumerate(families):
-                    for match in pattern.finditer(content):
-                        if fires_on(key_of(match)) in recreated:
-                            creates.setdefault((index, key_of(match)), set()).add(node)
-        notes = []
-        for table, recreating in sorted(recreated.items()):
-            model = models_by_table.get(table)
-            if model is None or not migrates_to_postgresql(model):
-                continue
-            # Per object, not per table: one new object on the table says nothing of the rest.
-            # Only what is recorded and still called for -- else ``--adopt`` writes nothing.
-            lost = sorted(
-                str(key)
-                for (index, key), nodes in creates.items()
-                if families[index][2](key) == table
-                and key in families[index][3]
-                and families[index][4](key, model)
-                and not any(recreating in loader.graph.forwards_plan(node) for node in nodes)
-            )
-            if lost:
-                notes.append(
-                    f"Table '{table}' was dropped and recreated (at {recreating[0]}."
-                    f'{recreating[1]}), taking with it what the old table carried, yet this '
-                    f'command still reads it as present: {", ".join(lost)}. Run '
-                    f'makeguitarmigrations --adopt to re-create them.'
-                )
-        return notes
-
-    def _families_on_a_table(self) -> list[tuple]:
-        """``(scanner, key, table it fires on, recorded keys, still called for)`` for every
-        family whose object lives on one table -- what a ``DROP TABLE`` takes with it."""
-        # The scan's own key reader for the cascade pair, so the two cannot spell a key apart.
-        from guitars.management.enforcement.scanning import _cascade_key  # noqa: PLC0415
-
-        coverage = expected_coverage().tables if tenant_policies_enabled() else {}
-        required, _by_table = self._cascade_key_maps()
-        declared = self._declared_owned_keys()
-        selfs = self._required_self_cascades()
-
-        def single(match):
-            return _identifiers._unescape_ident(match.group(1))
-
-        def groups(match):
-            return tuple(_identifiers._unescape_ident(group) for group in match.groups())
-
-        def autofill(match):
-            return (
-                _identifiers._unescape_ident(match.group(RE_TENANT_AUTOFILL_TABLE)),
-                _identifiers._unescape_ident(match.group(RE_TENANT_AUTOFILL_FUNCTION)),
-            )
-
-        existing = self.existing
-        return [
-            (
-                _RE_UPDATED_AT,
-                single,
-                str,
-                existing.triggers,
-                lambda _k, m: owns_column(m, '_updated_at'),
-            ),
-            (
-                _RE_SOFT_DELETE,
-                single,
-                str,
-                existing.soft_deletes,
-                lambda _k, m: owns_column(m, '_deleted_at') and not refuses_soft_delete_rule(m),
-            ),
-            (
-                _RE_MTI_UPDATED_AT,
-                single,
-                str,
-                existing.mti_triggers,
-                lambda _k, m: is_mti_child(m, '_updated_at'),
-            ),
-            (
-                _RE_MTI_SOFT_DELETE,
-                single,
-                str,
-                existing.mti_soft_deletes,
-                lambda _k, m: is_mti_child(m, '_deleted_at') and not refuses_soft_delete_rule(m),
-            ),
-            (
-                _RE_SOFT_DELETE_RELATED,
-                _cascade_key,
-                itemgetter(1),
-                existing.soft_delete_related,
-                lambda k, _m: k in required,
-            ),
-            (
-                _RE_SOFT_DELETE_REVIVE,
-                _cascade_key,
-                itemgetter(1),
-                existing.soft_delete_revive,
-                lambda k, _m: k in required,
-            ),
-            (
-                _RE_SOFT_DELETE_OWNED,
-                groups,
-                itemgetter(1),
-                existing.soft_delete_owned,
-                lambda k, _m: k in declared,
-            ),
-            (
-                _RE_SOFT_DELETE_OWNED_SWEEP,
-                groups,
-                itemgetter(1),
-                existing.soft_delete_owned_sweep,
-                lambda k, _m: k in declared,
-            ),
-            (
-                _RE_SOFT_DELETE_SELF_CASCADE,
-                groups,
-                itemgetter(0),
-                existing.soft_delete_self_cascade,
-                lambda k, _m: k in selfs,
-            ),
-            (
-                _RE_TENANT_AUTOFILL,
-                autofill,
-                itemgetter(0),
-                existing.tenant_autofill,
-                lambda k, _m: k[0] in coverage,
-            ),
-            (
-                _RE_TENANT_POLICY,
-                single,
-                str,
-                existing.tenant_policies,
-                lambda k, _m: k in coverage,
-            ),
-        ]
 
     def _drop_cached_migration_loader(self) -> None:
         """Forget the graph after writing a migration file. The file carries edges into other

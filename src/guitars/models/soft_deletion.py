@@ -165,8 +165,8 @@ def _self_cascade_fields(model: type[Model], using: str | None) -> list[Field]:
 
 def _with_self_descendants(model: type[Model], pks: set, using: str | None) -> set:
     """*pks* and every row below them through *model*'s self-referential cascade keys, in **one**
-    ``WITH RECURSIVE`` per key instead of one query a level. ``UNION``, not ``UNION ALL``, so a
-    cycle in the data ends the recursion; read under the session's own scope like every read."""
+    ``WITH RECURSIVE`` instead of a query a level. ``UNION`` ends a cycle in the data. Raw SQL: the
+    database's policies apply, a tenant dimension kept in Python alone (ADR 0003) does not."""
     fields = _self_cascade_fields(model, using)
     if not fields or not pks:
         return set(pks)
@@ -487,20 +487,14 @@ def _by_pk(model: type[Model], using: str, pks: list):
         yield model._base_manager.using(using).filter(pk__in=pks[start : start + _PK_BATCH])
 
 
-_SELF_REFERENTIAL = 'self-referential'
-
-
-def _fast_delete_applies(model: type[Model], using: str, *, removing: bool = False) -> bool:
+def _fast_delete_applies(model: type[Model], using: str) -> bool:
     """Whether ``.delete()`` can be one ``DELETE`` the rules rewrite, ending where Django's
-    collector would have. Asked per call: a receiver can be connected at runtime. *removing*: the
-    rows go for good here, so the stale ``_updated_at`` of a self-referential tree is no reason."""
+    collector would have. Asked per call: a receiver can be connected at runtime."""
     if not getattr(settings, 'GUITARS_DELETE_FAST_PATH', True):
         return False
     if connections[using].vendor != 'postgresql':
         return False
     gaps, reached = cascade_plan(model)
-    if removing:
-        gaps = tuple(gap for gap in gaps if not gap.reason.startswith(_SELF_REFERENTIAL))
     if gaps:
         return False
     # *model* too, not only what the walk reached: it resolves a proxy to its concrete model, but
@@ -699,11 +693,8 @@ class SoftDeletableModel(Model):
     def delete(self, using=None, keep_parents=False):
         """Django's ``delete()``, as one ``DELETE`` the rules rewrite where nothing is lost by it
         -- see :meth:`LiveQuerySet.delete`. Clears the pk as Django does."""
-        return self._delete(using, keep_parents, removing=False)
-
-    def _delete(self, using, keep_parents, *, removing: bool):
         using = using or router.db_for_write(self.__class__, instance=self)
-        if self.pk is None or not _fast_delete_applies(type(self), using, removing=removing):
+        if self.pk is None or not _fast_delete_applies(type(self), using):
             return super().delete(using=using, keep_parents=keep_parents)
         # Django's single-instance shortcut names the model; a model with dependents returns {}.
         leaf = Collector(using=using, origin=self).can_fast_delete(self)
@@ -849,9 +840,9 @@ class SoftDeletableModel(Model):
 
         with transaction.atomic(using=using):
             # Phase 1 — soft-delete first (idempotent; PG rules cascade to related objects,
-            # and stamp whatever this row was the last owner of). ``removing``: every row it
-            # archives is removed below, so only the end state matters.
-            self._delete(None, False, removing=True)
+            # and stamp whatever this row was the last owner of). Still ``self.delete()``: an
+            # override of it runs, and a survivor's ``_updated_at`` is the collector's to move.
+            self.delete()
 
             # Phase 2 — collect related rows and hard-delete child-first. self.pk is None
             # after Phase 1 (Django clears it post-delete), so use the saved pk.
@@ -898,5 +889,12 @@ class SoftDeletableModel(Model):
                         # owned group runs no Collector, so an m2m through row of an owned row lands
                         # here for real -- add one to `tests/testapp` before trusting this path.
                         else:  # pragma: no cover - no testapp owned model carries an m2m
-                            # Read through ``_rows``, which no default manager can filter.
-                            _rows(model, using).filter(pk__in=pks).delete()
+                            # Read through ``_rows``, which no default manager can filter. With
+                            # the switch off for it: a receiver that deletes soft-deletable
+                            # rows must archive them, not remove them.
+                            with connections[using or DEFAULT_DB_ALIAS].cursor() as cursor:
+                                cursor.execute(SWITCH_OFF_HARD_DELETION)
+                                try:
+                                    _rows(model, using).filter(pk__in=pks).delete()
+                                finally:
+                                    cursor.execute(SWITCH_ON_HARD_DELETION)

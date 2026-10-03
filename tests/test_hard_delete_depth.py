@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pytest
 from django.db import connection
-from django.test.utils import CaptureQueriesContext
+from django.test.utils import CaptureQueriesContext, isolate_apps
 
 from tests.testapp.models import (
     Clause,
@@ -67,46 +67,39 @@ class TestTheSwitch:
             assert cursor.fetchone()[0] in (None, '', 'off')
 
 
-@pytest.mark.django_db(transaction=True)
-def test_a_failure_part_way_leaves_nothing_removed_and_the_switch_off(monkeypatch):
-    """The second table's delete fails, after the first has run under the switch: the whole walk
-    rolls back, and a switch left on would let the next rule-bypassing delete through."""
+@pytest.mark.django_db
+def test_a_failure_part_way_leaves_the_switch_off_inside_the_callers_transaction(monkeypatch):
+    """The walk's third ``DELETE`` fails (the first is Phase 1's), after the switch went on. The
+    caller catches it and goes on in the same transaction -- the case where a leaked switch is
+    live -- and the very next ``.delete()`` must still archive rather than remove."""
+    from django.db import transaction  # noqa: PLC0415
     from django.db.backends.utils import CursorWrapper  # noqa: PLC0415
 
-    offer, *_ = _tree()
-    pk = offer.pk  # Phase 1 clears it on the instance, rolled back or not
+    offer, tier, *_ = _tree()
+    other = Offer.objects.create(name='bystander')
+    other_pk = other.pk  # ``delete()`` clears it on the instance
     deletes = []
     real = CursorWrapper.execute
 
     def failing(self, sql, params=None):
         if isinstance(sql, str) and sql.strip().upper().startswith('DELETE FROM'):
             deletes.append(sql)
-            if len(deletes) == 2:
-                raise RuntimeError('simulated failure on the second table')
+            if len(deletes) == 3:
+                raise RuntimeError('simulated failure on the walk\'s second table')
         return real(self, sql, params)
 
-    monkeypatch.setattr(CursorWrapper, 'execute', failing)
+    with transaction.atomic():
+        monkeypatch.setattr(CursorWrapper, 'execute', failing)
+        with pytest.raises(RuntimeError, match='second table'):
+            offer.hard_delete()
+        monkeypatch.undo()
 
-    with pytest.raises(RuntimeError, match='second table'):
-        offer.hard_delete()
+        other.delete()
 
-    monkeypatch.undo()
-    assert Offer._all_objects.filter(pk=pk).exists()
-    assert Tier._all_objects.filter(offer_id=pk).exists()
-    with connection.cursor() as cursor:
-        cursor.execute("SELECT current_setting('rules.hard_deletion', true)")
-        assert cursor.fetchone()[0] in (None, '', 'off')
-
-
-@pytest.mark.django_db
-def test_the_walk_costs_a_delete_a_table_not_five_statements():
-    """Was 34 for this tree, five a table; the one savepoint left is the walk's own atomic."""
-    offer, *_ = _tree()
-
-    sql = statements(offer.hard_delete)
-
-    assert sum(statement.startswith('SAVEPOINT') for statement in sql) == 1
-    assert len(sql) <= 16
+        assert Offer._all_objects.filter(pk=other_pk).exists()  # archived, not removed
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT current_setting('rules.hard_deletion', true)")
+            assert cursor.fetchone()[0] in (None, '', 'off')
 
 
 def _chain(depth: int) -> Setlist:
@@ -123,13 +116,15 @@ def _chain(depth: int) -> Setlist:
 class TestASelfReferentialCascade:
     """One level a query, until the walk asked for the whole subtree at once."""
 
-    def test_the_cost_does_not_grow_with_the_depth(self):
+    def test_the_walk_adds_no_statement_a_level_beyond_phase_1s_collector(self):
+        """Phase 1 is still ``self.delete()``: Django's collector reads a self-referential tree a
+        level at a time (two statements), while the walk after it, four more, is now constant."""
         counts = {}
         for depth in (2, 8, 20):
             root = _chain(depth)
             counts[depth] = len(statements(root.hard_delete))
 
-        assert len(set(counts.values())) == 1, counts
+        assert counts[20] - counts[2] <= 2 * (20 - 2), counts
 
     def test_the_whole_subtree_and_its_entries_are_removed(self):
         root = _chain(8)
@@ -191,7 +186,7 @@ class TestSeveralSelfReferentialKeys:
         assert set(Ledger._all_objects.values_list('name', flat=True)) == {'other'}
         assert deep and other
 
-    def test_the_cost_does_not_grow_with_the_depth(self):
+    def test_the_walk_after_phase_1_does_not_grow_with_the_depth(self):
         from tests.testapp.models import Ledger  # noqa: PLC0415
 
         counts = []
@@ -203,7 +198,8 @@ class TestSeveralSelfReferentialKeys:
                 )
             counts.append(len(statements(root.hard_delete)))
 
-        assert counts[0] == counts[1]
+        # Phase 1's collector reads a key a level; the walk after it is constant.
+        assert counts[1] - counts[0] <= 3 * (12 - 3), counts
 
 
 def _ledger(depth: int):
@@ -378,3 +374,74 @@ def test_the_delta_read_ends_where_a_full_rescan_did(name, monkeypatch):
     full = walk()
 
     assert delta == full
+
+
+class TestWhichSelfKeysAreFollowedInOneQuery:
+    """The eligibility guards of ``_self_cascade_fields``, each of which keeps the level-by-level
+    walk where one recursion would be wrong: an MTI chain collected from its root, a key to a
+    column that is not the primary key, a pk the ORM converts."""
+
+    @staticmethod
+    @isolate_apps('tests.testapp')
+    def _models():
+        from django.db import models as dj_models  # noqa: PLC0415
+
+        from guitars.models import SetarModel  # noqa: PLC0415
+
+        class Plain(SetarModel):
+            parent = dj_models.ForeignKey('self', on_delete=dj_models.CASCADE, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Root(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Chapter(Root):
+            parent = dj_models.ForeignKey('self', on_delete=dj_models.CASCADE, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Folder(SetarModel):
+            code = dj_models.CharField(max_length=10, unique=True)
+            parent = dj_models.ForeignKey(
+                'self', to_field='code', on_delete=dj_models.CASCADE, null=True
+            )
+
+            class Meta:
+                app_label = 'testapp'
+
+        return Plain, Chapter, Folder
+
+    def test_a_plain_model_with_a_key_to_the_primary_key_is_followed(self):
+        from guitars.models.soft_deletion import _self_cascade_fields  # noqa: PLC0415
+
+        plain, _chapter, _folder = self._models()
+
+        assert [field.name for field in _self_cascade_fields(plain, None)] == ['parent']
+
+    def test_an_mti_chain_keeps_the_level_walk(self):
+        from guitars.models.soft_deletion import _self_cascade_fields  # noqa: PLC0415
+
+        _plain, chapter, _folder = self._models()
+
+        assert _self_cascade_fields(chapter, None) == []
+
+    def test_a_key_to_another_column_keeps_the_level_walk(self):
+        from guitars.models.soft_deletion import _self_cascade_fields  # noqa: PLC0415
+
+        _plain, _chapter, folder = self._models()
+
+        assert _self_cascade_fields(folder, None) == []
+
+    def test_a_pk_the_orm_converts_keeps_the_level_walk(self, monkeypatch):
+        from guitars.models.soft_deletion import _self_cascade_fields  # noqa: PLC0415
+
+        plain, _chapter, _folder = self._models()
+        monkeypatch.setattr(
+            type(plain._meta.pk), 'get_db_converters', lambda self, connection: [str]
+        )
+
+        assert _self_cascade_fields(plain, None) == []

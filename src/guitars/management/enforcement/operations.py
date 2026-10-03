@@ -1606,9 +1606,9 @@ class OperationsMixin:
             self.reverse_relations_mapping[model],
             key=lambda t: (t[0]._meta.db_table, t[1].column),
         ):
-            # Structural parent-links and MTI-inherited FKs are excluded there: the MTI
-            # redirect rule already ties a child's deletion to the owner, and every table in
-            # an MTI chain shares one ``_deleted_at``, so that rule already archives them.
+            # ``classify_cascade`` leaves out structural parent-links and MTI-inherited FKs: the
+            # redirect rule already ties a child's deletion to the owner, and every table in a
+            # chain shares one ``_deleted_at``, so that rule already archives them.
             kind = classify_cascade(
                 related_model, fk_field, on_delete, owner_table, self._rule_cycle_edges()
             )

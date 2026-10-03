@@ -5,7 +5,11 @@ model is eligible"."""
 from __future__ import annotations
 
 import pytest
+from django.db import models
+from django.db.models.signals import class_prepared
+from django.test.utils import isolate_apps
 
+from guitars.models import SetarModel
 from guitars.models import _cascade_coverage as coverage
 from guitars.models._cascade_coverage import cascade_plan, clear_cascade_plan_cache
 from tests.testapp.models import (
@@ -126,3 +130,42 @@ def test_a_plan_is_computed_once_per_model():
 
     assert cascade_plan(Offer) is cascade_plan(Offer)
     assert cascade_plan(Album) is not cascade_plan(Band)
+
+
+class TestAKeyToAColumnOtherThanThePrimaryKey:
+    """The cascade rule correlates ``fk = old.<pk>``, so a ``to_field`` key archives nothing: it
+    is a gap the walk must report, not a covered edge."""
+
+    @staticmethod
+    @isolate_apps('tests.testapp')
+    def _gaps():
+        class Parent(SetarModel):
+            code = models.CharField(max_length=10, unique=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Child(SetarModel):
+            parent = models.ForeignKey(
+                Parent, to_field='code', on_delete=models.CASCADE, related_name='children'
+            )
+
+            class Meta:
+                app_label = 'testapp'
+
+        clear_cascade_plan_cache()
+        return cascade_plan(Parent)[0]
+
+    def test_it_is_a_blocking_gap(self):
+        gaps = self._gaps()
+
+        assert [g.reason for g in gaps if g.blocking and 'to_field' in g.reason]
+
+
+def test_a_new_model_invalidates_the_plans():
+    cascade_plan(Offer)
+    assert cascade_plan.cache_info().currsize >= 1
+
+    class_prepared.send(sender=Offer)
+
+    assert cascade_plan.cache_info().currsize == 0

@@ -437,3 +437,16 @@ class TestTheFastPathSetting:
         (error,) = check_delete_fast_path_setting(None)
         assert error.id == FAST_PATH_SETTING_ID
         assert repr(value) in error.msg
+
+
+def test_the_setting_check_is_registered_with_django(settings):
+    """The function tests above call it directly, which would pass with it unregistered."""
+    from django.core.checks.messages import Error  # noqa: PLC0415
+    from django.core.management import call_command  # noqa: PLC0415
+    from django.core.management.base import SystemCheckError  # noqa: PLC0415
+
+    settings.GUITARS_DELETE_FAST_PATH = 'False'
+
+    with pytest.raises(SystemCheckError, match='guitars.E004'):
+        call_command('check')
+    assert Error  # the id above is an Error, so `manage.py check` refuses to start

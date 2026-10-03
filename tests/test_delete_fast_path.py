@@ -7,17 +7,21 @@ from __future__ import annotations
 import pytest
 from asgiref.sync import async_to_sync
 from django.db import connection
-from django.db.models.signals import pre_delete
+from django.db.models import Count, Exists, F, OuterRef, Window
+from django.db.models.functions import RowNumber
+from django.db.models.signals import post_delete, pre_delete
 from django.test.utils import CaptureQueriesContext, isolate_apps
 
 from zeal import zeal_ignore
 
 from guitars.models import SoftDeleteUnsupportedError
 from guitars.tenancy import tenancy_bypassed, tenant
+from tests.conftest import scalar
 from tests.testapp.models import (
     Band,
     Clause,
     Condition,
+    ConditionNote,
     Genre,
     Offer,
     QuantityCondition,
@@ -55,14 +59,14 @@ def archived(instance) -> bool:
 
 @pytest.mark.django_db
 class TestTheFastPathEngages:
-    def test_a_covered_tree_is_one_statement_however_many_children(self, settings):
+    def test_a_covered_tree_costs_the_same_however_many_children(self, settings):
         settings.GUITARS_DELETE_FAST_PATH = True
         counts = []
         for conditions in (1, 8):
             offer, *_ = build(conditions)
             counts.append(statements(lambda offer=offer: Offer.objects.filter(pk=offer.pk).delete()))
 
-        assert counts == [1, 1]
+        assert counts == [2, 2]  # the keys, then the delete
 
     def test_the_collector_reads_each_mti_childs_parent_separately(self, settings):
         """Issue #55. Needs ``ConditionNote``: an incoming ``CASCADE`` key onto the child is what
@@ -84,12 +88,12 @@ class TestTheFastPathEngages:
 
         assert single_row_reads(lambda: Offer.objects.filter(pk=offer.pk).delete()) == 0
 
-    def test_an_mti_child_queryset_is_one_statement_too(self, settings):
+    def test_an_mti_child_queryset_costs_the_same_too(self, settings):
         settings.GUITARS_DELETE_FAST_PATH = True
         _, _, _, made = build(8)
         pks = [condition.pk for condition in made]
 
-        assert statements(lambda: QuantityCondition.objects.filter(pk__in=pks).delete()) == 1
+        assert statements(lambda: QuantityCondition.objects.filter(pk__in=pks).delete()) == 2
         assert all(archived(condition) for condition in made)
 
     def test_an_instance_is_one_statement(self, settings):
@@ -118,7 +122,7 @@ class TestItStandsAside:
     def test_a_delete_signal_receiver_connected_at_runtime_is_honoured(self, settings):
         settings.GUITARS_DELETE_FAST_PATH = True
         offer, *_ = build(1)
-        assert statements(lambda: Offer.objects.filter(pk=offer.pk).delete()) == 1
+        assert statements(lambda: Offer.objects.filter(pk=offer.pk).delete()) == 2
         second, *_ = build(1)
         seen = []
 
@@ -132,6 +136,23 @@ class TestItStandsAside:
             pre_delete.disconnect(receiver, sender=Condition)
 
         assert len(seen) == 1
+
+    def test_a_post_delete_only_receiver_is_honoured(self, settings):
+        """Only ``post_delete`` is connected: the check must ask both signals, not just the first."""
+        settings.GUITARS_DELETE_FAST_PATH = True
+        offer, *_ = build(1)
+        seen = []
+
+        def receiver(sender, instance, **kwargs):
+            seen.append(sender.__name__)
+
+        post_delete.connect(receiver, sender=Tier)
+        try:
+            Offer.objects.filter(pk=offer.pk).delete()
+        finally:
+            post_delete.disconnect(receiver, sender=Tier)
+
+        assert seen == ['Tier']
 
     def test_an_ancestors_receiver_counts_for_its_descendant(self, settings):
         """The collector sends the signal for the ancestor row too, so a receiver on it is a
@@ -215,7 +236,22 @@ class TestTheBackendIsTheOneWrittenTo:
         settings.GUITARS_DELETE_FAST_PATH = True
         offer, *_ = build(1)
 
-        assert statements(lambda: Offer.objects.filter(pk=offer.pk).delete()) == 1
+        assert statements(lambda: Offer.objects.filter(pk=offer.pk).delete()) == 2
+
+
+@pytest.mark.django_db(databases=['default', 'secondary'])
+@pytest.mark.parametrize('how', ['from_state', 'explicit'])
+def test_an_instance_is_deleted_on_the_alias_it_is_on(settings, how):
+    settings.GUITARS_DELETE_FAST_PATH = True
+    offer = Offer.objects.using('secondary').create(name='elsewhere')
+    pk = offer.pk  # delete() clears it on the instance
+
+    if how == 'from_state':
+        offer.delete()
+    else:
+        Offer.objects.using('secondary').get(pk=pk).delete(using='secondary')
+
+    assert Offer._all_objects.using('secondary').get(pk=pk)._deleted_at is not None
 
 
 def test_soft_delete_refuses_a_non_postgresql_alias():
@@ -265,7 +301,7 @@ class TestSoftDelete:
     def test_the_statement_count_does_not_grow_with_the_tree(self, conditions):
         offer, *_ = build(conditions)
 
-        assert statements(lambda: Offer.objects.filter(pk=offer.pk).soft_delete()) == 1
+        assert statements(lambda: Offer.objects.filter(pk=offer.pk).soft_delete()) == 2
 
     def test_an_mti_child_queryset_is_a_constant_number_of_statements(self):
         counts = []
@@ -421,3 +457,184 @@ class TestTenancy:
 
         assert archived_anywhere(tenants.release_a)
         assert not archived_anywhere(tenants.release_b)
+
+
+def _shape_exists(offer):
+    return Offer.objects.filter(Exists(Tier.objects.filter(offer=OuterRef('pk'))), pk=offer.pk)
+
+
+def _shape_pk_in(offer):
+    return Offer.objects.filter(pk__in=Tier.objects.values('offer')).filter(pk=offer.pk)
+
+
+def _shape_joined_live(offer):
+    return Offer.objects.filter(tiers___deleted_at__isnull=True, pk=offer.pk)
+
+
+@pytest.mark.django_db
+class TestAFilterThatReadsWhatTheRulesChange:
+    """A rule's cascade runs BEFORE the statement that fired it, so a ``WHERE`` reading a table the
+    cascade modifies is re-evaluated against rows already archived, and the parent is skipped."""
+
+    @pytest.mark.parametrize('shape', [_shape_exists, _shape_pk_in, _shape_joined_live])
+    def test_delete_archives_the_parent_as_well(self, settings, shape):
+        settings.GUITARS_DELETE_FAST_PATH = True
+        offer, tier, *_ = build(1)
+
+        shape(offer).delete()
+
+        assert archived(offer)
+        assert archived(tier)
+
+    @pytest.mark.parametrize('shape', [_shape_exists, _shape_pk_in, _shape_joined_live])
+    def test_soft_delete_archives_the_parent_as_well(self, shape):
+        offer, tier, *_ = build(1)
+
+        assert shape(offer).soft_delete() == 1
+
+        assert archived(offer)
+        assert archived(tier)
+
+
+@pytest.mark.django_db
+class TestAFilterPostgreSQLCannotEvaluateInAWhere:
+    """An aggregate or window in the ``WHERE`` makes a bare ``DELETE`` fail. The collector selects
+    the keys first, so it never meets the statement; the fast path has to do the same."""
+
+    @staticmethod
+    def _aggregate(offer):
+        return Offer.objects.annotate(n=Count('id')).filter(n__gte=1, pk=offer.pk)
+
+    @staticmethod
+    def _window(offer):
+        return Offer.objects.annotate(rn=Window(RowNumber(), order_by=F('pk').asc())).filter(
+            rn=1, pk=offer.pk
+        )
+
+    @staticmethod
+    def _extra_tables(offer):
+        return Offer.objects.extra(
+            tables=['testapp_tier'], where=['testapp_tier.offer_id = testapp_offer.id']
+        ).filter(pk=offer.pk)
+
+    @pytest.mark.parametrize('shape', ['_aggregate', '_window', '_extra_tables'])
+    def test_delete_does_not_raise_and_archives(self, settings, shape):
+        settings.GUITARS_DELETE_FAST_PATH = True
+        offer, *_ = build(1)
+
+        getattr(self, shape)(offer).delete()
+
+        assert archived(offer)
+
+    @pytest.mark.parametrize('shape', ['_aggregate', '_window', '_extra_tables'])
+    def test_soft_delete_does_not_raise_and_archives(self, shape):
+        offer, *_ = build(1)
+
+        assert getattr(self, shape)(offer).soft_delete() == 1
+
+        assert archived(offer)
+
+
+@pytest.mark.django_db
+class TestTheStampIsTheTransactionsClock:
+    """Every rule and trigger writes ``NOW()``, the transaction's start. Django's ``Now()`` renders
+    ``STATEMENT_TIMESTAMP()``, so a descendant stamped by a self-cascade or an owned rule would
+    not carry the parent's value, and a revive keys on exactly that equality."""
+
+    def test_soft_delete_matches_now_after_time_has_passed(self):
+        offer, *_ = build(1)
+        scalar('SELECT pg_sleep(0.05)')  # statement_timestamp() moves on; now() does not
+
+        Offer.objects.filter(pk=offer.pk).soft_delete()
+
+        assert Offer._all_objects.get(pk=offer.pk)._deleted_at == scalar('SELECT now()')
+
+    def test_the_instance_form_does_too(self):
+        offer, *_ = build(1)
+        scalar('SELECT pg_sleep(0.05)')
+
+        offer.soft_delete()
+
+        assert offer._deleted_at == scalar('SELECT now()')
+
+
+@pytest.mark.django_db
+class TestSoftDeleteKeepsDeletesGuards:
+    """``soft_delete()`` ignored ``DISTINCT ON`` and stamped every match, where ``.delete()`` raises."""
+
+    def test_distinct_on_fields(self):
+        with pytest.raises(TypeError, match=r'soft_delete\(\) after .distinct'):
+            Offer.objects.order_by('pk').distinct('name').soft_delete()
+
+    def test_sliced(self):
+        with pytest.raises(TypeError, match="'limit' or 'offset' with soft_delete"):
+            Offer.objects.all()[:1].soft_delete()
+
+    def test_values(self):
+        with pytest.raises(TypeError, match=r'soft_delete\(\) after .values'):
+            Offer.objects.values('name').soft_delete()
+
+    def test_combined(self):
+        from django.db import NotSupportedError  # noqa: PLC0415
+
+        with pytest.raises(NotSupportedError):
+            Offer.objects.all().union(Offer.objects.all()).soft_delete()
+
+
+@pytest.mark.django_db
+class TestALeafInstanceReturnsItsOwnLabel:
+    """Django's single-instance shortcut returns ``(count, {label: count})``; the empty dict is
+    only what a model with dependents gives."""
+
+    @pytest.mark.parametrize('fast', [True, False])
+    def test_a_model_nothing_depends_on(self, settings, fast):
+        settings.GUITARS_DELETE_FAST_PATH = fast
+        *_, made = build(1)
+        note = ConditionNote.objects.create(condition=made[0])
+
+        with zeal_ignore():
+            result = note.delete()
+
+        assert result == (0, {'testapp.ConditionNote': 0})
+
+
+@pytest.mark.django_db
+def test_a_hidden_row_is_not_an_error_for_the_instance_form(tenants):
+    """Row-level security hides another tenant's row: nothing is stamped, as ``.delete()`` does
+    nothing there, rather than raising from the refresh that follows."""
+    with tenant(label=tenants.b):
+        stamped = tenants.release_a.soft_delete()
+
+    assert stamped == 0
+    assert not archived_anywhere(tenants.release_a)
+
+
+@pytest.mark.django_db
+class TestTheConsistentTreeAssumption:
+    """Documented, and pinned here so it stays a deliberate fact: the rules cascade only through
+    rows that *flip* to archived, so a live row under an already-archived ancestor is reached by the
+    collector and left live by the fast path. See ``docs/soft-delete-api.md``, "What both assume"."""
+
+    @staticmethod
+    def _live_clause_under_an_archived_tier():
+        offer, tier, *_ = build(0)
+        tier.soft_delete()
+        clause = Clause._all_objects.create(tier=tier)
+        return offer, clause
+
+    def test_the_collector_reaches_it(self, settings):
+        settings.GUITARS_DELETE_FAST_PATH = False
+        offer, clause = self._live_clause_under_an_archived_tier()
+
+        with zeal_ignore():
+            Offer._all_objects.filter(pk=offer.pk).delete()
+
+        assert archived(clause)
+
+    def test_the_fast_path_leaves_it_live(self, settings):
+        settings.GUITARS_DELETE_FAST_PATH = True
+        offer, clause = self._live_clause_under_an_archived_tier()
+
+        Offer._all_objects.filter(pk=offer.pk).delete()
+
+        assert not archived(clause)

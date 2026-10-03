@@ -202,8 +202,22 @@ def retired_enforcement(
 
 def dropped_tables(loader: MigrationLoader) -> dict[str, tuple[str, str]]:
     """Tables a ``DeleteModel`` dropped and nothing holds by the end of the history, in any app
-    the loader knows, each with the migration that dropped it, for a retirement to follow. Positive evidence that a model was deleted, which an unmapped table alone is
-    not: an app dropped from ``LOCAL_APPS`` maps to nothing too, and its tables are live."""
+    the loader knows, each with the migration that dropped it, for a retirement to follow.
+    Positive evidence of a deletion, which an unmapped table alone is not."""
+    dropped, _recreated, held = _deletions(loader)
+    return {table: node for table, node in dropped.items() if table not in held}
+
+
+def recreated_tables(loader: MigrationLoader) -> dict[str, tuple[str, str]]:
+    """Tables a ``CreateModel`` took again after a ``DeleteModel`` dropped them, each with the
+    migration that recreated it: what the old table carried went with it (#66)."""
+    return _deletions(loader)[1]
+
+
+def _deletions(
+    loader: MigrationLoader,
+) -> tuple[dict[str, tuple[str, str]], dict[str, tuple[str, str]], set[str]]:
+    """``(table -> last dropping node, table -> recreating node, tables held at the end)``."""
     # One forward walk over the *graph*, never the files: a pending squash leaves replaced
     # migrations on disk that the graph has dropped. State is read before each *operation*, so
     # a create and delete in one migration, or a rename before the delete, is seen as it ran.
@@ -212,6 +226,7 @@ def dropped_tables(loader: MigrationLoader) -> dict[str, tuple[str, str]]:
         plan.update(dict.fromkeys(loader.graph.forwards_plan(leaf)))
     state = ProjectState(real_apps=loader.unmigrated_apps)
     dropped: dict[str, tuple[str, str]] = {}
+    recreated: dict[str, tuple[str, str]] = {}
     for app_label, name in plan:
         for operation in loader.graph.nodes[app_label, name].operations:
             # Top level only: a ``DeleteModel`` inside ``SeparateDatabaseAndState`` moves a
@@ -219,17 +234,19 @@ def dropped_tables(loader: MigrationLoader) -> dict[str, tuple[str, str]]:
             if isinstance(operation, DeleteModel):
                 model_state = state.models.get((app_label, operation.name_lower))
                 if model_state is not None and _owns_a_table(model_state):
-                    dropped[_table_of(app_label, operation.name_lower, model_state)] = (
-                        app_label,
-                        name,
-                    )
+                    table = _table_of(app_label, operation.name_lower, model_state)
+                    dropped[table] = (app_label, name)
             operation.state_forwards(app_label, state)
-    # A later model taking the same ``db_table`` holds it again.
+            if isinstance(operation, CreateModel):
+                model_state = state.models[app_label, operation.name_lower]
+                table = _table_of(app_label, operation.name_lower, model_state)
+                if table in dropped and _owns_a_table(model_state):
+                    recreated[table] = (app_label, name)
     held = {
         _table_of(label, model_name, model_state)
         for (label, model_name), model_state in state.models.items()
     }
-    return {table: node for table, node in dropped.items() if table not in held}
+    return dropped, recreated, held
 
 
 def _owns_a_table(model_state) -> bool:

@@ -30,6 +30,7 @@ from guitars.management.enforcement.graph import (
     ObjectRef,
     drop_implied_edges,
     dropped_tables,
+    recreated_tables,
     resolve_dependencies,
     resolve_object_migration,
 )
@@ -2837,6 +2838,45 @@ class OperationsMixin:
                 },
             )
         return self._dropped_tables_cache[1]
+
+    def _recreated_tables(self) -> dict[str, tuple[str, str]]:
+        """:func:`recreated_tables` over :meth:`_migration_loader`."""
+        return recreated_tables(self._migration_loader())
+
+    def _recreated_table_notes(self) -> list[str]:
+        """A table recreated on its old ``db_table`` with no enforcement generated since: the
+        objects went with the old table, yet their headers still read as coverage, so nothing
+        re-creates them. Named for ``--adopt`` to repair, never repaired here (#66)."""
+        recreated = self._recreated_tables()
+        if not recreated:
+            return []
+        loader = self._migration_loader()
+        notes = []
+        for table, recreating in sorted(recreated.items()):
+            named = f'"{_identifiers._escape_ident(table)}"'
+            covering = [
+                (app.label, path.stem)
+                for app in django_apps.get_app_configs()
+                if _generator.is_local(app)
+                for path, content in _generator.iter_migration_files(app)
+                if any(
+                    line.lstrip().startswith('# ') and named in line and ' retired on ' not in line
+                    for line in content.splitlines()
+                )
+            ]
+            # Coverage only where it descends from the recreate: an older header named what the
+            # deletion took. A table nothing ever enforced has nothing to have lost.
+            if not covering or any(
+                recreating in loader.graph.forwards_plan(node) for node in covering
+            ):
+                continue
+            notes.append(
+                f"Table '{table}' was dropped and recreated (at {recreating[0]}."
+                f'{recreating[1]}) with no enforcement generated since: its rules and triggers '
+                f'went with the old table, and this command still reads them as present. Run '
+                f'makeguitarmigrations --adopt to re-create them.'
+            )
+        return notes
 
     def _drop_cached_migration_loader(self) -> None:
         """Forget the graph after writing a migration file. The file carries edges into other

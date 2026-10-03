@@ -2,9 +2,13 @@
 rule, which names the child in its action, but not the revive trigger on the owner: a plpgsql
 body records no dependency. The trigger then fails every ``UPDATE`` on the owner."""
 
+from io import StringIO
+from pathlib import Path
+
 import pytest
 from django.apps import apps
-from django.db import ProgrammingError, connection, migrations, transaction
+from django.core.management import CommandError, call_command
+from django.db import ProgrammingError, connection, migrations, models, transaction
 from django.db.backends.utils import truncate_name
 from django.db.migrations.graph import MigrationGraph
 from django.db.migrations.operations import (
@@ -13,12 +17,12 @@ from django.db.migrations.operations import (
     RenameModel,
     SeparateDatabaseAndState,
 )
-from django.db import models
 
 from guitars.management.enforcement import graph
 from guitars.management.enforcement.command import Command
 from guitars.operations import RetireEnforcement
 from tests.conftest import clear_cascade_coverage, execute, scalar
+
 
 CHILD, OWNER = 'testapp_setlistentry', 'testapp_setlist'
 KEY = (CHILD, OWNER, None)
@@ -295,3 +299,56 @@ def test_an_owner_whose_table_was_dropped_is_not_named(monkeypatch):
     monkeypatch.setattr(command, '_dropped_tables', lambda: {'shop_gone'})
 
     assert command._unmapped_cascade_notes() == []
+
+
+class TestARecreatedTable:
+    """Deleted and recreated on one ``db_table`` with no generation between: the objects went
+    with the old table, the scan still reads them as covered, and only ``--adopt`` re-creates
+    them. Detected and failed in ``--check`` rather than repaired (#66)."""
+
+    def test_the_walk_names_the_recreating_migration(self):
+        loader = _Loader([_create()], [DeleteModel('item')], [_create()])
+
+        assert graph.recreated_tables(loader) == {'shop_item': ('shop', '0003')}
+
+    def test_a_table_never_deleted_is_not_recreated(self):
+        assert graph.recreated_tables(_Loader([_create()])) == {}
+
+    def test_enforcement_older_than_the_recreate_is_named(self, monkeypatch):
+        command = Command()
+        newest = sorted(
+            path.stem for path in (Path(__file__).parent / 'testapp' / 'migrations').glob('0*.py')
+        )[-1]
+        monkeypatch.setattr(command, '_recreated_tables', lambda: {OWNER: ('testapp', newest)})
+
+        (note,) = command._recreated_table_notes()
+
+        assert OWNER in note
+        assert 'makeguitarmigrations --adopt' in note
+
+    def test_enforcement_after_the_recreate_is_coverage(self, monkeypatch):
+        command = Command()
+        monkeypatch.setattr(
+            command, '_recreated_tables', lambda: {OWNER: ('testapp', '0001_initial')}
+        )
+
+        assert command._recreated_table_notes() == []
+
+    def test_a_table_with_no_enforcement_is_not_named(self, monkeypatch):
+        command = Command()
+        monkeypatch.setattr(
+            command, '_recreated_tables', lambda: {'testapp_nothing': ('testapp', '0001_initial')}
+        )
+
+        assert command._recreated_table_notes() == []
+
+    def test_check_fails_on_it(self, monkeypatch):
+        newest = sorted(
+            path.stem for path in (Path(__file__).parent / 'testapp' / 'migrations').glob('0*.py')
+        )[-1]
+        monkeypatch.setattr(
+            Command, '_recreated_tables', lambda self: {OWNER: ('testapp', newest)}
+        )
+
+        with pytest.raises(CommandError, match=OWNER):
+            call_command('makeguitarmigrations', '--check', stdout=StringIO(), stderr=StringIO())

@@ -27,8 +27,9 @@ cascading to its **own root** is the one-node cycle, and is refused with the usu
 ## Why
 
 - **Same family, same header.** The key, header, rule name and `[SQL:...]` identity are unchanged,
-  so no frozen interface moves; only the body differs. Nothing was recorded for these keys before,
-  so an upgrade is a plain `CREATE`.
+  so no frozen interface moves; only the body differs. A joined key was skipped before, so no
+  migration recorded it and an upgrade is a plain `CREATE`. A key that was *flat* and becomes
+  joined (the column moves down an inheritance chain) is recorded, and takes the replace path.
 - **Not a trigger for the self-root shape.** That is the [ADR 0018](0018-self-referential-cascade-trigger.md)
   form, and worth doing, but a second new object family in one release is a second thing to review.
   Refusal is the safe default; #55's `soft_delete()` is to raise on it, not leave children live.
@@ -39,7 +40,10 @@ cascading to its **own root** is the one-node cycle, and is refused with the usu
 
 **Accepted costs.** The subselect and the update run under the **invoker's row-level security**, as
 every cascade does: a session that cannot see a tenanted descendant cannot archive through it.
-The ancestor's `_updated_at` moves when it is archived, pinned in `tests/test_cascade_join.py`.
+The ancestor's `_updated_at` moves when the owner is archived by a statement at trigger depth 0,
+pinned in `tests/test_cascade_join.py`. An owner archived from inside a trigger (the owned sweep,
+a self-cascade) runs at depth 1, where `updated_at_trigger` is suppressed, so the ancestor's
+`_updated_at` stays put as it does for every other cascade.
 
 **Reversibility.** A retirement's `reverse_sql` **refuses** for a joined key: the key names no
 ancestor, and the flat template would be built against a table without `_deleted_at`.

@@ -904,6 +904,13 @@ class OperationsMixin:
             ),
         ]
 
+    @staticmethod
+    def _retired_key_is_joined(related_table: str, models_by_table: dict) -> bool:
+        """Whether the retired rule updated an ancestor -- the one refusal whose cause is not
+        an unrecorded column. Through ``concrete_model`` for ``_retired_cascade_column``'s reason."""
+        model = models_by_table[related_table]
+        return not owns_column(model._meta.concrete_model or model, '_deleted_at')
+
     def _revive_updated_at(self, related_table: str) -> str:
         """The ``_updated_at`` splice for a revive body rebuilt by a retirement's reverse. Its
         ``UPDATE`` runs at trigger depth 1, where ``updated_at_trigger``'s ``WHEN`` suppresses
@@ -971,7 +978,11 @@ class OperationsMixin:
                     # Passed as ``RAISE`` arguments, not interpolated into the literal: the
                     # quoted forms escape ``"`` but not ``'``, so a db_table carrying one
                     # would break it.
-                    else _soft_delete._REFUSE_RECREATING_RETIRED_RULE.format(
+                    else (
+                        _soft_delete._REFUSE_RECREATING_JOINED_RULE
+                        if self._retired_key_is_joined(related_table, models_by_table)
+                        else _soft_delete._REFUSE_RECREATING_RETIRED_RULE
+                    ).format(
                         literal_rule_name=_identifiers._quote_literal(rule_name),
                         literal_table=_identifiers._quote_literal(owner_table),
                     )
@@ -1474,6 +1485,17 @@ class OperationsMixin:
                         self._cycle_warning(
                             'Cascade', f"'{related_table}'", owner_table, target_table
                         )
+                    )
+                continue
+            # A ``to_field`` column is not the primary key the rule compares: ``migrate`` fails
+            # or the wrong rows are archived. Skipped before 2.12.0, so still; the flat form's
+            # flaw is #59.
+            if joined and not _targets_primary_key(fk_field):
+                if report:
+                    self._skipped_rule_notes.append(
+                        f"Cascade '{related_table}' -> '{owner_table}' skipped: "
+                        f"'{fk_field.name}' declares to_field, which the rule would not read; "
+                        'Django archives it in Python.'
                     )
                 continue
             is_primary = related_table not in seen_related_tables

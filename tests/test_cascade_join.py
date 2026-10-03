@@ -159,7 +159,9 @@ class TestASelfReferencingDescendantIsRefused:
         command._skipped_rule_notes.clear()
         clear_cascade_coverage(command)
         root, child = self._models()
-        command.reverse_relations_mapping[root] = {(child, child._meta.get_field('parent'), CASCADE)}
+        command.reverse_relations_mapping[root] = {
+            (child, child._meta.get_field('parent'), CASCADE)
+        }
 
         assert command._cascade_operations(root) == []
         assert len(command._skipped_rule_notes) == 1
@@ -304,7 +306,9 @@ class TestTwoJoinedKeysFromOneDescendant:
     def test_four_operations_with_distinct_names_and_no_clash(self):
         command, operations, _ = self._operations()
 
-        names = [name for op in operations for name in re.findall(r'(?:RULE|TRIGGER) "([^"]+)"', op)[:1]]
+        names = [
+            name for op in operations for name in re.findall(r'(?:RULE|TRIGGER) "([^"]+)"', op)[:1]
+        ]
         assert len(operations) == 4
         assert len(set(names)) == 4
         assert command._rule_name_clashes == []
@@ -316,7 +320,10 @@ class TestTwoJoinedKeysFromOneDescendant:
         rules = [op for op in operations if 'CREATE OR REPLACE RULE' in op]
         assert len(rules) == 2
         assert all('SELECT "root_ptr_id"' in rule and 'IN (' in rule for rule in rules)
-        assert sorted(re.findall(r'WHERE "(\w+)" = old', ' '.join(rules))) == ['first_id', 'second_id']
+        assert sorted(re.findall(r'WHERE "(\w+)" = old', ' '.join(rules))) == [
+            'first_id',
+            'second_id',
+        ]
 
     def test_the_via_key_recovers_no_column_on_retirement(self):
         """The ``_via`` spelling names its column in the key, which is not enough: the flat
@@ -336,7 +343,9 @@ class TestRetiringAJoinedKey:
         command = Command()
         clear_cascade_coverage(command)
         command.reverse_relations_mapping[Label] = {
-            relation for relation in command.reverse_relations_mapping[Label] if relation[0] is not model
+            relation
+            for relation in command.reverse_relations_mapping[Label]
+            if relation[0] is not model
         }
         return command
 
@@ -361,6 +370,19 @@ class TestRetiringAJoinedKey:
         assert 'RAISE EXCEPTION' in cascade
         assert 'RAISE EXCEPTION' in revive
 
+    def test_the_refusal_names_the_ancestor_not_a_column_it_failed_to_record(self):
+        """The column is known for a joined key; what cannot be rebuilt is the ancestor the
+        rule updated, so a message about an unrecorded column sends the reader the wrong way."""
+        command = self._command_without(TouringFestival)
+        key = (TouringFestival._meta.db_table, Label._meta.db_table, None)
+        command.existing.soft_delete_related[key] = 'abc'
+        command.existing.soft_delete_revive[key] = 'def'
+
+        for kind in ('Related Rule', 'Revive Trigger'):
+            (refusal,) = self._retired(command, kind)
+            assert 'could not record which column' not in refusal
+            assert 'ancestor' in refusal
+
     def test_a_flat_key_is_still_reversible_so_the_refusal_is_not_universal(self):
         """The control: the same retirement for a key whose child owns the column rebuilds it."""
         command = self._command_without(Festival)
@@ -371,3 +393,58 @@ class TestRetiringAJoinedKey:
 
         assert 'RAISE EXCEPTION' not in cascade
         assert 'CREATE OR REPLACE RULE' in cascade
+
+
+class TestAToFieldKeyIsLeftToTheCollector:
+    """The rule compares the key with the owner's primary key, so a ``to_field`` column fails
+    ``migrate`` or archives the wrong rows. Skipped before 2.12.0, so it must not become the
+    shape that breaks ``migrate``; the flat form's identical flaw is #59."""
+
+    @staticmethod
+    @isolate_apps('tests.testapp')
+    def _models():
+        from django.db.models import CharField  # noqa: PLC0415
+
+        class Owner(SetarModel):
+            slug = CharField(max_length=20, unique=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Root(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Kid(Root):
+            owner = ForeignKey(Owner, on_delete=CASCADE, to_field='slug', related_name='kids')
+
+            class Meta:
+                app_label = 'testapp'
+
+        return Owner, Root, Kid
+
+    def test_the_generator_writes_no_rule_and_says_why(self):
+        command = Command()
+        command._skipped_rule_notes.clear()
+        clear_cascade_coverage(command)
+        owner, _, kid = self._models()
+        command.reverse_relations_mapping[owner] = {(kid, kid._meta.get_field('owner'), CASCADE)}
+
+        assert command._cascade_operations(owner) == []
+        assert len(command._skipped_rule_notes) == 1
+        assert 'to_field' in command._skipped_rule_notes[0]
+
+    def test_it_files_no_edge_in_the_cycle_graph(self):
+        owner, root, kid = self._models()
+
+        assert _rule_update_edges([owner, root, kid]) == set()
+
+    def test_a_silent_run_still_skips_it(self):
+        command = Command()
+        clear_cascade_coverage(command)
+        owner, _, kid = self._models()
+        command.reverse_relations_mapping[owner] = {(kid, kid._meta.get_field('owner'), CASCADE)}
+
+        candidates, selfs = command._cascade_candidates(owner, owner._meta.db_table, report=False)
+
+        assert (candidates, selfs, command._skipped_rule_notes) == ([], [], [])

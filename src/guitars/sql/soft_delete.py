@@ -449,6 +449,20 @@ _REFUSE_RECREATING_RETIRED_RULE = """
     $guitars_retired$;
 """
 
+# The same refusal for a joined key, whose column is recorded but whose rule updated an ancestor
+# table that the key does not name -- a different cause, so a different message.
+_REFUSE_RECREATING_JOINED_RULE = """
+    DO $guitars_retired$
+    BEGIN
+        RAISE EXCEPTION
+            'guitars: rule % on % cannot be recreated -- it updated an ancestor table that '
+            'the migration that retired it did not record. Restore the foreign key in the '
+            'models and run makeguitarmigrations.', {literal_rule_name}, {literal_table}
+            USING ERRCODE = 'feature_not_supported';
+    END;
+    $guitars_retired$;
+"""
+
 # ---- Self-referential cascade: a trigger where the family above is a rule. A rule updating the
 # table it fires on is rewritten into itself and PostgreSQL rejects **every** ``UPDATE`` there.
 # Self keys only -- a multi-table cycle has no stable choice of edge. See ADR 0018. ----

@@ -35,9 +35,17 @@ from guitars.management.enforcement.graph import (
     resolve_object_migration,
 )
 from guitars.management.enforcement.headers import (
+    _RE_MTI_SOFT_DELETE,
     _RE_MTI_UPDATED_AT,
+    _RE_SOFT_DELETE,
+    _RE_SOFT_DELETE_OWNED,
+    _RE_SOFT_DELETE_OWNED_SWEEP,
+    _RE_SOFT_DELETE_RELATED,
+    _RE_SOFT_DELETE_REVIVE,
+    _RE_SOFT_DELETE_SELF_CASCADE,
     _RE_TENANT_AUTOFILL,
     _RE_TENANT_AUTOFILL_RETIRED,
+    _RE_TENANT_POLICY,
     _RE_UPDATED_AT,
     HEADER_MTI_SOFT_DELETE,
     HEADER_MTI_UPDATED_AT,
@@ -87,6 +95,32 @@ if TYPE_CHECKING:
 
     from guitars.management.enforcement.scanning import CascadeRetirementSite, ExistingOperations
     from guitars.tenancy.discovery import TableCoverage
+
+
+# Each create header's scanner, with the group naming the table its object fires on: a cascade
+# rule and its revive fire on the owner (the second slot), every other family on the first.
+_FIRES_ON = (
+    (_RE_UPDATED_AT, 1),
+    (_RE_SOFT_DELETE, 1),
+    (_RE_SOFT_DELETE_RELATED, 2),
+    (_RE_SOFT_DELETE_REVIVE, 2),
+    (_RE_SOFT_DELETE_OWNED, 2),
+    (_RE_SOFT_DELETE_OWNED_SWEEP, 2),
+    (_RE_SOFT_DELETE_SELF_CASCADE, 1),
+    (_RE_MTI_UPDATED_AT, 1),
+    (_RE_MTI_SOFT_DELETE, 1),
+    (_RE_TENANT_AUTOFILL, 1),
+    (_RE_TENANT_POLICY, 1),
+)
+
+
+def _tables_fired_on(content: str) -> set[str]:
+    """The tables *content*'s create headers put an object on."""
+    return {
+        _identifiers._unescape_ident(match.group(group))
+        for pattern, group in _FIRES_ON
+        for match in pattern.finditer(content)
+    }
 
 
 class _RetiredFamily(NamedTuple):
@@ -2844,39 +2878,49 @@ class OperationsMixin:
         return recreated_tables(self._migration_loader())
 
     def _recreated_table_notes(self) -> list[str]:
-        """A table recreated on its old ``db_table`` with no enforcement generated since: the
-        objects went with the old table, yet their headers still read as coverage, so nothing
-        re-creates them. Named for ``--adopt`` to repair, never repaired here (#66)."""
+        """A table recreated on its old ``db_table`` with nothing re-created *on* it since: the
+        objects went with the old table, yet their headers still read as coverage. Named for
+        ``--adopt`` to repair, never repaired here (#66)."""
         recreated = self._recreated_tables()
         if not recreated:
             return []
         loader = self._migration_loader()
+        # A replaced migration stays on disk until the squash is finished, out of the graph.
+        replaced_by = {
+            old: new for new, squash in loader.replacements.items() for old in squash.replaces
+        }
+        _required, models_by_table = self._cascade_key_maps()
         notes = []
         for table, recreating in sorted(recreated.items()):
-            named = f'"{_identifiers._escape_ident(table)}"'
-            covering = [
-                (app.label, path.stem)
-                for app in django_apps.get_app_configs()
-                if _generator.is_local(app)
-                for path, content in _generator.iter_migration_files(app)
-                if any(
-                    line.lstrip().startswith('# ') and named in line and ' retired on ' not in line
-                    for line in content.splitlines()
-                )
-            ]
-            # Coverage only where it descends from the recreate: an older header named what the
-            # deletion took. A table nothing ever enforced has nothing to have lost.
-            if not covering or any(
-                recreating in loader.graph.forwards_plan(node) for node in covering
+            # What the current model needs: a plain model recreated on the name needs nothing,
+            # and naming it would keep ``--check`` red past an ``--adopt`` that writes nothing.
+            model = models_by_table.get(table)
+            if model is None or not (
+                has_column(model, '_deleted_at') or has_column(model, '_updated_at')
             ):
+                continue
+            nodes = [replaced_by.get(node, node) for node in self._nodes_firing_on(table)]
+            nodes = [node for node in nodes if node in loader.graph.nodes]
+            if not nodes or any(recreating in loader.graph.forwards_plan(n) for n in nodes):
                 continue
             notes.append(
                 f"Table '{table}' was dropped and recreated (at {recreating[0]}."
-                f'{recreating[1]}) with no enforcement generated since: its rules and triggers '
-                f'went with the old table, and this command still reads them as present. Run '
-                f'makeguitarmigrations --adopt to re-create them.'
+                f'{recreating[1]}) and nothing has been re-created on it since: its rules and '
+                f'triggers went with the old table, and this command still reads them as '
+                f'present. Run makeguitarmigrations --adopt to re-create them.'
             )
         return notes
+
+    def _nodes_firing_on(self, table: str) -> list[tuple[str, str]]:
+        """Every local migration with a create header whose object fires *on* *table* -- never
+        one merely naming it, as an owner's cascade rule names its child."""
+        return [
+            (app.label, path.stem)
+            for app in django_apps.get_app_configs()
+            if _generator.is_local(app)
+            for path, content in _generator.iter_migration_files(app)
+            if table in _tables_fired_on(content)
+        ]
 
     def _drop_cached_migration_loader(self) -> None:
         """Forget the graph after writing a migration file. The file carries edges into other

@@ -19,6 +19,7 @@ from django.db.migrations.operations import (
 )
 
 from guitars.management.enforcement import graph
+from guitars.management.enforcement import operations as operations_module
 from guitars.management.enforcement.command import Command
 from guitars.operations import RetireEnforcement
 from tests.conftest import clear_cascade_coverage, execute, scalar
@@ -339,6 +340,40 @@ class TestARecreatedTable:
         monkeypatch.setattr(
             command, '_recreated_tables', lambda: {'testapp_nothing': ('testapp', '0001_initial')}
         )
+
+        assert command._recreated_table_notes() == []
+
+    def test_only_a_header_firing_on_the_table_is_coverage(self):
+        """An owner's cascade rule names its child, but its object lives on the owner: counting
+        it read a recreated child as covered while the child's own rule and trigger were gone."""
+        content = '\n'.join(
+            [
+                '# Soft Delete Related Rule on "shop_foo" that is related to "shop_owner"! [SQL:a]',
+                '# Soft Delete Revive Trigger on "shop_foo" that is related to "shop_owner"! [SQL:b]',
+                '# Soft Delete Owned Rule on "shop_kit" that is owned by "shop_box" via "kit_id"!',
+                '# Updated at Trigger on "shop_bar" table! [SQL:c]',
+                '# Soft Delete Rule retired on "shop_baz" table!',
+            ]
+        )
+
+        assert operations_module._tables_fired_on(content) == {'shop_owner', 'shop_box', 'shop_bar'}
+
+    def test_a_table_recreated_as_a_plain_model_is_not_named(self, monkeypatch):
+        """It needs nothing, so ``--adopt`` writes nothing for it and the note would never clear."""
+        from tests.testapp.models import Riff  # noqa: PLC0415
+
+        command = Command()
+        table = Riff._meta.db_table  # a TarModel: no metadata columns at all
+        monkeypatch.setattr(command, '_recreated_tables', lambda: {table: ('testapp', '0061_retirement_host')})
+        monkeypatch.setattr(command, '_nodes_firing_on', lambda _t: [('testapp', '0042_auto_enforcement')])
+
+        assert command._recreated_table_notes() == []
+
+    def test_a_replaced_migration_is_not_asked_of_the_graph(self, monkeypatch):
+        """A pending squash leaves its replaced files on disk and out of the graph."""
+        command = Command()
+        monkeypatch.setattr(command, '_recreated_tables', lambda: {OWNER: ('testapp', '0001_initial')})
+        monkeypatch.setattr(command, '_nodes_firing_on', lambda _t: [('testapp', '0099_replaced')])
 
         assert command._recreated_table_notes() == []
 

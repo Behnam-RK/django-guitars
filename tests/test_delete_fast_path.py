@@ -4,19 +4,22 @@ stand aside. What ``delete()`` returns and leaves behind is pinned in
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pytest
 from asgiref.sync import async_to_sync
-from django.db import connection
+from django.db import IntegrityError, connection
 from django.db.models import Count, Exists, F, OuterRef, Window
 from django.db.models.functions import RowNumber
 from django.db.models.signals import post_delete, pre_delete
 from django.test.utils import CaptureQueriesContext, isolate_apps
+from django.utils import timezone
 
 from zeal import zeal_ignore
 
-from guitars.models import SoftDeleteUnsupportedError
+from guitars.models import SoftDeleteUnsupportedError, soft_deletion
 from guitars.tenancy import tenancy_bypassed, tenant
-from tests.conftest import scalar
+from tests.conftest import execute, scalar
 from tests.testapp.models import (
     Band,
     Clause,
@@ -638,3 +641,105 @@ class TestTheConsistentTreeAssumption:
         Offer._all_objects.filter(pk=offer.pk).delete()
 
         assert not archived(clause)
+
+
+def _run(queryset, operation: str):
+    return queryset.delete() if operation == 'delete' else queryset.soft_delete()
+
+
+@pytest.fixture
+def small_batches(monkeypatch, settings):
+    """Two keys a batch, so the boundary is a handful of rows rather than 10,000."""
+    settings.GUITARS_DELETE_FAST_PATH = True
+    monkeypatch.setattr(soft_deletion, '_PK_BATCH', 2)
+
+
+@pytest.mark.parametrize('operation', ['delete', 'soft_delete'])
+class TestBatching:
+    @pytest.mark.django_db
+    def test_a_queryset_crossing_the_boundary_is_archived_whole(self, small_batches, operation):
+        offers = [Offer.objects.create(name=f'o{number}') for number in range(5)]
+
+        result = _run(Offer.objects.filter(pk__in=[o.pk for o in offers]), operation)
+
+        assert all(archived(offer) for offer in offers)
+        assert result == (5 if operation == 'soft_delete' else (0, {}))
+
+    @pytest.mark.django_db
+    def test_it_costs_the_keys_plus_one_statement_a_batch(self, small_batches, operation):
+        offers = [Offer.objects.create(name=f'o{number}') for number in range(5)]
+        queryset = Offer.objects.filter(pk__in=[o.pk for o in offers])
+
+        assert statements(lambda: _run(queryset, operation)) == 1 + 3  # five keys, two a batch
+
+    @pytest.mark.django_db(transaction=True)
+    def test_a_failure_in_a_later_batch_archives_nothing(self, small_batches, operation):
+        """The collector writes inside one transaction; so must this, or a failure leaves half."""
+        offers = [Offer.objects.create(name=name) for name in ('a', 'b', 'c', 'bad', 'd')]
+        execute("ALTER TABLE testapp_offer ADD CONSTRAINT nobad CHECK (name <> 'bad') NOT VALID")
+        try:
+            with pytest.raises(IntegrityError):
+                _run(Offer.objects.order_by('pk'), operation)
+        finally:
+            execute('ALTER TABLE testapp_offer DROP CONSTRAINT nobad')
+
+        assert not any(archived(offer) for offer in offers)
+
+    @pytest.mark.django_db(transaction=True)
+    def test_one_archive_is_one_instant_across_batches(self, small_batches, operation):
+        """Autocommit: without a surrounding transaction each batch would read its own ``NOW()``."""
+        for number in range(6):
+            Offer.objects.create(name=f'o{number}')
+
+        _run(Offer.objects.all(), operation)
+
+        stamps = {row._deleted_at for row in Offer._all_objects.all()}
+        assert len(stamps) == 1
+
+
+@pytest.mark.django_db
+def test_a_row_archived_between_the_read_and_the_write_keeps_its_stamp(monkeypatch):
+    """The inner ``_deleted_at IS NULL``: the keys were read live, and one has since been archived,
+    so counting or re-stamping it would break the provenance a revive keys on."""
+    offers = [Offer.objects.create(name=f'o{number}') for number in range(3)]
+    earlier = timezone.now() - timedelta(days=30)
+    real = soft_deletion._matching_pks
+
+    def racing(queryset):
+        pks = real(queryset)
+        Offer._all_objects.filter(pk=pks[0]).update(_deleted_at=earlier)
+        return pks
+
+    monkeypatch.setattr(soft_deletion, '_matching_pks', racing)
+
+    stamped = Offer.objects.filter(pk__in=[o.pk for o in offers]).soft_delete()
+
+    assert stamped == 2
+    assert Offer._all_objects.get(pk=min(o.pk for o in offers))._deleted_at == earlier
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize('operation', ['delete', 'soft_delete'])
+def test_select_for_update_does_not_reach_the_key_read(settings, operation):
+    """PostgreSQL refuses ``FOR UPDATE`` with ``DISTINCT``; the key read must not carry it."""
+    settings.GUITARS_DELETE_FAST_PATH = True
+    offer, *_ = build(1)
+
+    _run(Offer.objects.select_for_update().distinct().filter(pk=offer.pk), operation)
+
+    assert archived(offer)
+
+
+@pytest.mark.django_db
+class TestADeferredInstance:
+    def test_it_costs_one_refresh_not_one_per_field(self):
+        offer, *_ = build(1)
+        deferred = Offer.objects.only('name').get(pk=offer.pk)
+
+        assert statements(deferred.soft_delete) == 2  # the UPDATE, then one refresh
+
+    def test_a_hidden_row_is_still_not_an_error(self, tenants):
+        with tenant(label=tenants.a):
+            release = Release.objects.only('title').get()
+        with tenant(label=tenants.b):
+            assert release.soft_delete() == 0

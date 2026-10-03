@@ -59,7 +59,7 @@ blocks nest instead of clobbering each other's restore.
 | `AllObjectsManager` | `_all_objects` — every row regardless of `_deleted_at`. |
 | `LiveQuerySet` | Queryset backing `LiveManager`. |
 | `HardDeletableQuerySet` | `LiveQuerySet` subclass adding `.hard_delete()` in bulk; backs `ArchiveManager` / `AllObjectsManager`. |
-| `LiveQuerySet.soft_delete()` / `asoft_delete()` | Archive in one `UPDATE`, returning the rows stamped; queryset-only, denied unscoped. See [soft_delete()](soft-delete-api.md). |
+| `LiveQuerySet.soft_delete()` / `asoft_delete()` | Read the keys, then archive with `UPDATE`s by key, returning the rows stamped; queryset-only, denied unscoped. See [soft_delete()](soft-delete-api.md). |
 | `SoftDeletableModel.soft_delete()` / `asoft_delete()` | Instance form; keeps the pk, sets `_deleted_at`. Raises `SoftDeleteUnsupportedError` where the rules alone would leave rows live. |
 
 ## Tenancy public API (`guitars.tenancy`)

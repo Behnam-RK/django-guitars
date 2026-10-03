@@ -412,10 +412,13 @@ class LiveQuerySet(QuerySet):
         _require_covered(self.model, using)
         _guard_bulk(self, 'soft_delete')
         pks = _matching_pks(self.filter(_deleted_at__isnull=True))
-        return sum(
-            batch.filter(_deleted_at__isnull=True).update(_deleted_at=_now())
-            for batch in _by_pk(self.model, using, pks)
-        )
+        # One transaction, as the collector's is: a failing batch leaves nothing half-archived,
+        # and every batch's ``NOW()`` is the one instant.
+        with transaction.atomic(using=using, savepoint=False):
+            return sum(
+                batch.filter(_deleted_at__isnull=True).update(_deleted_at=_now())
+                for batch in _by_pk(self.model, using, pks)
+            )
 
     async def asoft_delete(self) -> int:
         return await sync_to_async(self.soft_delete)()
@@ -431,8 +434,9 @@ class LiveQuerySet(QuerySet):
         if not _fast_delete_applies(self.model, using):
             return super().delete()
         _guard_bulk(self, 'delete')  # Django's own, ahead of the shortcut
-        for batch in _by_pk(self.model, using, _matching_pks(self)):
-            batch._raw_delete(using=using)
+        with transaction.atomic(using=using, savepoint=False):  # all batches or none
+            for batch in _by_pk(self.model, using, _matching_pks(self)):
+                batch._raw_delete(using=using)
         self._result_cache = None
         return 0, {}
 
@@ -623,7 +627,10 @@ class SoftDeletableModel(Model):
             .filter(pk=self.pk, _deleted_at__isnull=True)
             .update(_deleted_at=_now())
         )
-        fields = ['_deleted_at', *(['_updated_at'] if hasattr(self, '_updated_at') else [])]
+        fields = [
+            '_deleted_at',
+            *(['_updated_at'] if has_column(type(self), '_updated_at') else []),
+        ]
         with contextlib.suppress(type(self).DoesNotExist):  # row-level security hides the row
             self.refresh_from_db(using=using, fields=fields)
         return stamped

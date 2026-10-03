@@ -44,7 +44,7 @@ CREATE RULE soft_delete AS ON DELETE TO <child> DO INSTEAD (UPDATE <owner>
 ```
 
 Django deletes child-before-parent, so the parent's rule no-ops via its `_deleted_at IS NULL`
-guard — cascades fire once, at any depth. `cursor.rowcount` describes the *substituted* `UPDATE`.
+guard — cascades fire once, at any depth. `cursor.rowcount` reads 0 for the rewritten `DELETE`, whatever the rule archived, which is why `.delete()` returns no counts.
 
 The **inverse** shape — a child carrying `_deleted_at`, declared or inherited from a second
 parent, over a concrete parent that has none — is **refused** ([`guitars.E003`](adr/0015-refuse-soft-deletable-mti-orphans.md),

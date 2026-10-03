@@ -162,10 +162,32 @@ class TestAKeyToAColumnOtherThanThePrimaryKey:
         assert [g.reason for g in gaps if g.blocking and 'to_field' in g.reason]
 
 
-def test_a_new_model_invalidates_the_plans():
+def _both_caches_are_warm():
     cascade_plan(Offer)
+    coverage._registry_cycle_edges()
     assert cascade_plan.cache_info().currsize >= 1
+    assert coverage._registry_cycle_edges.cache_info().currsize >= 1
+
+
+def _both_caches_are_empty():
+    return (
+        cascade_plan.cache_info().currsize == 0
+        and coverage._registry_cycle_edges.cache_info().currsize == 0
+    )
+
+
+def test_a_new_model_invalidates_every_cache():
+    _both_caches_are_warm()
 
     class_prepared.send(sender=Offer)
 
-    assert cascade_plan.cache_info().currsize == 0
+    assert _both_caches_are_empty()
+
+
+def test_a_changed_setting_invalidates_every_cache(settings):
+    """What an edge is depends on ``LOCAL_APPS`` and the router, so a plan outlives neither."""
+    _both_caches_are_warm()
+
+    settings.LOCAL_APPS = [*settings.LOCAL_APPS]
+
+    assert _both_caches_are_empty()

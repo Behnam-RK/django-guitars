@@ -24,7 +24,7 @@ Full history and diffs: [GitHub releases](https://github.com/Behnam-RK/django-gu
 
 **Known, not fixed here:** the cascade rule for a `to_field` foreign key compares the child's column with the target's *primary key*, so it matches the wrong rows. `soft_delete()` and the fast path refuse that shape rather than inherit it.
 
-**Upgrading.** Nothing to generate, but this changes what `.delete()` executes for covered models: two statements (the keys, then the delete) instead of the collector's, with no signals and no `on_delete`. Both it and `soft_delete()` assume a consistent tree, meaning no live row beneath an already-archived ancestor, which the collector would reach and the rules do not, and that your enforcement migrations are applied. Set `GUITARS_DELETE_FAST_PATH = False` to keep the collector.
+**Upgrading.** Nothing to generate, but this changes what `.delete()` executes for covered models: at least two statements (the keys, then a delete per 10,000 of them, in one transaction) instead of the collector's. It declines, running the collector, whenever a delete receiver or an `on_delete` other than `CASCADE`/`DO_NOTHING` is reachable, so neither is skipped. Both it and `soft_delete()` assume a consistent tree, meaning no live row beneath an already-archived ancestor, which the collector would reach and the rules do not, and that your enforcement migrations are applied. Set `GUITARS_DELETE_FAST_PATH = False` to keep the collector.
 
 ## [2.13.0] - 2026-10-03
 

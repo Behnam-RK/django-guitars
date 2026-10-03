@@ -18,7 +18,7 @@ Both of the last two. **`soft_delete()`** is the opt-in: it reads the keys then 
 - **Why not only `soft_delete()`?** Every existing `.delete()` caller would keep the cost.
 - **Why `_raw_delete`, not `UPDATE`.** It runs the SQL `.delete()` ends in, so an MTI child needs no root resolution (the redirect rule does it) and the stamp is `NOW()`. `soft_delete()` writes `NOW()` itself: Django's `Now()` renders `STATEMENT_TIMESTAMP()`, which a revive would not match.
 - **Why the keys first.** A rule's cascade runs before the statement that fired it, so a `WHERE` reading what the cascade changes would skip the parent, and an aggregate in it would fail. The collector reads first too.
-- **Strongest objection.** A clean `.delete()` is no longer the collector, so a divergence is possible. A parity test found one (a self-referential tree) and an independent review found four more: the `WHERE` hazard, an aggregate in it, a leaf instance's return value, and a `to_field` key.
+- **Strongest objection.** A clean `.delete()` is no longer the collector, so a divergence is possible. A parity test found one (a self-referential tree) and independent review found more, among them the `WHERE` hazard, an aggregate in it, a leaf instance's return value, and a `to_field` key.
 
 ## Consequences
 

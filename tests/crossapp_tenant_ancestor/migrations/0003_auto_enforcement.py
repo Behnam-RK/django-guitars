@@ -4,6 +4,7 @@ from django.db import migrations
 
 
 class Migration(migrations.Migration):
+
     dependencies = [
         ('testapp', '0011_auto_enforcement_trigger_function'),
         ('crossapp_tenant_ancestor', '0002_tenantedancestor_label'),
@@ -23,6 +24,7 @@ class Migration(migrations.Migration):
             DROP TRIGGER updated_at_trigger ON "crossapp_tenant_ancestor_locallabel";
         """,
         ),
+
         # Soft Delete Rule on "crossapp_tenant_ancestor_locallabel" table! [SQL:5650008d2459]
         migrations.RunSQL(
             sql="""
@@ -39,6 +41,7 @@ class Migration(migrations.Migration):
             DROP RULE soft_delete ON "crossapp_tenant_ancestor_locallabel";
         """,
         ),
+
         # Updated at Trigger on "crossapp_tenant_ancestor_tenantedancestor" table! [SQL:82921a0f543d]
         migrations.RunSQL(
             sql="""
@@ -52,6 +55,7 @@ class Migration(migrations.Migration):
             DROP TRIGGER updated_at_trigger ON "crossapp_tenant_ancestor_tenantedancestor";
         """,
         ),
+
         # Soft Delete Rule on "crossapp_tenant_ancestor_tenantedancestor" table! [SQL:b8abd6548fda]
         migrations.RunSQL(
             sql="""
@@ -68,6 +72,7 @@ class Migration(migrations.Migration):
             DROP RULE soft_delete ON "crossapp_tenant_ancestor_tenantedancestor";
         """,
         ),
+
         # Soft Delete Related Rule on "crossapp_tenant_ancestor_tenantedancestor" that is related to "crossapp_tenant_ancestor_locallabel"! [SQL:8bb2ac8e8f47]
         migrations.RunSQL(
             sql="""
@@ -85,6 +90,7 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_related_crossapp_tenant_ancestor_tenantedancestor" ON "crossapp_tenant_ancestor_locallabel";
         """,
         ),
+
         # Tenant RLS on "crossapp_tenant_ancestor_tenantedancestor" table! [POLICY:3f4bb4ab26ad] [SQL:7d16e325cb2f]
         migrations.RunSQL(
             sql=[
@@ -100,4 +106,5 @@ class Migration(migrations.Migration):
                 """DROP POLICY IF EXISTS tenant_scope ON crossapp_tenant_ancestor_tenantedancestor""",
             ],
         ),
+
     ]

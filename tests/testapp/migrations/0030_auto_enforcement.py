@@ -4,6 +4,7 @@ from django.db import migrations
 
 
 class Migration(migrations.Migration):
+
     dependencies = [
         ('testapp', '0011_auto_enforcement_trigger_function'),
         ('testapp', '0029_placard_kiosk_foyer'),
@@ -23,6 +24,7 @@ class Migration(migrations.Migration):
             DROP TRIGGER updated_at_trigger ON "testapp_placard";
         """,
         ),
+
         # Soft Delete Rule on "testapp_placard" table! [SQL:78156df57608]
         migrations.RunSQL(
             sql="""
@@ -39,6 +41,7 @@ class Migration(migrations.Migration):
             DROP RULE soft_delete ON "testapp_placard";
         """,
         ),
+
         # Updated at Trigger on "testapp_kiosk" table! [SQL:aacda5dad10b]
         migrations.RunSQL(
             sql="""
@@ -52,6 +55,7 @@ class Migration(migrations.Migration):
             DROP TRIGGER updated_at_trigger ON "testapp_kiosk";
         """,
         ),
+
         # Soft Delete Rule on "testapp_kiosk" table! [SQL:b60f5c18532c]
         migrations.RunSQL(
             sql="""
@@ -68,6 +72,7 @@ class Migration(migrations.Migration):
             DROP RULE soft_delete ON "testapp_kiosk";
         """,
         ),
+
         # Updated at Trigger on "testapp_foyer" table! [SQL:d72bc5d1a15f]
         migrations.RunSQL(
             sql="""
@@ -81,6 +86,7 @@ class Migration(migrations.Migration):
             DROP TRIGGER updated_at_trigger ON "testapp_foyer";
         """,
         ),
+
         # Soft Delete Rule on "testapp_foyer" table! [SQL:8105993da7b2]
         migrations.RunSQL(
             sql="""
@@ -97,6 +103,7 @@ class Migration(migrations.Migration):
             DROP RULE soft_delete ON "testapp_foyer";
         """,
         ),
+
         # Soft Delete Owned Rule on "testapp_presskit" that is owned by "testapp_album" via "alt_press_kit_id"! [SQL:36a279b45b0e]
         migrations.RunSQL(
             sql="""
@@ -127,6 +134,7 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_owned_16_testapp_presskit_16_alt_press_kit_id" ON "testapp_album";
         """,
         ),
+
         # Soft Delete Owned Rule on "testapp_presskit" that is owned by "testapp_album" via "press_kit_id"! [SQL:485e8a740c40]
         migrations.RunSQL(
             sql="""
@@ -157,6 +165,7 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_owned_16_testapp_presskit_12_press_kit_id" ON "testapp_album";
         """,
         ),
+
         # Soft Delete Owned Rule on "testapp_ensemble" that is owned by "testapp_merch" via "featured_orchestra_id"! [SQL:510286ffeb96]
         migrations.RunSQL(
             sql="""
@@ -186,6 +195,7 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_owned_16_testapp_ensemble_21_featured_orchestra_id" ON "testapp_merch";
         """,
         ),
+
         # Soft Delete Owned Rule on "testapp_ensemble" that is owned by "testapp_patron" via "ensemble_id"! [SQL:05863c76cbcf]
         migrations.RunSQL(
             sql="""
@@ -215,6 +225,7 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_owned_16_testapp_ensemble_11_ensemble_id" ON "testapp_patron";
         """,
         ),
+
         # Soft Delete Owned Rule on "testapp_placard" that is owned by "testapp_kiosk" via "placard_id"! [SQL:ddb19f806282]
         migrations.RunSQL(
             sql="""
@@ -244,6 +255,7 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_owned_15_testapp_placard_10_placard_id" ON "testapp_kiosk";
         """,
         ),
+
         # Soft Delete Owned Rule on "testapp_placard" that is owned by "testapp_foyer" via "placard_id"! [SQL:8b09e64665ef]
         migrations.RunSQL(
             sql="""
@@ -273,4 +285,5 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_owned_15_testapp_placard_10_placard_id" ON "testapp_foyer";
         """,
         ),
+
     ]

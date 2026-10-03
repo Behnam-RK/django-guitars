@@ -99,7 +99,6 @@ def mti_child_proxy():
 def test_a_proxy_of_an_mti_child_adds_nothing_and_leaves_the_child_alone(mti_child_proxy):
     """The child keeps every operation its own inheritance earns; the proxy contributes none.
     Both would otherwise key on ``testapp_orchestra`` and collide rather than add."""
-
     def _emit(*models):
         # Recorded coverage cleared, or the corpus's own MTI keys make this emit nothing and
         # the comparison would hold for the wrong reason.

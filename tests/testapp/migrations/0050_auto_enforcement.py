@@ -4,6 +4,7 @@ from django.db import migrations
 
 
 class Migration(migrations.Migration):
+
     dependencies = [
         ('testapp', '0049_alter_encore_band'),
     ]
@@ -26,4 +27,5 @@ class Migration(migrations.Migration):
                 );
         """,
         ),
+
     ]

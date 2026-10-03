@@ -123,9 +123,7 @@ def test_the_note_names_the_rule_of_the_family_whose_site_it_is():
     command = Command()
     command.existing.cascade_retirement_sites.clear()
     command.existing.revive_retirement_sites.clear()
-    site = CascadeRetirementSite(
-        'testapp', '0059_retirement_host', ('testapp_album', 'testapp_band', None), _CREATE
-    )
+    site = CascadeRetirementSite('testapp', '0059_retirement_host', ('testapp_album', 'testapp_band', None), _CREATE)
     command.existing.revive_retirement_sites.append(site)
 
     (note,) = command._missing_retirement_edge_notes(set())
@@ -181,7 +179,9 @@ def test_the_scan_reads_a_revive_retirement_off_a_migration(monkeypatch):
     )
     real = _generator.iter_migration_files
 
-    create = '# Soft Delete Revive Trigger on "testapp_album" that is related to "testapp_band"!'
+    create = (
+        '# Soft Delete Revive Trigger on "testapp_album" that is related to "testapp_band"!'
+    )
 
     def _walk(app):
         if app.label == 'testapp':

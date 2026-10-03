@@ -4,24 +4,18 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
+
     initial = True
 
-    dependencies = []
+    dependencies = [
+    ]
 
     operations = [
         migrations.CreateModel(
             name='Retiree',
             fields=[
-                (
-                    'id',
-                    models.BigAutoField(
-                        auto_created=True, primary_key=True, serialize=False, verbose_name='ID'
-                    ),
-                ),
-                (
-                    '_deleted_at',
-                    models.DateTimeField(editable=False, null=True, verbose_name='Deleted at'),
-                ),
+                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
+                ('_deleted_at', models.DateTimeField(editable=False, null=True, verbose_name='Deleted at')),
             ],
         ),
     ]

@@ -4,6 +4,7 @@ from django.db import migrations
 
 
 class Migration(migrations.Migration):
+
     dependencies = [
         ('testapp', '0011_auto_enforcement_trigger_function'),
         ('testapp', '0041_setlist_setlistentry_setlist_setlist_deleted_at_and_more'),
@@ -23,6 +24,7 @@ class Migration(migrations.Migration):
             DROP TRIGGER updated_at_trigger ON "testapp_setlist";
         """,
         ),
+
         # Soft Delete Rule on "testapp_setlist" table! [SQL:292b936b0884]
         migrations.RunSQL(
             sql="""
@@ -39,6 +41,7 @@ class Migration(migrations.Migration):
             DROP RULE soft_delete ON "testapp_setlist";
         """,
         ),
+
         # Updated at Trigger on "testapp_setlistentry" table! [SQL:a22147de5482]
         migrations.RunSQL(
             sql="""
@@ -52,6 +55,7 @@ class Migration(migrations.Migration):
             DROP TRIGGER updated_at_trigger ON "testapp_setlistentry";
         """,
         ),
+
         # Soft Delete Rule on "testapp_setlistentry" table! [SQL:eddacba0295c]
         migrations.RunSQL(
             sql="""
@@ -68,6 +72,7 @@ class Migration(migrations.Migration):
             DROP RULE soft_delete ON "testapp_setlistentry";
         """,
         ),
+
         # Soft Delete Related Rule on "testapp_setlistentry" that is related to "testapp_setlist"! [SQL:83799e4510c5]
         migrations.RunSQL(
             sql="""
@@ -85,6 +90,7 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_related_testapp_setlistentry" ON "testapp_setlist";
         """,
         ),
+
         # Soft Delete Self Cascade Trigger on "testapp_setlist" via "parent_id"! [SQL:a523e7e47da3]
         migrations.RunSQL(
             sql="""
@@ -132,4 +138,5 @@ class Migration(migrations.Migration):
             DROP FUNCTION "soft_delete_self_cascade_15_testapp_setlist_9_parent_id"();
         """,
         ),
+
     ]

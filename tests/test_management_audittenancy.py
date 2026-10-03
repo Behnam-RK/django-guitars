@@ -797,16 +797,14 @@ class TestOptions:
         # Every policy in the database, not only the expected ones: a fixture app outside
         # ``LOCAL_APPS`` is policied by the migrations the test database is built from, and one
         # surviving policy leaves oids to look columns up for -- the path this test is here for.
-        _execute(
-            *[
-                sql.drop_tenant_policy(table=table)
-                for (table,) in rows(
-                    'SELECT relname FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid '
-                    'WHERE p.polname = %s',
-                    [sql.TENANT_POLICY],
-                )
-            ]
-        )
+        _execute(*[
+            sql.drop_tenant_policy(table=table)
+            for (table,) in rows(
+                'SELECT relname FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid '
+                'WHERE p.polname = %s',
+                [sql.TENANT_POLICY],
+            )
+        ])
 
         output = _audit_failure()
 

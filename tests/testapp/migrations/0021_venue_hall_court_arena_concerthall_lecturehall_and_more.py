@@ -6,6 +6,7 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
+
     dependencies = [
         ('testapp', '0020_auto_enforcement'),
     ]
@@ -14,41 +15,12 @@ class Migration(migrations.Migration):
         migrations.CreateModel(
             name='Venue',
             fields=[
-                (
-                    'id',
-                    models.BigAutoField(
-                        auto_created=True, primary_key=True, serialize=False, verbose_name='ID'
-                    ),
-                ),
-                (
-                    '_deleted_at',
-                    models.DateTimeField(editable=False, null=True, verbose_name='Deleted at'),
-                ),
-                (
-                    '_created_at',
-                    models.DateTimeField(
-                        db_default=django.db.models.functions.datetime.Now(),
-                        editable=False,
-                        verbose_name='Created at',
-                    ),
-                ),
-                (
-                    '_updated_at',
-                    models.DateTimeField(
-                        db_default=django.db.models.functions.datetime.Now(),
-                        editable=False,
-                        verbose_name='Updated at',
-                    ),
-                ),
+                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
+                ('_deleted_at', models.DateTimeField(editable=False, null=True, verbose_name='Deleted at')),
+                ('_created_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Created at')),
+                ('_updated_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Updated at')),
                 ('name', models.CharField(max_length=100)),
-                (
-                    'label',
-                    models.ForeignKey(
-                        on_delete=django.db.models.deletion.CASCADE,
-                        related_name='venues',
-                        to='testapp.label',
-                    ),
-                ),
+                ('label', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='venues', to='testapp.label')),
             ],
             options={
                 'abstract': False,
@@ -58,41 +30,12 @@ class Migration(migrations.Migration):
         migrations.CreateModel(
             name='Hall',
             fields=[
-                (
-                    'id',
-                    models.BigAutoField(
-                        auto_created=True, primary_key=True, serialize=False, verbose_name='ID'
-                    ),
-                ),
-                (
-                    '_deleted_at',
-                    models.DateTimeField(editable=False, null=True, verbose_name='Deleted at'),
-                ),
-                (
-                    '_created_at',
-                    models.DateTimeField(
-                        db_default=django.db.models.functions.datetime.Now(),
-                        editable=False,
-                        verbose_name='Created at',
-                    ),
-                ),
-                (
-                    '_updated_at',
-                    models.DateTimeField(
-                        db_default=django.db.models.functions.datetime.Now(),
-                        editable=False,
-                        verbose_name='Updated at',
-                    ),
-                ),
+                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
+                ('_deleted_at', models.DateTimeField(editable=False, null=True, verbose_name='Deleted at')),
+                ('_created_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Created at')),
+                ('_updated_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Updated at')),
                 ('name', models.CharField(max_length=100)),
-                (
-                    'label',
-                    models.ForeignKey(
-                        on_delete=django.db.models.deletion.CASCADE,
-                        related_name='halls',
-                        to='testapp.label',
-                    ),
-                ),
+                ('label', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='halls', to='testapp.label')),
             ],
             options={
                 'abstract': False,
@@ -102,41 +45,12 @@ class Migration(migrations.Migration):
         migrations.CreateModel(
             name='Court',
             fields=[
-                (
-                    'id',
-                    models.BigAutoField(
-                        auto_created=True, primary_key=True, serialize=False, verbose_name='ID'
-                    ),
-                ),
-                (
-                    '_deleted_at',
-                    models.DateTimeField(editable=False, null=True, verbose_name='Deleted at'),
-                ),
-                (
-                    '_created_at',
-                    models.DateTimeField(
-                        db_default=django.db.models.functions.datetime.Now(),
-                        editable=False,
-                        verbose_name='Created at',
-                    ),
-                ),
-                (
-                    '_updated_at',
-                    models.DateTimeField(
-                        db_default=django.db.models.functions.datetime.Now(),
-                        editable=False,
-                        verbose_name='Updated at',
-                    ),
-                ),
+                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
+                ('_deleted_at', models.DateTimeField(editable=False, null=True, verbose_name='Deleted at')),
+                ('_created_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Created at')),
+                ('_updated_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Updated at')),
                 ('name', models.CharField(max_length=100)),
-                (
-                    'label',
-                    models.ForeignKey(
-                        on_delete=django.db.models.deletion.CASCADE,
-                        related_name='courts',
-                        to='testapp.label',
-                    ),
-                ),
+                ('label', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='courts', to='testapp.label')),
             ],
             options={
                 'abstract': False,
@@ -146,17 +60,7 @@ class Migration(migrations.Migration):
         migrations.CreateModel(
             name='Arena',
             fields=[
-                (
-                    'venue_ptr',
-                    models.OneToOneField(
-                        auto_created=True,
-                        on_delete=django.db.models.deletion.CASCADE,
-                        parent_link=True,
-                        primary_key=True,
-                        serialize=False,
-                        to='testapp.venue',
-                    ),
-                ),
+                ('venue_ptr', models.OneToOneField(auto_created=True, on_delete=django.db.models.deletion.CASCADE, parent_link=True, primary_key=True, serialize=False, to='testapp.venue')),
                 ('seats', models.IntegerField(default=0)),
             ],
             bases=('testapp.venue',),
@@ -164,17 +68,7 @@ class Migration(migrations.Migration):
         migrations.CreateModel(
             name='ConcertHall',
             fields=[
-                (
-                    'hall_ptr',
-                    models.OneToOneField(
-                        auto_created=True,
-                        on_delete=django.db.models.deletion.CASCADE,
-                        parent_link=True,
-                        primary_key=True,
-                        serialize=False,
-                        to='testapp.hall',
-                    ),
-                ),
+                ('hall_ptr', models.OneToOneField(auto_created=True, on_delete=django.db.models.deletion.CASCADE, parent_link=True, primary_key=True, serialize=False, to='testapp.hall')),
                 ('stage', models.CharField(default='', max_length=50)),
             ],
             bases=('testapp.hall',),
@@ -182,17 +76,7 @@ class Migration(migrations.Migration):
         migrations.CreateModel(
             name='LectureHall',
             fields=[
-                (
-                    'hall_ptr',
-                    models.OneToOneField(
-                        auto_created=True,
-                        on_delete=django.db.models.deletion.CASCADE,
-                        parent_link=True,
-                        primary_key=True,
-                        serialize=False,
-                        to='testapp.hall',
-                    ),
-                ),
+                ('hall_ptr', models.OneToOneField(auto_created=True, on_delete=django.db.models.deletion.CASCADE, parent_link=True, primary_key=True, serialize=False, to='testapp.hall')),
                 ('rows', models.IntegerField(default=0)),
             ],
             bases=('testapp.hall',),
@@ -200,17 +84,7 @@ class Migration(migrations.Migration):
         migrations.CreateModel(
             name='SquashCourt',
             fields=[
-                (
-                    'court_ptr',
-                    models.OneToOneField(
-                        auto_created=True,
-                        on_delete=django.db.models.deletion.CASCADE,
-                        parent_link=True,
-                        primary_key=True,
-                        serialize=False,
-                        to='testapp.court',
-                    ),
-                ),
+                ('court_ptr', models.OneToOneField(auto_created=True, on_delete=django.db.models.deletion.CASCADE, parent_link=True, primary_key=True, serialize=False, to='testapp.court')),
                 ('walls', models.IntegerField(default=4)),
             ],
             bases=('testapp.court',),
@@ -218,43 +92,21 @@ class Migration(migrations.Migration):
         migrations.CreateModel(
             name='TennisCourt',
             fields=[
-                (
-                    'court_ptr',
-                    models.OneToOneField(
-                        auto_created=True,
-                        on_delete=django.db.models.deletion.CASCADE,
-                        parent_link=True,
-                        primary_key=True,
-                        serialize=False,
-                        to='testapp.court',
-                    ),
-                ),
+                ('court_ptr', models.OneToOneField(auto_created=True, on_delete=django.db.models.deletion.CASCADE, parent_link=True, primary_key=True, serialize=False, to='testapp.court')),
                 ('net_height', models.IntegerField(default=0)),
             ],
             bases=('testapp.court',),
         ),
         migrations.AddIndex(
             model_name='venue',
-            index=models.Index(
-                condition=models.Q(('_deleted_at__isnull', True)),
-                fields=['_deleted_at'],
-                name='venue_deleted_at',
-            ),
+            index=models.Index(condition=models.Q(('_deleted_at__isnull', True)), fields=['_deleted_at'], name='venue_deleted_at'),
         ),
         migrations.AddIndex(
             model_name='hall',
-            index=models.Index(
-                condition=models.Q(('_deleted_at__isnull', True)),
-                fields=['_deleted_at'],
-                name='hall_deleted_at',
-            ),
+            index=models.Index(condition=models.Q(('_deleted_at__isnull', True)), fields=['_deleted_at'], name='hall_deleted_at'),
         ),
         migrations.AddIndex(
             model_name='court',
-            index=models.Index(
-                condition=models.Q(('_deleted_at__isnull', True)),
-                fields=['_deleted_at'],
-                name='court_deleted_at',
-            ),
+            index=models.Index(condition=models.Q(('_deleted_at__isnull', True)), fields=['_deleted_at'], name='court_deleted_at'),
         ),
     ]

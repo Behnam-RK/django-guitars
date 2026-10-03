@@ -4,6 +4,7 @@ from django.db import migrations
 
 
 class Migration(migrations.Migration):
+
     dependencies = [
         ('testapp', '0011_auto_enforcement_trigger_function'),
         ('testapp', '0025_patron'),
@@ -23,6 +24,7 @@ class Migration(migrations.Migration):
             DROP TRIGGER updated_at_trigger ON "testapp_presskit";
         """,
         ),
+
         # Soft Delete Rule on "testapp_presskit" table! [SQL:7308c71677b5]
         migrations.RunSQL(
             sql="""
@@ -39,6 +41,7 @@ class Migration(migrations.Migration):
             DROP RULE soft_delete ON "testapp_presskit";
         """,
         ),
+
         # Updated at Trigger on "testapp_patron" table! [SQL:f15a2ba7ba52]
         migrations.RunSQL(
             sql="""
@@ -52,6 +55,7 @@ class Migration(migrations.Migration):
             DROP TRIGGER updated_at_trigger ON "testapp_patron";
         """,
         ),
+
         # Soft Delete Rule on "testapp_patron" table! [SQL:40420f7e7728]
         migrations.RunSQL(
             sql="""
@@ -68,6 +72,7 @@ class Migration(migrations.Migration):
             DROP RULE soft_delete ON "testapp_patron";
         """,
         ),
+
         # Soft Delete Owned Rule on "testapp_presskit" that is owned by "testapp_album" via "alt_press_kit_id"! [SQL:c18377a59cad]
         migrations.RunSQL(
             sql="""
@@ -92,6 +97,7 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_owned_16_testapp_presskit_16_alt_press_kit_id" ON "testapp_album";
         """,
         ),
+
         # Soft Delete Owned Rule on "testapp_presskit" that is owned by "testapp_album" via "press_kit_id"! [SQL:e2f060af31c4]
         migrations.RunSQL(
             sql="""
@@ -116,6 +122,7 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_owned_16_testapp_presskit_12_press_kit_id" ON "testapp_album";
         """,
         ),
+
         # Soft Delete Owned Rule on "testapp_ensemble" that is owned by "testapp_merch" via "featured_orchestra_id"! [SQL:a05f5065aea6]
         migrations.RunSQL(
             sql="""
@@ -140,6 +147,7 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_owned_16_testapp_ensemble_21_featured_orchestra_id" ON "testapp_merch";
         """,
         ),
+
         # Soft Delete Owned Rule on "testapp_ensemble" that is owned by "testapp_patron" via "ensemble_id"! [SQL:a62e3b4b40fb]
         migrations.RunSQL(
             sql="""
@@ -164,4 +172,5 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_owned_16_testapp_ensemble_11_ensemble_id" ON "testapp_patron";
         """,
         ),
+
     ]

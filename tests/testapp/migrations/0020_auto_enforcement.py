@@ -4,6 +4,7 @@ from django.db import migrations
 
 
 class Migration(migrations.Migration):
+
     dependencies = [
         ('testapp', '0019_auto_enforcement_guitars_fill_5_label_label_id'),
     ]
@@ -21,6 +22,7 @@ class Migration(migrations.Migration):
             DROP TRIGGER "guitars_fill_5_label_label_id_trigger" ON "testapp_release";
         """,
         ),
+
         # Tenant autofill Trigger on "testapp_tour" table (function "guitars_fill_5_label_label_id")! [SQL:7b4a5f612c46]
         migrations.RunSQL(
             sql="""
@@ -33,6 +35,7 @@ class Migration(migrations.Migration):
             DROP TRIGGER "guitars_fill_5_label_label_id_trigger" ON "testapp_tour";
         """,
         ),
+
         # Tenant autofill Trigger on "testapp_track" table (function "guitars_fill_5_label_label_id")! [SQL:683553fd1e15]
         migrations.RunSQL(
             sql="""
@@ -45,4 +48,5 @@ class Migration(migrations.Migration):
             DROP TRIGGER "guitars_fill_5_label_label_id_trigger" ON "testapp_track";
         """,
         ),
+
     ]

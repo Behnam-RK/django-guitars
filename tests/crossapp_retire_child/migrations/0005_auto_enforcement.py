@@ -4,6 +4,7 @@ from django.db import migrations
 
 
 class Migration(migrations.Migration):
+
     dependencies = [
         ('crossapp_retire_owner', '0003_auto_enforcement'),
         ('crossapp_retire_owner', '0001_initial'),
@@ -28,4 +29,5 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_related_crossapp_retire_child_dependant" ON "crossapp_retire_owner_retiree";
         """,
         ),
+
     ]

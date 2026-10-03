@@ -4,6 +4,7 @@ from django.db import migrations
 
 
 class Migration(migrations.Migration):
+
     dependencies = [
         ('crossapp_retire_child', '0005_auto_enforcement'),
         ('crossapp_retire_owner', '0003_auto_enforcement'),
@@ -27,4 +28,5 @@ class Migration(migrations.Migration):
                 );
         """,
         ),
+
     ]

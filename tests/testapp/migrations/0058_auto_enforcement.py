@@ -4,6 +4,7 @@ from django.db import migrations
 
 
 class Migration(migrations.Migration):
+
     dependencies = [
         ('testapp', '0057_auto_enforcement'),
     ]
@@ -48,6 +49,7 @@ class Migration(migrations.Migration):
             DROP FUNCTION "soft_delete_revive_12_testapp_band_13_testapp_album"();
         """,
         ),
+
         # Soft Delete Revive Trigger on "testapp_merch" that is related to "testapp_album"! [SQL:0659cf53fc46]
         migrations.RunSQL(
             sql="""
@@ -87,6 +89,7 @@ class Migration(migrations.Migration):
             DROP FUNCTION "soft_delete_revive_13_testapp_album_13_testapp_merch"();
         """,
         ),
+
         # Soft Delete Revive Trigger on "testapp_merch" that is related to "testapp_album" via "bonus_album_id"! [SQL:703a9dcfcb79]
         migrations.RunSQL(
             sql="""
@@ -126,6 +129,7 @@ class Migration(migrations.Migration):
             DROP FUNCTION "soft_delete_revive_via_13_testapp_album_13_testapp_m_8576eb3445"();
         """,
         ),
+
         # Soft Delete Revive Trigger on "testapp_section" that is related to "testapp_ensemble"! [SQL:c739df83fb02]
         migrations.RunSQL(
             sql="""
@@ -165,6 +169,7 @@ class Migration(migrations.Migration):
             DROP FUNCTION "soft_delete_revive_16_testapp_ensemble_15_testapp_section"();
         """,
         ),
+
         # Soft Delete Revive Trigger on "testapp_booking" that is related to "testapp_label"! [SQL:46828e2d3fd3]
         migrations.RunSQL(
             sql="""
@@ -204,6 +209,7 @@ class Migration(migrations.Migration):
             DROP FUNCTION "soft_delete_revive_13_testapp_label_15_testapp_booking"();
         """,
         ),
+
         # Soft Delete Revive Trigger on "testapp_court" that is related to "testapp_label"! [SQL:80479eda347e]
         migrations.RunSQL(
             sql="""
@@ -243,6 +249,7 @@ class Migration(migrations.Migration):
             DROP FUNCTION "soft_delete_revive_13_testapp_label_13_testapp_court"();
         """,
         ),
+
         # Soft Delete Revive Trigger on "testapp_festival" that is related to "testapp_label"! [SQL:61c6113efb53]
         migrations.RunSQL(
             sql="""
@@ -282,6 +289,7 @@ class Migration(migrations.Migration):
             DROP FUNCTION "soft_delete_revive_13_testapp_label_16_testapp_festival"();
         """,
         ),
+
         # Soft Delete Revive Trigger on "testapp_hall" that is related to "testapp_label"! [SQL:10d1f344878a]
         migrations.RunSQL(
             sql="""
@@ -321,6 +329,7 @@ class Migration(migrations.Migration):
             DROP FUNCTION "soft_delete_revive_13_testapp_label_12_testapp_hall"();
         """,
         ),
+
         # Soft Delete Revive Trigger on "testapp_release" that is related to "testapp_label"! [SQL:8098d9fdae45]
         migrations.RunSQL(
             sql="""
@@ -360,6 +369,7 @@ class Migration(migrations.Migration):
             DROP FUNCTION "soft_delete_revive_13_testapp_label_15_testapp_release"();
         """,
         ),
+
         # Soft Delete Revive Trigger on "testapp_tour" that is related to "testapp_label"! [SQL:25b68f6f3525]
         migrations.RunSQL(
             sql="""
@@ -399,6 +409,7 @@ class Migration(migrations.Migration):
             DROP FUNCTION "soft_delete_revive_13_testapp_label_12_testapp_tour"();
         """,
         ),
+
         # Soft Delete Revive Trigger on "testapp_track" that is related to "testapp_label"! [SQL:718b7f8937cd]
         migrations.RunSQL(
             sql="""
@@ -438,6 +449,7 @@ class Migration(migrations.Migration):
             DROP FUNCTION "soft_delete_revive_13_testapp_label_13_testapp_track"();
         """,
         ),
+
         # Soft Delete Revive Trigger on "testapp_troupe" that is related to "testapp_label"! [SQL:ef2c7f77a7c2]
         migrations.RunSQL(
             sql="""
@@ -477,6 +489,7 @@ class Migration(migrations.Migration):
             DROP FUNCTION "soft_delete_revive_13_testapp_label_14_testapp_troupe"();
         """,
         ),
+
         # Soft Delete Revive Trigger on "testapp_venue" that is related to "testapp_label"! [SQL:4d2f4775686b]
         migrations.RunSQL(
             sql="""
@@ -516,6 +529,7 @@ class Migration(migrations.Migration):
             DROP FUNCTION "soft_delete_revive_13_testapp_label_13_testapp_venue"();
         """,
         ),
+
         # Soft Delete Revive Trigger on "testapp_review" that is related to "testapp_release"! [SQL:aac032d28d85]
         migrations.RunSQL(
             sql="""
@@ -555,6 +569,7 @@ class Migration(migrations.Migration):
             DROP FUNCTION "soft_delete_revive_15_testapp_release_14_testapp_review"();
         """,
         ),
+
         # Soft Delete Revive Trigger on "testapp_track" that is related to "testapp_release"! [SQL:e5c4146bf05c]
         migrations.RunSQL(
             sql="""
@@ -594,6 +609,7 @@ class Migration(migrations.Migration):
             DROP FUNCTION "soft_delete_revive_15_testapp_release_13_testapp_track"();
         """,
         ),
+
         # Soft Delete Revive Trigger on "testapp_setlistentry" that is related to "testapp_setlist"! [SQL:1e27fc1ac238]
         migrations.RunSQL(
             sql="""
@@ -633,4 +649,5 @@ class Migration(migrations.Migration):
             DROP FUNCTION "soft_delete_revive_15_testapp_setlist_20_testapp_setlistentry"();
         """,
         ),
+
     ]

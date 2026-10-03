@@ -4,6 +4,7 @@ from django.db import migrations
 
 
 class Migration(migrations.Migration):
+
     dependencies = [
         ('testapp', '0030_auto_enforcement'),
     ]
@@ -46,6 +47,7 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_owned_16_testapp_presskit_16_alt_press_kit_id" ON "testapp_album";
         """,
         ),
+
         # Soft Delete Owned Rule on "testapp_presskit" that is owned by "testapp_album" via "press_kit_id"! [SQL:8024d1c64039]
         migrations.RunSQL(
             sql="""
@@ -83,4 +85,5 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_owned_16_testapp_presskit_12_press_kit_id" ON "testapp_album";
         """,
         ),
+
     ]

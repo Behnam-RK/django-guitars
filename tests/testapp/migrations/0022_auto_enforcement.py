@@ -4,6 +4,7 @@ from django.db import migrations
 
 
 class Migration(migrations.Migration):
+
     dependencies = [
         ('testapp', '0019_auto_enforcement_guitars_fill_5_label_label_id'),
         ('testapp', '0017_auto_enforcement_parent_trigger_function'),
@@ -25,6 +26,7 @@ class Migration(migrations.Migration):
             DROP TRIGGER updated_at_trigger ON "testapp_venue";
         """,
         ),
+
         # Soft Delete Rule on "testapp_venue" table! [SQL:2b51fb0a0314]
         migrations.RunSQL(
             sql="""
@@ -41,6 +43,7 @@ class Migration(migrations.Migration):
             DROP RULE soft_delete ON "testapp_venue";
         """,
         ),
+
         # MTI Updated at Trigger on "testapp_arena" table (parent "testapp_venue")! [SQL:037c1ab610cc]
         migrations.RunSQL(
             sql="""
@@ -56,6 +59,7 @@ class Migration(migrations.Migration):
             DROP TRIGGER updated_at_trigger ON "testapp_arena";
         """,
         ),
+
         # MTI Soft Delete Rule on "testapp_arena" table (parent "testapp_venue")! [SQL:b40b6e8d79c8]
         migrations.RunSQL(
             sql="""
@@ -72,6 +76,7 @@ class Migration(migrations.Migration):
             DROP RULE soft_delete ON "testapp_arena";
         """,
         ),
+
         # Updated at Trigger on "testapp_hall" table! [SQL:7265ec431324]
         migrations.RunSQL(
             sql="""
@@ -85,6 +90,7 @@ class Migration(migrations.Migration):
             DROP TRIGGER updated_at_trigger ON "testapp_hall";
         """,
         ),
+
         # Soft Delete Rule on "testapp_hall" table! [SQL:f27d6c07c53f]
         migrations.RunSQL(
             sql="""
@@ -101,6 +107,7 @@ class Migration(migrations.Migration):
             DROP RULE soft_delete ON "testapp_hall";
         """,
         ),
+
         # MTI Updated at Trigger on "testapp_concerthall" table (parent "testapp_hall")! [SQL:aab5f9de4e50]
         migrations.RunSQL(
             sql="""
@@ -116,6 +123,7 @@ class Migration(migrations.Migration):
             DROP TRIGGER updated_at_trigger ON "testapp_concerthall";
         """,
         ),
+
         # MTI Soft Delete Rule on "testapp_concerthall" table (parent "testapp_hall")! [SQL:ae054c1ed6c0]
         migrations.RunSQL(
             sql="""
@@ -132,6 +140,7 @@ class Migration(migrations.Migration):
             DROP RULE soft_delete ON "testapp_concerthall";
         """,
         ),
+
         # MTI Updated at Trigger on "testapp_lecturehall" table (parent "testapp_hall")! [SQL:1a3a09629238]
         migrations.RunSQL(
             sql="""
@@ -147,6 +156,7 @@ class Migration(migrations.Migration):
             DROP TRIGGER updated_at_trigger ON "testapp_lecturehall";
         """,
         ),
+
         # MTI Soft Delete Rule on "testapp_lecturehall" table (parent "testapp_hall")! [SQL:787c335c6b63]
         migrations.RunSQL(
             sql="""
@@ -163,6 +173,7 @@ class Migration(migrations.Migration):
             DROP RULE soft_delete ON "testapp_lecturehall";
         """,
         ),
+
         # Updated at Trigger on "testapp_court" table! [SQL:dd27f03ed3b2]
         migrations.RunSQL(
             sql="""
@@ -176,6 +187,7 @@ class Migration(migrations.Migration):
             DROP TRIGGER updated_at_trigger ON "testapp_court";
         """,
         ),
+
         # Soft Delete Rule on "testapp_court" table! [SQL:417177cdb6b6]
         migrations.RunSQL(
             sql="""
@@ -192,6 +204,7 @@ class Migration(migrations.Migration):
             DROP RULE soft_delete ON "testapp_court";
         """,
         ),
+
         # MTI Updated at Trigger on "testapp_tenniscourt" table (parent "testapp_court")! [SQL:75319e073544]
         migrations.RunSQL(
             sql="""
@@ -207,6 +220,7 @@ class Migration(migrations.Migration):
             DROP TRIGGER updated_at_trigger ON "testapp_tenniscourt";
         """,
         ),
+
         # MTI Soft Delete Rule on "testapp_tenniscourt" table (parent "testapp_court")! [SQL:3feff02c85cc]
         migrations.RunSQL(
             sql="""
@@ -223,6 +237,7 @@ class Migration(migrations.Migration):
             DROP RULE soft_delete ON "testapp_tenniscourt";
         """,
         ),
+
         # MTI Updated at Trigger on "testapp_squashcourt" table (parent "testapp_court")! [SQL:c0a37fc12c45]
         migrations.RunSQL(
             sql="""
@@ -238,6 +253,7 @@ class Migration(migrations.Migration):
             DROP TRIGGER updated_at_trigger ON "testapp_squashcourt";
         """,
         ),
+
         # MTI Soft Delete Rule on "testapp_squashcourt" table (parent "testapp_court")! [SQL:9b9d56e745f8]
         migrations.RunSQL(
             sql="""
@@ -254,6 +270,7 @@ class Migration(migrations.Migration):
             DROP RULE soft_delete ON "testapp_squashcourt";
         """,
         ),
+
         # Soft Delete Related Rule on "testapp_court" that is related to "testapp_label"! [SQL:d8abfb1b1364]
         migrations.RunSQL(
             sql="""
@@ -271,6 +288,7 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_related_testapp_court" ON "testapp_label";
         """,
         ),
+
         # Soft Delete Related Rule on "testapp_hall" that is related to "testapp_label"! [SQL:3a862ca2f295]
         migrations.RunSQL(
             sql="""
@@ -288,6 +306,7 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_related_testapp_hall" ON "testapp_label";
         """,
         ),
+
         # Soft Delete Related Rule on "testapp_venue" that is related to "testapp_label"! [SQL:c7a130ab5951]
         migrations.RunSQL(
             sql="""
@@ -305,6 +324,7 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_related_testapp_venue" ON "testapp_label";
         """,
         ),
+
         # Tenant autofill Trigger on "testapp_venue" table (function "guitars_fill_5_label_label_id")! [SQL:a36851eee1bb]
         migrations.RunSQL(
             sql="""
@@ -317,6 +337,7 @@ class Migration(migrations.Migration):
             DROP TRIGGER "guitars_fill_5_label_label_id_trigger" ON "testapp_venue";
         """,
         ),
+
         # Tenant RLS on "testapp_arena" table! [POLICY:e00fd40c8f58] [SQL:050359f8474c]
         migrations.RunSQL(
             sql=[
@@ -340,6 +361,7 @@ class Migration(migrations.Migration):
                 """DROP POLICY IF EXISTS tenant_scope ON testapp_arena""",
             ],
         ),
+
         # Tenant RLS on "testapp_concerthall" table! [POLICY:67e0952d0986] [SQL:f1bbe707f2a1]
         migrations.RunSQL(
             sql=[
@@ -363,6 +385,7 @@ class Migration(migrations.Migration):
                 """DROP POLICY IF EXISTS tenant_scope ON testapp_concerthall""",
             ],
         ),
+
         # Tenant RLS on "testapp_lecturehall" table! [POLICY:ccdb6fa1a604] [SQL:4b4c60cd1939]
         migrations.RunSQL(
             sql=[
@@ -386,6 +409,7 @@ class Migration(migrations.Migration):
                 """DROP POLICY IF EXISTS tenant_scope ON testapp_lecturehall""",
             ],
         ),
+
         # Tenant RLS on "testapp_squashcourt" table! [POLICY:c20a7f7a00ba] [SQL:8de878e61241]
         migrations.RunSQL(
             sql=[
@@ -409,6 +433,7 @@ class Migration(migrations.Migration):
                 """DROP POLICY IF EXISTS tenant_scope ON testapp_squashcourt""",
             ],
         ),
+
         # Tenant RLS on "testapp_tenniscourt" table! [POLICY:475d87fee00e] [SQL:e3753b249382]
         migrations.RunSQL(
             sql=[
@@ -432,4 +457,5 @@ class Migration(migrations.Migration):
                 """DROP POLICY IF EXISTS tenant_scope ON testapp_tenniscourt""",
             ],
         ),
+
     ]

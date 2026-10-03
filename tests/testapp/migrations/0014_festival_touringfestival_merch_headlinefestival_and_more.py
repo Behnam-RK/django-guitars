@@ -6,6 +6,7 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
+
     dependencies = [
         ('testapp', '0013_auto_enforcement'),
     ]
@@ -14,41 +15,12 @@ class Migration(migrations.Migration):
         migrations.CreateModel(
             name='Festival',
             fields=[
-                (
-                    'id',
-                    models.BigAutoField(
-                        auto_created=True, primary_key=True, serialize=False, verbose_name='ID'
-                    ),
-                ),
-                (
-                    '_deleted_at',
-                    models.DateTimeField(editable=False, null=True, verbose_name='Deleted at'),
-                ),
-                (
-                    '_created_at',
-                    models.DateTimeField(
-                        db_default=django.db.models.functions.datetime.Now(),
-                        editable=False,
-                        verbose_name='Created at',
-                    ),
-                ),
-                (
-                    '_updated_at',
-                    models.DateTimeField(
-                        db_default=django.db.models.functions.datetime.Now(),
-                        editable=False,
-                        verbose_name='Updated at',
-                    ),
-                ),
+                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
+                ('_deleted_at', models.DateTimeField(editable=False, null=True, verbose_name='Deleted at')),
+                ('_created_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Created at')),
+                ('_updated_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Updated at')),
                 ('name', models.CharField(max_length=100)),
-                (
-                    'market',
-                    models.ForeignKey(
-                        on_delete=django.db.models.deletion.CASCADE,
-                        related_name='festivals',
-                        to='testapp.label',
-                    ),
-                ),
+                ('market', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='festivals', to='testapp.label')),
             ],
             options={
                 'abstract': False,
@@ -58,78 +30,21 @@ class Migration(migrations.Migration):
         migrations.CreateModel(
             name='TouringFestival',
             fields=[
-                (
-                    'festival_ptr',
-                    models.OneToOneField(
-                        auto_created=True,
-                        on_delete=django.db.models.deletion.CASCADE,
-                        parent_link=True,
-                        primary_key=True,
-                        serialize=False,
-                        to='testapp.festival',
-                    ),
-                ),
-                (
-                    'promoter',
-                    models.ForeignKey(
-                        on_delete=django.db.models.deletion.CASCADE,
-                        related_name='touring_festivals',
-                        to='testapp.label',
-                    ),
-                ),
+                ('festival_ptr', models.OneToOneField(auto_created=True, on_delete=django.db.models.deletion.CASCADE, parent_link=True, primary_key=True, serialize=False, to='testapp.festival')),
+                ('promoter', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='touring_festivals', to='testapp.label')),
             ],
             bases=('testapp.festival',),
         ),
         migrations.CreateModel(
             name='Merch',
             fields=[
-                (
-                    'id',
-                    models.BigAutoField(
-                        auto_created=True, primary_key=True, serialize=False, verbose_name='ID'
-                    ),
-                ),
-                (
-                    '_deleted_at',
-                    models.DateTimeField(editable=False, null=True, verbose_name='Deleted at'),
-                ),
-                (
-                    '_created_at',
-                    models.DateTimeField(
-                        db_default=django.db.models.functions.datetime.Now(),
-                        editable=False,
-                        verbose_name='Created at',
-                    ),
-                ),
-                (
-                    '_updated_at',
-                    models.DateTimeField(
-                        db_default=django.db.models.functions.datetime.Now(),
-                        editable=False,
-                        verbose_name='Updated at',
-                    ),
-                ),
+                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
+                ('_deleted_at', models.DateTimeField(editable=False, null=True, verbose_name='Deleted at')),
+                ('_created_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Created at')),
+                ('_updated_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Updated at')),
                 ('description', models.CharField(max_length=100)),
-                (
-                    'album',
-                    models.ForeignKey(
-                        blank=True,
-                        null=True,
-                        on_delete=django.db.models.deletion.CASCADE,
-                        related_name='merch',
-                        to='testapp.album',
-                    ),
-                ),
-                (
-                    'bonus_album',
-                    models.ForeignKey(
-                        blank=True,
-                        null=True,
-                        on_delete=django.db.models.deletion.CASCADE,
-                        related_name='bonus_merch',
-                        to='testapp.album',
-                    ),
-                ),
+                ('album', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.CASCADE, related_name='merch', to='testapp.album')),
+                ('bonus_album', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.CASCADE, related_name='bonus_merch', to='testapp.album')),
             ],
             options={
                 'abstract': False,
@@ -139,43 +54,21 @@ class Migration(migrations.Migration):
         migrations.CreateModel(
             name='HeadlineFestival',
             fields=[
-                (
-                    'touringfestival_ptr',
-                    models.OneToOneField(
-                        auto_created=True,
-                        on_delete=django.db.models.deletion.CASCADE,
-                        parent_link=True,
-                        primary_key=True,
-                        serialize=False,
-                        to='testapp.touringfestival',
-                    ),
-                ),
+                ('touringfestival_ptr', models.OneToOneField(auto_created=True, on_delete=django.db.models.deletion.CASCADE, parent_link=True, primary_key=True, serialize=False, to='testapp.touringfestival')),
             ],
             bases=('testapp.touringfestival',),
         ),
         migrations.AddIndex(
             model_name='festival',
-            index=models.Index(
-                condition=models.Q(('_deleted_at__isnull', True)),
-                fields=['_deleted_at'],
-                name='festival_deleted_at',
-            ),
+            index=models.Index(condition=models.Q(('_deleted_at__isnull', True)), fields=['_deleted_at'], name='festival_deleted_at'),
         ),
         migrations.AddIndex(
             model_name='merch',
-            index=models.Index(
-                condition=models.Q(('_deleted_at__isnull', True)),
-                fields=['_deleted_at'],
-                name='merch_deleted_at',
-            ),
+            index=models.Index(condition=models.Q(('_deleted_at__isnull', True)), fields=['_deleted_at'], name='merch_deleted_at'),
         ),
         migrations.AddField(
             model_name='headlinefestival',
             name='sponsor',
-            field=models.ForeignKey(
-                on_delete=django.db.models.deletion.CASCADE,
-                related_name='headline_festivals',
-                to='testapp.label',
-            ),
+            field=models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='headline_festivals', to='testapp.label'),
         ),
     ]

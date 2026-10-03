@@ -5,72 +5,30 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
+
     initial = True
 
-    dependencies = []
+    dependencies = [
+    ]
 
     operations = [
         migrations.CreateModel(
             name='LocalLabel',
             fields=[
-                (
-                    'id',
-                    models.BigAutoField(
-                        auto_created=True, primary_key=True, serialize=False, verbose_name='ID'
-                    ),
-                ),
-                (
-                    '_deleted_at',
-                    models.DateTimeField(editable=False, null=True, verbose_name='Deleted at'),
-                ),
-                (
-                    '_created_at',
-                    models.DateTimeField(
-                        db_default=django.db.models.functions.datetime.Now(),
-                        editable=False,
-                        verbose_name='Created at',
-                    ),
-                ),
-                (
-                    '_updated_at',
-                    models.DateTimeField(
-                        db_default=django.db.models.functions.datetime.Now(),
-                        editable=False,
-                        verbose_name='Updated at',
-                    ),
-                ),
+                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
+                ('_deleted_at', models.DateTimeField(editable=False, null=True, verbose_name='Deleted at')),
+                ('_created_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Created at')),
+                ('_updated_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Updated at')),
                 ('name', models.CharField(max_length=100)),
             ],
         ),
         migrations.CreateModel(
             name='TenantedAncestor',
             fields=[
-                (
-                    'id',
-                    models.BigAutoField(
-                        auto_created=True, primary_key=True, serialize=False, verbose_name='ID'
-                    ),
-                ),
-                (
-                    '_deleted_at',
-                    models.DateTimeField(editable=False, null=True, verbose_name='Deleted at'),
-                ),
-                (
-                    '_created_at',
-                    models.DateTimeField(
-                        db_default=django.db.models.functions.datetime.Now(),
-                        editable=False,
-                        verbose_name='Created at',
-                    ),
-                ),
-                (
-                    '_updated_at',
-                    models.DateTimeField(
-                        db_default=django.db.models.functions.datetime.Now(),
-                        editable=False,
-                        verbose_name='Updated at',
-                    ),
-                ),
+                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
+                ('_deleted_at', models.DateTimeField(editable=False, null=True, verbose_name='Deleted at')),
+                ('_created_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Created at')),
+                ('_updated_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Updated at')),
                 ('name', models.CharField(max_length=100)),
             ],
         ),

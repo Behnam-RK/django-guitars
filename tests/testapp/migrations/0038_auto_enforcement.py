@@ -4,6 +4,7 @@ from django.db import migrations
 
 
 class Migration(migrations.Migration):
+
     dependencies = [
         ('testapp', '0037_auto_enforcement'),
     ]
@@ -117,6 +118,7 @@ class Migration(migrations.Migration):
             DROP FUNCTION "soft_delete_owned_sweep_13_testapp_album_16_testapp__c9e1014f18"();
         """,
         ),
+
         # Soft Delete Owned Sweep on "testapp_presskit" that is owned by "testapp_album" via "press_kit_id"! [SQL:155db021095d]
         migrations.RunSQL(
             sql="""
@@ -225,6 +227,7 @@ class Migration(migrations.Migration):
             DROP FUNCTION "soft_delete_owned_sweep_13_testapp_album_16_testapp__334bdb7a77"();
         """,
         ),
+
         # Soft Delete Owned Sweep on "testapp_presskit" that is owned by "testapp_ensemble" via "press_kit_id"! [SQL:b59fa3bbfd49]
         migrations.RunSQL(
             sql="""
@@ -333,6 +336,7 @@ class Migration(migrations.Migration):
             DROP FUNCTION "soft_delete_owned_sweep_16_testapp_ensemble_16_testa_a783e60c61"();
         """,
         ),
+
         # Soft Delete Owned Sweep on "testapp_ensemble" that is owned by "testapp_merch" via "featured_orchestra_id"! [SQL:3ce0787eba3d]
         migrations.RunSQL(
             sql="""
@@ -415,6 +419,7 @@ class Migration(migrations.Migration):
             DROP FUNCTION "soft_delete_owned_sweep_13_testapp_merch_16_testapp__a2efbfd03b"();
         """,
         ),
+
         # Soft Delete Owned Sweep on "testapp_ensemble" that is owned by "testapp_patron" via "ensemble_id"! [SQL:e548cb8f0957]
         migrations.RunSQL(
             sql="""
@@ -497,6 +502,7 @@ class Migration(migrations.Migration):
             DROP FUNCTION "soft_delete_owned_sweep_14_testapp_patron_16_testapp_f691a7bc95"();
         """,
         ),
+
         # Soft Delete Owned Sweep on "testapp_stagehand" that is owned by "testapp_rider" via "stagehand_id"! [SQL:eaaf273880f5]
         migrations.RunSQL(
             sql="""
@@ -569,6 +575,7 @@ class Migration(migrations.Migration):
             DROP FUNCTION "soft_delete_owned_sweep_13_testapp_rider_17_testapp__5d4408f760"();
         """,
         ),
+
         # Soft Delete Owned Sweep on "testapp_rider" that is owned by "testapp_residency" via "rider_id"! [SQL:75a6270d9722]
         migrations.RunSQL(
             sql="""
@@ -641,6 +648,7 @@ class Migration(migrations.Migration):
             DROP FUNCTION "soft_delete_owned_sweep_17_testapp_residency_13_test_daabc7e451"();
         """,
         ),
+
         # Soft Delete Owned Sweep on "testapp_placard" that is owned by "testapp_kiosk" via "placard_id"! [SQL:e24e29abf884]
         migrations.RunSQL(
             sql="""
@@ -751,6 +759,7 @@ class Migration(migrations.Migration):
             DROP FUNCTION "soft_delete_owned_sweep_13_testapp_kiosk_15_testapp__6599948231"();
         """,
         ),
+
         # Soft Delete Owned Sweep on "testapp_placard" that is owned by "testapp_foyer" via "placard_id"! [SQL:a0e2f734ce0b]
         migrations.RunSQL(
             sql="""
@@ -861,4 +870,5 @@ class Migration(migrations.Migration):
             DROP FUNCTION "soft_delete_owned_sweep_13_testapp_foyer_15_testapp__951604b7d8"();
         """,
         ),
+
     ]

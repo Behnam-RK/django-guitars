@@ -57,9 +57,7 @@ def _program(rng: random.Random, labels: list, steps: int) -> list:
                 kind, handle = blocks.pop()
                 failing = operation == 'block_rollback'
                 if kind == 'atomic':
-                    handle.__exit__(
-                        *((RuntimeError, RuntimeError(), None) if failing else (None,) * 3)
-                    )
+                    handle.__exit__(*((RuntimeError, RuntimeError(), None) if failing else (None,) * 3))
                 elif failing:
                     transaction.savepoint_rollback(handle)
                 else:

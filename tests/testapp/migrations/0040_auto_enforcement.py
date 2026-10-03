@@ -4,6 +4,7 @@ from django.db import migrations
 
 
 class Migration(migrations.Migration):
+
     dependencies = [
         ('testapp', '0011_auto_enforcement_trigger_function'),
         ('testapp', '0039_awning_banner_billboard_scribble_signboard_and_more'),
@@ -23,6 +24,7 @@ class Migration(migrations.Migration):
             DROP TRIGGER updated_at_trigger ON "testapp_awning";
         """,
         ),
+
         # Soft Delete Rule on "testapp_awning" table! [SQL:264692f9edcf]
         migrations.RunSQL(
             sql="""
@@ -39,6 +41,7 @@ class Migration(migrations.Migration):
             DROP RULE soft_delete ON "testapp_awning";
         """,
         ),
+
         # Updated at Trigger on "testapp_banner" table! [SQL:e116a12bbfa0]
         migrations.RunSQL(
             sql="""
@@ -52,6 +55,7 @@ class Migration(migrations.Migration):
             DROP TRIGGER updated_at_trigger ON "testapp_banner";
         """,
         ),
+
         # Soft Delete Rule on "testapp_banner" table! [SQL:e1beeae1b3a2]
         migrations.RunSQL(
             sql="""
@@ -68,6 +72,7 @@ class Migration(migrations.Migration):
             DROP RULE soft_delete ON "testapp_banner";
         """,
         ),
+
         # Updated at Trigger on "testapp_billboard" table! [SQL:0240dbf558ea]
         migrations.RunSQL(
             sql="""
@@ -81,6 +86,7 @@ class Migration(migrations.Migration):
             DROP TRIGGER updated_at_trigger ON "testapp_billboard";
         """,
         ),
+
         # Soft Delete Rule on "testapp_billboard" table! [SQL:130e7c5b44d5]
         migrations.RunSQL(
             sql="""
@@ -97,6 +103,7 @@ class Migration(migrations.Migration):
             DROP RULE soft_delete ON "testapp_billboard";
         """,
         ),
+
         # Updated at Trigger on "testapp_signboard" table! [SQL:0da941035dca]
         migrations.RunSQL(
             sql="""
@@ -110,6 +117,7 @@ class Migration(migrations.Migration):
             DROP TRIGGER updated_at_trigger ON "testapp_signboard";
         """,
         ),
+
         # Soft Delete Rule on "testapp_signboard" table! [SQL:ce96dc98a6eb]
         migrations.RunSQL(
             sql="""
@@ -126,6 +134,7 @@ class Migration(migrations.Migration):
             DROP RULE soft_delete ON "testapp_signboard";
         """,
         ),
+
         # Updated at Trigger on "testapp_scribble" table! [SQL:cb4c74c17327]
         migrations.RunSQL(
             sql="""
@@ -139,6 +148,7 @@ class Migration(migrations.Migration):
             DROP TRIGGER updated_at_trigger ON "testapp_scribble";
         """,
         ),
+
         # Soft Delete Rule on "testapp_scribble" table! [SQL:c809b51eb99c]
         migrations.RunSQL(
             sql="""
@@ -155,6 +165,7 @@ class Migration(migrations.Migration):
             DROP RULE soft_delete ON "testapp_scribble";
         """,
         ),
+
         # Soft Delete Owned Rule on "testapp_awning" that is owned by "testapp_banner" via "awning_id"! [SQL:3d8f6cabf011]
         migrations.RunSQL(
             sql="""
@@ -179,6 +190,7 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_owned_14_testapp_awning_9_awning_id" ON "testapp_banner";
         """,
         ),
+
         # Soft Delete Owned Sweep on "testapp_awning" that is owned by "testapp_banner" via "awning_id"! [SQL:f929e54d6c0e]
         migrations.RunSQL(
             sql="""
@@ -251,6 +263,7 @@ class Migration(migrations.Migration):
             DROP FUNCTION "soft_delete_owned_sweep_14_testapp_banner_14_testapp_f417b53ba1"();
         """,
         ),
+
         # Soft Delete Owned Rule on "testapp_banner" that is owned by "testapp_billboard" via "banner_id"! [SQL:0a56a8ae54f4]
         migrations.RunSQL(
             sql="""
@@ -275,6 +288,7 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_owned_14_testapp_banner_9_banner_id" ON "testapp_billboard";
         """,
         ),
+
         # Soft Delete Owned Sweep on "testapp_banner" that is owned by "testapp_billboard" via "banner_id"! [SQL:c5db3e1130df]
         migrations.RunSQL(
             sql="""
@@ -347,4 +361,5 @@ class Migration(migrations.Migration):
             DROP FUNCTION "soft_delete_owned_sweep_17_testapp_billboard_14_test_d5220b4a6b"();
         """,
         ),
+
     ]

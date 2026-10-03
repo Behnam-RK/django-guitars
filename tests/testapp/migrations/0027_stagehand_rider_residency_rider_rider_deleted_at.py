@@ -7,6 +7,7 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
+
     dependencies = [
         ('testapp', '0026_auto_enforcement'),
     ]
@@ -15,86 +16,27 @@ class Migration(migrations.Migration):
         migrations.CreateModel(
             name='Stagehand',
             fields=[
-                (
-                    'id',
-                    models.BigAutoField(
-                        auto_created=True, primary_key=True, serialize=False, verbose_name='ID'
-                    ),
-                ),
-                (
-                    '_deleted_at',
-                    models.DateTimeField(editable=False, null=True, verbose_name='Deleted at'),
-                ),
-                (
-                    '_created_at',
-                    models.DateTimeField(
-                        db_default=django.db.models.functions.datetime.Now(),
-                        editable=False,
-                        verbose_name='Created at',
-                    ),
-                ),
-                (
-                    '_updated_at',
-                    models.DateTimeField(
-                        db_default=django.db.models.functions.datetime.Now(),
-                        editable=False,
-                        verbose_name='Updated at',
-                    ),
-                ),
+                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
+                ('_deleted_at', models.DateTimeField(editable=False, null=True, verbose_name='Deleted at')),
+                ('_created_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Created at')),
+                ('_updated_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Updated at')),
                 ('name', models.CharField(max_length=100)),
             ],
             options={
                 'abstract': False,
                 'default_manager_name': 'objects',
-                'indexes': [
-                    models.Index(
-                        condition=models.Q(('_deleted_at__isnull', True)),
-                        fields=['_deleted_at'],
-                        name='stagehand_deleted_at',
-                    )
-                ],
+                'indexes': [models.Index(condition=models.Q(('_deleted_at__isnull', True)), fields=['_deleted_at'], name='stagehand_deleted_at')],
             },
         ),
         migrations.CreateModel(
             name='Rider',
             fields=[
-                (
-                    'id',
-                    models.BigAutoField(
-                        auto_created=True, primary_key=True, serialize=False, verbose_name='ID'
-                    ),
-                ),
-                (
-                    '_deleted_at',
-                    models.DateTimeField(editable=False, null=True, verbose_name='Deleted at'),
-                ),
-                (
-                    '_created_at',
-                    models.DateTimeField(
-                        db_default=django.db.models.functions.datetime.Now(),
-                        editable=False,
-                        verbose_name='Created at',
-                    ),
-                ),
-                (
-                    '_updated_at',
-                    models.DateTimeField(
-                        db_default=django.db.models.functions.datetime.Now(),
-                        editable=False,
-                        verbose_name='Updated at',
-                    ),
-                ),
+                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
+                ('_deleted_at', models.DateTimeField(editable=False, null=True, verbose_name='Deleted at')),
+                ('_created_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Created at')),
+                ('_updated_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Updated at')),
                 ('clause', models.CharField(max_length=100)),
-                (
-                    'stagehand',
-                    guitars.models.OwningForeignKey(
-                        blank=True,
-                        null=True,
-                        on_delete=django.db.models.deletion.DO_NOTHING,
-                        related_name='riders',
-                        to='testapp.stagehand',
-                    ),
-                ),
+                ('stagehand', guitars.models.OwningForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.DO_NOTHING, related_name='riders', to='testapp.stagehand')),
             ],
             options={
                 'abstract': False,
@@ -104,62 +46,21 @@ class Migration(migrations.Migration):
         migrations.CreateModel(
             name='Residency',
             fields=[
-                (
-                    'id',
-                    models.BigAutoField(
-                        auto_created=True, primary_key=True, serialize=False, verbose_name='ID'
-                    ),
-                ),
-                (
-                    '_deleted_at',
-                    models.DateTimeField(editable=False, null=True, verbose_name='Deleted at'),
-                ),
-                (
-                    '_created_at',
-                    models.DateTimeField(
-                        db_default=django.db.models.functions.datetime.Now(),
-                        editable=False,
-                        verbose_name='Created at',
-                    ),
-                ),
-                (
-                    '_updated_at',
-                    models.DateTimeField(
-                        db_default=django.db.models.functions.datetime.Now(),
-                        editable=False,
-                        verbose_name='Updated at',
-                    ),
-                ),
+                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
+                ('_deleted_at', models.DateTimeField(editable=False, null=True, verbose_name='Deleted at')),
+                ('_created_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Created at')),
+                ('_updated_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Updated at')),
                 ('venue_name', models.CharField(max_length=100)),
-                (
-                    'rider',
-                    guitars.models.OwningForeignKey(
-                        blank=True,
-                        null=True,
-                        on_delete=django.db.models.deletion.DO_NOTHING,
-                        related_name='residencies',
-                        to='testapp.rider',
-                    ),
-                ),
+                ('rider', guitars.models.OwningForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.DO_NOTHING, related_name='residencies', to='testapp.rider')),
             ],
             options={
                 'abstract': False,
                 'default_manager_name': 'objects',
-                'indexes': [
-                    models.Index(
-                        condition=models.Q(('_deleted_at__isnull', True)),
-                        fields=['_deleted_at'],
-                        name='residency_deleted_at',
-                    )
-                ],
+                'indexes': [models.Index(condition=models.Q(('_deleted_at__isnull', True)), fields=['_deleted_at'], name='residency_deleted_at')],
             },
         ),
         migrations.AddIndex(
             model_name='rider',
-            index=models.Index(
-                condition=models.Q(('_deleted_at__isnull', True)),
-                fields=['_deleted_at'],
-                name='rider_deleted_at',
-            ),
+            index=models.Index(condition=models.Q(('_deleted_at__isnull', True)), fields=['_deleted_at'], name='rider_deleted_at'),
         ),
     ]

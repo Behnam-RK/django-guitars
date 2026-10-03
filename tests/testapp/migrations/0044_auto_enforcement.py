@@ -4,6 +4,7 @@ from django.db import migrations
 
 
 class Migration(migrations.Migration):
+
     dependencies = [
         ('testapp', '0019_auto_enforcement_guitars_fill_5_label_label_id'),
         ('testapp', '0011_auto_enforcement_trigger_function'),
@@ -24,6 +25,7 @@ class Migration(migrations.Migration):
             DROP TRIGGER updated_at_trigger ON "testapp_riser";
         """,
         ),
+
         # Soft Delete Rule on "testapp_riser" table! [SQL:38350a4a5031]
         migrations.RunSQL(
             sql="""
@@ -40,6 +42,7 @@ class Migration(migrations.Migration):
             DROP RULE soft_delete ON "testapp_riser";
         """,
         ),
+
         # Updated at Trigger on "testapp_rack" table! [SQL:eb311a756b30]
         migrations.RunSQL(
             sql="""
@@ -53,6 +56,7 @@ class Migration(migrations.Migration):
             DROP TRIGGER updated_at_trigger ON "testapp_rack";
         """,
         ),
+
         # Soft Delete Rule on "testapp_rack" table! [SQL:e50c51f7688a]
         migrations.RunSQL(
             sql="""
@@ -69,6 +73,7 @@ class Migration(migrations.Migration):
             DROP RULE soft_delete ON "testapp_rack";
         """,
         ),
+
         # Updated at Trigger on "testapp_troupe" table! [SQL:b563a8d8d2fb]
         migrations.RunSQL(
             sql="""
@@ -82,6 +87,7 @@ class Migration(migrations.Migration):
             DROP TRIGGER updated_at_trigger ON "testapp_troupe";
         """,
         ),
+
         # Soft Delete Rule on "testapp_troupe" table! [SQL:f231cbc86173]
         migrations.RunSQL(
             sql="""
@@ -98,6 +104,7 @@ class Migration(migrations.Migration):
             DROP RULE soft_delete ON "testapp_troupe";
         """,
         ),
+
         # Soft Delete Related Rule on "testapp_troupe" that is related to "testapp_label"! [SQL:1c5e140e0e1d]
         migrations.RunSQL(
             sql="""
@@ -115,6 +122,7 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_related_testapp_troupe" ON "testapp_label";
         """,
         ),
+
         # Soft Delete Self Cascade Trigger on "testapp_rack" via "parent_id"! [SQL:4c4cbeab4d78]
         migrations.RunSQL(
             sql="""
@@ -162,6 +170,7 @@ class Migration(migrations.Migration):
             DROP FUNCTION "soft_delete_self_cascade_12_testapp_rack_9_parent_id"();
         """,
         ),
+
         # Soft Delete Owned Rule on "testapp_riser" that is owned by "testapp_rack" via "riser_id"! [SQL:11529906492c]
         migrations.RunSQL(
             sql="""
@@ -186,6 +195,7 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_owned_13_testapp_riser_8_riser_id" ON "testapp_rack";
         """,
         ),
+
         # Soft Delete Owned Sweep on "testapp_riser" that is owned by "testapp_rack" via "riser_id"! [SQL:7a9362d06bc9]
         migrations.RunSQL(
             sql="""
@@ -258,6 +268,7 @@ class Migration(migrations.Migration):
             DROP FUNCTION "soft_delete_owned_sweep_12_testapp_rack_13_testapp_r_e10c5b7096"();
         """,
         ),
+
         # Soft Delete Self Cascade Trigger on "testapp_troupe" via "parent_id"! [SQL:ca1ffd4803ed]
         migrations.RunSQL(
             sql="""
@@ -305,6 +316,7 @@ class Migration(migrations.Migration):
             DROP FUNCTION "soft_delete_self_cascade_14_testapp_troupe_9_parent_id"();
         """,
         ),
+
         # Tenant autofill Trigger on "testapp_troupe" table (function "guitars_fill_5_label_label_id")! [SQL:fde02cf78302]
         migrations.RunSQL(
             sql="""
@@ -317,6 +329,7 @@ class Migration(migrations.Migration):
             DROP TRIGGER "guitars_fill_5_label_label_id_trigger" ON "testapp_troupe";
         """,
         ),
+
         # Tenant RLS on "testapp_troupe" table! [POLICY:1669775c43fd] [SQL:db4aecf1c60b]
         migrations.RunSQL(
             sql=[
@@ -332,4 +345,5 @@ class Migration(migrations.Migration):
                 """DROP POLICY IF EXISTS tenant_scope ON testapp_troupe""",
             ],
         ),
+
     ]

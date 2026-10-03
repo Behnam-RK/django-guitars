@@ -70,7 +70,9 @@ class TestARevertedPublishIsRepublished:
 
             assert _published() == str(tenants.b.pk)
 
-    def test_rollback_of_an_enclosing_savepoint_after_the_inner_one_was_released(self, tenants):
+    def test_rollback_of_an_enclosing_savepoint_after_the_inner_one_was_released(
+        self, tenants
+    ):
         with tenant(label=tenants.a), _Interleaved() as interleaved:
             outer = interleaved.enter(transaction.atomic())
             inner = interleaved.enter(transaction.atomic())
@@ -92,6 +94,7 @@ class TestARevertedPublishIsRepublished:
             interleaved.roll_back(outer)
 
             assert _published() == str(tenants.b.pk)
+
 
 
 @pytest.mark.django_db
@@ -127,7 +130,9 @@ class TestARollbackWithTheScopeStillOpen:
     SAVEPOINT`` statement itself, which then reverts it -- and the cache recorded it. Found by a
     reviewer; present before this branch, on every path ending in that statement."""
 
-    def test_a_scope_entered_in_the_savepoint_with_no_query_before_the_rollback(self, tenants):
+    def test_a_scope_entered_in_the_savepoint_with_no_query_before_the_rollback(
+        self, tenants
+    ):
         with tenant(label=tenants.a), _Interleaved() as interleaved:
             scalar('SELECT 1')
             block = interleaved.enter(transaction.atomic())
@@ -217,7 +222,7 @@ class TestTheMatcherNeverBacktracks:
             "sql = {'leading': '/* c */ ' * 2000 + 'SELECT 1',"
             " 'later': '/* a */ SELECT 1 ' + '/* c */ ' * 2000,"
             " 'unclosed': '/* ' + 'x ' * 20000,"
-            " 'nested': '/* ' * 2000 + '*/ ' * 2000 + 'SELECT 1'}[" + repr(shape) + ']\n'
+            " 'nested': '/* ' * 2000 + '*/ ' * 2000 + 'SELECT 1'}[" + repr(shape) + "]\n"
             'print(_reverts_a_set(sql))'
         )
         done = subprocess.run(
@@ -253,18 +258,8 @@ class TestRollbackThroughOtherDoors:
 
 @pytest.mark.parametrize(
     'statement',
-    [
-        'COMMIT',
-        'COMMIT AND CHAIN',
-        'END',
-        'ROLLBACK',
-        'ABORT',
-        'ABORT AND CHAIN',
-        'ROLLBACK AND CHAIN',
-        'SELECT 1; ABORT',
-        'SELECT 1; COMMIT',
-        'SELECT 1; END',
-    ],
+    ['COMMIT', 'COMMIT AND CHAIN', 'END', 'ROLLBACK', 'ABORT', 'ABORT AND CHAIN',
+     'ROLLBACK AND CHAIN', 'SELECT 1; ABORT', 'SELECT 1; COMMIT', 'SELECT 1; END'],
 )
 def test_ending_the_transaction_in_raw_sql_republishes(transactional_db, statement):
     """Each undoes every ``SET LOCAL`` while Django still believes it is inside its block. Run in
@@ -282,21 +277,9 @@ def test_ending_the_transaction_in_raw_sql_republishes(transactional_db, stateme
 class TestWhatIsNotARollback:
     @pytest.mark.parametrize(
         'statement',
-        [
-            '',
-            '   ',
-            '-- only a comment',
-            '/* only a comment */',
-            '/* unterminated',
-            'SELECT 1',
-            'BEGIN',
-            "SELECT 'ROLLBACK TO x'",
-            'ROLLBACKTO x',
-            "ROLLBACK PREPARED 'gid'",
-            "COMMIT PREPARED 'gid'",
-            'SELECT 1; SELECT 2',
-            'SELECT 1;',
-        ],
+        ['', '   ', '-- only a comment', '/* only a comment */', '/* unterminated', 'SELECT 1',
+         'BEGIN', "SELECT 'ROLLBACK TO x'", 'ROLLBACKTO x', 'ROLLBACK PREPARED \'gid\'',
+         'COMMIT PREPARED \'gid\'', 'SELECT 1; SELECT 2', 'SELECT 1;'],
     )
     def test_it_is_left_alone(self, statement):
         """Only the exact statement shape counts: a name that merely starts with ROLLBACK, or one
@@ -305,25 +288,11 @@ class TestWhatIsNotARollback:
 
     @pytest.mark.parametrize(
         'statement',
-        [
-            'ROLLBACK',
-            'ROLLBACK;',
-            'ABORT',
-            'ROLLBACK AND CHAIN',
-            'abort and chain',
-            'COMMIT',
-            'COMMIT AND CHAIN',
-            'END',
-            'ROLLBACK TO SAVEPOINT p',
-            'SELECT 1; ROLLBACK TO SAVEPOINT p',
-            '; ROLLBACK TO SAVEPOINT p',
-            'SET LOCAL x.y = 1; ROLLBACK TO SAVEPOINT p',
-            'SELECT 1; ABORT',
-            'SELECT 1; ABORT WORK',
-            'SELECT 1; COMMIT',
-            'SELECT 1; END',
-            'SELECT 1; COMMIT AND CHAIN',
-        ],
+        ['ROLLBACK', 'ROLLBACK;', 'ABORT', 'ROLLBACK AND CHAIN', 'abort and chain', 'COMMIT',
+         'COMMIT AND CHAIN', 'END', 'ROLLBACK TO SAVEPOINT p', 'SELECT 1; ROLLBACK TO SAVEPOINT p',
+         '; ROLLBACK TO SAVEPOINT p', "SET LOCAL x.y = 1; ROLLBACK TO SAVEPOINT p",
+         'SELECT 1; ABORT', 'SELECT 1; ABORT WORK', 'SELECT 1; COMMIT', 'SELECT 1; END',
+         'SELECT 1; COMMIT AND CHAIN'],
     )
     def test_anything_that_ends_the_transaction_or_its_savepoint_counts(self, statement):
         """Each reverts every ``SET LOCAL``, ``AND CHAIN`` and a bare ``ROLLBACK`` included."""

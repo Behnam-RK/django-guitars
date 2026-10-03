@@ -114,7 +114,9 @@ class TestLocalTenantFields:
     def test_a_lookup_naming_a_non_concrete_field_is_not_local(self, monkeypatch):
         """A lookup with no ``__`` is not automatically a column -- ``albums`` resolves as
         a reverse relation, which has no column of its own, and must be dropped too."""
-        monkeypatch.setattr('guitars.tenancy.spec.tenant_spec', lambda model: {'label': 'albums'})
+        monkeypatch.setattr(
+            'guitars.tenancy.spec.tenant_spec', lambda model: {'label': 'albums'}
+        )
 
         assert spec.local_tenant_fields(Band) == {}
 

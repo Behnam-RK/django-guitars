@@ -681,6 +681,4 @@ class TestTenantAutofillTrigger:
             assert self._tenant_of('both') == TENANT_A
             assert stamped is True
         finally:
-            _execute(
-                sql.DROP_SOFT_DELETE_RULE.format(table=_identifiers._quote_table(_OWNER_TABLE))
-            )
+            _execute(sql.DROP_SOFT_DELETE_RULE.format(table=_identifiers._quote_table(_OWNER_TABLE)))

@@ -4,6 +4,7 @@ from django.db import migrations
 
 
 class Migration(migrations.Migration):
+
     dependencies = [
         ('testapp', '0056_rename_encore_deleted_at_refrain_deleted_at_and_more'),
     ]
@@ -27,6 +28,7 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_related_testapp_album" ON "testapp_band";
         """,
         ),
+
         # Soft Delete Related Rule on "testapp_merch" that is related to "testapp_album"! [SQL:5a795ea3d52f]
         migrations.RunSQL(
             sql="""
@@ -45,6 +47,7 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_related_testapp_merch" ON "testapp_album";
         """,
         ),
+
         # Soft Delete Related Rule on "testapp_merch" that is related to "testapp_album" via "bonus_album_id"! [SQL:fb2aee0ad137]
         migrations.RunSQL(
             sql="""
@@ -63,6 +66,7 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_related_testapp_merch_bonus_album_id" ON "testapp_album";
         """,
         ),
+
         # Soft Delete Related Rule on "testapp_section" that is related to "testapp_ensemble"! [SQL:4ec973294834]
         migrations.RunSQL(
             sql="""
@@ -81,6 +85,7 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_related_testapp_section" ON "testapp_ensemble";
         """,
         ),
+
         # Soft Delete Related Rule on "testapp_booking" that is related to "testapp_label"! [SQL:1cca3380fa54]
         migrations.RunSQL(
             sql="""
@@ -99,6 +104,7 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_related_testapp_booking" ON "testapp_label";
         """,
         ),
+
         # Soft Delete Related Rule on "testapp_court" that is related to "testapp_label"! [SQL:30cd50fc681f]
         migrations.RunSQL(
             sql="""
@@ -117,6 +123,7 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_related_testapp_court" ON "testapp_label";
         """,
         ),
+
         # Soft Delete Related Rule on "testapp_festival" that is related to "testapp_label"! [SQL:322708a563d1]
         migrations.RunSQL(
             sql="""
@@ -135,6 +142,7 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_related_testapp_festival" ON "testapp_label";
         """,
         ),
+
         # Soft Delete Related Rule on "testapp_hall" that is related to "testapp_label"! [SQL:aedaa658c129]
         migrations.RunSQL(
             sql="""
@@ -153,6 +161,7 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_related_testapp_hall" ON "testapp_label";
         """,
         ),
+
         # Soft Delete Related Rule on "testapp_release" that is related to "testapp_label"! [SQL:b0c289d73cd4]
         migrations.RunSQL(
             sql="""
@@ -171,6 +180,7 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_related_testapp_release" ON "testapp_label";
         """,
         ),
+
         # Soft Delete Related Rule on "testapp_tour" that is related to "testapp_label"! [SQL:96d41188e554]
         migrations.RunSQL(
             sql="""
@@ -189,6 +199,7 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_related_testapp_tour" ON "testapp_label";
         """,
         ),
+
         # Soft Delete Related Rule on "testapp_track" that is related to "testapp_label"! [SQL:07045916046c]
         migrations.RunSQL(
             sql="""
@@ -207,6 +218,7 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_related_testapp_track" ON "testapp_label";
         """,
         ),
+
         # Soft Delete Related Rule on "testapp_troupe" that is related to "testapp_label"! [SQL:90eed053eb23]
         migrations.RunSQL(
             sql="""
@@ -225,6 +237,7 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_related_testapp_troupe" ON "testapp_label";
         """,
         ),
+
         # Soft Delete Related Rule on "testapp_venue" that is related to "testapp_label"! [SQL:e585e658a0f7]
         migrations.RunSQL(
             sql="""
@@ -243,6 +256,7 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_related_testapp_venue" ON "testapp_label";
         """,
         ),
+
         # Soft Delete Related Rule on "testapp_review" that is related to "testapp_release"! [SQL:dfa3d3293ba7]
         migrations.RunSQL(
             sql="""
@@ -261,6 +275,7 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_related_testapp_review" ON "testapp_release";
         """,
         ),
+
         # Soft Delete Related Rule on "testapp_track" that is related to "testapp_release"! [SQL:5278fbc74dbe]
         migrations.RunSQL(
             sql="""
@@ -279,6 +294,7 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_related_testapp_track" ON "testapp_release";
         """,
         ),
+
         # Soft Delete Related Rule on "testapp_setlistentry" that is related to "testapp_setlist"! [SQL:5f78110d88a4]
         migrations.RunSQL(
             sql="""
@@ -297,4 +313,5 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_related_testapp_setlistentry" ON "testapp_setlist";
         """,
         ),
+
     ]

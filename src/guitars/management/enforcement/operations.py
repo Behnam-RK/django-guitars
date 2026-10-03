@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import re
+from operator import itemgetter
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from django.apps import apps as django_apps
@@ -71,6 +72,7 @@ from guitars.management.enforcement.headers import (
     HEADER_TENANT_POLICY_REPLACED,
     HEADER_UPDATED_AT,
     RE_TENANT_AUTOFILL_FUNCTION,
+    RE_TENANT_AUTOFILL_TABLE,
 )
 from guitars.management.enforcement.identity import _literal, _operation
 from guitars.models.fields import OwningForeignKey, _targets_primary_key
@@ -83,6 +85,8 @@ from guitars.tenancy.discovery import (
     app_coverage,
     autofill_function_name,
     autofill_trigger_name,
+    expected_coverage,
+    tenant_policies_enabled,
 )
 
 
@@ -95,32 +99,6 @@ if TYPE_CHECKING:
 
     from guitars.management.enforcement.scanning import CascadeRetirementSite, ExistingOperations
     from guitars.tenancy.discovery import TableCoverage
-
-
-# Each create header's scanner, with the group naming the table its object fires on: a cascade
-# rule and its revive fire on the owner (the second slot), every other family on the first.
-_FIRES_ON = (
-    (_RE_UPDATED_AT, 1),
-    (_RE_SOFT_DELETE, 1),
-    (_RE_SOFT_DELETE_RELATED, 2),
-    (_RE_SOFT_DELETE_REVIVE, 2),
-    (_RE_SOFT_DELETE_OWNED, 2),
-    (_RE_SOFT_DELETE_OWNED_SWEEP, 2),
-    (_RE_SOFT_DELETE_SELF_CASCADE, 1),
-    (_RE_MTI_UPDATED_AT, 1),
-    (_RE_MTI_SOFT_DELETE, 1),
-    (_RE_TENANT_AUTOFILL, 1),
-    (_RE_TENANT_POLICY, 1),
-)
-
-
-def _tables_fired_on(content: str) -> set[str]:
-    """The tables *content*'s create headers put an object on."""
-    return {
-        _identifiers._unescape_ident(match.group(group))
-        for pattern, group in _FIRES_ON
-        for match in pattern.finditer(content)
-    }
 
 
 class _RetiredFamily(NamedTuple):
@@ -1540,8 +1518,8 @@ class OperationsMixin:
     def _record_readoption_edge(
         self,
         app_label: str,
-        key: tuple[str, str, str | None],
-        recorded: dict[tuple[str, str, str | None], str | None] | None = None,
+        key: tuple,
+        recorded: dict[Any, str | None] | None = None,
         retirement_sites: list[CascadeRetirementSite] | None = None,
     ) -> None:
         """Order a cascade create against the retirement it revives. Without it a fresh
@@ -2139,6 +2117,7 @@ class OperationsMixin:
                 ident_owner_pk=ident_owner_pk,
                 foreign_key=fk_field.column,
                 adopt=adopt,
+                app_label=model._meta.app_label,
             )
         return ops
 
@@ -2153,6 +2132,7 @@ class OperationsMixin:
         ident_owner_pk: str,
         foreign_key: str,
         adopt: bool,
+        app_label: str,
     ) -> None:
         """The statement-level trigger a self-referential CASCADE FK takes in place of the rule
         the loop above emits (ADR 0018). Appended from inside :meth:`_cascade_operations`, after
@@ -2201,6 +2181,14 @@ class OperationsMixin:
         # holding its name would report a clash against the one relation that does reach it.
         self._claim_sweep_function_name(
             name, (owner_table, owner_table, foreign_key), kind='Self cascade trigger'
+        )
+        # Against the retirement it revives, which the table's app hosts while this create
+        # can land in an MTI descendant's: unordered, a fresh migrate runs it first (ADR 0021).
+        self._record_readoption_edge(
+            app_label,
+            key,
+            self.existing.soft_delete_self_cascade,
+            self.existing.self_cascade_retirement_sites,
         )
         self._append_if_stale(
             ops,
@@ -2455,6 +2443,15 @@ class OperationsMixin:
                     )
                     + forward
                 )
+            # Each half against the retirement it revives, as the cascade pair does (ADR 0021).
+            for recorded, sites in (
+                (self.existing.soft_delete_owned, self.existing.owned_retirement_sites),
+                (
+                    self.existing.soft_delete_owned_sweep,
+                    self.existing.owned_sweep_retirement_sites,
+                ),
+            ):
+                self._record_readoption_edge(model._meta.app_label, key, recorded, sites)
             self._append_if_stale(
                 ops,
                 self.existing.soft_delete_owned,
@@ -2862,6 +2859,9 @@ class OperationsMixin:
     def _scoped_trigger_retirement_notes(self, requested: set[str]) -> list[str]:
         """#66's retirements a scoped run leaves unwritten because the table they fire on is
         hosted by an app outside it: each trigger named, since it fails every UPDATE there."""
+        # An unscoped run writes these itself; only a scoped one can leave them behind.
+        if not requested:
+            return []
         hosting = self._table_app_labels()
         undeclared = (
             set(self.existing.soft_delete_owned) | set(self.existing.soft_delete_owned_sweep)
@@ -2907,9 +2907,9 @@ class OperationsMixin:
         return recreated_tables(self._migration_loader())
 
     def _recreated_table_notes(self) -> list[str]:
-        """A table recreated on its old ``db_table`` with nothing re-created *on* it since: the
-        objects went with the old table, yet their headers still read as coverage. Named for
-        ``--adopt`` to repair, never repaired here (#66)."""
+        """A table recreated on its old ``db_table``: every object the old table carried went
+        with it, yet its header still reads as coverage. Named, per object, for ``--adopt`` to
+        repair -- never repaired here (#66)."""
         recreated = self._recreated_tables()
         if not recreated:
             return []
@@ -2919,36 +2919,145 @@ class OperationsMixin:
             old: new for new, squash in loader.replacements.items() for old in squash.replaces
         }
         _required, models_by_table = self._cascade_key_maps()
+        families = self._families_on_a_table()
+        creates: dict[tuple[int, object], set[tuple[str, str]]] = {}
+        for app in django_apps.get_app_configs():
+            if not _generator.is_local(app):
+                continue
+            for path, content in _generator.iter_migration_files(app):
+                node = replaced_by.get((app.label, path.stem), (app.label, path.stem))
+                if node not in loader.graph.nodes:
+                    continue
+                for index, (pattern, key_of, fires_on, _recorded, _needed) in enumerate(families):
+                    for match in pattern.finditer(content):
+                        if fires_on(key_of(match)) in recreated:
+                            creates.setdefault((index, key_of(match)), set()).add(node)
         notes = []
         for table, recreating in sorted(recreated.items()):
-            # What the current model needs: a plain model recreated on the name needs nothing,
-            # and naming it would keep ``--check`` red past an ``--adopt`` that writes nothing.
             model = models_by_table.get(table)
-            if model is None or not (
-                has_column(model, '_deleted_at') or has_column(model, '_updated_at')
-            ):
+            if model is None or not migrates_to_postgresql(model):
                 continue
-            nodes = [replaced_by.get(node, node) for node in self._nodes_firing_on(table)]
-            nodes = [node for node in nodes if node in loader.graph.nodes]
-            if not nodes or any(recreating in loader.graph.forwards_plan(n) for n in nodes):
-                continue
-            notes.append(
-                f"Table '{table}' was dropped and recreated (at {recreating[0]}."
-                f'{recreating[1]}) and nothing has been re-created on it since: its rules and '
-                f'triggers went with the old table, and this command still reads them as '
-                f'present. Run makeguitarmigrations --adopt to re-create them.'
+            # Per object, not per table: one new object on the table says nothing of the rest.
+            # Only what is recorded and still called for -- else ``--adopt`` writes nothing.
+            lost = sorted(
+                str(key)
+                for (index, key), nodes in creates.items()
+                if families[index][2](key) == table
+                and key in families[index][3]
+                and families[index][4](key, model)
+                and not any(recreating in loader.graph.forwards_plan(node) for node in nodes)
             )
+            if lost:
+                notes.append(
+                    f"Table '{table}' was dropped and recreated (at {recreating[0]}."
+                    f'{recreating[1]}), taking with it what the old table carried, yet this '
+                    f'command still reads it as present: {", ".join(lost)}. Run '
+                    f'makeguitarmigrations --adopt to re-create them.'
+                )
         return notes
 
-    def _nodes_firing_on(self, table: str) -> list[tuple[str, str]]:
-        """Every local migration with a create header whose object fires *on* *table* -- never
-        one merely naming it, as an owner's cascade rule names its child."""
+    def _families_on_a_table(self) -> list[tuple]:
+        """``(scanner, key, table it fires on, recorded keys, still called for)`` for every
+        family whose object lives on one table -- what a ``DROP TABLE`` takes with it."""
+        # The scan's own key reader for the cascade pair, so the two cannot spell a key apart.
+        from guitars.management.enforcement.scanning import _cascade_key  # noqa: PLC0415
+
+        coverage = expected_coverage().tables if tenant_policies_enabled() else {}
+        required, _by_table = self._cascade_key_maps()
+        declared = self._declared_owned_keys()
+        selfs = self._required_self_cascades()
+
+        def single(match):
+            return _identifiers._unescape_ident(match.group(1))
+
+        def groups(match):
+            return tuple(_identifiers._unescape_ident(group) for group in match.groups())
+
+        def autofill(match):
+            return (
+                _identifiers._unescape_ident(match.group(RE_TENANT_AUTOFILL_TABLE)),
+                _identifiers._unescape_ident(match.group(RE_TENANT_AUTOFILL_FUNCTION)),
+            )
+
+        existing = self.existing
         return [
-            (app.label, path.stem)
-            for app in django_apps.get_app_configs()
-            if _generator.is_local(app)
-            for path, content in _generator.iter_migration_files(app)
-            if table in _tables_fired_on(content)
+            (
+                _RE_UPDATED_AT,
+                single,
+                str,
+                existing.triggers,
+                lambda _k, m: owns_column(m, '_updated_at'),
+            ),
+            (
+                _RE_SOFT_DELETE,
+                single,
+                str,
+                existing.soft_deletes,
+                lambda _k, m: owns_column(m, '_deleted_at') and not refuses_soft_delete_rule(m),
+            ),
+            (
+                _RE_MTI_UPDATED_AT,
+                single,
+                str,
+                existing.mti_triggers,
+                lambda _k, m: is_mti_child(m, '_updated_at'),
+            ),
+            (
+                _RE_MTI_SOFT_DELETE,
+                single,
+                str,
+                existing.mti_soft_deletes,
+                lambda _k, m: is_mti_child(m, '_deleted_at') and not refuses_soft_delete_rule(m),
+            ),
+            (
+                _RE_SOFT_DELETE_RELATED,
+                _cascade_key,
+                itemgetter(1),
+                existing.soft_delete_related,
+                lambda k, _m: k in required,
+            ),
+            (
+                _RE_SOFT_DELETE_REVIVE,
+                _cascade_key,
+                itemgetter(1),
+                existing.soft_delete_revive,
+                lambda k, _m: k in required,
+            ),
+            (
+                _RE_SOFT_DELETE_OWNED,
+                groups,
+                itemgetter(1),
+                existing.soft_delete_owned,
+                lambda k, _m: k in declared,
+            ),
+            (
+                _RE_SOFT_DELETE_OWNED_SWEEP,
+                groups,
+                itemgetter(1),
+                existing.soft_delete_owned_sweep,
+                lambda k, _m: k in declared,
+            ),
+            (
+                _RE_SOFT_DELETE_SELF_CASCADE,
+                groups,
+                itemgetter(0),
+                existing.soft_delete_self_cascade,
+                lambda k, _m: k in selfs,
+            ),
+            (
+                _RE_TENANT_AUTOFILL,
+                autofill,
+                itemgetter(0),
+                existing.tenant_autofill,
+                lambda k, _m: k[0] in coverage,
+            ),
+            (
+                _RE_TENANT_POLICY,
+                single,
+                str,
+                existing.tenant_policies,
+                lambda k, _m: k in coverage,
+            ),
         ]
 
     def _drop_cached_migration_loader(self) -> None:

@@ -16,11 +16,11 @@ A plpgsql trigger body records no `pg_depend` dependency on the tables and colum
 
 ## Decision
 
-- **Evidence from migration history.** `graph.dropped_tables` walks the migration **graph** forward once, reading state before each operation, and returns each table a top-level `DeleteModel` dropped and no model holds by the end (nor any model of an app without migrations), with the migration that dropped it. A recorded cascade key whose child is in that set is retired, ordered after that migration.
+- **Evidence from migration history.** `graph.dropped_tables` walks the migration **graph** forward once, reading state before each operation, and returns each table a top-level `DeleteModel` dropped and no model holds by the end, with the migration that dropped it; the generator then leaves out any table a model in the registry holds now. A recorded cascade key whose child is in that set is retired, ordered after that migration.
 - **Retire the trigger families.** A recorded owned key no `OwningForeignKey` declares any more, and a self-cascade key the models no longer call for, are retired in the app hosting the table they fire on. Like the cascade family they record their creates, settle their retirements against the graph, and depend on the newest create in another app: an MTI descendant's pass writes a self-cascade trigger into the descendant's app. A declared but refused owned key is left to the existing `--check` failure.
 - **Every retirement says `IF EXISTS`**, over every name the tables have held. The new retirements' reverse, and a deleted child's, refuses and points at `--adopt`; a cascade or autofill retirement still recreates what it can.
 - **The scan forgets only what `RetireEnforcement` drops**: a trigger only on a whole-table retirement of the table it fires on.
-- **A recreated table fails `--check`.** `graph.recreated_tables` names the migration that took a dropped table back. Where the current model needs enforcement and no create header for an object *on* that table descends from it, `--check` fails and names `makeguitarmigrations --adopt`.
+- **A recreated table fails `--check`.** `graph.recreated_tables` names the migration that took a dropped table back. It is decided **per object**: every object recorded on that table that the current models still call for, and none of whose creates descends from the recreate, is named, and `--check` fails pointing at `makeguitarmigrations --adopt`. One object re-created on the table vouches for no other.
 
 ## Why
 

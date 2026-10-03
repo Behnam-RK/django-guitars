@@ -2,6 +2,7 @@
 rule, which names the child in its action, but not the revive trigger on the owner: a plpgsql
 body records no dependency. The trigger then fails every ``UPDATE`` on the owner."""
 
+import types
 from io import StringIO
 from pathlib import Path
 
@@ -18,9 +19,21 @@ from django.db.migrations.operations import (
     SeparateDatabaseAndState,
 )
 
+from guitars.management import _generator
 from guitars.management.enforcement import graph
 from guitars.management.enforcement import operations as operations_module
 from guitars.management.enforcement.command import Command
+from guitars.management.enforcement.headers import (
+    HEADER_MTI_UPDATED_AT,
+    HEADER_SOFT_DELETE,
+    HEADER_SOFT_DELETE_OWNED_SWEEP,
+    HEADER_SOFT_DELETE_RELATED,
+    HEADER_SOFT_DELETE_REVIVE,
+    HEADER_SOFT_DELETE_SELF_CASCADE,
+    HEADER_TENANT_AUTOFILL,
+    HEADER_TENANT_POLICY,
+    HEADER_UPDATED_AT,
+)
 from guitars.operations import RetireEnforcement
 from tests.conftest import clear_cascade_coverage, execute, scalar
 
@@ -303,9 +316,16 @@ def test_an_owner_whose_table_was_dropped_is_not_named(monkeypatch):
 
 
 class TestARecreatedTable:
-    """Deleted and recreated on one ``db_table`` with no generation between: the objects went
-    with the old table, the scan still reads them as covered, and only ``--adopt`` re-creates
-    them. Detected and failed in ``--check`` rather than repaired (#66)."""
+    """Deleted and recreated on one ``db_table``: the objects went with the old table, the scan
+    still reads them as covered, and only ``--adopt`` re-creates them. Detected per object and
+    failed in ``--check`` rather than repaired (#66)."""
+
+    TABLE = 'testapp_setlist'
+    BEFORE, RECREATE, AFTER = (
+        '0042_auto_enforcement',
+        '0060_auto_enforcement',
+        '0061_retirement_host',
+    )
 
     def test_the_walk_names_the_recreating_migration(self):
         loader = _Loader([_create()], [DeleteModel('item')], [_create()])
@@ -315,67 +335,107 @@ class TestARecreatedTable:
     def test_a_table_never_deleted_is_not_recreated(self):
         assert graph.recreated_tables(_Loader([_create()])) == {}
 
-    def test_enforcement_older_than_the_recreate_is_named(self, monkeypatch):
+    def _notes(self, monkeypatch, files: dict[str, str], recreated=None, **recorded):
+        """*files* replace testapp's migrations by stem, on real graph nodes."""
         command = Command()
-        newest = sorted(
-            path.stem for path in (Path(__file__).parent / 'testapp' / 'migrations').glob('0*.py')
-        )[-1]
-        monkeypatch.setattr(command, '_recreated_tables', lambda: {OWNER: ('testapp', newest)})
-
-        (note,) = command._recreated_table_notes()
-
-        assert OWNER in note
-        assert 'makeguitarmigrations --adopt' in note
-
-    def test_enforcement_after_the_recreate_is_coverage(self, monkeypatch):
-        command = Command()
+        for family, keys in recorded.items():
+            target = getattr(command.existing, family)
+            for key in keys:
+                target.add(key) if isinstance(target, set) else target.__setitem__(key, 'x')
         monkeypatch.setattr(
-            command, '_recreated_tables', lambda: {OWNER: ('testapp', '0001_initial')}
+            command,
+            '_recreated_tables',
+            lambda: recreated or {self.TABLE: ('testapp', self.RECREATE)},
         )
-
-        assert command._recreated_table_notes() == []
-
-    def test_a_table_with_no_enforcement_is_not_named(self, monkeypatch):
-        command = Command()
         monkeypatch.setattr(
-            command, '_recreated_tables', lambda: {'testapp_nothing': ('testapp', '0001_initial')}
+            _generator,
+            'iter_migration_files',
+            lambda app: (
+                [(types.SimpleNamespace(stem=stem), text) for stem, text in files.items()]
+                if app.label == 'testapp'
+                else []
+            ),
         )
+        return command._recreated_table_notes()
 
-        assert command._recreated_table_notes() == []
+    def _header(self, template, **slots):
+        return template.format(**slots) + ' [SQL:abc]\n'
 
-    def test_only_a_header_firing_on_the_table_is_coverage(self):
-        """An owner's cascade rule names its child, but its object lives on the owner: counting
-        it read a recreated child as covered while the child's own rule and trigger were gone."""
-        content = '\n'.join(
+    def test_each_lost_object_is_named_and_one_recreated_object_hides_none(self, monkeypatch):
+        """Per object: a self-cascade trigger re-created after the recreate does not vouch for
+        the table's own soft-delete rule and trigger, which went with the old table."""
+        t = self.TABLE
+        before = ''.join(
             [
-                '# Soft Delete Related Rule on "shop_foo" that is related to "shop_owner"! [SQL:a]',
-                '# Soft Delete Revive Trigger on "shop_foo" that is related to "shop_owner"! [SQL:b]',
-                '# Soft Delete Owned Rule on "shop_kit" that is owned by "shop_box" via "kit_id"!',
-                '# Updated at Trigger on "shop_bar" table! [SQL:c]',
-                '# Soft Delete Rule retired on "shop_baz" table!',
+                self._header(HEADER_UPDATED_AT, table=t),
+                self._header(HEADER_SOFT_DELETE, table=t),
+                self._header(HEADER_MTI_UPDATED_AT, child_table=t, parent_table='x'),
+                self._header(
+                    HEADER_SOFT_DELETE_RELATED, related_table='testapp_setlistentry', table=t
+                ),
+                self._header(
+                    HEADER_SOFT_DELETE_REVIVE, related_table='testapp_setlistentry', table=t
+                ),
+                self._header(
+                    HEADER_SOFT_DELETE_OWNED_SWEEP, dependent_table='d', table=t, foreign_key='f'
+                ),
+                self._header(HEADER_TENANT_AUTOFILL, table=t, function='guitars_fill_x'),
+                self._header(
+                    HEADER_TENANT_POLICY.replace(' [POLICY:{identity}]', ''), table=t
+                ).replace(' [SQL:abc]', ' [POLICY:abc]'),
             ]
         )
+        after = self._header(HEADER_SOFT_DELETE_SELF_CASCADE, table=t, foreign_key='parent_id')
 
-        assert operations_module._tables_fired_on(content) == {'shop_owner', 'shop_box', 'shop_bar'}
+        (note,) = self._notes(
+            monkeypatch,
+            {self.BEFORE: before, self.AFTER: after},
+            mti_triggers=[t],
+            soft_delete_owned_sweep=[('d', t, 'f')],
+            tenant_autofill=[(t, 'guitars_fill_x')],
+            tenant_policies=[t],
+        )
 
-    def test_a_table_recreated_as_a_plain_model_is_not_named(self, monkeypatch):
-        """It needs nothing, so ``--adopt`` writes nothing for it and the note would never clear."""
+        assert "'testapp_setlist'" in note  # the soft-delete rule and updated_at trigger keys
+        assert "('testapp_setlistentry', 'testapp_setlist', None)" in note
+        assert 'parent_id' not in note  # re-created after the recreate
+        assert "('d', 'testapp_setlist', 'f')" not in note  # not declared: --adopt writes nothing
+        assert 'guitars_fill_x' not in note  # not a tenanted table
+        assert note.count("'testapp_setlist'") >= 1
+
+    def test_everything_created_after_the_recreate_is_coverage(self, monkeypatch):
+        t = self.TABLE
+        files = {self.AFTER: self._header(HEADER_SOFT_DELETE, table=t)}
+
+        assert self._notes(monkeypatch, files) == []
+
+    def test_a_table_recreated_as_a_model_needing_nothing_is_not_named(self, monkeypatch):
         from tests.testapp.models import Riff  # noqa: PLC0415
 
-        command = Command()
         table = Riff._meta.db_table  # a TarModel: no metadata columns at all
-        monkeypatch.setattr(command, '_recreated_tables', lambda: {table: ('testapp', '0061_retirement_host')})
-        monkeypatch.setattr(command, '_nodes_firing_on', lambda _t: [('testapp', '0042_auto_enforcement')])
+        files = {self.BEFORE: self._header(HEADER_SOFT_DELETE, table=table)}
 
-        assert command._recreated_table_notes() == []
+        notes = self._notes(
+            monkeypatch,
+            files,
+            recreated={table: ('testapp', self.RECREATE)},
+            soft_deletes=[table],
+        )
+
+        assert notes == []
+
+    def test_a_routed_away_model_is_not_named(self, monkeypatch):
+        """``--adopt`` writes nothing for it, so naming it would keep ``--check`` red for good."""
+        monkeypatch.setattr(operations_module, 'migrates_to_postgresql', lambda model: False)
+        files = {self.BEFORE: self._header(HEADER_SOFT_DELETE, table=self.TABLE)}
+
+        assert self._notes(monkeypatch, files) == []
 
     def test_a_replaced_migration_is_not_asked_of_the_graph(self, monkeypatch):
         """A pending squash leaves its replaced files on disk and out of the graph."""
-        command = Command()
-        monkeypatch.setattr(command, '_recreated_tables', lambda: {OWNER: ('testapp', '0001_initial')})
-        monkeypatch.setattr(command, '_nodes_firing_on', lambda _t: [('testapp', '0099_replaced')])
+        files = {'0099_replaced': self._header(HEADER_SOFT_DELETE, table=self.TABLE)}
 
-        assert command._recreated_table_notes() == []
+        assert self._notes(monkeypatch, files) == []
 
     def test_check_fails_on_it(self, monkeypatch):
         newest = sorted(

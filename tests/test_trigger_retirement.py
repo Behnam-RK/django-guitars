@@ -403,6 +403,98 @@ class TestAScopedRunNamesWhatItLeaves:
             Command, '_scoped_trigger_retirement_notes', lambda self, requested: ['LEFT-BEHIND']
         )
         out = StringIO()
-        call_command('makeguitarmigrations', 'crossapp_owner', '--check', stdout=out, stderr=StringIO())
+        call_command(
+            'makeguitarmigrations', 'crossapp_owner', '--check', stdout=out, stderr=StringIO()
+        )
 
         assert 'LEFT-BEHIND' in out.getvalue()
+
+
+class TestARenameInAnotherAppReachesTheseKeys:
+    """An app walked after the one that renamed a table records its keys under the old name and
+    the walk never moves them, so the owned key read as undeclared and was retired on every run."""
+
+    @staticmethod
+    def _scan(monkeypatch, *contents):
+        from guitars.management.enforcement import scanning  # noqa: PLC0415
+
+        monkeypatch.setattr(
+            scanning, 'renamed_tables', lambda loader, label: {'tgt_prize': ['tgt_target']}
+        )
+        monkeypatch.setattr(scanning, 'renames_by_migration', lambda loader, label: {})
+        return _scan_with(monkeypatch, *contents)
+
+    @staticmethod
+    def _header(template, table='tgt_target') -> str:
+        return (
+            template.format(dependent_table=table, table='own_owner', foreign_key='target_id')
+            + ' [SQL:abc123def456]\n'
+        )
+
+    def test_a_create_under_the_old_name_is_filed_under_the_new(self, monkeypatch):
+        existing = self._scan(monkeypatch, self._header(HEADER_SOFT_DELETE_OWNED_SWEEP))
+
+        assert ('tgt_prize', 'own_owner', 'target_id') in existing.soft_delete_owned_sweep
+        assert ('tgt_target', 'own_owner', 'target_id') not in existing.soft_delete_owned_sweep
+        assert (
+            'tgt_prize',
+            'own_owner',
+            'target_id',
+        ) in existing.soft_delete_owned_sweep_dependencies
+
+    def test_its_retirement_under_the_new_name_takes_it(self, monkeypatch):
+        existing = self._scan(
+            monkeypatch,
+            self._header(HEADER_SOFT_DELETE_OWNED_SWEEP),
+            self._header(HEADER_SOFT_DELETE_OWNED_SWEEP_RETIRED, table='tgt_prize'),
+        )
+
+        assert not existing.soft_delete_owned_sweep
+
+
+def test_an_unscoped_run_names_nothing_it_is_about_to_write():
+    command = _command()
+    command.existing.soft_delete_self_cascade[SELF] = 'abc'
+
+    assert command._scoped_trigger_retirement_notes(set()) == []
+
+
+class TestARedeclaredKeyIsOrderedAfterItsRetirement:
+    """Retired, then declared again: unordered against that retirement, a fresh ``migrate``
+    could run the create first, and the drop then took what the create made (ADR 0021)."""
+
+    @staticmethod
+    def _edges(command) -> list:
+        command._build_operations(apps.get_app_config('testapp'))
+        return command._retirement_edges.get('testapp', [])
+
+    def test_a_self_cascade(self):
+        from guitars.management.enforcement.scanning import CascadeRetirementSite  # noqa: PLC0415
+
+        command = _command()
+        key = ('testapp_setlist', 'parent_id')
+        command.existing.soft_delete_self_cascade.pop(key)
+        command.existing.self_cascade_retirement_sites.append(
+            CascadeRetirementSite('otherapp', '0007_x', key, None)
+        )
+
+        assert ('otherapp', '0007_x') in self._edges(command)
+
+    def test_an_owned_rule_and_sweep(self):
+        from guitars.management.enforcement.scanning import CascadeRetirementSite  # noqa: PLC0415
+
+        command = _command()
+        key = ('testapp_stagehand', 'testapp_rider', 'stagehand_id')
+        command.existing.soft_delete_owned.pop(key)
+        command.existing.soft_delete_owned_sweep.pop(key)
+        command.existing.owned_retirement_sites.append(
+            CascadeRetirementSite('otherapp', '0008_y', key, None)
+        )
+        command.existing.owned_sweep_retirement_sites.append(
+            CascadeRetirementSite('otherapp', '0009_z', key, None)
+        )
+
+        edges = self._edges(command)
+
+        assert ('otherapp', '0008_y') in edges
+        assert ('otherapp', '0009_z') in edges

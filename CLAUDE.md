@@ -89,7 +89,7 @@ uv run ty check               # type check (excludes tests/)
 uv run bandit -c pyproject.toml -r src
 ```
 
-`pytest` runs with `filterwarnings = ["error"]` and `xfail_strict` — warnings and unexpected passes fail the suite. `ruff` and `ty` are scoped to `src` and exclude `tests/`.
+`pytest` runs with `filterwarnings = ["error"]` and `xfail_strict` — warnings and unexpected passes fail the suite. An autouse `django-zeal` guard also fails any test whose lazy related-object load repeats from one call site; only a repeated `.get()` is allow-listed (`tests/settings.py`), and a test that deliberately runs a known N+1 opts out with `zeal_ignore()` ([ADR 0028](docs/adr/0028-n-plus-one-guard-in-the-suite.md)). `ruff` and `ty` are scoped to `src` and exclude `tests/`.
 
 Doc stewardship comes from the `docs@ai-toolkit` plugin, enabled by `.claude/settings.json` and configured by `.docs.toml`: `docs check` applies weighted-token caps and in-code doc rules, `docs scan` runs the same engine advisory. **It is advisory here — the gate that blocks is still `scripts/doc_budget.py`,** run from pre-commit and CI, and the two disagree by design: `doc_budget.py` caps markdown by *line* (100) and this repo is tuned to that, while `docs` caps by *weighted token*, so docs squeezed to 100 dense lines are over its caps — a shrink-pass backlog, not a build status. Its `stale-file-ref` rule reads a path like `sql/__init__.py` as repo-relative; here that spelling means `src/guitars/sql/__init__.py`.
 

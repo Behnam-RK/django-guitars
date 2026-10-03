@@ -18,6 +18,7 @@ from guitars.introspection import (
     classify_cascade,
     column_owner,
     has_column,
+    own_key_between,
     rule_update_cycle_edges,
 )
 from guitars.local_apps import is_local
@@ -56,28 +57,51 @@ def clear_cascade_plan_cache() -> None:
     cascade_plan.cache_clear()
 
 
-def _enforcement_gaps(model: type[Model]) -> list[Gap]:
-    """A reached model whose own ``DELETE`` is not rewritten: nothing archives it."""
+def _chain(model: type[Model], holder: type[Model]) -> list[type[Model]]:
+    """*model* and every ancestor down to *holder*: each one's own rule is written from the pass
+    over its own app."""
+    return [model, *(m for m in model._meta.get_parent_list() if issubclass(m, holder))]
+
+
+def _enforcement_gaps(model: type[Model], *, has_inbound_keys: bool) -> list[Gap]:
+    """A reached model whose own ``DELETE`` is not rewritten: nothing archives it. A model with
+    no key cascading into it is only a gap for the fast path (*has_inbound_keys* false): the
+    collector would delete its row, but ``soft_delete()`` leaves nothing live."""
     # Deferred: ``guitars.checks`` reaches the models package this module is part of.
     from guitars.checks import refuses_soft_delete_rule  # noqa: PLC0415
 
     if not has_column(model, '_deleted_at'):
         return [Gap(model._meta.label, 'is not soft-deletable', True)]
     holder = column_owner(model, '_deleted_at')
-    # Both: a child's redirect rule is written from the pass over the child's *own* app, so
-    # a child outside LOCAL_APPS or routed away has none even under a covered ancestor.
-    for owner in dict.fromkeys((model, holder)):
+    # Every model on the chain: a redirect rule is written from the pass over its *own* app, so
+    # a model outside LOCAL_APPS or routed away has none even under a covered ancestor.
+    for owner in dict.fromkeys(_chain(model, holder)):
         if not is_local(django_apps.get_app_config(owner._meta.app_label)):
-            return [
-                Gap(model._meta.label, f"'{owner._meta.app_label}' is not in LOCAL_APPS", True)
-            ]
+            reason = f"'{owner._meta.app_label}' is not in LOCAL_APPS"
+            return [Gap(model._meta.label, reason, has_inbound_keys)]
         if not migrates_to_postgresql(owner):
-            return [Gap(model._meta.label, 'is routed off PostgreSQL', True)]
+            return [Gap(model._meta.label, 'is routed off PostgreSQL', has_inbound_keys)]
     if refuses_soft_delete_rule(model):
         return [
             Gap(model._meta.label, 'its chain is refused a soft-delete rule (guitars.E003)', True)
         ]
+    # The redirect rule joins on the child's own key, which is not its link to the ancestor
+    # when it declares one of its own (#64): it archives another row and leaves this one live.
+    if model is not holder and (
+        model._meta.pk is not model._meta.get_ancestor_link(holder)
+        or own_key_between(model, holder) is not None
+    ):
+        return [Gap(model._meta.label, 'its primary key is not its parent link (#64)', True)]
     return []
+
+
+def _has_inbound_cascade_keys(model: type[Model]) -> bool:
+    """Whether a foreign key still cascades into *model* (a parent link is structural)."""
+    return any(
+        not relation.field.remote_field.parent_link  # ty: ignore[unresolved-attribute]
+        and relation.field.remote_field.on_delete is not DO_NOTHING  # ty: ignore[unresolved-attribute]
+        for relation in get_candidate_relations_to_delete(model._meta)
+    )
 
 
 @cache
@@ -95,7 +119,9 @@ def cascade_plan(model: type[Model]) -> tuple[tuple[Gap, ...], frozenset[type[Mo
             continue
         reached.add(current)
         reached.update(current._meta.get_parent_list())
-        gaps.extend(_enforcement_gaps(current))
+        gaps.extend(
+            _enforcement_gaps(current, has_inbound_keys=_has_inbound_cascade_keys(current))
+        )
         if not has_column(current, '_deleted_at'):
             continue
         for owner in (current, *current._meta.get_parent_list()):

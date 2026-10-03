@@ -21,6 +21,7 @@ from guitars.models import SoftDeleteUnsupportedError, soft_deletion
 from guitars.tenancy import tenancy_bypassed, tenant
 from tests.conftest import execute, scalar
 from tests.testapp.models import (
+    Arena,
     Band,
     Clause,
     Condition,
@@ -453,8 +454,33 @@ class TestTenancy:
         assert archived_anywhere(tenants.release_a)
         assert not archived_anywhere(tenants.release_b)
 
+    def test_an_mti_childs_own_policy_still_hides_its_row_from_an_instance(self, tenants):
+        """Stamped through the root's table, the policy on the child's would never be asked:
+        another tenant's arena was archived and the instance left unchanged."""
+        with tenant(label=tenants.a):
+            arena = Arena.objects.create(name='a-arena', seats=1)
+
+        with tenant(label=tenants.b):
+            stamped = arena.soft_delete()
+
+        assert stamped == 0
+        assert not archived_anywhere(arena)
+        assert arena._deleted_at is None
+
+    def test_its_own_tenant_archives_it(self, tenants):
+        with tenant(label=tenants.a):
+            arena = Arena.objects.create(name='a-arena', seats=1)
+            stamped = arena.soft_delete()
+
+        assert stamped == 1
+        assert archived_anywhere(arena)
+        assert arena._deleted_at is not None
+
     def test_the_delete_fast_path_follows_the_same_scope(self, tenants, settings):
         settings.GUITARS_DELETE_FAST_PATH = True
+        # Said, not assumed: with the fast path declined this test would pass through the
+        # collector and prove nothing about it.
+        assert soft_deletion._fast_delete_applies(Release, 'default')
         with tenant(label=tenants.a):
             Release.objects.all().delete()
 

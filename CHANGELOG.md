@@ -10,6 +10,15 @@ Full history and diffs: [GitHub releases](https://github.com/Behnam-RK/django-gu
 
 ## [Unreleased]
 
+## [2.14.1] - 2026-10-03
+
+### Fixed
+
+- **`Model.soft_delete()` on an MTI child asked the wrong table's row-level policy.** Round 3 of #58 made it stamp the root's table by key, so another tenant's tenanted child was archived and the instance left unchanged. The `UPDATE` now finds the root's row through the child's own table in one guarded statement, so the child's policy is asked.
+- **The `.delete()` fast path deleted rows a rule would not archive.** It declined for a model's column holder but not for a model whose primary key is not its link to the holder (#64: the redirect rule joins on the wrong column, so the child stayed live), and it did not ask an intermediate ancestor's app, so a chain through an app outside `LOCAL_APPS` or routed off PostgreSQL read as covered. Both are now blocking gaps.
+- **`soft_delete()` is no longer refused over a childless child outside `LOCAL_APPS`.** Nothing cascades into such a model, so nothing is left live; only the fast path, whose collector would delete its row, declines. A model with a key cascading into it stays refused.
+- The recorded statement count for `.delete()` said "at least two statements"; an instance is one.
+
 ## [2.14.0] - 2026-10-03
 
 ### Added
@@ -24,7 +33,7 @@ Full history and diffs: [GitHub releases](https://github.com/Behnam-RK/django-gu
 
 **Known, not fixed here:** the cascade rule for a `to_field` foreign key compares the child's column with the target's *primary key*, so it matches the wrong rows. `soft_delete()` and the fast path refuse that shape rather than inherit it.
 
-**Upgrading.** Nothing to generate, but this changes what `.delete()` executes for covered models: at least two statements (the keys, then a delete per 10,000 of them, in one transaction) instead of the collector's. It declines, running the collector, whenever a delete receiver or an `on_delete` other than `CASCADE`/`DO_NOTHING` is reachable, so neither is skipped. Both it and `soft_delete()` assume a consistent tree, meaning no live row beneath an already-archived ancestor, which the collector would reach and the rules do not, and that your enforcement migrations are applied. Set `GUITARS_DELETE_FAST_PATH = False` to keep the collector.
+**Upgrading.** Nothing to generate, but this changes what `.delete()` executes for covered models: a key read plus a delete per 10,000 keys, in one transaction, for a queryset, and one statement for an instance, instead of the collector's. It declines, running the collector, whenever a delete receiver or an `on_delete` other than `CASCADE`/`DO_NOTHING` is reachable, so neither is skipped. Both it and `soft_delete()` assume a consistent tree, meaning no live row beneath an already-archived ancestor, which the collector would reach and the rules do not, and that your enforcement migrations are applied. Set `GUITARS_DELETE_FAST_PATH = False` to keep the collector.
 
 ## [2.13.0] - 2026-10-03
 
@@ -355,7 +364,8 @@ First stable release. **BREAKING:** the instrument ladder shifted down one rung 
 
 - Added: initial release — `SetarModel`, `GuitarModel`, `SoftDeletableModel`, `DisableSignals`, `makeguitarmigrations`.
 
-[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.14.0...HEAD
+[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.14.1...HEAD
+[2.14.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.14.1
 [2.14.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.14.0
 [2.13.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.13.0
 [2.12.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.12.0

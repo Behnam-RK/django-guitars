@@ -26,4 +26,4 @@ An autouse, function-scoped fixture wraps every test in `zeal.zeal_context()`, s
 
 ## Related
 
-- Issue #55 · ADR 0026 (the `delete()` fast path, arriving with #58) · `tests/test_n_plus_one_guard.py`
+- Issue #55 · [ADR 0026](0026-soft-delete-and-delete-fast-path.md) (the `delete()` fast path) · `tests/test_n_plus_one_guard.py`

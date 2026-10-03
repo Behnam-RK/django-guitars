@@ -206,6 +206,7 @@ class TestEverySpellingOfARollback:
             scalar('SELECT 1')
             with CaptureQueriesContext(connection) as captured:
                 scalar("SELECT 'ROLLBACK TO SAVEPOINT x'")
+                scalar('SELECT 1')  # where a wrongly distrusted cache would republish
 
         assert _set_configs(captured.captured_queries) == 0
 
@@ -255,6 +256,23 @@ class TestRollbackThroughOtherDoors:
             assert _published() == str(tenants.a.pk)
 
 
+@pytest.mark.parametrize(
+    'statement',
+    ['COMMIT', 'COMMIT AND CHAIN', 'END', 'ROLLBACK', 'ABORT', 'ABORT AND CHAIN',
+     'ROLLBACK AND CHAIN', 'SELECT 1; ABORT', 'SELECT 1; COMMIT', 'SELECT 1; END'],
+)
+def test_ending_the_transaction_in_raw_sql_republishes(transactional_db, statement):
+    """Each undoes every ``SET LOCAL`` while Django still believes it is inside its block. Run in
+    the outermost atomic(), whose own exit then finds nothing to commit and does not fail."""
+    with tenancy_bypassed():
+        label = Label.objects.create(name='End Records')
+    with tenant(label=label), transaction.atomic():
+        scalar('SELECT 1')
+        execute(statement)
+
+        assert _published() == str(label.pk)
+
+
 @pytest.mark.django_db
 class TestWhatIsNotARollback:
     @pytest.mark.parametrize(
@@ -272,7 +290,9 @@ class TestWhatIsNotARollback:
         'statement',
         ['ROLLBACK', 'ROLLBACK;', 'ABORT', 'ROLLBACK AND CHAIN', 'abort and chain', 'COMMIT',
          'COMMIT AND CHAIN', 'END', 'ROLLBACK TO SAVEPOINT p', 'SELECT 1; ROLLBACK TO SAVEPOINT p',
-         '; ROLLBACK TO SAVEPOINT p', "SET LOCAL x.y = 1; ROLLBACK TO SAVEPOINT p"],
+         '; ROLLBACK TO SAVEPOINT p', "SET LOCAL x.y = 1; ROLLBACK TO SAVEPOINT p",
+         'SELECT 1; ABORT', 'SELECT 1; ABORT WORK', 'SELECT 1; COMMIT', 'SELECT 1; END',
+         'SELECT 1; COMMIT AND CHAIN'],
     )
     def test_anything_that_ends_the_transaction_or_its_savepoint_counts(self, statement):
         """Each reverts every ``SET LOCAL``, ``AND CHAIN`` and a bare ``ROLLBACK`` included."""
@@ -418,6 +438,23 @@ class TestASessionLevelPublishOutlivesATransactionLocalClear:
                 scalar('SELECT 1')
 
         assert len(connection.run_on_commit) - before <= 1
+
+
+def test_a_clear_made_inside_a_raw_transaction_is_undone_by_its_rollback(transactional_db):
+    """Django does not know about a raw BEGIN, so the publisher treats a clear inside it as
+    session-level and durable. The rollback undoes it: forgetting the name then leaves the old
+    value live. Found by running an extended fuzz against a version that did forget it."""
+    with tenant(other='X'):
+        scalar('SELECT 1')  # session level, before the transaction
+        execute('BEGIN')
+    scalar('SELECT 1')  # the scope is gone: `other` is cleared, inside the raw transaction
+    execute('ROLLBACK')  # ...which restores X
+
+    assert _published_other() in ('', None)
+
+
+def _published_other() -> str | None:
+    return scalar('SELECT current_setting(%s, true)', [guc_name('other')])
 
 
 def test_a_later_transaction_republishes(transactional_db):

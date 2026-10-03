@@ -41,7 +41,9 @@ _SYNCING = '_guitars_tenant_guc_syncing'
 _NAMES = '_guitars_tenant_guc_names'
 # Each ends the transaction or its savepoint, undoing every ``SET LOCAL``; ``... PREPARED`` is another one's.
 _ENDS_ONE = frozenset({'ROLLBACK', 'ABORT', 'COMMIT', 'END'})
-_ROLLBACK_WORD = re.compile(r'\bROLLBACK\b', re.I)  # a literal: nothing in it can backtrack
+_ENDS_ONE_WORD = re.compile(
+    r'\b(?:ROLLBACK|ABORT|COMMIT|END)\b', re.I
+)  # literals: no backtracking
 
 # SQLSTATE 42501 insufficient_privilege -- what a WITH CHECK violation raises.
 _RLS_SQLSTATE = '42501'
@@ -148,6 +150,8 @@ def _publish(connection: BaseDatabaseWrapper, state: dict[str, str]) -> None:
         if is_local
         else None
     )
+    # Never forgotten: a clear is undone by a rollback of a transaction Django cannot see (a raw
+    # BEGIN), and only the name says what to clear then. Dimension names are model field names.
     setattr(connection, _NAMES, getattr(connection, _NAMES, frozenset()) | updates.keys())
     setattr(connection, _CACHE, (state, _fingerprint(connection), marker))
 
@@ -204,15 +208,12 @@ def _rls_violation(exc: BaseException) -> BaseException | None:
 
 
 def _distrust(connection: BaseDatabaseWrapper) -> None:
-    """Force the next statement to republish, keeping the dimensions last published so a stale
-    one is still cleared. For ``ROLLBACK TO SAVEPOINT``, which reverts a ``SET LOCAL`` the
-    cache has already recorded -- including the one just made on that very statement."""
+    """Force the next statement to republish. For a statement that ends a transaction or its
+    savepoint, which reverts a ``SET LOCAL`` the cache has already recorded -- including the
+    one just made on that very statement."""
     cached = getattr(connection, _CACHE, None)
     if cached is not None:
-        # Every dimension ever published, not just the last: a rollback can restore one the
-        # cache has since forgotten.
-        names = getattr(connection, _NAMES, frozenset()) | cached[0].keys()
-        setattr(connection, _CACHE, (dict.fromkeys(names, ''), None, cached[2]))
+        setattr(connection, _CACHE, (cached[0], None, cached[2]))
 
 
 def _skip_noise(sql: str, at: int) -> int:
@@ -252,8 +253,8 @@ def _word(sql: str, at: int) -> tuple[str, int]:
 
 def _reverts_a_set(sql: object) -> bool:
     """Whether *sql* undoes every ``SET LOCAL``: a statement that begins ``ROLLBACK``, ``ABORT``,
-    ``COMMIT`` or ``END`` (``AND CHAIN`` included), or a multi-statement string mentioning
-    ``ROLLBACK``. Text and bytes only; a driver object cannot be read without a connection."""
+    ``COMMIT`` or ``END`` (``AND CHAIN`` included), or a multi-statement string containing one.
+    Text and bytes only; a driver object cannot be read without a connection."""
     if isinstance(sql, bytes):
         sql = sql.decode('utf-8', 'replace')
     if not isinstance(sql, str):
@@ -262,7 +263,7 @@ def _reverts_a_set(sql: object) -> bool:
     if word in _ENDS_ONE:
         return _word(sql, at)[0] != 'PREPARED'
     body = sql.rstrip().rstrip(';')
-    return ';' in body and _ROLLBACK_WORD.search(body) is not None
+    return ';' in body and _ENDS_ONE_WORD.search(body) is not None
 
 
 def _wrapper(

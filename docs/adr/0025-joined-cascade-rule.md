@@ -19,7 +19,8 @@ the ancestor: `UPDATE <ancestor> SET _deleted_at = new._deleted_at WHERE <ancest
 <child parent link> FROM <child> WHERE <fk> = old.<pk>) AND _deleted_at IS NULL`. Every table in a
 chain stores one value for a row, so the descendant's link to the ancestor (`get_ancestor_link`, not
 its primary key, which can be a column of its own beside `parent_link=True`) names the ancestor's
-row directly, one subselect however deep. A descendant over a refused chain (`guitars.E003`) gets no joined rule. The revive twin ([ADR 0024](0024-inverse-cascade-revive-rules.md))
+row directly, one subselect however deep. A descendant over a refused chain (`guitars.E003`), or
+whose link passes an intermediate with a primary key of its own, gets no joined rule. The revive twin ([ADR 0024](0024-inverse-cascade-revive-rules.md))
 gets the same form.
 
 The cycle graph files the edge against the table the rule **updates**, the ancestor. A descendant

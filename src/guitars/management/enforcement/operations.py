@@ -19,6 +19,7 @@ from guitars.introspection import (
     column_owner,
     has_column,
     is_mti_child,
+    own_key_between,
     owned_tenancy_refusals,
     owner_arms,
     owns_column,
@@ -1545,6 +1546,15 @@ class OperationsMixin:
             # ``--skip-checks`` reaches the generator: re-asked for the key as it is for the model's
             # own rule, and the note is the model's. A refused chain's link is not a stable parent.
             if _is_joined(related_model) and refuses_soft_delete_rule(related_model):
+                continue
+            middle = own_key_between(related_model, column_owner(related_model, '_deleted_at'))
+            if _is_joined(related_model) and middle is not None:
+                if report:
+                    self._skipped_rule_notes.append(
+                        f"Cascade '{related_table}' -> '{owner_table}' skipped: its link to the "
+                        f"ancestor holding _deleted_at passes through '{middle._meta.db_table}', "
+                        'whose primary key is not its parent link; Django archives it in Python.'
+                    )
                 continue
             is_primary = related_table not in seen_related_tables
             seen_related_tables.add(related_table)

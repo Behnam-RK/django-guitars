@@ -602,6 +602,54 @@ class TestTheParentLinkIsTheAncestorsNotTheDescendantsPk:
 
         assert 'guitars_link."root_link_id"' in blob
 
+    @staticmethod
+    @isolate_apps('tests.testapp')
+    def _explicit_pk_in_the_middle():
+        from django.db.models import AutoField, OneToOneField  # noqa: PLC0415
+
+        class Owner(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Root(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Mid(Root):
+            code = AutoField(primary_key=True)
+            root_link = OneToOneField(Root, on_delete=CASCADE, parent_link=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Kid(Mid):
+            owner = ForeignKey(Owner, on_delete=CASCADE, related_name='kids')
+
+            class Meta:
+                app_label = 'testapp'
+
+        return Owner, Kid
+
+    def test_an_indirect_link_through_a_mid_level_own_pk_gets_no_rule(self):
+        """``Kid``'s link holds ``Mid``'s own key, not ``Root``'s, and one subselect cannot hop
+        it. A ``Mid`` whose key *is* its link (the default) keeps the rule, as the festival tree shows."""
+        owner, kid = self._explicit_pk_in_the_middle()
+
+        command, blob = self._operations(owner, kid)
+
+        assert blob == ''
+        assert any('mid' in note.lower() for note in command._skipped_rule_notes)
+
+    def test_the_indirect_link_files_no_edge_and_a_silent_run_says_nothing(self):
+        owner, kid = self._explicit_pk_in_the_middle()
+        command, _ = self._operations(owner, kid)
+        command._skipped_rule_notes.clear()
+
+        candidates, _ = command._cascade_candidates(owner, owner._meta.db_table, report=False)
+
+        assert _rule_update_edges([owner, kid]) == set()
+        assert (candidates, command._skipped_rule_notes) == ([], [])
+
     def test_a_descendant_the_check_refuses_gets_no_rule(self):
         """``guitars.E003``'s shape: the generator re-asks it for the model's own rule, so it
         must for a key declared on the model too, or ``--skip-checks`` writes a rule through a

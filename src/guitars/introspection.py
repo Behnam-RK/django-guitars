@@ -69,6 +69,19 @@ def mti_root(model: type[models.Model]) -> type[models.Model]:
     return root
 
 
+def own_key_between(model: type[models.Model], ancestor: type[models.Model]):
+    """The first model strictly between *model* and *ancestor* whose primary key is not its link
+    to *ancestor*, or ``None``. *model*'s link then holds that model's key, which one join cannot
+    carry on to *ancestor*'s row -- so a joined rule there would match the wrong row."""
+    link = model._meta.get_ancestor_link(ancestor)
+    parent = link.related_model if link is not None else ancestor
+    while parent is not ancestor:
+        if parent._meta.pk is not parent._meta.get_ancestor_link(ancestor):
+            return parent
+        parent = parent._meta.pk.related_model
+    return None
+
+
 def _rule_update_edges(candidates: Iterable[type[models.Model]]) -> set[tuple[str, str]]:
     """``(fires_on_table, updates_table)`` for every ON UPDATE soft-delete rule *candidates* call
     for -- cascade and owned alike, read off the model declaring the key and off its target, so
@@ -124,6 +137,7 @@ def _rule_update_edges(candidates: Iterable[type[models.Model]]) -> set[tuple[st
                 field.remote_field.on_delete is CASCADE
                 and not getattr(field.remote_field, 'parent_link', False)
                 and (owns or _targets_primary_key(field))
+                and (owns or own_key_between(model, holder) is None)
             ):
                 edges.add((target_table, updates_table))  # fires on the target, updates here
     return edges

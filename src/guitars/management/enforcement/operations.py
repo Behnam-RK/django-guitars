@@ -274,7 +274,7 @@ class OperationsMixin:
         _object_refs: dict[str, list[ObjectRef]]
         _retirement_edges: dict[str, list[tuple[str, str]]]
         _loader_cache: MigrationLoader | None
-        _dropped_tables_cache: tuple[MigrationLoader, set[str]] | None
+        _dropped_tables_cache: tuple[MigrationLoader, dict[str, tuple[str, str]]] | None
         _refusals_over_live_rules: list[str]
         _missing_edges: list[str]
         _unresolved_reference_notes: list[str]
@@ -1005,6 +1005,12 @@ class OperationsMixin:
                 if key not in family.recorded:
                     continue
                 self._record_retirement_edge(app.label, key, family.creates)
+                if deleted:
+                    # After the drop of the child's table, not only after the create: run first,
+                    # it removed both objects while the child was live and archivable.
+                    deleting_node = self._dropped_tables()[related_table]
+                    if deleting_node[0] != app.label:
+                        self._record_edge(self._retirement_edges, app.label, deleting_node)
                 rule_name = family.name(owner_table, related_table, via)
                 slots = family.slots(rule_name, ident_owner_table)
                 drop = family.drop_template.format(**slots)
@@ -2699,16 +2705,22 @@ class OperationsMixin:
         # naming it twice would read as two rules still archiving rows.
         recorded = set(self.existing.soft_delete_related) | set(self.existing.soft_delete_revive)
         for key in sorted(recorded - set(required), key=lambda k: (k[0], k[1], k[2] or '')):
-            related_table, owner_table, _via = key
+            related_table, owner_table, via = key
             owner_app = hosting.get(owner_table)
             if owner_app is None or owner_app in requested:
                 continue
             if related_table not in hosting:
-                if related_table in self._dropped_tables():
+                # Only where a revive was recorded: before 2.11.0 there is none, and nothing
+                # is broken. Named per trigger, so two keys to one owner read as two.
+                if (
+                    related_table in self._dropped_tables()
+                    and key in self.existing.soft_delete_revive
+                ):
                     notes.append(
-                        f"Revive trigger on '{owner_table}' names '{related_table}', whose "
-                        f'model was deleted, and fails every UPDATE on that table until it is '
-                        f"retired -- which only a run including '{owner_app}' writes."
+                        f'Revive trigger {_revive_name(owner_table, related_table, via)} on '
+                        f"'{owner_table}' names '{related_table}', whose model was deleted, and "
+                        f'fails every UPDATE on that table until it is retired -- which only a '
+                        f"run including '{owner_app}' writes."
                     )
                 continue
             notes.append(
@@ -2727,13 +2739,20 @@ class OperationsMixin:
             self._loader_cache = MigrationLoader(None, ignore_no_migrations=True)
         return self._loader_cache
 
-    def _dropped_tables(self) -> set[str]:
+    def _dropped_tables(self) -> dict[str, tuple[str, str]]:
         """:func:`dropped_tables` over :meth:`_migration_loader`, recomputed with it, less any
         table a model of an app with no migrations holds -- migration state cannot see those."""
         loader = self._migration_loader()
         if self._dropped_tables_cache is None or self._dropped_tables_cache[0] is not loader:
             live = {model._meta.db_table for model in django_apps.get_models()}
-            self._dropped_tables_cache = (loader, dropped_tables(loader) - live)
+            self._dropped_tables_cache = (
+                loader,
+                {
+                    table: node
+                    for table, node in dropped_tables(loader).items()
+                    if table not in live
+                },
+            )
         return self._dropped_tables_cache[1]
 
     def _drop_cached_migration_loader(self) -> None:

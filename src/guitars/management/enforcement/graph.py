@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, NamedTuple
 
+from django.db import connection
+from django.db.backends.utils import truncate_name
 from django.db.migrations.operations import (
     AddField,
     AlterField,
@@ -198,9 +200,9 @@ def retired_enforcement(
     return found
 
 
-def dropped_tables(loader: MigrationLoader) -> set[str]:
+def dropped_tables(loader: MigrationLoader) -> dict[str, tuple[str, str]]:
     """Tables a ``DeleteModel`` dropped and nothing holds by the end of the history, in any app
-    the loader knows. Positive evidence that a model was deleted, which an unmapped table alone is
+    the loader knows, each with the migration that dropped it, for a retirement to follow. Positive evidence that a model was deleted, which an unmapped table alone is
     not: an app dropped from ``LOCAL_APPS`` maps to nothing too, and its tables are live."""
     # One forward walk over the *graph*, never the files: a pending squash leaves replaced
     # migrations on disk that the graph has dropped. State is read before each *operation*, so
@@ -209,7 +211,7 @@ def dropped_tables(loader: MigrationLoader) -> set[str]:
     for leaf in loader.graph.leaf_nodes():
         plan.update(dict.fromkeys(loader.graph.forwards_plan(leaf)))
     state = ProjectState(real_apps=loader.unmigrated_apps)
-    dropped: set[str] = set()
+    dropped: dict[str, tuple[str, str]] = {}
     for app_label, name in plan:
         for operation in loader.graph.nodes[app_label, name].operations:
             # Top level only: a ``DeleteModel`` inside ``SeparateDatabaseAndState`` moves a
@@ -217,13 +219,17 @@ def dropped_tables(loader: MigrationLoader) -> set[str]:
             if isinstance(operation, DeleteModel):
                 model_state = state.models.get((app_label, operation.name_lower))
                 if model_state is not None and _owns_a_table(model_state):
-                    dropped.add(_table_of(app_label, operation.name_lower, model_state))
+                    dropped[_table_of(app_label, operation.name_lower, model_state)] = (
+                        app_label,
+                        name,
+                    )
             operation.state_forwards(app_label, state)
     # A later model taking the same ``db_table`` holds it again.
-    return dropped - {
+    held = {
         _table_of(label, model_name, model_state)
         for (label, model_name), model_state in state.models.items()
     }
+    return {table: node for table, node in dropped.items() if table not in held}
 
 
 def _owns_a_table(model_state) -> bool:
@@ -232,7 +238,12 @@ def _owns_a_table(model_state) -> bool:
 
 
 def _table_of(app_label: str, model_name: str, model_state) -> str:
-    return model_state.options.get('db_table') or f'{app_label}_{model_name}'
+    """The table ``Options`` gives a model: a default name is shortened past the backend's
+    limit, or a long app label never matches the key the scan recorded."""
+    explicit = model_state.options.get('db_table')
+    if explicit:
+        return explicit
+    return truncate_name(f'{app_label}_{model_name}', connection.ops.max_name_length())
 
 
 def renamed_tables(loader: MigrationLoader, app_label: str) -> dict[str, list[str]]:
@@ -323,7 +334,7 @@ def _tables_by_model(
     index = ordered.index(upto) + (1 if inclusive else 0)
     state = loader.project_state([(app_label, ordered[index - 1])] if index else [])
     return {
-        model_name: model_state.options.get('db_table') or f'{label}_{model_name}'
+        model_name: _table_of(label, model_name, model_state)
         for (label, model_name), model_state in state.models.items()
         if label == app_label
     }

@@ -125,7 +125,9 @@ class Command(OperationsMixin, BaseCommand):
         # whenever this command writes a file. ``None`` is "not built"; building one imports
         # every migration module in the project, so it is worth not doing per app.
         self._loader_cache: MigrationLoader | None = None
-        self._dropped_tables_cache: tuple[MigrationLoader, set[str]] | None = None
+        self._dropped_tables_cache: tuple[MigrationLoader, dict[str, tuple[str, str]]] | None = (
+            None
+        )
         self._required_autofill_cache: dict[tuple[str, str], tuple[str, str]] | None = None
         self._relocated_autofill_cache: dict[tuple[str, str], tuple[str, str]] | None = None
 

@@ -470,8 +470,8 @@ _REFUSE_RECREATING_DROPPED_RULE = """
     BEGIN
         RAISE EXCEPTION
             'guitars: % on % cannot be recreated -- the model it read was deleted. To migrate '
-            'back past this, unapply this migration with --fake, then reverse the deletion and '
-            'run makeguitarmigrations.',
+            'back past this, unapply this migration with --fake, reverse the deletion, then run '
+            'makeguitarmigrations --adopt to rebuild it.',
             {literal_rule_name}, {literal_table}
             USING ERRCODE = 'feature_not_supported';
     END;

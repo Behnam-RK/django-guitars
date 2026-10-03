@@ -21,7 +21,7 @@ from guitars.introspection import (
     column_owner,
     has_column,
     is_mti_child,
-    own_key_between,
+    joined_refusal,
     owned_tenancy_refusals,
     owner_arms,
     owns_column,
@@ -1629,30 +1629,11 @@ class OperationsMixin:
                         )
                     )
                 continue
-            # A ``to_field`` column is not the primary key the rule compares: ``migrate`` fails
-            # or the wrong rows are archived. Skipped before 2.12.0, so still; the flat form's
-            # flaw is #59.
-            if not owns_column(related_model, '_deleted_at') and not _targets_primary_key(
-                fk_field
-            ):
+            if kind is CascadeKind.REFUSED:
                 if report:
                     self._skipped_rule_notes.append(
                         f"Cascade '{related_table}' -> '{owner_table}' skipped: "
-                        f"'{fk_field.name}' declares to_field, which the rule would not read; "
-                        'Django archives it in Python.'
-                    )
-                continue
-            # ``--skip-checks`` reaches the generator: re-asked for the key as it is for the model's
-            # own rule, and the note is the model's. A refused chain's link is not a stable parent.
-            if _is_joined(related_model) and refuses_soft_delete_rule(related_model):
-                continue
-            middle = own_key_between(related_model, column_owner(related_model, '_deleted_at'))
-            if _is_joined(related_model) and middle is not None:
-                if report:
-                    self._skipped_rule_notes.append(
-                        f"Cascade '{related_table}' -> '{owner_table}' skipped: its link to the "
-                        f"ancestor holding _deleted_at passes through '{middle._meta.db_table}', "
-                        'whose primary key is not its parent link; Django archives it in Python.'
+                        f'{joined_refusal(related_model, fk_field)}; Django archives it in Python.'
                     )
                 continue
             is_primary = related_table not in seen_related_tables

@@ -191,3 +191,65 @@ def test_a_changed_setting_invalidates_every_cache(settings):
     settings.LOCAL_APPS = [*settings.LOCAL_APPS]
 
     assert _both_caches_are_empty()
+
+
+class TestAJoinedKeyTheGeneratorRefusesIsAGap:
+    """Every key the generator writes no rule for must read as uncovered here, or ``.delete()``
+    takes the fast path and the rows only a rule would have archived stay live."""
+
+    @staticmethod
+    @isolate_apps('tests.testapp')
+    def _through_an_intermediates_own_key():
+        class Owner(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Root(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Mid(Root):
+            code = models.AutoField(primary_key=True)
+            root_link = models.OneToOneField(Root, on_delete=models.CASCADE, parent_link=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Kid(Mid):
+            owner = models.ForeignKey(Owner, on_delete=models.CASCADE, related_name='kids')
+
+            class Meta:
+                app_label = 'testapp'
+
+        clear_cascade_plan_cache()
+        return cascade_plan(Owner)[0]
+
+    @staticmethod
+    @isolate_apps('tests.testapp')
+    def _over_a_refused_chain():
+        class Owner(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Plain(models.Model):
+            class Meta:
+                app_label = 'testapp'
+
+        class Soft(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Both(Plain, Soft):
+            owner = models.ForeignKey(Owner, on_delete=models.CASCADE, related_name='boths')
+
+            class Meta:
+                app_label = 'testapp'
+
+        clear_cascade_plan_cache()
+        return cascade_plan(Owner)[0]
+
+    def test_a_link_through_an_intermediates_own_key(self):
+        assert [g for g in self._through_an_intermediates_own_key() if g.blocking]
+
+    def test_a_key_over_a_chain_guitars_e003_refuses(self):
+        assert [g for g in self._over_a_refused_chain() if g.blocking]

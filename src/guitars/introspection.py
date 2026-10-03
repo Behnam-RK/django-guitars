@@ -112,6 +112,30 @@ class CascadeKind(Enum):
     RULE = 'rule'  # the ``soft_delete_related_*`` rule, flat or joined
     SELF = 'self'  # the statement-level trigger a self-referential key takes (ADR 0018)
     CYCLE = 'cycle'  # refused: its rule would close a cycle of ON UPDATE rules
+    REFUSED = 'refused'  # a joined key no rule can read right: see :func:`joined_refusal`
+
+
+def joined_refusal(related_model, fk_field) -> str | None:
+    """Why a joined key gets no rule, or ``None``. One answer for the generator, which notes it,
+    and :func:`classify_cascade`, which the ``delete()`` fast path reads -- a refusal in one only
+    has that path skip the collector with no rule written, leaving the rows live."""
+    from guitars.checks import refuses_soft_delete_rule  # noqa: PLC0415 - checks imports this
+    from guitars.models.fields import (
+        _targets_primary_key,  # noqa: PLC0415 - see _rule_update_edges
+    )
+
+    ancestor = column_owner(related_model, '_deleted_at')
+    if not _targets_primary_key(fk_field):
+        return f"'{fk_field.name}' declares to_field, which the rule would not read"
+    if refuses_soft_delete_rule(related_model):
+        return 'its chain is refused a soft-delete rule (guitars.E003)'
+    middle = own_key_between(related_model, ancestor)
+    if middle is not None:
+        return (
+            f'its link to the ancestor holding _deleted_at passes through '
+            f"'{middle._meta.db_table}', whose primary key is not its parent link"
+        )
+    return None
 
 
 def classify_cascade(
@@ -138,6 +162,8 @@ def classify_cascade(
     # may not be in the registry graph.
     if (owner_table, target_table) in cycle_edges or (joined and target_table == owner_table):
         return CascadeKind.CYCLE
+    if joined and joined_refusal(related_model, fk_field) is not None:
+        return CascadeKind.REFUSED
     return CascadeKind.RULE
 
 

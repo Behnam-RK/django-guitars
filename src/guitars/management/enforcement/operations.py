@@ -1632,7 +1632,9 @@ class OperationsMixin:
             # A ``to_field`` column is not the primary key the rule compares: ``migrate`` fails
             # or the wrong rows are archived. Skipped before 2.12.0, so still; the flat form's
             # flaw is #59.
-            if joined and not _targets_primary_key(fk_field):
+            if not owns_column(related_model, '_deleted_at') and not _targets_primary_key(
+                fk_field
+            ):
                 if report:
                     self._skipped_rule_notes.append(
                         f"Cascade '{related_table}' -> '{owner_table}' skipped: "

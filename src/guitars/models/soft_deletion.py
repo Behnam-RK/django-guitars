@@ -290,12 +290,38 @@ def _still_referenced(
     return referenced
 
 
+class _OwnedScan:
+    """What the ``hard_delete`` fixpoint has read: owner rows enumerated, targets *spared* (asked
+    again each round, since a referrer holding one back can be claimed later), and the rule graph.
+    A fresh one reproduces a full rescan."""
+
+    def __init__(self) -> None:
+        self.scanned: dict[type[Model], set] = defaultdict(set)
+        self.spared: dict[tuple[type[Model], str], set] = defaultdict(set)
+        self.graph_for: frozenset[type[Model]] | None = None
+        self.cycles: set = set()
+        self.refusals: dict = {}
+
+    def graph(self, claimed: dict[type[Model], set]) -> tuple[set, dict]:
+        # Redone only for a claimed model outside the registry: a registered one is already in
+        # the sweep, so the answer cannot have moved.
+        registry = set(django_apps.get_models())
+        extra = frozenset(model for model in claimed if model not in registry)
+        if self.graph_for is None or not extra <= self.graph_for:
+            swept = [*claimed, *registry]
+            self.cycles = rule_update_cycle_edges(swept)
+            self.refusals = owned_tenancy_refusals(swept)
+            self.graph_for = extra | (self.graph_for or frozenset())
+        return self.cycles, self.refusals
+
+
 def _owned_targets(
-    claimed: dict[type[Model], set], using: str | None
+    claimed: dict[type[Model], set], using: str | None, scan: _OwnedScan | None = None
 ) -> list[tuple[type[Model], set]]:
     """``(model, pks)`` for every owned row *claimed* is the last owner of -- the rule's
     ``NOT EXISTS``, narrowed three ways below because this *removes* the row where the rule
     only stamps a column. *claimed* is every row going away, not one group's; see below."""
+    scan = scan or _OwnedScan()
     found: dict[type[Model], set] = defaultdict(set)
     # The cheap half first: the graph below sweeps the whole registry, and ``hard_delete`` runs
     # this to a fixpoint over models that nearly all own nothing. ``pks`` too -- ``claimed`` is
@@ -305,29 +331,33 @@ def _owned_targets(
     }
     if not owning:
         return []
-    # Once per call, not once per claimed model: the graph is registry-wide and identical for
-    # every one of them. The claimed models are named alongside the registry for the same
-    # reason ``_owned_fields`` names its own -- they may not be registered.
-    swept = [*claimed, *django_apps.get_models()]
-    cycles = rule_update_cycle_edges(swept)
-    # The tenancy half of the same shared answer, and a second sweep of the registry -- paid per
-    # round like the graph above, ``claimed`` growing as rounds run. Skipped outright where
-    # ``GUITARS_TENANT_POLICIES`` is off; otherwise cheapest where no model is tenanted.
-    tenancy_refusals = owned_tenancy_refusals(swept)
+    # Once for the walk, not per round or per claimed model: the rule graph and its tenancy half
+    # are registry-wide. Claimed models are named beside the registry as ``_owned_fields`` names
+    # its own, since they may not be registered.
+    cycles, tenancy_refusals = scan.graph(claimed)
     for model, pks in owning.items():
+        # Only owners not read before: a target of an owner read earlier was asked then, and a
+        # target spared then is carried in ``scan.spared`` and asked again below.
+        new = pks - scan.scanned[model]
         for field in _owned_fields(model, cycles, tenancy_refusals):
-            owned_pks = set(
-                _rows(model, using)
-                .filter(pk__in=pks)
-                .exclude(**{field.attname: None})
-                .values_list(field.attname, flat=True)
+            carried = scan.spared[(model, field.name)]
+            owned_pks = (
+                set(
+                    _rows(model, using)
+                    .filter(pk__in=new)
+                    .exclude(**{field.attname: None})
+                    .values_list(field.attname, flat=True)
+                )
+                if new
+                else set()
             )
-            if not owned_pks:
+            everything = owned_pks | carried
+            if not everything:
                 continue
             # Narrowed: (1) the whole claimed batch is spared, not one row -- all of it is
             # going; (2) no `_deleted_at` filter, an archived referrer's key is still on disk;
             # (3) *any* surviving reference holds the row back, not just the owning column.
-            candidates = owned_pks
+            candidates = everything
             # A *shrinking* fixpoint, not one subtraction: a pk spared here keeps its CASCADE
             # closure alive, so a referrer inside it survives after all and holds another pk
             # back. Each round is a strict subset of the last, which is what terminates it.
@@ -336,11 +366,13 @@ def _owned_targets(
                 if not referenced:
                     break
                 candidates = candidates - referenced
+            scan.spared[(model, field.name)] = everything - candidates
             # Guarded: ``found`` is a defaultdict, so an unguarded ``update`` would mint a
             # ``(model, set())`` row for a relation that spared everything, and the caller
             # would enter a fixpoint round over rows that do not exist.
             if candidates:
                 found[field.related_model].update(candidates)
+        scan.scanned[model] |= new
     return list(found.items())
 
 
@@ -828,9 +860,10 @@ class SoftDeletableModel(Model):
             # batch references, and `claimed` grows as rounds run, so a row held back by a
             # not-yet-collected reference becomes collectable later.
             dispatched: dict[type[Model], set] = defaultdict(set)
+            scan = _OwnedScan()  # one for the fixpoint: each round reads only what is new
             while True:
                 fresh: list[tuple[type[Model], set]] = []
-                for owned_model, owned_pks in _owned_targets(claimed, using):
+                for owned_model, owned_pks in _owned_targets(claimed, using, scan):
                     # `dispatched`, not `claimed`: every pk is collected at most once, which
                     # is what bounds this loop. `claimed` is keyed by the model actually
                     # collected, which for an MTI target is the root, not `owned_model`.

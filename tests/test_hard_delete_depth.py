@@ -269,3 +269,112 @@ class TestAnOwnedTree:
         craft.hard_delete()
 
         assert Ledger._all_objects.filter(pk=nodes[0].pk).exists()
+
+
+@pytest.mark.django_db
+class TestTheOwnedFixpointReadsWhatIsNew:
+    def test_a_chain_reads_each_owner_once(self):
+        """Ten reads for this three-deep chain when every round rescanned every owner."""
+        from tests.testapp.models import Residency, Rider, Stagehand  # noqa: PLC0415
+
+        stagehand = Stagehand.objects.create(name='s')
+        rider = Rider.objects.create(stagehand=stagehand)
+        residency = Residency.objects.create(rider=rider)
+
+        sql = statements(residency.hard_delete)
+
+        reads = [s for s in sql if s.startswith('SELECT') and 'set_config' not in s]
+        assert len(reads) <= 4
+
+    def test_the_rule_graph_is_read_once_for_the_walk(self, monkeypatch):
+        from guitars.models import soft_deletion  # noqa: PLC0415
+        from tests.testapp.models import Residency, Rider, Stagehand  # noqa: PLC0415
+
+        calls = []
+        real = soft_deletion.rule_update_cycle_edges
+        monkeypatch.setattr(
+            soft_deletion,
+            'rule_update_cycle_edges',
+            lambda models: calls.append(1) or real(models),
+        )
+        stagehand = Stagehand.objects.create(name='s')
+        residency = Residency.objects.create(rider=Rider.objects.create(stagehand=stagehand))
+
+        residency.hard_delete()
+
+        assert len(calls) == 1
+
+
+def _end_state():
+    """The row count of every testapp table, live and archived: what a walk leaves behind."""
+    from django.apps import apps  # noqa: PLC0415
+
+    from guitars.tenancy import tenancy_bypassed  # noqa: PLC0415
+
+    state = {}
+    with tenancy_bypassed():
+        for model in apps.get_app_config('testapp').get_models():
+            manager = model._all_objects if hasattr(model, '_all_objects') else model._base_manager
+            state[model._meta.db_table] = manager.count()
+    return state
+
+
+def _scenarios():
+    """Each builds rows and returns the instance to ``hard_delete``; chosen for the shapes a
+    delta read could get wrong: a chain, a co-owner that spares, a target freed in a later round."""
+    from tests.testapp.models import (  # noqa: PLC0415
+        Album,
+        Band,
+        Merch,
+        Orchestra,
+        PressKit,
+        Residency,
+        Rider,
+        Stagehand,
+    )
+
+    def chain():
+        return Residency.objects.create(
+            rider=Rider.objects.create(stagehand=Stagehand.objects.create(name='s'))
+        )
+
+    def co_owner():
+        band = Band.objects.create(name='b')
+        kit = PressKit.objects.create(headline='shared')
+        Album.objects.create(title='keeps', band=band, press_kit=kit)
+        return Album.objects.create(title='goes', band=band, press_kit=kit)
+
+    def freed_in_a_later_round():
+        band = Band.objects.create(name='b')
+        kit = PressKit.objects.create(headline='Shared')
+        album = Album.objects.create(title='Hemispheres', band=band, press_kit=kit)
+        orchestra = Orchestra.objects.create(name='LSO', conductor='Davis', programme=kit)
+        Merch.objects.create(description='Tour shirt', album=album, featured_orchestra=orchestra)
+        return album
+
+    return {'chain': chain, 'co_owner': co_owner, 'freed_later': freed_in_a_later_round}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize('name', ['chain', 'co_owner', 'freed_later'])
+def test_the_delta_read_ends_where_a_full_rescan_did(name, monkeypatch):
+    """A fresh ``_OwnedScan`` each round *is* the full rescan, so the end states must agree."""
+    from django.db import transaction  # noqa: PLC0415
+
+    from guitars.models import soft_deletion  # noqa: PLC0415
+
+    def walk():
+        with transaction.atomic():
+            _scenarios()[name]().hard_delete()
+            counts = _end_state()
+            transaction.set_rollback(True)
+        return counts
+
+    delta = walk()
+    real = soft_deletion._owned_targets
+    monkeypatch.setattr(
+        soft_deletion, '_owned_targets', lambda claimed, using, scan=None: real(claimed, using)
+    )
+    full = walk()
+
+    assert delta == full

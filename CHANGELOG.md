@@ -10,6 +10,17 @@ Full history and diffs: [GitHub releases](https://github.com/Behnam-RK/django-gu
 
 ## [Unreleased]
 
+## [2.14.3] - 2026-10-03
+
+### Changed
+
+- **`hard_delete()` costs fewer statements** (PR 4 of #55). No result changes: the end state is the same rows removed, in the same order.
+  - **One switch for the whole walk.** The instance walk set `rules.hard_deletion` on and off around every table, inside its own savepoint, which was five statements a table. The switch is transaction-local and the walk is one transaction, so one on and one off bracket every `DELETE`; the `Offer` tree went from 34 statements to 16. A failing walk still tries to switch off before re-raising, and the queryset forms keep their own bracket.
+  - **A self-referential subtree in one query.** The walk entered a self-referential `CASCADE` key one level at a time, in the collection, in the owned-closure read, and in Phase 1's collector: ten levels deeper cost forty more statements. It is now one `WITH RECURSIVE` over every self key (`UNION`, so a cycle in the data ends it), and Phase 1 takes the fast route past the self-referential gap, since every row it archives is removed below. A plain model with a key to the primary key only; an MTI chain or a `to_field` key keeps the level-by-level walk.
+  - **The owned fixpoint reads each owner once.** Every round rescanned every claimed owner and re-derived the registry's rule graph. A round now reads only owners not yet read, carries the targets it spared (a referrer holding one back can be claimed later, so they are asked again), and computes the graph once for the walk. A three-deep chain went from ten reads to four.
+- The private DELETE-only primitive `_delete_own_table_rows` is denied on an unscoped tenant queryset like its siblings.
+- Not here: a single-statement fixpoint for the owned read (#60).
+
 ## [2.14.2] - 2026-10-03
 
 ### Fixed
@@ -373,7 +384,8 @@ First stable release. **BREAKING:** the instrument ladder shifted down one rung 
 
 - Added: initial release — `SetarModel`, `GuitarModel`, `SoftDeletableModel`, `DisableSignals`, `makeguitarmigrations`.
 
-[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.14.2...HEAD
+[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.14.3...HEAD
+[2.14.3]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.14.3
 [2.14.2]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.14.2
 [2.14.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.14.1
 [2.14.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.14.0

@@ -463,6 +463,35 @@ _REFUSE_RECREATING_JOINED_RULE = """
     $guitars_retired$;
 """
 
+# The same refusal for a key whose child model was deleted (#63): nothing left in the models says
+# which column it read, and the table it fired into is gone.
+_REFUSE_RECREATING_DROPPED_RULE = """
+    DO $guitars_retired$
+    BEGIN
+        RAISE EXCEPTION
+            'guitars: % on % cannot be recreated -- the model it read was deleted. To migrate '
+            'back past this, unapply this migration with --fake, reverse the deletion, then run '
+            'makeguitarmigrations --adopt to rebuild it.',
+            {literal_rule_name}, {literal_table}
+            USING ERRCODE = 'feature_not_supported';
+    END;
+    $guitars_retired$;
+"""
+
+# The reverse of #66's retirements: what they dropped reads a column or table the models no
+# longer have, so nothing here can rebuild it. ``--adopt`` re-emits what the models call for.
+_REFUSE_REVERSING_RETIREMENT = """
+    DO $guitars_retired$
+    BEGIN
+        RAISE EXCEPTION
+            'guitars: % on % was retired and cannot be rebuilt by reversing this migration. '
+            'Unapply it with --fake, restore the models, then run makeguitarmigrations --adopt.',
+            {literal_name}, {literal_table}
+            USING ERRCODE = 'feature_not_supported';
+    END;
+    $guitars_retired$;
+"""
+
 # ---- Self-referential cascade: a trigger where the family above is a rule. A rule updating the
 # table it fires on is rewritten into itself and PostgreSQL rejects **every** ``UPDATE`` there.
 # Self keys only -- a multi-table cycle has no stable choice of edge. See ADR 0018. ----

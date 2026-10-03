@@ -101,9 +101,7 @@ class TestScanningSubtracts:
 
         assert existing.retirement_apps == set()
 
-    def test_a_retirement_does_not_pop_a_different_function_on_the_same_table(
-        self, monkeypatch
-    ):
+    def test_a_retirement_does_not_pop_a_different_function_on_the_same_table(self, monkeypatch):
         """The key is the pair. Popping by table alone would retire the live trigger of a
         table tenanted on two dimensions the moment the other one was renamed."""
         live = (_TABLE, 'guitars_fill_5_label_label_id')
@@ -138,8 +136,8 @@ class TestRetirementEmission:
 
         blob = '\n'.join(operations)
         assert HEADER_TENANT_AUTOFILL_RETIRED.format(table=_TABLE, function=_STALE) in blob
-        assert f'DROP TRIGGER "{autofill_trigger_name(_STALE)}" ON "{_TABLE}";' in blob
-        assert 'IF EXISTS' not in blob
+        # ``IF EXISTS``: a column dropped with ``CASCADE`` or a hand-drop may have taken it.
+        assert f'DROP TRIGGER IF EXISTS "{autofill_trigger_name(_STALE)}" ON "{_TABLE}";' in blob
 
     def test_the_reverse_recreates_the_trigger(self, _command):
         """A genuine inverse, not a noop -- the migration has to be reversible like every
@@ -187,7 +185,7 @@ class TestRetirementEmission:
         assert _command._retired_autofill_operations(_testapp(), adopt=True) == []
 
     def test_retirement_sorts_before_the_creates(self, _command):
-        """"Retire, then create" is how a rename reads. Legibility, not correctness -- the
+        """ "Retire, then create" is how a rename reads. Legibility, not correctness -- the
         two names never collide."""
         # Clear the live key too, so this run has both a create and a retirement to order --
         # which is exactly the shape a rename produces.
@@ -261,7 +259,7 @@ class TestNotesRatherThanOperations:
 
         assert len(notes) == 1
         assert 'gone_table' in notes[0]
-        assert f'DROP TRIGGER "{autofill_trigger_name(_STALE)}" ON "gone_table";' in notes[0]
+        assert f'DROP TRIGGER IF EXISTS "{autofill_trigger_name(_STALE)}" ON "gone_table";' in notes[0]
 
     def test_a_required_trigger_with_no_local_host_is_named_too(self, _command):
         """The other direction: the tenant column lives on an ancestor outside LOCAL_APPS, so

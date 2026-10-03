@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from django.apps import apps as django_apps
 
@@ -22,12 +22,15 @@ from guitars.management.enforcement.headers import (
     _RE_PARENT_TRIGGER_FUNCTION,
     _RE_SOFT_DELETE,
     _RE_SOFT_DELETE_OWNED,
+    _RE_SOFT_DELETE_OWNED_RETIRED,
     _RE_SOFT_DELETE_OWNED_SWEEP,
+    _RE_SOFT_DELETE_OWNED_SWEEP_RETIRED,
     _RE_SOFT_DELETE_RELATED,
     _RE_SOFT_DELETE_RELATED_RETIRED,
     _RE_SOFT_DELETE_REVIVE,
     _RE_SOFT_DELETE_REVIVE_RETIRED,
     _RE_SOFT_DELETE_SELF_CASCADE,
+    _RE_SOFT_DELETE_SELF_CASCADE_RETIRED,
     _RE_TENANT_AUTOFILL,
     _RE_TENANT_AUTOFILL_FUNCTION,
     _RE_TENANT_AUTOFILL_RETIRED,
@@ -103,6 +106,15 @@ class ExistingOperations(NamedTuple):
     #: firing on the table it points at. Its own dict for the sweep's reason: a cascade *rule*
     #: already recorded must not read as a trigger recorded. See ADR 0018.
     soft_delete_self_cascade: dict[tuple[str, str], str | None]
+    #: The migrations that created each of the three above, for a retirement to depend on:
+    #: an MTI descendant's pass writes a self-cascade trigger into *its* app (#66).
+    soft_delete_owned_dependencies: dict[tuple[str, str, str], list[tuple[str, str]]]
+    soft_delete_owned_sweep_dependencies: dict[tuple[str, str, str], list[tuple[str, str]]]
+    soft_delete_self_cascade_dependencies: dict[tuple[str, str], list[tuple[str, str]]]
+    #: Their settled retirements, for a re-adopted create to depend on (ADR 0021).
+    owned_retirement_sites: list[CascadeRetirementSite]
+    owned_sweep_retirement_sites: list[CascadeRetirementSite]
+    self_cascade_retirement_sites: list[CascadeRetirementSite]
     mti_triggers: dict[str, str | None]
     mti_soft_deletes: dict[str, str | None]
     #: ``(app_label, migration, kind, table)`` for an MTI header a single migration carries
@@ -163,9 +175,28 @@ def _cascade_key(match: re.Match) -> tuple[str, str, str | None]:
     )
 
 
-def _current_key(
-    key: tuple[str, str, str | None], moved: dict[str, str], live: set[str]
-) -> tuple[str, str, str | None]:
+def _rekey(recorded: dict, moved: dict[str, str], live: set[str]) -> None:
+    """Move *recorded*'s keys onto the table names in use, in place. A key already filed under
+    the new name keeps its value -- written after the rename, it is the newer -- and creates merge."""
+    for key in list(recorded):
+        now = _current_key(key, moved, live)
+        if now == key:
+            continue
+        value = recorded.pop(key)
+        if isinstance(value, list):
+            merged = recorded.setdefault(now, [])
+            merged[:0] = [node for node in value if node not in merged]
+        else:
+            recorded.setdefault(now, value)
+
+
+def _unescaped_groups(match: re.Match) -> tuple:
+    """A header's key, every group unescaped: the three #66 families' scanners capture exactly
+    their key, in order."""
+    return tuple(_identifiers._unescape_ident(group) for group in match.groups())
+
+
+def _current_key(key: tuple, moved: dict[str, str], live: set[str]) -> tuple:
     """*key* under the spelling a rename moved its coverage onto. Both tables, ``_move_renamed``
     rewriting every position -- and only where that walk moved it: a freed name another model
     retook keeps its own coverage there, so translating anyway looks up the wrong model's."""
@@ -173,14 +204,17 @@ def _current_key(
     def _now(table: str) -> str:
         return table if table in live else moved.get(table, table)
 
+    # A self-cascade key spells one table and its column; every other key two tables first.
+    if len(key) == 2:
+        return (_now(key[0]), key[1])
     related, owner, via = key
     return (_now(related), _now(owner), via)
 
 
 def _settle_retirement_sites(
     sites: list[CascadeRetirementSite],
-    recorded: dict[tuple[str, str, str | None], str | None],
-    provenance: dict[tuple[str, str, str | None], list[tuple[str, str]]],
+    recorded: dict[Any, str | None],
+    provenance: dict[Any, list[tuple[str, str]]],
     renames: dict[str, list[str]],
     live_tables: set[str],
     ensure_loader: Callable[[], MigrationLoader],
@@ -190,7 +224,7 @@ def _settle_retirement_sites(
     time, so both questions are settled here, once, by the graph. See ADR 0021."""
     moved = {old: new for new, chain in renames.items() for old in chain}
     graph = ensure_loader().graph
-    by_key: dict[tuple[str, str, str | None], list[CascadeRetirementSite]] = {}
+    by_key: dict[Any, list[CascadeRetirementSite]] = {}
     for site in sites:
         by_key.setdefault(_current_key(site.key, moved, live_tables), []).append(site)
     settled = []
@@ -268,10 +302,17 @@ def _subtract_retired(
     column: str | None,
     keyed: dict[str, dict],
     whole_table: dict[str, dict],
+    triggers: dict[str, tuple[dict, int]] | None = None,
 ) -> None:
     """Forget what a ``RetireEnforcement`` dropped, so a later run re-emits what the models
-    still call for. *keyed* spell a table **and** a column, so a column form can match them;
-    *whole_table* are keyed on a table alone and only the whole-table form reaches them."""
+    still call for. *keyed* spell a table and column, *whole_table* a table, *triggers* a family
+    with the index of the table it fires on; only a whole-table form reaches the last two."""
+    # Exactly what the operation drops, never more: a trigger only on the table it names, whole.
+    # Forgetting one it left live read it as gone, and nothing retired it again (#66).
+    if column is None:
+        for recorded, fires_on in (triggers or {}).values():
+            for key in [k for k in recorded if k[fires_on] == table]:
+                del recorded[key]
     for recorded in keyed.values():
         # ``k[-1] is None`` is the cascade family's *primary* form, whose key drops the column
         # as the historical rule name does, so a column retirement takes it unseen: over-
@@ -333,6 +374,10 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
     existing_soft_delete_owned: dict[tuple[str, str, str], str | None] = {}
     existing_soft_delete_owned_sweep: dict[tuple[str, str, str], str | None] = {}
     existing_soft_delete_self_cascade: dict[tuple[str, str], str | None] = {}
+    owned_deps: dict = {}
+    sweep_deps: dict = {}
+    self_deps: dict = {}
+    trigger_retirement_sites: dict[int, list[CascadeRetirementSite]] = {}
     existing_mti_triggers: dict[str, str | None] = {}
     existing_mti_soft_deletes: dict[str, str | None] = {}
     duplicate_mti: list[tuple[str, str, str, str]] = []
@@ -432,10 +477,13 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
     # rest of the scan -- which is the point: a later migration re-recording a key wins again.
     keyed_families = {
         'soft_delete_related': existing_soft_delete_related,
-        'soft_delete_revive': existing_soft_delete_revive,
         'soft_delete_owned': existing_soft_delete_owned,
-        'soft_delete_owned_sweep': existing_soft_delete_owned_sweep,
-        'soft_delete_self_cascade': existing_soft_delete_self_cascade,
+    }
+    # A revive and a sweep fire on the owner (index 1), a self cascade on its own table.
+    trigger_families = {
+        'soft_delete_revive': (existing_soft_delete_revive, 1),
+        'soft_delete_owned_sweep': (existing_soft_delete_owned_sweep, 1),
+        'soft_delete_self_cascade': (existing_soft_delete_self_cascade, 0),
     }
     whole_table_families = {
         'triggers': existing_triggers,
@@ -459,9 +507,8 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
             existing_soft_delete_related,
             existing_soft_delete_revive,
             revive_deps,
-            existing_soft_delete_owned,
-            existing_soft_delete_owned_sweep,
-            existing_soft_delete_self_cascade,
+            # Not #66's three: moved once, after the walk, by ``_rekey``, which keeps an entry
+            # another app filed under the new name -- this move would overwrite it with an older.
             existing_mti_triggers,
             existing_mti_soft_deletes,
             cascade_deps,
@@ -492,7 +539,9 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
 
             for table, column in retired.get(path.stem, ()):
                 for spelling in spellings[table]:
-                    _subtract_retired(spelling, column, keyed_families, whole_table_families)
+                    _subtract_retired(
+                        spelling, column, keyed_families, whole_table_families, trigger_families
+                    )
                     # A tenant policy is dropped on **either** path -- it is filed against the
                     # column it reads, so a column form takes it too. Forgetting it only on the
                     # whole-table path leaves tenancy off with ``--check`` green.
@@ -548,6 +597,18 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
                 if (app.label, path.stem) not in creates:
                     creates.append((app.label, path.stem))
 
+            # #66's three record their creates too, and their retirements below are settled
+            # by the graph rather than popped here: a self-cascade trigger can be written by
+            # an MTI descendant's app, and a rename in another app re-keys after a pop.
+            for pattern, deps in (
+                (_RE_SOFT_DELETE_OWNED, owned_deps),
+                (_RE_SOFT_DELETE_OWNED_SWEEP, sweep_deps),
+                (_RE_SOFT_DELETE_SELF_CASCADE, self_deps),
+            ):
+                for match in pattern.finditer(content):
+                    # A dict as an ordered set: one entry per migration, in walk order.
+                    deps.setdefault(_unescaped_groups(match), {})[app.label, path.stem] = None
+
             # Recorded per file, not per family: a repeat is only visible while the file is
             # open, and the key it writes is the one a real MTI child writes too.
             for pattern, kind in (
@@ -584,6 +645,16 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
                 revive_retirement_sites.append(
                     CascadeRetirementSite(app.label, path.stem, _cascade_key(match), None)
                 )
+            for pattern, recorded in (
+                (_RE_SOFT_DELETE_OWNED_RETIRED, existing_soft_delete_owned),
+                (_RE_SOFT_DELETE_OWNED_SWEEP_RETIRED, existing_soft_delete_owned_sweep),
+                (_RE_SOFT_DELETE_SELF_CASCADE_RETIRED, existing_soft_delete_self_cascade),
+            ):
+                for match in pattern.finditer(content):
+                    trigger_retirement_sites.setdefault(id(recorded), []).append(
+                        CascadeRetirementSite(app.label, path.stem, _unescaped_groups(match), None)
+                    )
+                    retirement_apps.add(app.label)
             retirements = list(_RE_TENANT_AUTOFILL_RETIRED.finditer(content))
             for match in retirements:
                 existing_tenant_autofill.pop(_autofill_key(match), None)
@@ -640,6 +711,39 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
         _ensure_loader,
     )
 
+    # #66's three, settled the same way and for the same reason.
+    owned_deps, sweep_deps, self_deps = (
+        {key: list(nodes) for key, nodes in deps.items()}
+        for deps in (owned_deps, sweep_deps, self_deps)
+    )
+    # Onto the names in use first: the walk moves a key only once its rename's app is walked,
+    # so an app walked later records the old name, never moved, and retired on every run.
+    final = {old: new for new, chain in _pending_renames.items() for old in chain}
+    for recorded in (
+        existing_soft_delete_owned,
+        existing_soft_delete_owned_sweep,
+        existing_soft_delete_self_cascade,
+        owned_deps,
+        sweep_deps,
+        self_deps,
+    ):
+        _rekey(recorded, final, live_tables)
+    owned_sites, sweep_sites, self_sites = (
+        _settle_retirement_sites(
+            trigger_retirement_sites.get(id(recorded), []),
+            recorded,
+            deps,
+            _pending_renames,
+            live_tables,
+            _ensure_loader,
+        )
+        for recorded, deps in (
+            (existing_soft_delete_owned, owned_deps),
+            (existing_soft_delete_owned_sweep, sweep_deps),
+            (existing_soft_delete_self_cascade, self_deps),
+        )
+    )
+
     # One map across every local app: a cascade rule's key names two tables, and they can
     # belong to different apps, so translating per app would leave half a key behind.
     renames = _pending_renames
@@ -656,6 +760,12 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
         soft_delete_owned=existing_soft_delete_owned,
         soft_delete_owned_sweep=existing_soft_delete_owned_sweep,
         soft_delete_self_cascade=existing_soft_delete_self_cascade,
+        soft_delete_owned_dependencies=owned_deps,
+        soft_delete_owned_sweep_dependencies=sweep_deps,
+        soft_delete_self_cascade_dependencies=self_deps,
+        owned_retirement_sites=owned_sites,
+        owned_sweep_retirement_sites=sweep_sites,
+        self_cascade_retirement_sites=self_sites,
         mti_triggers=existing_mti_triggers,
         mti_soft_deletes=existing_mti_soft_deletes,
         duplicate_mti_operations=duplicate_mti,

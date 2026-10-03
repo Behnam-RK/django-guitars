@@ -103,6 +103,7 @@ class Command(OperationsMixin, BaseCommand):
         self._table_app_labels_cache: dict[str, str] | None = None
         self._routed_away_cache: frozenset[str] | None = None
         self._cascade_key_maps_cache: tuple[dict, dict] | None = None  # see the mixin
+        self._required_self_cascade_keys: set[tuple[str, str]] = set()
         # Lazy, not built here: the graph reads ``self.all_models``, which a caller can *replace*
         # after construction -- the generation tests do, ``isolate_apps`` swapping ``Options.apps``
         # rather than the registry this constructor read. Building it here freezes the old answer.
@@ -125,6 +126,9 @@ class Command(OperationsMixin, BaseCommand):
         # whenever this command writes a file. ``None`` is "not built"; building one imports
         # every migration module in the project, so it is worth not doing per app.
         self._loader_cache: MigrationLoader | None = None
+        self._dropped_tables_cache: tuple[MigrationLoader, dict[str, tuple[str, str]]] | None = (
+            None
+        )
         self._required_autofill_cache: dict[tuple[str, str], tuple[str, str]] | None = None
         self._relocated_autofill_cache: dict[tuple[str, str], tuple[str, str]] | None = None
 
@@ -568,6 +572,7 @@ class Command(OperationsMixin, BaseCommand):
             self._scoped_cascade_gap_notes(requested)
             + self._scoped_owned_gap_notes(requested)
             + self._scoped_autofill_gap_notes(requested)
+            + self._scoped_trigger_retirement_notes(requested)
         ):
             self.stdout.write(self.style.WARNING(note))
 

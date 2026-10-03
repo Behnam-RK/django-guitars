@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, NamedTuple, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from django.apps import apps as django_apps
 from django.core.exceptions import FieldDoesNotExist
@@ -29,6 +29,7 @@ from guitars.management import _generator
 from guitars.management.enforcement.graph import (
     ObjectRef,
     drop_implied_edges,
+    dropped_tables,
     resolve_dependencies,
     resolve_object_migration,
 )
@@ -41,7 +42,9 @@ from guitars.management.enforcement.headers import (
     HEADER_MTI_UPDATED_AT,
     HEADER_SOFT_DELETE,
     HEADER_SOFT_DELETE_OWNED,
+    HEADER_SOFT_DELETE_OWNED_RETIRED,
     HEADER_SOFT_DELETE_OWNED_SWEEP,
+    HEADER_SOFT_DELETE_OWNED_SWEEP_RETIRED,
     HEADER_SOFT_DELETE_RELATED,
     HEADER_SOFT_DELETE_RELATED_RETIRED,
     HEADER_SOFT_DELETE_RELATED_VIA,
@@ -51,6 +54,7 @@ from guitars.management.enforcement.headers import (
     HEADER_SOFT_DELETE_REVIVE_VIA,
     HEADER_SOFT_DELETE_REVIVE_VIA_RETIRED,
     HEADER_SOFT_DELETE_SELF_CASCADE,
+    HEADER_SOFT_DELETE_SELF_CASCADE_RETIRED,
     HEADER_TENANT_AUTOFILL,
     HEADER_TENANT_AUTOFILL_RETIRED,
     HEADER_TENANT_FORCE,
@@ -273,6 +277,7 @@ class OperationsMixin:
         _object_refs: dict[str, list[ObjectRef]]
         _retirement_edges: dict[str, list[tuple[str, str]]]
         _loader_cache: MigrationLoader | None
+        _dropped_tables_cache: tuple[MigrationLoader, dict[str, tuple[str, str]]] | None
         _refusals_over_live_rules: list[str]
         _missing_edges: list[str]
         _unresolved_reference_notes: list[str]
@@ -650,6 +655,7 @@ class OperationsMixin:
             # is legibility rather than correctness.
             + self._retired_cascade_operations(app, adopt=adopt)
             + self._retired_autofill_operations(app, adopt=adopt)
+            + self._retired_trigger_operations(app)
             + self._tenant_autofill_operations(app, adopt=adopt)
             + self._tenant_policy_operations(app, adopt=adopt)
         )
@@ -836,6 +842,7 @@ class OperationsMixin:
             return self._cascade_key_maps_cache
         required: dict[tuple[str, str, str | None], str] = {}
         models_by_table: dict[str, type[models.Model]] = {}
+        self._required_self_cascade_keys: set[tuple[str, str]] = set()
         for app in django_apps.get_app_configs():
             if not _generator.is_local(app):
                 continue
@@ -848,13 +855,131 @@ class OperationsMixin:
                 owner_table = column_owner(model, '_deleted_at')._meta.db_table
                 # ``report=False``: this sweep covers apps the run was never asked about, and
                 # their misconfigurations are not its to report -- ``_owned_candidates``' rule.
-                candidates, _self = self._cascade_candidates(model, owner_table, report=False)
+                candidates, selfs = self._cascade_candidates(model, owner_table, report=False)
+                self._required_self_cascade_keys.update(
+                    (owner_table, fk_field.column) for fk_field in selfs
+                )
                 for related_model, fk_field, is_primary in candidates:
                     related_table = related_model._meta.db_table
                     column = fk_field.column
                     required[(related_table, owner_table, None if is_primary else column)] = column
         self._cascade_key_maps_cache = (required, models_by_table)
         return self._cascade_key_maps_cache
+
+    def _required_self_cascades(self) -> set[tuple[str, str]]:
+        """``(table, foreign_key)`` of every self-cascade trigger the models call for, off the
+        same sweep as :meth:`_cascade_key_maps`."""
+        self._cascade_key_maps()
+        return self._required_self_cascade_keys
+
+    @staticmethod
+    def _declared_owned_keys() -> set[tuple[str, str, str]]:
+        """Every owned key a declaration still names, *refused or not*: a refusal escalates a
+        live rule to a failing ``--check`` already, so only an undeclared key is retired."""
+        return {
+            (
+                column_owner(field.related_model, '_deleted_at')._meta.db_table,
+                column_owner(model, '_deleted_at')._meta.db_table,
+                field.column,
+            )
+            for app in django_apps.get_app_configs()
+            if _generator.is_local(app)
+            for model in app.get_models()
+            if has_column(model, '_deleted_at')
+            for field in OperationsMixin._declared_owning_fields(model)
+            if has_column(field.related_model, '_deleted_at')
+        }
+
+    def _retired_trigger_operations(self, app: AppConfig) -> list[str]:
+        """Retire the owned rule, its sweep and the self-cascade trigger whose key the models no
+        longer call for (#66): their plpgsql bodies name the column, so after ``DROP COLUMN ...
+        CASCADE`` each failed every UPDATE on its table. ``IF EXISTS`` and every spelling."""
+        hosting = self._table_app_labels()
+        declared = self._declared_owned_keys()
+        required_selfs = self._required_self_cascades()
+        quote = _identifiers._quote_table
+        operations: list[str] = []
+        owned = set(self.existing.soft_delete_owned) | set(self.existing.soft_delete_owned_sweep)
+        for dependent_table, owner_table, foreign_key in sorted(owned - declared):
+            if hosting.get(owner_table) != app.label:
+                continue
+            key = (dependent_table, owner_table, foreign_key)
+            pairs = [
+                (owner, dependent)
+                for owner in (*self._prior_names(owner_table), owner_table)
+                for dependent in (*self._prior_names(dependent_table), dependent_table)
+            ]
+            slots = {
+                'dependent_table': _identifiers._escape_ident(dependent_table),
+                'table': _identifiers._escape_ident(owner_table),
+                'foreign_key': _identifiers._escape_ident(foreign_key),
+            }
+            for recorded, creates, header, drop, name in (
+                (
+                    self.existing.soft_delete_owned,
+                    self.existing.soft_delete_owned_dependencies,
+                    HEADER_SOFT_DELETE_OWNED_RETIRED,
+                    self._drop_prior_rules(
+                        quote(owner_table),
+                        sorted({_owned_rule_name(d, foreign_key) for _o, d in pairs}),
+                    ),
+                    _owned_rule_name(dependent_table, foreign_key),
+                ),
+                (
+                    self.existing.soft_delete_owned_sweep,
+                    self.existing.soft_delete_owned_sweep_dependencies,
+                    HEADER_SOFT_DELETE_OWNED_SWEEP_RETIRED,
+                    self._drop_prior_triggers(
+                        {'table': quote(owner_table)},
+                        [_owned_sweep_name(o, d, foreign_key) for o, d in pairs],
+                    ),
+                    _owned_sweep_name(owner_table, dependent_table, foreign_key),
+                ),
+            ):
+                if key in recorded:
+                    self._record_retirement_edge(app.label, key, creates)
+                    operations.append(
+                        self._retirement(
+                            app.label, header.format(**slots), drop, name, owner_table
+                        )
+                    )
+        for table, foreign_key in sorted(
+            set(self.existing.soft_delete_self_cascade) - required_selfs
+        ):
+            if hosting.get(table) != app.label:
+                continue
+            header = HEADER_SOFT_DELETE_SELF_CASCADE_RETIRED.format(
+                table=_identifiers._escape_ident(table),
+                foreign_key=_identifiers._escape_ident(foreign_key),
+            )
+            drop = self._drop_prior_triggers(
+                {'table': quote(table)},
+                [
+                    _self_cascade_name(name, foreign_key)
+                    for name in (*self._prior_names(table), table)
+                ],
+            )
+            name = _self_cascade_name(table, foreign_key)
+            # Ordered after its create: an MTI descendant's pass writes this trigger into the
+            # descendant's app, while the retirement is hosted by the table's.
+            self._record_retirement_edge(
+                app.label,
+                (table, foreign_key),
+                self.existing.soft_delete_self_cascade_dependencies,
+            )
+            operations.append(self._retirement(app.label, header, drop, name, table))
+        return operations
+
+    def _retirement(self, app_label: str, header: str, drop: str, name: str, table: str) -> str:
+        """One #66 retirement: the drop, and a reverse that refuses and points at ``--adopt``."""
+        # Its operation set may recur once a key is re-adopted and retired again.
+        self.existing.retirement_apps.add(app_label)
+        reverse = _soft_delete._REFUSE_REVERSING_RETIREMENT.format(
+            literal_name=_identifiers._quote_literal(name),
+            literal_table=_identifiers._quote_literal(table),
+        )
+        source, _ = _operation(header, drop, reverse)
+        return source
 
     def _retired_cascade_column(
         self, key: tuple[str, str, str | None], models_by_table: dict[str, type[models.Model]]
@@ -985,32 +1110,42 @@ class OperationsMixin:
         for key in sorted(recorded - set(required), key=lambda k: (k[0], k[1], k[2] or '')):
             related_table, owner_table, via = key
             # Both, not just the host: a table mapping to nothing is a *deleted* model on one
-            # reading and an app dropped from LOCAL_APPS on another, and this cannot tell them
-            # apart. Named in ``_unmapped_cascade_notes`` instead.
-            if hosting.get(owner_table) != app.label or related_table not in hosting:
+            # reading and an app dropped from LOCAL_APPS on another. Only the migration history
+            # tells them apart; without its evidence the key is named, not retired.
+            if hosting.get(owner_table) != app.label:
                 continue
-            column = self._retired_cascade_column(key, models_by_table)
+            # The one unmapped table with evidence behind it: a ``DeleteModel`` dropped it, which
+            # took the rule and left the owner's revive trigger failing every UPDATE (#63).
+            deleted = related_table not in hosting and related_table in self._dropped_tables()
+            if related_table not in hosting and not deleted:
+                continue
+            column = None if deleted else self._retired_cascade_column(key, models_by_table)
             owner = models_by_table[owner_table]
-            self._note_a_cycle_retirement(key, models_by_table)
+            if not deleted:
+                self._note_a_cycle_retirement(key, models_by_table)
             ident_owner_table = _identifiers._quote_table(owner_table)
             for family in self._retired_cascade_families(key):
                 if key not in family.recorded:
                     continue
                 self._record_retirement_edge(app.label, key, family.creates)
+                if deleted:
+                    # After the drop of the child's table, not only after the create: run first,
+                    # it removed both objects while the child was live and archivable.
+                    deleting_node = self._dropped_tables()[related_table]
+                    if deleting_node[0] != app.label:
+                        self._record_edge(self._retirement_edges, app.label, deleting_node)
                 rule_name = family.name(owner_table, related_table, via)
                 slots = family.slots(rule_name, ident_owner_table)
-                drop = family.drop_template.format(**slots)
-                if self._renamed(related_table):
-                    # Which spelling is live depends on when a generation last ran, so every
-                    # one goes, ``IF EXISTS``. A bare DROP of a name nothing has fails
-                    # ``migrate``.
-                    drop = family.drop_prior(
-                        ident_owner_table,
-                        [
-                            family.name(owner_table, name, via)
-                            for name in (*self._prior_names(related_table), related_table)
-                        ],
-                    )
+                # ``IF EXISTS`` on every retirement, over every name the table has held (ADR
+                # 0029): ``DROP ... CASCADE`` takes a rule with the column or table it reads, and
+                # a hand-drop the docs advised takes a trigger, so absent is the expected case.
+                drop = family.drop_prior(
+                    ident_owner_table,
+                    [
+                        family.name(owner_table, name, via)
+                        for name in (*self._prior_names(related_table), related_table)
+                    ],
+                )
                 reverse = (
                     family.create_template.format(
                         **slots,
@@ -1024,7 +1159,9 @@ class OperationsMixin:
                     # quoted forms escape ``"`` but not ``'``, so a db_table carrying one
                     # would break it.
                     else (
-                        _soft_delete._REFUSE_RECREATING_JOINED_RULE
+                        _soft_delete._REFUSE_RECREATING_DROPPED_RULE
+                        if deleted
+                        else _soft_delete._REFUSE_RECREATING_JOINED_RULE
                         if self._retired_key_is_joined(related_table, models_by_table)
                         else _soft_delete._REFUSE_RECREATING_RETIRED_RULE
                     ).format(
@@ -1047,20 +1184,7 @@ class OperationsMixin:
                 # Not ``_append_if_stale``, for ``_retired_autofill_operations``' reason: the
                 # set difference above is the whole idempotency mechanism, and "recorded digest
                 # differs -> replace" means nothing for a drop.
-
-                # ``--adopt`` is honest about not knowing what the database holds, so it is the
-                # one path that may say ``IF EXISTS``, the swap the autofill retirement makes.
-                source, _ = _operation(
-                    header,
-                    drop,
-                    reverse,
-                    # Where a rename already made ``drop`` all-``IF EXISTS`` over every
-                    # spelling, that *is* the adopt form -- overriding it would leave adopt
-                    # strictly weaker than the plain path in the one case the old name is live.
-                    emit=family.drop_prior(ident_owner_table, [rule_name])
-                    if adopt and not self._renamed(related_table)
-                    else drop,
-                )
+                source, _ = _operation(header, drop, reverse)
                 operations.append(source)
         return operations
 
@@ -1171,32 +1295,34 @@ class OperationsMixin:
             related_table, owner_table, via = key
             if owner_table in hosting and related_table in hosting:
                 continue
+            # Retired above on the evidence of a ``DeleteModel``; or the owner's table itself was
+            # dropped, taking every rule and trigger on it.
+            dropped = self._dropped_tables()
+            if owner_table in dropped or (owner_table in hosting and related_table in dropped):
+                continue
             # A routed-away table maps to nothing by design, and the vendor note already
             # says why. Advising a by-hand drop here would name the same model twice.
             if {owner_table, related_table} & self._routed_away_tables():
                 continue
-            # **Both** halves, the precedent the owned pair set: the cascade alone leaves the
-            # revive live, and a later un-archive then revives children whose stamp still
-            # matches -- the exposing direction. Only halves this project recorded are named.
+            # **Both** halves, as the owned pair set the precedent: the cascade alone leaves the
+            # revive reviving children whose stamp still matches. Only halves recorded here are
+            # named, ``IF EXISTS`` as the generated retirements say it (ADR 0029).
+            quoted_owner = _identifiers._quote_table(owner_table)
             drop = '\n'.join(
-                template.format(**slots).strip()
-                for recorded_in, template, slots in (
+                statement.strip()
+                for recorded_in, statement in (
                     (
                         self.existing.soft_delete_related,
-                        _soft_delete._DROP_SOFT_DELETE_RELATED_OBJECTS_RULE,
-                        {
-                            'rule_name': _related_rule_name(related_table, via),
-                            'table': _identifiers._quote_table(owner_table),
-                        },
+                        self._drop_prior_rules(
+                            quoted_owner, [_related_rule_name(related_table, via)]
+                        ),
                     ),
                     (
                         self.existing.soft_delete_revive,
-                        _soft_delete._DROP_SOFT_DELETE_REVIVE,
-                        {
-                            'function': _revive_name(owner_table, related_table, via),
-                            'trigger': _revive_name(owner_table, related_table, via),
-                            'table': _identifiers._quote_table(owner_table),
-                        },
+                        self._drop_prior_triggers(
+                            {'table': quoted_owner},
+                            [_revive_name(owner_table, related_table, via)],
+                        ),
                     ),
                 )
                 if key in recorded_in
@@ -1238,7 +1364,9 @@ class OperationsMixin:
             if hosting.get(table) != app.label:
                 continue
             slots = self._autofill_slots(table, function)
-            drop = _triggers._DROP_TENANT_AUTOFILL_TRIGGER.format(**slots)
+            # ``IF EXISTS`` as every retirement says it (ADR 0029): a column dropped with
+            # ``CASCADE`` or a hand-drop leaves nothing for a strict drop to find.
+            drop = _triggers._ADOPT_DROP_TENANT_AUTOFILL_TRIGGER.format(**slots)
             # Not _append_if_stale: its "recorded digest differs -> replace" branch is
             # meaningless for a drop. The set difference above is the whole idempotency
             # mechanism, so the [SQL:...] stamped here is written and never read.
@@ -1249,9 +1377,6 @@ class OperationsMixin:
                 ),
                 drop,
                 _triggers._CREATE_TENANT_AUTOFILL_TRIGGER.format(**slots),
-                emit=_triggers._ADOPT_DROP_TENANT_AUTOFILL_TRIGGER.format(**slots)
-                if adopt
-                else drop,
             )
             operations.append(source)
         return operations
@@ -1274,7 +1399,7 @@ class OperationsMixin:
                 f"Tenant autofill trigger on '{table}' (function '{function}') is recorded "
                 f'but no local model maps to that table, so it cannot be retired here. If '
                 f'the table still exists, drop it by hand: '
-                f'{_triggers._DROP_TENANT_AUTOFILL_TRIGGER.format(**slots).strip()}'
+                f'{_triggers._ADOPT_DROP_TENANT_AUTOFILL_TRIGGER.format(**slots).strip()}'
             )
         # The other direction: a relocated trigger whose ancestor lives outside LOCAL_APPS.
         # Nothing hosts it, so `audittenancy` would report it missing on every run forever.
@@ -1357,8 +1482,8 @@ class OperationsMixin:
     def _record_retirement_edge(
         self,
         app_label: str,
-        key: tuple[str, str, str | None],
-        creates_by_key: dict[tuple[str, str, str | None], list[tuple[str, str]]],
+        key: tuple,
+        creates_by_key: dict[Any, list[tuple[str, str]]],
     ) -> None:
         """Order a cascade retirement against the migration that created the object it drops.
         Read off the scan rather than resolved: neither is visible to migration state, and the
@@ -1380,8 +1505,8 @@ class OperationsMixin:
     def _record_readoption_edge(
         self,
         app_label: str,
-        key: tuple[str, str, str | None],
-        recorded: dict[tuple[str, str, str | None], str | None] | None = None,
+        key: tuple,
+        recorded: dict[Any, str | None] | None = None,
         retirement_sites: list[CascadeRetirementSite] | None = None,
     ) -> None:
         """Order a cascade create against the retirement it revives. Without it a fresh
@@ -1979,6 +2104,7 @@ class OperationsMixin:
                 ident_owner_pk=ident_owner_pk,
                 foreign_key=fk_field.column,
                 adopt=adopt,
+                app_label=model._meta.app_label,
             )
         return ops
 
@@ -1993,13 +2119,14 @@ class OperationsMixin:
         ident_owner_pk: str,
         foreign_key: str,
         adopt: bool,
+        app_label: str,
     ) -> None:
         """The statement-level trigger a self-referential CASCADE FK takes in place of the rule
         the loop above emits (ADR 0018). Appended from inside :meth:`_cascade_operations`, after
         the same refusals -- so which self keys carry a trigger *is* which would carry a rule."""
         # No object refs: CREATE TRIGGER names only the table it fires on and plpgsql resolves
-        # no body at CREATE FUNCTION time. A proxy cannot relocate it (``_is_cascade_candidate``
-        # drops the proxy-declared side) and an MTI child never reaches this branch at all.
+        # no body at CREATE FUNCTION time. An MTI descendant's key at its root does reach here,
+        # from the descendant's pass and app, so its retirement depends on this migration (#66).
         name = _self_cascade_name(owner_table, foreign_key)
         ident_foreign_key = _identifiers._escape_ident(foreign_key)
         slots = {
@@ -2041,6 +2168,14 @@ class OperationsMixin:
         # holding its name would report a clash against the one relation that does reach it.
         self._claim_sweep_function_name(
             name, (owner_table, owner_table, foreign_key), kind='Self cascade trigger'
+        )
+        # Against the retirement it revives, which the table's app hosts while this create
+        # can land in an MTI descendant's: unordered, a fresh migrate runs it first (ADR 0021).
+        self._record_readoption_edge(
+            app_label,
+            key,
+            self.existing.soft_delete_self_cascade,
+            self.existing.self_cascade_retirement_sites,
         )
         self._append_if_stale(
             ops,
@@ -2295,6 +2430,15 @@ class OperationsMixin:
                     )
                     + forward
                 )
+            # Each half against the retirement it revives, as the cascade pair does (ADR 0021).
+            for recorded, sites in (
+                (self.existing.soft_delete_owned, self.existing.owned_retirement_sites),
+                (
+                    self.existing.soft_delete_owned_sweep,
+                    self.existing.owned_sweep_retirement_sites,
+                ),
+            ):
+                self._record_readoption_edge(model._meta.app_label, key, recorded, sites)
             self._append_if_stale(
                 ops,
                 self.existing.soft_delete_owned,
@@ -2673,9 +2817,23 @@ class OperationsMixin:
         # naming it twice would read as two rules still archiving rows.
         recorded = set(self.existing.soft_delete_related) | set(self.existing.soft_delete_revive)
         for key in sorted(recorded - set(required), key=lambda k: (k[0], k[1], k[2] or '')):
-            related_table, owner_table, _via = key
+            related_table, owner_table, via = key
             owner_app = hosting.get(owner_table)
-            if owner_app is None or owner_app in requested or related_table not in hosting:
+            if owner_app is None or owner_app in requested:
+                continue
+            if related_table not in hosting:
+                # Only where a revive was recorded: before 2.11.0 there is none, and nothing
+                # is broken. Named per trigger, so two keys to one owner read as two.
+                if (
+                    related_table in self._dropped_tables()
+                    and key in self.existing.soft_delete_revive
+                ):
+                    notes.append(
+                        f'Revive trigger {_revive_name(owner_table, related_table, via)} on '
+                        f"'{owner_table}' names '{related_table}', whose model was deleted, and "
+                        f'fails every UPDATE on that table until it is retired -- which only a '
+                        f"run including '{owner_app}' writes."
+                    )
                 continue
             notes.append(
                 f"Cascade rule on '{owner_table}' related to '{related_table}' is recorded but "
@@ -2685,6 +2843,28 @@ class OperationsMixin:
             )
         return notes
 
+    def _scoped_trigger_retirement_notes(self, requested: set[str]) -> list[str]:
+        """#66's retirements a scoped run leaves unwritten because the table they fire on is
+        hosted by an app outside it: each trigger named, since it fails every UPDATE there."""
+        # An unscoped run writes these itself; only a scoped one can leave them behind.
+        if not requested:
+            return []
+        hosting = self._table_app_labels()
+        undeclared = (
+            set(self.existing.soft_delete_owned) | set(self.existing.soft_delete_owned_sweep)
+        ) - self._declared_owned_keys()
+        unrequired = set(self.existing.soft_delete_self_cascade) - self._required_self_cascades()
+        fires_on = [(key, key[1]) for key in sorted(undeclared)] + [
+            (key, key[0]) for key in sorted(unrequired)
+        ]
+        return [
+            f"Enforcement on '{table}' for {key} is recorded but the models no longer call for "
+            f"it, and it cannot be retired here: its app '{hosting[table]}' is not in this "
+            f'scoped run. Until a run includes that app it may fail every UPDATE on the table.'
+            for key, table in fires_on
+            if hosting.get(table) not in (None, *requested)
+        ]
+
     def _migration_loader(self) -> MigrationLoader:
         """The project's migration graph, built at most once between writes. Building one imports
         every migration module in the project, and both readers below ask one question per app --
@@ -2692,6 +2872,22 @@ class OperationsMixin:
         if self._loader_cache is None:
             self._loader_cache = MigrationLoader(None, ignore_no_migrations=True)
         return self._loader_cache
+
+    def _dropped_tables(self) -> dict[str, tuple[str, str]]:
+        """:func:`dropped_tables` over :meth:`_migration_loader`, recomputed with it, less any
+        table a model of an app with no migrations holds -- migration state cannot see those."""
+        loader = self._migration_loader()
+        if self._dropped_tables_cache is None or self._dropped_tables_cache[0] is not loader:
+            live = {model._meta.db_table for model in django_apps.get_models()}
+            self._dropped_tables_cache = (
+                loader,
+                {
+                    table: node
+                    for table, node in dropped_tables(loader).items()
+                    if table not in live
+                },
+            )
+        return self._dropped_tables_cache[1]
 
     def _drop_cached_migration_loader(self) -> None:
         """Forget the graph after writing a migration file. The file carries edges into other

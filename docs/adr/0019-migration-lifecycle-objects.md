@@ -72,6 +72,8 @@ beside ours.
   raises rather than succeeding into a database missing a rule its history claims.
 - `--adopt` remains the one path that may say `IF EXISTS`, being the one honest about not
   knowing — except where a rename already made the drop all-`IF EXISTS` over every spelling.
+  **Superseded for retirements** by [ADR 0029](0029-retiring-a-deleted-childs-revive-trigger.md):
+  since 2.13.0 every retirement drop says `IF EXISTS`; creates keep the strict forms.
 
 ## Alternatives rejected
 

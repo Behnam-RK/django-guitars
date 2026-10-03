@@ -41,6 +41,17 @@ HEADER_SOFT_DELETE_OWNED_SWEEP = (
     'via "{foreign_key}"!'
 )
 
+# Their retirement (#66), hosted with the create since both fire on the owner's table: a key
+# no longer declared, or its column gone. Popped in the file walk, as the autofill one is.
+HEADER_SOFT_DELETE_OWNED_RETIRED = (
+    '# Soft Delete Owned Rule retired on "{dependent_table}" that is owned by "{table}" '
+    'via "{foreign_key}"!'
+)
+HEADER_SOFT_DELETE_OWNED_SWEEP_RETIRED = (
+    '# Soft Delete Owned Sweep retired on "{dependent_table}" that is owned by "{table}" '
+    'via "{foreign_key}"!'
+)
+
 # The retirement of the two above, and the only headers besides the autofill pair that mean an
 # operation *removed* something. Two forms for the two create forms, since the rule they drop is
 # named after whichever one wrote it. See ``docs/migrations.md``'s "Retirement".
@@ -75,6 +86,9 @@ HEADER_SOFT_DELETE_REVIVE_VIA_RETIRED = (
 # reads one as another's. One table slot: the trigger fires on the table its key points at.
 HEADER_SOFT_DELETE_SELF_CASCADE = (
     '# Soft Delete Self Cascade Trigger on "{table}" via "{foreign_key}"!'
+)
+HEADER_SOFT_DELETE_SELF_CASCADE_RETIRED = (
+    '# Soft Delete Self Cascade Trigger retired on "{table}" via "{foreign_key}"!'
 )
 
 # --- Multi-table inheritance (MTI) operations ---
@@ -142,6 +156,10 @@ _RE_SOFT_DELETE_OWNED_SWEEP = _derive_scanner(HEADER_SOFT_DELETE_OWNED_SWEEP)
 # Derivable too, and disjoint from all three above on "Self": no header of another
 # family carries that token, so nothing reads a self-cascade record as a rule.
 _RE_SOFT_DELETE_SELF_CASCADE = _derive_scanner(HEADER_SOFT_DELETE_SELF_CASCADE)
+# The three retirements of #66, each disjoint from its create on "retired".
+_RE_SOFT_DELETE_OWNED_RETIRED = _derive_scanner(HEADER_SOFT_DELETE_OWNED_RETIRED)
+_RE_SOFT_DELETE_OWNED_SWEEP_RETIRED = _derive_scanner(HEADER_SOFT_DELETE_OWNED_SWEEP_RETIRED)
+_RE_SOFT_DELETE_SELF_CASCADE_RETIRED = _derive_scanner(HEADER_SOFT_DELETE_SELF_CASCADE_RETIRED)
 _RE_TENANT_FORCE = _derive_scanner(HEADER_TENANT_FORCE)
 _RE_TENANT_AUTOFILL_FUNCTION = _derive_scanner(HEADER_TENANT_AUTOFILL_FUNCTION)
 # Derived, and deliberately NOT fused with _RE_TENANT_AUTOFILL the way _RE_TENANT_POLICY

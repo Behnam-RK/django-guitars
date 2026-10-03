@@ -4,6 +4,7 @@ CLAUDE.md's checklist and :func:`_transaction_marker`."""
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 from django.db import connections, transaction
@@ -38,6 +39,9 @@ __all__ = [
 _CACHE = '_guitars_tenant_guc'
 _SYNCING = '_guitars_tenant_guc_syncing'
 _NAMES = '_guitars_tenant_guc_names'
+# Each ends the transaction or its savepoint, undoing every ``SET LOCAL``; ``... PREPARED`` is another one's.
+_ENDS_ONE = frozenset({'ROLLBACK', 'ABORT', 'COMMIT', 'END'})
+_ROLLBACK_WORD = re.compile(r'\bROLLBACK\b', re.I)  # a literal: nothing in it can backtrack
 
 # SQLSTATE 42501 insufficient_privilege -- what a WITH CHECK violation raises.
 _RLS_SQLSTATE = '42501'
@@ -116,9 +120,10 @@ def _publish(connection: BaseDatabaseWrapper, state: dict[str, str]) -> None:
     cached = getattr(connection, _CACHE, None)
     previous = cached[0] if cached else {}
     updates = dict(state)
-    # A dimension present in the last frame but absent now must be cleared, or a policy
-    # would keep matching against a tenant nobody is scoped to.
-    for stale in previous:
+    # Every dimension ever published here, absent now, must be cleared, or a policy would keep
+    # matching a tenant nobody is scoped to. Not just the last frame's: a clear made inside a
+    # transaction is undone when it ends, and the cache holds only the desired state.
+    for stale in (*previous, *getattr(connection, _NAMES, ())):
         updates.setdefault(stale, '')
 
     # Transaction-local inside a block: it then cannot outlive the block, so a commit or
@@ -246,20 +251,18 @@ def _word(sql: str, at: int) -> tuple[str, int]:
 
 
 def _reverts_a_set(sql: object) -> bool:
-    """Whether *sql* is ``ROLLBACK [WORK|TRANSACTION] TO ...``, however spelled: any whitespace or
-    comments between the words. Text and bytes only; a driver object cannot be read without a
-    connection."""
+    """Whether *sql* undoes every ``SET LOCAL``: a statement that begins ``ROLLBACK``, ``ABORT``,
+    ``COMMIT`` or ``END`` (``AND CHAIN`` included), or a multi-statement string mentioning
+    ``ROLLBACK``. Text and bytes only; a driver object cannot be read without a connection."""
     if isinstance(sql, bytes):
         sql = sql.decode('utf-8', 'replace')
     if not isinstance(sql, str):
         return False
     word, at = _word(sql, 0)
-    if word != 'ROLLBACK':
-        return False
-    word, at = _word(sql, at)
-    if word in ('WORK', 'TRANSACTION'):
-        word, at = _word(sql, at)
-    return word == 'TO'
+    if word in _ENDS_ONE:
+        return _word(sql, at)[0] != 'PREPARED'
+    body = sql.rstrip().rstrip(';')
+    return ';' in body and _ROLLBACK_WORD.search(body) is not None
 
 
 def _wrapper(

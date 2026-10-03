@@ -231,16 +231,52 @@ class TestTheMatcherNeverBacktracks:
         assert done.stdout.strip() == 'False', done.stderr[-300:]
 
 
+@pytest.mark.django_db
+class TestRollbackThroughOtherDoors:
+    def test_a_rollback_later_in_a_multi_statement_string(self, tenants):
+        with tenant(label=tenants.a):
+            scalar('SELECT 1')
+            execute('SAVEPOINT guitars_probe')
+            with tenant(label=tenants.b):
+                scalar('SELECT 1')
+                execute('SELECT 1; ROLLBACK TO SAVEPOINT guitars_probe')
+
+                assert _published() == str(tenants.b.pk)
+            execute('RELEASE SAVEPOINT guitars_probe')
+
+    def test_rollback_and_chain_which_keeps_the_transaction_open(self, tenants):
+        """It undoes every ``SET LOCAL`` while Django still sees the same transaction. Run in the
+        test's own wrapping transaction: inside an atomic() it would destroy that block's
+        savepoint and fail its RELEASE, which is a different problem."""
+        with tenant(label=tenants.a):
+            scalar('SELECT 1')
+            execute('ROLLBACK AND CHAIN')
+
+            assert _published() == str(tenants.a.pk)
+
+
+@pytest.mark.django_db
 class TestWhatIsNotARollback:
     @pytest.mark.parametrize(
         'statement',
-        ['', '   ', '-- only a comment', '/* only a comment */', '/* unterminated', 'ROLLBACK', 'SELECT 1',
-         'ROLLBACK;', 'BEGIN', "SELECT 'ROLLBACK TO x'", 'ROLLBACKTO x'],
+        ['', '   ', '-- only a comment', '/* only a comment */', '/* unterminated', 'SELECT 1',
+         'BEGIN', "SELECT 'ROLLBACK TO x'", 'ROLLBACKTO x', 'ROLLBACK PREPARED \'gid\'',
+         'COMMIT PREPARED \'gid\'', 'SELECT 1; SELECT 2', 'SELECT 1;'],
     )
     def test_it_is_left_alone(self, statement):
         """Only the exact statement shape counts: a name that merely starts with ROLLBACK, or one
         quoted inside another statement, must not cost a republish."""
         assert guc._reverts_a_set(statement) is False
+
+    @pytest.mark.parametrize(
+        'statement',
+        ['ROLLBACK', 'ROLLBACK;', 'ABORT', 'ROLLBACK AND CHAIN', 'abort and chain', 'COMMIT',
+         'COMMIT AND CHAIN', 'END', 'ROLLBACK TO SAVEPOINT p', 'SELECT 1; ROLLBACK TO SAVEPOINT p',
+         '; ROLLBACK TO SAVEPOINT p', "SET LOCAL x.y = 1; ROLLBACK TO SAVEPOINT p"],
+    )
+    def test_anything_that_ends_the_transaction_or_its_savepoint_counts(self, statement):
+        """Each reverts every ``SET LOCAL``, ``AND CHAIN`` and a bare ``ROLLBACK`` included."""
+        assert guc._reverts_a_set(statement) is True
 
     def test_a_driver_object_is_not_inspected(self):
         """A ``psycopg.sql.Composed`` cannot be read without a connection; it is documented, not
@@ -338,6 +374,50 @@ class TestADistrustedCacheStillClearsWhatItForgot:
         guc._distrust(connection)
 
         assert getattr(connection, guc._CACHE, None) is None
+
+
+class TestASessionLevelPublishOutlivesATransactionLocalClear:
+    """Outside a transaction a publish is session-level. Inside one, clearing it is only
+    transaction-local, so the old value returns when the transaction ends -- and the cache, which
+    stores the desired state, had forgotten the dimension it cleared."""
+
+    @pytest.mark.parametrize('outcome', ['commit', 'rollback'])
+    def test_a_dimension_cleared_inside_a_block_stays_cleared_after_it(
+        self, transactional_db, outcome
+    ):
+        with tenancy_bypassed():
+            label = Label.objects.create(name='Session Records')
+        with tenant(label=label):
+            scalar('SELECT 1')  # autocommit: published at session level
+
+        try:
+            with transaction.atomic():
+                assert _published() in ('', None)  # the block clears it, locally
+                if outcome == 'rollback':
+                    raise RuntimeError
+        except RuntimeError:
+            pass
+
+        assert _published() in ('', None)
+
+    def test_a_publish_inside_a_transaction_does_not_outlive_it(self, transactional_db):
+        """Read through the driver, past the publisher, which would otherwise republish."""
+        with tenancy_bypassed():
+            label = Label.objects.create(name='Local Records')
+        with tenant(label=label), transaction.atomic():
+            scalar('SELECT 1')
+
+        with connection.connection.cursor() as raw:
+            raw.execute("SELECT current_setting('tenant.label', true)")
+            assert raw.fetchone()[0] in ('', None)
+
+    def test_a_long_transaction_keeps_one_marker(self, tenants):
+        before = len(connection.run_on_commit)
+        for label in (tenants.a, tenants.b) * 5:
+            with tenant(label=label):
+                scalar('SELECT 1')
+
+        assert len(connection.run_on_commit) - before <= 1
 
 
 def test_a_later_transaction_republishes(transactional_db):

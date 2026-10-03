@@ -9,8 +9,9 @@ import random
 import pytest
 from django.db import transaction
 
-from guitars.tenancy import tenant
+from guitars.tenancy import tenancy_bypassed, tenant
 from tests.conftest import scalar
+from tests.testapp.models import Label
 
 
 _DIMENSIONS = ('label', 'other')
@@ -86,5 +87,20 @@ def test_the_database_always_holds_the_active_scope(tenants, seed):
     failures: list = []
     for _ in range(60):
         failures += _program(rng, [tenants.a, tenants.b], steps=30)
+
+    assert not failures, f'{len(failures)} programs ended stale; first: {failures[0]}'
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize('seed', range(8))
+def test_the_database_holds_the_active_scope_outside_a_test_transaction(seed):
+    """The same programs without pytest-django's wrapping transaction: here a query outside any
+    block publishes at session level, and an outermost atomic() really commits or rolls back."""
+    with tenancy_bypassed():
+        labels = [Label.objects.create(name=f'fuzz-{number}') for number in range(2)]
+    rng = random.Random(seed)
+    failures: list = []
+    for _ in range(60):
+        failures += _program(rng, labels, steps=30)
 
     assert not failures, f'{len(failures)} programs ended stale; first: {failures[0]}'

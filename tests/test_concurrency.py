@@ -270,6 +270,29 @@ def test_tenant_scope_is_correct_under_djangos_psycopg_pool(tenants):
         pooled.close_pool()
 
 
+@requires_connection_pool
+@pytest.mark.django_db(transaction=True, databases=['default', 'pooled'])
+def test_a_dimension_the_previous_checkout_left_behind_is_cleared(tenants):
+    """The session setting outlives the checkout and the new one starts with an empty cache, so
+    only the names this wrapper has published before can say what to clear. One physical
+    connection, or the next checkout would not be the one carrying the leftover."""
+    pooled = connections['pooled']
+    pooled.close_pool()
+    options = pooled.settings_dict['OPTIONS']
+    original = options['pool']
+    options['pool'] = {'min_size': 1, 'max_size': 1}
+    try:
+        with tenant(other='LEFTOVER'), pooled.cursor() as cursor:
+            cursor.execute('SELECT 1')
+        pooled.close()
+        with pooled.cursor() as cursor:
+            cursor.execute("SELECT current_setting('tenant.other', true)")
+            assert cursor.fetchone()[0] in ('', None)
+    finally:
+        options['pool'] = original
+        pooled.close_pool()
+
+
 # ──────────────────────────────────── pgbouncer ──────────────────────────────────── #
 
 

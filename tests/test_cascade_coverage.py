@@ -4,6 +4,8 @@ model is eligible"."""
 
 from __future__ import annotations
 
+import types
+
 import pytest
 from django.db import models
 from django.db.models.signals import class_prepared
@@ -269,8 +271,9 @@ class TestAReachedModelTheGeneratorWritesNoRuleFor:
 
         child_app = TenantedChild._meta.app_label
         monkeypatch.setattr(coverage, 'is_local', lambda config: config.label != child_app)
+        monkeypatch.setattr(coverage, '_needs_rules_from_its_app', lambda owner: True)
 
-        gaps = coverage._enforcement_gaps(TenantedChild, has_inbound_keys=True)
+        gaps = coverage._enforcement_gaps(TenantedChild)
 
         assert [g.reason for g in gaps if g.blocking] == [f"'{child_app}' is not in LOCAL_APPS"]
 
@@ -278,8 +281,9 @@ class TestAReachedModelTheGeneratorWritesNoRuleFor:
         monkeypatch.setattr(
             coverage, 'migrates_to_postgresql', lambda model: model is not QuantityCondition
         )
+        monkeypatch.setattr(coverage, '_needs_rules_from_its_app', lambda owner: True)
 
-        gaps = coverage._enforcement_gaps(QuantityCondition, has_inbound_keys=True)
+        gaps = coverage._enforcement_gaps(QuantityCondition)
 
         assert [g.reason for g in gaps if g.blocking] == ['is routed off PostgreSQL']
 
@@ -301,8 +305,8 @@ class TestAReachedModelTheGeneratorWritesNoRuleFor:
                 app_label = 'testapp'
 
         return (
-            coverage._enforcement_gaps(LitPylon, has_inbound_keys=False),
-            coverage._enforcement_gaps(NeonPylon, has_inbound_keys=False),
+            coverage._enforcement_gaps(LitPylon),
+            coverage._enforcement_gaps(NeonPylon),
         )
 
     def test_a_chain_guitars_e003_refuses(self):
@@ -321,7 +325,7 @@ class TestWhatTheModelsOwnAppHasToDoWithIt:
         child_app = TenantedChild._meta.app_label
         monkeypatch.setattr(coverage, 'is_local', lambda config: config.label != child_app)
 
-        (gap,) = coverage._enforcement_gaps(TenantedChild, has_inbound_keys=False)
+        (gap,) = coverage._enforcement_gaps(TenantedChild)
 
         assert (gap.blocking, gap.reason) == (False, f"'{child_app}' is not in LOCAL_APPS")
 
@@ -358,8 +362,9 @@ class TestWhatTheModelsOwnAppHasToDoWithIt:
         """``Mid``'s own rule is written from ``Mid``'s app pass, between ``Kid`` and ``Root``."""
         _root, mid, kid = self._an_intermediate()
         monkeypatch.setattr(coverage, 'migrates_to_postgresql', lambda model: model is not mid)
+        monkeypatch.setattr(coverage, '_needs_rules_from_its_app', lambda owner: True)
 
-        gaps = coverage._enforcement_gaps(kid, has_inbound_keys=True)
+        gaps = coverage._enforcement_gaps(kid)
 
         assert [g.reason for g in gaps if g.blocking] == ['is routed off PostgreSQL']
 
@@ -381,14 +386,231 @@ class TestWhatTheModelsOwnAppHasToDoWithIt:
 
         return Kid
 
-    def test_a_primary_key_that_is_not_the_parent_link_is_a_blocking_gap(self):
-        """The redirect rule joins on the child's own key (#64), so it archives another row."""
+    def test_a_primary_key_that_is_not_the_parent_link_declines_the_fast_path(self):
+        """The redirect rule joins on the child's own key (#64), so ``.delete()`` archives another
+        row; ``soft_delete()`` stamps through the holder's key and is right, so this only declines
+        the fast path."""
         kid = self._explicit_pk()
 
-        gaps = coverage._enforcement_gaps(kid, has_inbound_keys=False)
+        gaps = coverage._enforcement_gaps(kid)
+
+        assert [g.blocking for g in gaps] == [False]
+        assert 'parent link' in gaps[0].reason
+
+    @staticmethod
+    @isolate_apps('tests.testapp')
+    def _explicit_pk_with_a_child():
+        from django.db.models import AutoField, OneToOneField  # noqa: PLC0415
+
+        class Root(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Kid(Root):
+            code = AutoField(primary_key=True)
+            root_link = OneToOneField(Root, on_delete=models.CASCADE, parent_link=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Child(SetarModel):
+            kid = models.ForeignKey(Kid, on_delete=models.CASCADE, related_name='children')
+
+            class Meta:
+                app_label = 'testapp'
+
+        return Kid
+
+    def test_a_key_cascading_into_it_makes_the_gap_blocking(self):
+        """The key stores ``Kid.code`` and the rule on the root's table compares it with the
+        root's ``id`` (#64): the stamp is right, the cascade out of it archives the wrong
+        children. ``soft_delete()`` there silently hid a sibling's rows, so it must raise."""
+        kid = self._explicit_pk_with_a_child()
+
+        gaps = coverage._enforcement_gaps(kid)
 
         assert [g.blocking for g in gaps] == [True]
-        assert 'parent link' in gaps[0].reason
+
+    @staticmethod
+    @isolate_apps('tests.testapp')
+    def _grandchild_over_an_intermediate_with_its_own_key():
+        from django.db.models import AutoField, OneToOneField  # noqa: PLC0415
+
+        class Root(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Mid(Root):
+            code = AutoField(primary_key=True)
+            root_link = OneToOneField(Root, on_delete=models.CASCADE, parent_link=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Kid(Mid):
+            class Meta:
+                app_label = 'testapp'
+
+        return Kid
+
+    def test_an_intermediates_own_key_is_seen_from_the_grandchild(self):
+        """``Kid``'s own key is its link to ``Mid``, so only walking the chain sees it."""
+        kid = self._grandchild_over_an_intermediate_with_its_own_key()
+
+        gaps = coverage._enforcement_gaps(kid)
+
+        assert [g.reason for g in gaps] == ['its primary key is not its parent link (#64)']
+
+    def test_every_gap_is_reported_not_the_first(self, monkeypatch):
+        """An early return let a non-blocking locality gap hide a blocking one behind it."""
+        kid = self._explicit_pk()
+        monkeypatch.setattr(coverage, 'migrates_to_postgresql', lambda model: False)
+        monkeypatch.setattr(coverage, '_needs_rules_from_its_app', lambda owner: False)
+
+        gaps = coverage._enforcement_gaps(kid)
+
+        assert {g.reason for g in gaps} == {
+            'is routed off PostgreSQL',
+            'its primary key is not its parent link (#64)',
+        }
+
+
+class TestWhichKeysCascadeIntoAModel:
+    """A cascade rule is written from the pass over the key's *target*, so only a CASCADE key
+    pointing at the model itself makes that model's own app matter."""
+
+    def test_a_cascade_key_counts(self):
+        assert coverage._needs_rules_from_its_app(Offer)
+
+    def test_a_key_that_does_not_cascade_does_not(self):
+        """``Stagehand``'s only inbound key is ``DO_NOTHING``."""
+        from tests.testapp.models import Stagehand  # noqa: PLC0415
+
+        assert not coverage._needs_rules_from_its_app(Stagehand)
+
+    def test_set_null_does_not(self):
+        from tests.crossapp_retire_child.models import Heir  # noqa: PLC0415
+
+        assert not coverage._needs_rules_from_its_app(Heir)
+
+    def test_a_parent_link_does_not(self):
+        """``Condition`` is pointed at by its descendants' parent links alone; the one ordinary
+        key (``ConditionNote``) aims at ``QuantityCondition``, which is the one that counts."""
+        from tests.testapp.models import Condition  # noqa: PLC0415
+
+        assert not coverage._needs_rules_from_its_app(Condition)
+        assert coverage._needs_rules_from_its_app(QuantityCondition)
+
+    @staticmethod
+    @isolate_apps('tests.testapp')
+    def _an_inherited_key():
+        class Root(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Booking(SetarModel):
+            root = models.ForeignKey(Root, on_delete=models.CASCADE, related_name='bookings')
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Kid(Root):
+            class Meta:
+                app_label = 'testapp'
+
+        return Root, Kid
+
+    def test_a_key_into_an_ancestor_is_the_ancestors_not_the_descendants(self):
+        """``Booking -> Root``'s rule is written from ``Root``'s app, whatever ``Kid`` is."""
+        root, kid = self._an_inherited_key()
+
+        assert coverage._needs_rules_from_its_app(root)
+        assert not coverage._needs_rules_from_its_app(kid)
+
+    def test_a_set_null_childless_child_does_not_refuse_soft_delete(self, monkeypatch):
+        """The real shape: a non-local descendant whose only inbound key is ``SET_NULL``."""
+        from tests.crossapp_retire_child.models import Heir  # noqa: PLC0415
+
+        child_app = Heir._meta.app_label
+        monkeypatch.setattr(coverage, 'is_local', lambda config: config.label != child_app)
+
+        gaps = coverage._enforcement_gaps(Heir)
+
+        assert gaps and not [g for g in gaps if g.blocking]
+
+
+class TestAnOwnedRuleIsWrittenFromItsOwnersApp:
+    """An ``OwningForeignKey`` rule fires on the declaring model's table, from that model's own
+    app pass, though no ``CASCADE`` key points at the declarer."""
+
+    @staticmethod
+    @isolate_apps('tests.testapp')
+    def _an_owner():
+        from guitars.models import OwningForeignKey  # noqa: PLC0415
+
+        class Target(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Owner(SetarModel):
+            target = OwningForeignKey(Target, on_delete=models.DO_NOTHING, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        return Owner
+
+    def test_it_counts_as_needing_a_rule_from_its_app(self):
+        assert coverage._needs_rules_from_its_app(self._an_owner())
+
+    def test_a_non_local_owner_leaves_its_target_live_so_it_blocks(self, monkeypatch):
+        owner = self._an_owner()
+        monkeypatch.setattr(coverage, 'is_local', lambda config: False)
+
+        gaps = coverage._enforcement_gaps(owner)
+
+        assert [g.blocking for g in gaps] == [True]
+
+
+class TestTheInboundTestsRemainingExclusions:
+    def test_a_referrer_with_no_deleted_at_carries_no_rule(self):
+        """``Band``'s many-to-many through row has no ``_deleted_at``; it is removed in Python."""
+        from tests.testapp.models import Genre  # noqa: PLC0415
+
+        assert not coverage._needs_rules_from_its_app(Genre)
+
+    @staticmethod
+    @isolate_apps('tests.testapp')
+    def _a_key_to_a_proxy():
+        class Root(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class RootProxy(Root):
+            class Meta:
+                app_label = 'testapp'
+                proxy = True
+
+        class Booking(SetarModel):
+            root = models.ForeignKey(RootProxy, on_delete=models.CASCADE, related_name='+')
+
+            class Meta:
+                app_label = 'testapp'
+
+        return Root
+
+    def test_a_key_aimed_at_a_proxy_counts_for_its_concrete_model(self):
+        assert coverage._needs_rules_from_its_app(self._a_key_to_a_proxy())
+
+    def test_each_chain_owner_is_asked_for_itself_not_the_model(self, monkeypatch):
+        """Only ``Mid`` has rules written from its app; asking about ``Kid`` instead missed it."""
+        _root, mid, kid = TestWhatTheModelsOwnAppHasToDoWithIt._an_intermediate()
+        monkeypatch.setattr(coverage, 'migrates_to_postgresql', lambda model: model is not mid)
+        monkeypatch.setattr(coverage, '_needs_rules_from_its_app', lambda owner: owner is mid)
+
+        gaps = coverage._enforcement_gaps(kid)
+
+        assert [g.blocking for g in gaps] == [True]
 
 
 class TestTheJoinedRefusalsAreOneAnswer:
@@ -424,3 +646,113 @@ class TestTheJoinedRefusalsAreOneAnswer:
         both, field = self._over_a_refused_chain()
 
         assert joined_refusal(both, field) == 'its chain is refused a soft-delete rule (guitars.E003)'
+
+
+class TestWhichKeysAreSafeBelowAnOwnKey:
+    """A key into a model stores that model's primary key, which is the root's id only while it
+    and every model between it and the holder use their parent link as their key (#64)."""
+
+    @staticmethod
+    @isolate_apps('tests.testapp')
+    def _shapes():
+        from django.db.models import AutoField, OneToOneField  # noqa: PLC0415
+
+        from guitars.models import OwningForeignKey  # noqa: PLC0415
+
+        class Root(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Normal(Root):
+            class Meta:
+                app_label = 'testapp'
+
+        class Own(Normal):
+            code = AutoField(primary_key=True)
+            normal_link = OneToOneField(Normal, on_delete=models.CASCADE, parent_link=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Below(Own):
+            class Meta:
+                app_label = 'testapp'
+
+        class IntoRoot(SetarModel):
+            root = models.ForeignKey(Root, on_delete=models.CASCADE, related_name='+')
+
+            class Meta:
+                app_label = 'testapp'
+
+        class IntoNormal(SetarModel):
+            normal = models.ForeignKey(Normal, on_delete=models.CASCADE, related_name='+')
+
+            class Meta:
+                app_label = 'testapp'
+
+        class IntoBelow(SetarModel):
+            below = models.ForeignKey(Below, on_delete=models.CASCADE, related_name='+')
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Owner(SetarModel):
+            own = OwningForeignKey(Own, on_delete=models.DO_NOTHING, null=True, related_name='+')
+
+            class Meta:
+                app_label = 'testapp'
+
+        return types.SimpleNamespace(Own=Own, Below=Below, Normal=Normal, Owner=Owner)
+
+    def test_the_own_key_model_is_blocked_only_by_keys_that_can_store_it(self):
+        """``IntoNormal`` stores ``Normal``'s key (the root's id); ``IntoRoot`` likewise; only a key
+        into ``Own`` or ``Below`` stores ``Own.code``. Here ``Own`` has none, ``Below`` has one."""
+        shapes = self._shapes()
+
+        assert [g.blocking for g in coverage._enforcement_gaps(shapes.Own)] == [False]
+        assert [g.blocking for g in coverage._enforcement_gaps(shapes.Below)] == [True]
+
+    def test_an_owned_key_into_an_own_key_model_blocks_the_owner(self):
+        """The owned rule stamps ``WHERE id = old.<fk>`` and the key stores ``Own.code``: it
+        archives another row. No ``CASCADE`` edge shows it, so ``cascade_plan`` has to."""
+        shapes = self._shapes()
+        clear_cascade_plan_cache()
+
+        gaps, _reached = cascade_plan(shapes.Owner)
+
+        assert [g.blocking for g in gaps if '#64' in g.reason] == [True]
+
+    def test_every_gap_is_reported_once(self, monkeypatch):
+        shapes = self._shapes()
+        monkeypatch.setattr(coverage, 'is_local', lambda config: False)
+
+        gaps = coverage._enforcement_gaps(shapes.Below)
+
+        assert len({(g.edge, g.reason) for g in gaps}) == len(gaps)
+
+    def test_one_reason_from_levels_that_differ_is_blocking_if_any_is(self, monkeypatch):
+        """The leaf needs a rule from its app and the levels above do not: the one reported gap
+        must be the blocking one whichever order they are read in."""
+        shapes = self._shapes()
+        monkeypatch.setattr(coverage, 'is_local', lambda config: False)
+        monkeypatch.setattr(coverage, '_needs_rules_from_its_app', lambda owner: owner is shapes.Below)
+
+        gaps = coverage._enforcement_gaps(shapes.Below)
+
+        assert [g.blocking for g in gaps if 'LOCAL_APPS' in g.reason] == [True]
+
+    def test_the_refusal_does_not_send_a_64_model_to_dot_delete(self):
+        """``.delete()`` archives another row for that shape, so the advice it gets is not that."""
+        from guitars.models.soft_deletion import (  # noqa: PLC0415
+            SoftDeleteUnsupportedError,
+            _require_covered,
+        )
+
+        shapes = self._shapes()
+        clear_cascade_plan_cache()
+
+        with pytest.raises(SoftDeleteUnsupportedError) as raised:
+            _require_covered(shapes.Below, 'default')
+
+        assert '#64' in str(raised.value)
+        assert 'Use .delete()' not in str(raised.value)

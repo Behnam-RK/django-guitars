@@ -10,6 +10,15 @@ Full history and diffs: [GitHub releases](https://github.com/Behnam-RK/django-gu
 
 ## [Unreleased]
 
+## [2.14.2] - 2026-10-03
+
+### Fixed
+
+- **The instance `soft_delete()` asked the leaf's and the root's policy, not a middle table's.** Its subquery was trimmed to the leaf, while the queryset form's `_deleted_at IS NULL` joins every table in the chain. The instance form now filters the same way.
+- **`soft_delete()` was refused over shapes that leave nothing live.** 2.14.1 counted every non-`DO_NOTHING` key, `SET_NULL` and M2M through rows included, and keys into an ancestor, as "cascading into" a model outside `LOCAL_APPS`. A rule is written from a model's own app only for a `CASCADE` key pointing at it from a referrer with `_deleted_at`, or an `OwningForeignKey` it declares; for anything else the fast path just declines. A model whose primary key is not its parent link (#64) is refused only where a rule needs a key into it or into a model below its own key (a `CASCADE` key, or an `OwningForeignKey` aimed at it), since the stamp is right but the cascade out of it compares the wrong keys; a key into a normal model above it is fine, and otherwise only the fast path declines. The refusal no longer advises `.delete()` for that shape, which archives another row too. Each reason is reported once.
+- **A non-blocking gap no longer hides a blocking one.** The gap check returned at the first locality or routing gap, so a refused `guitars.E003` chain behind it went unreported.
+- 2.14.1's entry said a chain through an app outside `LOCAL_APPS` or routed off PostgreSQL became a blocking gap, and listed a primary key that is not its parent link (#64) among the blocking gaps; the first held only where a rule is written from that model's app, and the second only where a key can store the child's own key. Both are as described above.
+
 ## [2.14.1] - 2026-10-03
 
 ### Fixed
@@ -364,7 +373,8 @@ First stable release. **BREAKING:** the instrument ladder shifted down one rung 
 
 - Added: initial release — `SetarModel`, `GuitarModel`, `SoftDeletableModel`, `DisableSignals`, `makeguitarmigrations`.
 
-[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.14.1...HEAD
+[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.14.2...HEAD
+[2.14.2]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.14.2
 [2.14.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.14.1
 [2.14.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.14.0
 [2.13.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.13.0

@@ -16,10 +16,10 @@ toward **exposing** data, and a `soft_delete()` that leans on the rules (#55) wo
 
 Emit a **joined** rule in the existing cascade family. It fires on the target as before and updates
 the ancestor: `UPDATE <ancestor> SET _deleted_at = new._deleted_at WHERE <ancestor pk> IN (SELECT
-<child parent link> FROM <child> WHERE <fk> = old.<pk>) AND _deleted_at IS NULL`. Every table in a
-chain stores one value for a row, so the descendant's link to the ancestor (`get_ancestor_link`, not
-its primary key, which can be a column of its own beside `parent_link=True`) names the ancestor's
-row directly, one subselect however deep. A descendant over a refused chain (`guitars.E003`), or
+<child parent link> FROM <child> WHERE <fk> = old.<pk>) AND _deleted_at IS NULL`. The descendant's
+link to the ancestor (`get_ancestor_link`, not its primary key, which can be a column of its own
+beside `parent_link=True`) holds the ancestor's key wherever every intermediate's key is its own
+parent link, so it names the ancestor's row directly, one subselect however deep. A descendant over a refused chain (`guitars.E003`), or
 whose link passes an intermediate with a primary key of its own, gets no joined rule. The revive twin ([ADR 0024](0024-inverse-cascade-revive-rules.md))
 gets the same form.
 

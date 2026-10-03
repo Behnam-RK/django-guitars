@@ -91,6 +91,7 @@ def _rule_update_edges(candidates: Iterable[type[models.Model]]) -> set[tuple[st
     # behind it -- a cost only a caller asking about rules should pay.
     from django.db.models import CASCADE, ForeignKey  # noqa: PLC0415 - see the comment above
 
+    from guitars.checks import refuses_soft_delete_rule  # noqa: PLC0415 - checks imports this
     from guitars.models.fields import (  # noqa: PLC0415 - see the comment above
         OwningForeignKey,
         _targets_primary_key,
@@ -138,6 +139,7 @@ def _rule_update_edges(candidates: Iterable[type[models.Model]]) -> set[tuple[st
                 and not getattr(field.remote_field, 'parent_link', False)
                 and (owns or _targets_primary_key(field))
                 and (owns or own_key_between(model, holder) is None)
+                and (owns or not refuses_soft_delete_rule(model))
             ):
                 edges.add((target_table, updates_table))  # fires on the target, updates here
     return edges

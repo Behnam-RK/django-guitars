@@ -41,10 +41,11 @@ class TestTheJoinedRule:
         assert 'SET _deleted_at = new._deleted_at' in rule
         assert 'SELECT "festival_ptr_id" FROM "testapp_touringfestival"' in rule
         assert '"promoter_id" = old."id"' in rule
-        assert '_deleted_at IS NULL' in rule
+        # The guard on the ancestor's row, not the trigger condition's ``old._deleted_at IS NULL``.
+        assert re.search(r'\)\s*AND _deleted_at IS NULL', rule)
 
     def test_the_pointer_is_the_descendants_own_not_the_roots(self):
-        """Every table in a chain stores one pk value, so the descendant's parent-link column
+        """In a default chain every key is its parent link, so the descendant's link column
         matches the ancestor's pk directly -- no multi-hop join, whatever the depth."""
         _, blob = _label_operations()
 
@@ -64,10 +65,18 @@ class TestTheJoinedRule:
     def test_each_joined_rule_has_a_revive_twin_against_the_ancestor(self):
         _, blob = _label_operations()
 
-        for related in ('testapp_touringfestival', 'testapp_headlinefestival'):
-            assert f'_{related}"\n' in blob, related
-        assert 'UPDATE "testapp_festival" AS guitars_child' in blob
-        assert 'guitars_child._deleted_at = guitars_revived._deleted_at' in blob
+        for related, link in (
+            ('testapp_touringfestival', 'festival_ptr_id'),
+            ('testapp_headlinefestival', 'touringfestival_ptr_id'),
+        ):
+            header = (
+                f'# Soft Delete Revive Trigger on "{related}" that is related to "testapp_label"!'
+            )
+            assert header in blob, related
+            revive = blob.split(header)[1].split('\n# ')[0]
+            assert 'UPDATE "testapp_festival" AS guitars_child' in revive
+            assert f'guitars_link."{link}"' in revive
+            assert 'guitars_child._deleted_at = guitars_revived._deleted_at' in revive
 
     def test_nothing_is_reported_skipped_any_more(self):
         command, _ = _label_operations()
@@ -649,6 +658,12 @@ class TestTheParentLinkIsTheAncestorsNotTheDescendantsPk:
 
         assert _rule_update_edges([owner, kid]) == set()
         assert (candidates, command._skipped_rule_notes) == ([], [])
+
+    def test_a_descendant_the_check_refuses_files_no_edge(self):
+        """An invented edge closes a cycle that cannot form and takes a legitimate rule with it."""
+        owner, both = self._second_parent()
+
+        assert _rule_update_edges([owner, both]) == set()
 
     def test_a_descendant_the_check_refuses_gets_no_rule(self):
         """``guitars.E003``'s shape: the generator re-asks it for the model's own rule, so it

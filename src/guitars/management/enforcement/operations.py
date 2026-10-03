@@ -904,6 +904,23 @@ class OperationsMixin:
             ),
         ]
 
+    def _note_a_cycle_retirement(self, key: tuple, models_by_table: dict) -> None:
+        """Say so when a retired rule goes because its key lies on a rule cycle: the "skipped"
+        notes read as "left alone", and the next migration drops what was working."""
+        related_table, owner_table, _ = key
+        related = models_by_table[related_table]
+        if not has_column(related, '_deleted_at'):  # no longer soft-deletable: nothing to cycle
+            return
+        updated = column_owner(related._meta.concrete_model or related, '_deleted_at')
+        if (owner_table, updated._meta.db_table) not in self._rule_cycle_edges():
+            return
+        note = (
+            f"Cascade rules on '{owner_table}' for '{related_table}' are dropped: the key lies "
+            'on a rule cycle, where every edge is refused, and a live rule goes with it.'
+        )
+        if note not in self._skipped_rule_notes:
+            self._skipped_rule_notes.append(note)
+
     @staticmethod
     def _retired_key_is_joined(related_table: str, models_by_table: dict) -> bool:
         """Whether the retired rule updated an ancestor -- the one refusal whose cause is not
@@ -947,6 +964,7 @@ class OperationsMixin:
                 continue
             column = self._retired_cascade_column(key, models_by_table)
             owner = models_by_table[owner_table]
+            self._note_a_cycle_retirement(key, models_by_table)
             ident_owner_table = _identifiers._quote_table(owner_table)
             for family in self._retired_cascade_families(key):
                 if key not in family.recorded:

@@ -448,3 +448,37 @@ class TestAToFieldKeyIsLeftToTheCollector:
         candidates, selfs = command._cascade_candidates(owner, owner._meta.db_table, report=False)
 
         assert (candidates, selfs, command._skipped_rule_notes) == ([], [], [])
+
+
+class TestARetirementForACycleSaysSo:
+    """A key that closes a rule cycle is refused with every other edge on it, so a rule already
+    live there is dropped; the note must say so, since "skipped" reads as "left alone"."""
+
+    @staticmethod
+    def _retire(monkeypatch, edges):
+        command = Command()
+        command._skipped_rule_notes.clear()
+        clear_cascade_coverage(command)
+        command.reverse_relations_mapping[Label] = {
+            relation
+            for relation in command.reverse_relations_mapping[Label]
+            if relation[0] is not Festival
+        }
+        key = (Festival._meta.db_table, Label._meta.db_table, None)
+        command.existing.soft_delete_related[key] = 'abc'
+        monkeypatch.setattr(command, '_rule_cycle_edges', lambda: edges)
+        for _ in range(2):  # a check run and a generation both ask; one note, not two
+            command._retired_cascade_operations(apps.get_app_config('testapp'))
+        return command._skipped_rule_notes
+
+    def test_a_rule_dropped_because_of_a_cycle_is_named(self, monkeypatch):
+        edges = {(Label._meta.db_table, Festival._meta.db_table)}
+
+        (note,) = self._retire(monkeypatch, edges)
+
+        assert 'dropped' in note
+        assert 'testapp_festival' in note
+        assert 'testapp_label' in note
+
+    def test_a_rule_dropped_for_another_reason_adds_no_note(self, monkeypatch):
+        assert self._retire(monkeypatch, set()) == []

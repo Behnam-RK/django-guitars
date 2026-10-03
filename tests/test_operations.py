@@ -230,7 +230,7 @@ def _stem_after_every_create() -> str:
     # at all, and fails with an assertion about the key rather than about the ordering.
     assert host > newest_create, (
         f'{host!r} must sort after {newest_create!r}: add an empty migration after it, as '
-        f'0059_retirement_host is, or these tests pretend a retirement into its own create.'
+        f'0061_retirement_host is, or these tests pretend a retirement into its own create.'
     )
     return host
 

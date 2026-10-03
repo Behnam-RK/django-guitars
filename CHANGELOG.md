@@ -10,6 +10,20 @@ Full history and diffs: [GitHub releases](https://github.com/Behnam-RK/django-gu
 
 ## [Unreleased]
 
+## [2.12.0] - 2026-10-03
+
+### Added
+
+- **A `CASCADE` key declared on an MTI descendant's own table now has a rule.** When `_deleted_at` lives on an ancestor, the flat cascade rule (`UPDATE <child> SET _deleted_at`) names a column the child's table does not have, so the generator skipped the key with a note. Nothing archived those children except Django's Python `Collector`: a raw `DELETE` or a bulk update left them live under an archived parent, which fails toward **exposing** data. The new *joined* form fires on the target as before and stamps the ancestor: `UPDATE <ancestor> ... WHERE <ancestor pk> IN (SELECT <parent link> FROM <child> WHERE <fk> = old.<pk>)`. Every table in a chain stores one pk value, so the descendant's own parent-link column names the ancestor's row, one subselect however deep. Its revive twin ([ADR 0024](docs/adr/0024-inverse-cascade-revive-rules.md)) gets the same form.
+- **Same family, no new frozen interface.** The key, header, rule name and `[SQL:...]` identity mechanism are unchanged and only the body differs. A joined key was skipped before, so nothing recorded it and an upgrade is a plain `CREATE`. See [ADR 0025](docs/adr/0025-joined-cascade-rule.md).
+
+### Changed
+
+- **The cycle graph files a cascade edge against the table the rule updates.** For a descendant's key that is the ancestor, not the descendant's own table. A descendant cascading to its **own root** closes a one-node cycle and is refused with the usual "infinite rule recursion" note; no trigger form is written for it yet.
+- **A retirement of a joined key is irreversible.** Its `reverse_sql` refuses: the key names no ancestor, and the flat template would be built against a table without `_deleted_at`.
+
+**Upgrading.** Run `makeguitarmigrations` and `migrate`. A project with such a key gets one additional enforcement migration, and `makemigrations --check` is red until it is generated and applied. Two things to know. The rule's subselect and update run under the **invoker's row-level security**, as every cascade does, so a session that cannot see a tenanted descendant cannot archive through it. And a key that closes a rule cycle is refused together with **every** other edge on that cycle, so a rule that worked before may now be refused. An already-live *flat* cascade rule on the cycle is retired with a `DROP RULE` in the next generated migration, and `makeguitarmigrations` names it in a note. An already-live **owned** rule is not retired: when its owner is the ancestor of a descendant declaring a cascade key back to the owned target, `--check` fails with a refusal naming the rule and its sweep to drop by hand, and `hard_delete()` stops following that ownership at once. Either way the joined key is refused too, so nothing replaces the lost rule; break the cycle before upgrading. A `to_field` key on a descendant stays skipped, with a note.
+
 ## [2.11.2] - 2026-10-03
 
 ### Added
@@ -309,7 +323,8 @@ First stable release. **BREAKING:** the instrument ladder shifted down one rung 
 
 - Added: initial release — `SetarModel`, `GuitarModel`, `SoftDeletableModel`, `DisableSignals`, `makeguitarmigrations`.
 
-[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.11.2...HEAD
+[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.12.0...HEAD
+[2.12.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.12.0
 [2.11.2]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.11.2
 [2.11.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.11.1
 [2.11.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.11.0

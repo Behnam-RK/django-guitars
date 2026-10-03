@@ -987,8 +987,8 @@ class OperationsMixin:
         for key in sorted(recorded - set(required), key=lambda k: (k[0], k[1], k[2] or '')):
             related_table, owner_table, via = key
             # Both, not just the host: a table mapping to nothing is a *deleted* model on one
-            # reading and an app dropped from LOCAL_APPS on another, and this cannot tell them
-            # apart. Named in ``_unmapped_cascade_notes`` instead.
+            # reading and an app dropped from LOCAL_APPS on another. Only the migration history
+            # tells them apart; without its evidence the key is named, not retired.
             if hosting.get(owner_table) != app.label:
                 continue
             # The one unmapped table with evidence behind it: a ``DeleteModel`` dropped it, which

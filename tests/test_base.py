@@ -4,11 +4,12 @@ import types
 
 import pytest
 from asgiref.sync import async_to_sync
-from django.db import transaction
+from django.db import connection, transaction
 from django.db.models.signals import post_save, pre_save
+from django.test.utils import CaptureQueriesContext
 
 from guitars.models.base import DutarModel
-from tests.testapp.models import Band, Genre, Riff
+from tests.testapp.models import Album, Band, Genre, Orchestra, Riff
 
 
 @pytest.mark.django_db
@@ -251,6 +252,62 @@ def test_repr_skips_none_valued_fields():
     band = Band.objects.create(name='Rush')  # nickname left as None
 
     assert 'nickname' not in repr(band)
+
+
+@pytest.mark.django_db
+def test_repr_shows_a_foreign_key_by_id_without_loading_it():
+    band = Band.objects.create(name='Rush')
+    Album.objects.create(title='2112', band=band)
+    album = Album.objects.get(title='2112')  # band not cached on this instance
+
+    with CaptureQueriesContext(connection) as captured:
+        text = repr(album)
+
+    assert f'band_id: {band.pk}' in text
+    assert len(captured) == 0
+
+
+@pytest.mark.django_db
+def test_repr_does_not_load_deferred_fields():
+    band = Band.objects.create(name='Rush')
+    for number in range(3):
+        Album.objects.create(title=f'album-{number}', band=band)
+    loaded = list(Album.objects.only('id'))  # every other field deferred
+
+    with CaptureQueriesContext(connection) as captured:
+        texts = [repr(album) for album in loaded]
+
+    assert len(captured) == 0
+    assert all('title' not in text for text in texts)
+
+
+@pytest.mark.django_db
+def test_repr_skips_only_the_deferred_fields():
+    band = Band.objects.create(name='Rush')
+    Album.objects.create(title='2112', band=band)
+
+    text = repr(Album.objects.only('title').get())  # id and title loaded; the rest deferred
+
+    assert 'title: 2112' in text
+    assert 'band_id' not in text
+
+
+@pytest.mark.django_db
+def test_repr_prints_an_mti_parent_link_by_attname_without_loading_it():
+    Orchestra.objects.create(name='LSO', conductor='Haitink')
+    loaded = Orchestra.objects.get()
+
+    with CaptureQueriesContext(connection) as captured:
+        text = repr(loaded)
+
+    assert f'ensemble_ptr_id: {loaded.pk}' in text
+    assert len(captured) == 0
+
+
+def test_repr_of_an_unsaved_instance_does_not_raise():
+    """Reading a foreign key by name raised ``RelatedObjectDoesNotExist`` before it was set."""
+    assert repr(Album(title='t')) == '<Album ID:None - title: t - >'
+    assert 'conductor: c' in repr(Orchestra(name='o', conductor='c'))
 
 
 @pytest.mark.django_db

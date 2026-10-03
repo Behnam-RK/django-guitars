@@ -10,6 +10,25 @@ Full history and diffs: [GitHub releases](https://github.com/Behnam-RK/django-gu
 
 ## [Unreleased]
 
+## [2.11.1] - 2026-10-02
+
+### Fixed
+
+- **Nested `atomic()` blocks no longer republish the tenant GUCs at both ends.** The publisher's cache key included `connection.savepoint_ids`, so the first statement inside every savepoint and the `RELEASE` that closed it each sent a `SELECT set_config(...)`. `update()` wraps its own `atomic()`, so N calls inside an outer transaction cost about 2N extra round trips. A push or release reverts no `SET LOCAL`, so the key is now only whether a transaction is open. A rollback is handled by distrusting the cache after it (next entry), and a commit, which reverts every `SET LOCAL`, by the transaction marker. Checked on Django 5.0, 5.2 and 6.0.
+- **A tenant could stay live after the scope that set it was gone.** Present in 2.11.0 and found while testing the change above. The publisher cached the *desired* state, and a `SET LOCAL` is undone by anything that ends a transaction or its savepoint, so the cache could believe a value the database no longer held. The ways in:
+  - a scope entered inside a savepoint that rolls back, including with no query inside it, and through `transaction.savepoint_rollback()` or raw SQL, none of which reach `connection.savepoint_ids`;
+  - a dimension published outside any transaction and then cleared inside one, which the commit or rollback restores after the cache had forgotten it (no rollback of a savepoint needed);
+  - `ROLLBACK AND CHAIN`, `ABORT`, `COMMIT AND CHAIN` or `END`, alone or anywhere in a multi-statement string;
+  - a pooled connection returned and checked out again, which keeps its session settings while the new checkout starts with an empty cache.
+
+  The cache is now distrusted after any statement that begins `ROLLBACK`, `ABORT`, `COMMIT` or `END` (`... PREPARED` excluded), sent as text or bytes, and after a multi-statement string containing one. Every republish clears every dimension ever published on the connection, not only the last frame's. The matcher is a linear scan: an earlier regex version hung on a statement with about 50 block comments. Each way in has a test, and a randomized fuzz (which does not generate the raw-SQL statements above), run both inside and outside pytest-django's wrapping transaction, fails on the original code.
+- **Still not covered:** a driver object (`psycopg.sql.Composed`) is not inspected; transactions managed outside Django (`set_autocommit(False)` then `connection.rollback()`); and a dimension left on a shared pooled connection by a *different* wrapper, such as another thread's, which this wrapper has never published. `DISCARD ALL`, `RESET ALL` and `RESET tenant.<dimension>` clear the setting behind the cache's back, which fails **closed**: queries see no tenant until the next republish.
+- **The price:** a rolled-back `atomic()` costs one extra republish. Push and release stay free, and a rollback is the exceptional path. Each publish also sends one `set_config` per dimension name ever used on the connection. Names are model field names, a small fixed set, and are never forgotten: a clear can be undone by the rollback of a transaction Django cannot see, and only the name says what to clear then.
+
+### Changed
+
+- **`DutarModel.__repr__` no longer touches the database.** A foreign key prints as `band_id: 5` instead of the related object's `str()`, and a **deferred field is left out** (as a `None` value already was) instead of being fetched. Each cost one query per field per instance, so `repr(queryset)` ran up to 20 x that many. The text changes for any model with an editable foreign key or a deferred field. An MTI parent link prints as `ensemble_ptr_id: 3`, and an unsaved instance no longer raises `RelatedObjectDoesNotExist` from `repr()`.
+
 ## [2.11.0] - 2026-09-22
 
 One release rather than the three it was planned as: a review loop's fixes spanned all three changes, so splitting them would have shipped two releases the loop had already proved defective. The three headings below are what a consumer would otherwise have read separately.
@@ -284,7 +303,8 @@ First stable release. **BREAKING:** the instrument ladder shifted down one rung 
 
 - Added: initial release — `SetarModel`, `GuitarModel`, `SoftDeletableModel`, `DisableSignals`, `makeguitarmigrations`.
 
-[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.11.0...HEAD
+[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.11.1...HEAD
+[2.11.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.11.1
 [2.11.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.11.0
 [2.10.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.10.0
 [2.9.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.9.1

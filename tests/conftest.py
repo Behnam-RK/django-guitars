@@ -9,6 +9,7 @@ from typing import NamedTuple
 
 import pytest
 from django.db import connection
+from zeal import zeal_context
 
 from guitars.tenancy import tenancy_bypassed, tenant
 from tests.testapp.models import Booking, Label, Release, StadiumTour, Track
@@ -22,6 +23,14 @@ def pytest_configure(config: pytest.Config) -> None:
         os.environ.setdefault(
             'COVERAGE_PROCESS_START', str(Path(__file__).resolve().parent.parent / 'pyproject.toml')
         )
+
+
+@pytest.fixture(autouse=True)
+def _n_plus_one_guard():
+    """Raise ``NPlusOneError`` on a lazy related-object load repeated from one call site.
+    Autouse and function-scoped, so it wraps fixture setup as well as the test body."""
+    with zeal_context():
+        yield
 
 
 class Tenants(NamedTuple):

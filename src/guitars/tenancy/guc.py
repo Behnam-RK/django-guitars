@@ -4,6 +4,7 @@ CLAUDE.md's checklist and :func:`_transaction_marker`."""
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 from django.db import connections, transaction
@@ -37,6 +38,13 @@ __all__ = [
 
 _CACHE = '_guitars_tenant_guc'
 _SYNCING = '_guitars_tenant_guc_syncing'
+_NAMES = '_guitars_tenant_guc_names'
+# Each ends the transaction or its savepoint, undoing every ``SET LOCAL``; ``... PREPARED`` is another one's.
+_ENDS_ONE = frozenset({'ROLLBACK', 'ABORT', 'COMMIT', 'END'})
+_ENDS_ONE_WORD = re.compile(
+    r'\b(?:ROLLBACK|ABORT|COMMIT|END)\b', re.I
+)  # literals: no backtracking
+
 # SQLSTATE 42501 insufficient_privilege -- what a WITH CHECK violation raises.
 _RLS_SQLSTATE = '42501'
 # SQLSTATE 25P02 in_failed_sql_transaction -- every statement is refused until rollback.
@@ -76,9 +84,10 @@ def desired_state() -> dict[str, str]:
 
 
 def _fingerprint(connection: BaseDatabaseWrapper) -> tuple:
-    # savepoint_ids shrinks on ROLLBACK TO SAVEPOINT, which also reverts any SET made
-    # after that savepoint -- so its shape is part of the signal we need.
-    return (connection.in_atomic_block, tuple(connection.savepoint_ids))
+    # Not savepoint_ids: a push or RELEASE reverts no SET LOCAL, yet keyed on them it cost a
+    # republish at both ends of every nested atomic(). A rollback is _distrust()'s; a commit,
+    # which reverts them all, is _marker_live's.
+    return (connection.in_atomic_block,)
 
 
 def _transaction_marker(
@@ -113,9 +122,10 @@ def _publish(connection: BaseDatabaseWrapper, state: dict[str, str]) -> None:
     cached = getattr(connection, _CACHE, None)
     previous = cached[0] if cached else {}
     updates = dict(state)
-    # A dimension present in the last frame but absent now must be cleared, or a policy
-    # would keep matching against a tenant nobody is scoped to.
-    for stale in previous:
+    # Every dimension ever published here, absent now, must be cleared, or a policy would keep
+    # matching a tenant nobody is scoped to. Not just the last frame's: a clear made inside a
+    # transaction is undone when it ends, and the cache holds only the desired state.
+    for stale in (*previous, *getattr(connection, _NAMES, ())):
         updates.setdefault(stale, '')
 
     # Transaction-local inside a block: it then cannot outlive the block, so a commit or
@@ -140,6 +150,9 @@ def _publish(connection: BaseDatabaseWrapper, state: dict[str, str]) -> None:
         if is_local
         else None
     )
+    # Never forgotten: a clear is undone by a rollback of a transaction Django cannot see (a raw
+    # BEGIN), and only the name says what to clear then. Dimension names are model field names.
+    setattr(connection, _NAMES, getattr(connection, _NAMES, frozenset()) | updates.keys())
     setattr(connection, _CACHE, (state, _fingerprint(connection), marker))
 
 
@@ -194,12 +207,72 @@ def _rls_violation(exc: BaseException) -> BaseException | None:
     return None
 
 
+def _distrust(connection: BaseDatabaseWrapper) -> None:
+    """Force the next statement to republish. For a statement that ends a transaction or its
+    savepoint, which reverts a ``SET LOCAL`` the cache has already recorded -- including the
+    one just made on that very statement."""
+    cached = getattr(connection, _CACHE, None)
+    if cached is not None:
+        setattr(connection, _CACHE, (cached[0], None, cached[2]))
+
+
+def _skip_noise(sql: str, at: int) -> int:
+    """Index of the first character at or after *at* that is not whitespace or a comment. A scan,
+    not a pattern: this runs on every statement, and a backtracking one hangs the connection."""
+    size = len(sql)
+    while at < size:
+        if sql[at].isspace():
+            at += 1
+        elif sql.startswith('--', at):
+            end = sql.find('\n', at)
+            at = size if end < 0 else end + 1
+        elif sql.startswith('/*', at):
+            depth, at = 1, at + 2  # PostgreSQL nests them
+            while at < size and depth:
+                if sql.startswith('/*', at):
+                    depth, at = depth + 1, at + 2
+                elif sql.startswith('*/', at):
+                    depth, at = depth - 1, at + 2
+                else:
+                    at += 1
+            if depth:
+                return size
+        else:
+            break
+    return at
+
+
+def _word(sql: str, at: int) -> tuple[str, int]:
+    """The next keyword, upper-cased, and the index after it."""
+    at = _skip_noise(sql, at)
+    end = at
+    while end < len(sql) and (sql[end].isalnum() or sql[end] == '_'):
+        end += 1
+    return sql[at:end].upper(), end
+
+
+def _reverts_a_set(sql: object) -> bool:
+    """Whether *sql* undoes every ``SET LOCAL``: a statement that begins ``ROLLBACK``, ``ABORT``,
+    ``COMMIT`` or ``END`` (``AND CHAIN`` included), or a multi-statement string containing one.
+    Text and bytes only; a driver object cannot be read without a connection."""
+    if isinstance(sql, bytes):
+        sql = sql.decode('utf-8', 'replace')
+    if not isinstance(sql, str):
+        return False
+    word, at = _word(sql, 0)
+    if word in _ENDS_ONE:
+        return _word(sql, at)[0] != 'PREPARED'
+    body = sql.rstrip().rstrip(';')
+    return ';' in body and _ENDS_ONE_WORD.search(body) is not None
+
+
 def _wrapper(
     execute: Callable, sql: str, params: object, many: bool, context: dict[str, object]
 ) -> object:
     connection: BaseDatabaseWrapper = context['connection']  # ty: ignore[invalid-assignment]
     # Re-entrancy guard: _publish issues SQL of its own through this same path.
-    if not getattr(connection, _SYNCING, False):
+    syncing = getattr(connection, _SYNCING, False)
+    if not syncing:
         _ensure(connection)
     try:
         return execute(sql, params, many, context)
@@ -215,6 +288,10 @@ def _wrapper(
             f'active tenant, or no tenant scope is active -- {remediation("write")} '
             f'Database said: {violation}'
         ) from exc
+    finally:
+        # In ``finally``: a stale cache fails open, one extra republish does not.
+        if not syncing and _reverts_a_set(sql):
+            _distrust(connection)
 
 
 def install_on(connection: BaseDatabaseWrapper) -> None:

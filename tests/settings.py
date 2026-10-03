@@ -36,6 +36,8 @@ INSTALLED_APPS = [  # noqa: F405
     # Harness-only, and deliberately not in core/settings.py or the shipped wheel: it exists
     # so 'testapp' can declare a GenericRelation, the one referring shape carrying no column.
     'django.contrib.contenttypes',
+    # N+1 detector, active for the whole suite via tests/conftest.py's autouse fixture.
+    'zeal',
     'tests.testapp',
     'tests.legacy_migrations',
     'tests.mti_incremental',
@@ -54,3 +56,8 @@ TRIGGER_FUNCTION_APP = 'tests.testapp'
 # Tenancy. The field name is deliberately non-default -- see tests/testapp/models.py.
 GUITARS_TENANT_MODEL = 'testapp.Label'
 GUITARS_TENANT_FIELD = 'label'
+
+# django-zeal (tests/conftest.py). Repeated QuerySet.get() from one call site is allowed: tests
+# re-read a row per assertion by design. Related-object loads stay fatal --
+# tests/test_n_plus_one_guard.py pins that, so this entry cannot quietly widen.
+ZEAL_ALLOWLIST = [{'model': '*', 'field': 'get()'}]

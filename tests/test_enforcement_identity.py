@@ -122,6 +122,21 @@ HEADER_SCANNERS = [
         {'table': 'shop_order', 'function': 'guitars_fill_4_shop_shop_id'},
     ),
     (
+        headers_module.HEADER_SOFT_DELETE_OWNED_RETIRED,
+        headers_module._RE_SOFT_DELETE_OWNED_RETIRED,
+        {'dependent_table': 'shop_kit', 'table': 'shop_order', 'foreign_key': 'kit_id'},
+    ),
+    (
+        headers_module.HEADER_SOFT_DELETE_OWNED_SWEEP_RETIRED,
+        headers_module._RE_SOFT_DELETE_OWNED_SWEEP_RETIRED,
+        {'dependent_table': 'shop_kit', 'table': 'shop_order', 'foreign_key': 'kit_id'},
+    ),
+    (
+        headers_module.HEADER_SOFT_DELETE_SELF_CASCADE_RETIRED,
+        headers_module._RE_SOFT_DELETE_SELF_CASCADE_RETIRED,
+        {'table': 'shop_node', 'foreign_key': 'parent_id'},
+    ),
+    (
         headers_module.HEADER_TENANT_AUTOFILL_RETIRED,
         headers_module._RE_TENANT_AUTOFILL_RETIRED,
         {'table': 'shop_order', 'function': 'guitars_fill_4_shop_shop_id'},
@@ -505,7 +520,9 @@ def test_the_generated_migrations_import_nothing_from_the_kit():
     """Every migration written since inlining must stand on its own -- one doing ``from
     guitars import sql`` changes meaning when the package is upgraded."""
     migrations = sorted((Path(__file__).parent / 'testapp' / 'migrations').glob('0*.py'))
-    inlined = [path for path in migrations if headers_module._RE_SQL_IDENTITY.search(path.read_text())]
+    inlined = [
+        path for path in migrations if headers_module._RE_SQL_IDENTITY.search(path.read_text())
+    ]
 
     assert inlined, 'no inlined enforcement migrations found -- has generation been run?'
     for path in inlined:
@@ -549,9 +566,9 @@ def test_unforced_policy_tables_still_reads_the_legacy_keyword_form():
     the SQL form would put already-forced tables back on the backlog."""
     legacy = (
         '# Tenant RLS on "a" table! [POLICY:aaaaaaaaaaaa]\n'
-        'migrations.RunSQL(sql=sql.create_table_rls(table=\'a\', force=True)),\n'
+        "migrations.RunSQL(sql=sql.create_table_rls(table='a', force=True)),\n"
         '# Tenant RLS on "b" table! [POLICY:bbbbbbbbbbbb]\n'
-        'migrations.RunSQL(sql=sql.create_table_rls(table=\'b\', force=False)),\n'
+        "migrations.RunSQL(sql=sql.create_table_rls(table='b', force=False)),\n"
     )
 
     assert _unforced_policy_tables(legacy) == {'b'}

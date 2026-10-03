@@ -4,7 +4,6 @@ from django.db import migrations
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ('testapp', '0011_auto_enforcement_trigger_function'),
         ('testapp', '0051_rename_encore_to_callback'),
@@ -26,7 +25,6 @@ class Migration(migrations.Migration):
             DROP TRIGGER updated_at_trigger ON "testapp_callback";
         """,
         ),
-
         # Soft Delete Rule on "testapp_callback" table! [SQL:0df9983f85a7]
         migrations.RunSQL(
             sql="""
@@ -43,5 +41,4 @@ class Migration(migrations.Migration):
             DROP RULE soft_delete ON "testapp_callback";
         """,
         ),
-
     ]

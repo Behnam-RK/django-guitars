@@ -6,7 +6,6 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ('testapp', '0035_auto_enforcement'),
     ]
@@ -15,9 +14,28 @@ class Migration(migrations.Migration):
         migrations.CreateModel(
             name='SpotlitPlacard',
             fields=[
-                ('placard_ptr', models.OneToOneField(auto_created=True, on_delete=django.db.models.deletion.CASCADE, parent_link=True, primary_key=True, serialize=False, to='testapp.placard')),
+                (
+                    'placard_ptr',
+                    models.OneToOneField(
+                        auto_created=True,
+                        on_delete=django.db.models.deletion.CASCADE,
+                        parent_link=True,
+                        primary_key=True,
+                        serialize=False,
+                        to='testapp.placard',
+                    ),
+                ),
                 ('lumens', models.CharField(max_length=100)),
-                ('pin', guitars.models.OwningForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.DO_NOTHING, related_name='pinned_by', to='testapp.placard')),
+                (
+                    'pin',
+                    guitars.models.OwningForeignKey(
+                        blank=True,
+                        null=True,
+                        on_delete=django.db.models.deletion.DO_NOTHING,
+                        related_name='pinned_by',
+                        to='testapp.placard',
+                    ),
+                ),
             ],
             bases=('testapp.placard',),
         ),

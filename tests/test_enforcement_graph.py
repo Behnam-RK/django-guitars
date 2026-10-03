@@ -404,9 +404,9 @@ def test_an_edge_reachable_from_another_is_dropped():
     not already say -- and the file then reads as if the rule needed two orderings."""
     history = _split_history()
 
-    assert drop_implied_edges(
-        history, [('shop', '0002_added'), ('shop', '0001_initial')]
-    ) == [('shop', '0002_added')]
+    assert drop_implied_edges(history, [('shop', '0002_added'), ('shop', '0001_initial')]) == [
+        ('shop', '0002_added')
+    ]
 
 
 def test_the_surviving_edge_is_kept_whichever_order_they_arrive_in():
@@ -414,9 +414,9 @@ def test_the_surviving_edge_is_kept_whichever_order_they_arrive_in():
     of the two is seen first is an ordering nothing guarantees."""
     history = _split_history()
 
-    assert drop_implied_edges(
-        history, [('shop', '0001_initial'), ('shop', '0002_added')]
-    ) == [('shop', '0002_added')]
+    assert drop_implied_edges(history, [('shop', '0001_initial'), ('shop', '0002_added')]) == [
+        ('shop', '0002_added')
+    ]
 
 
 def test_edges_neither_of_which_reaches_the_other_both_survive():
@@ -433,6 +433,4 @@ def test_an_edge_the_graph_does_not_have_is_kept():
     the only ordering the rule has. Kept, the same answer the resolver's own unknowns get."""
     history = _split_history()
 
-    assert drop_implied_edges(history, [('ghost', '0001_initial')]) == [
-        ('ghost', '0001_initial')
-    ]
+    assert drop_implied_edges(history, [('ghost', '0001_initial')]) == [('ghost', '0001_initial')]

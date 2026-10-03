@@ -198,9 +198,7 @@ def test_a_renamed_cascade_child_drops_its_inverse_rules_old_name_too():
     assert (
         'DROP FUNCTION IF EXISTS "soft_delete_revive_12_testapp_band_16_testapp_oldalbum"()'
     ) in operation
-    assert (
-        'CREATE TRIGGER "soft_delete_revive_12_testapp_band_13_testapp_album"' in operation
-    )
+    assert 'CREATE TRIGGER "soft_delete_revive_12_testapp_band_13_testapp_album"' in operation
 
 
 def test_a_rename_wrapped_in_separate_database_and_state_is_still_seen():
@@ -342,11 +340,15 @@ def test_a_retirement_subtracts_under_every_spelling_of_a_renamed_table(monkeypa
     monkeypatch.setattr(
         scanning,
         'retired_enforcement',
-        lambda ldr, app: {'0056_rename_encore_deleted_at_refrain_deleted_at_and_more': [
-            ('testapp_callbacks', None)
-        ]}
-        if app == 'testapp'
-        else real(ldr, app),
+        lambda ldr, app: (
+            {
+                '0056_rename_encore_deleted_at_refrain_deleted_at_and_more': [
+                    ('testapp_callbacks', None)
+                ]
+            }
+            if app == 'testapp'
+            else real(ldr, app)
+        ),
     )
 
     existing = scan_existing_operations()
@@ -425,9 +427,12 @@ def test_an_ambiguous_retired_column_refuses_rather_than_guessing():
 
     assert command._retired_cascade_column(key, {'testapp_album': Album}) is None
     # One key to the owner is unambiguous, and is the relaxed-field case the reverse exists for.
-    assert command._retired_cascade_column(
-        ('testapp_refrain', 'testapp_band', None), {'testapp_refrain': _refrain()}
-    ) == 'band_id'
+    assert (
+        command._retired_cascade_column(
+            ('testapp_refrain', 'testapp_band', None), {'testapp_refrain': _refrain()}
+        )
+        == 'band_id'
+    )
 
 
 def _refrain():
@@ -488,9 +493,11 @@ def test_the_walk_skips_a_move_whose_source_is_a_live_table(monkeypatch):
     monkeypatch.setattr(
         scanning,
         'renames_by_migration',
-        lambda ldr, app: {'0051_rename_encore_to_callback': [('testapp_setlist', 'testapp_zzz')]}
-        if app == 'testapp'
-        else real(ldr, app),
+        lambda ldr, app: (
+            {'0051_rename_encore_to_callback': [('testapp_setlist', 'testapp_zzz')]}
+            if app == 'testapp'
+            else real(ldr, app)
+        ),
     )
 
     existing = scan_existing_operations()

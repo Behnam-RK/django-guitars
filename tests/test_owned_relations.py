@@ -196,8 +196,10 @@ def test_hard_delete_does_not_follow_an_owned_relation_a_tenant_policy_refused()
         # ``Options.apps``, so none of these three is in the global registry the default sweep
         # would read.
         refusals = owned_tenancy_refusals([Shared, Plain, Scoped])
-        return refusals, _owned_fields(Plain, tenancy_refusals=refusals), _owned_fields(
-            Plain, tenancy_refusals={}
+        return (
+            refusals,
+            _owned_fields(Plain, tenancy_refusals=refusals),
+            _owned_fields(Plain, tenancy_refusals={}),
         )
 
     refusals, refused, unguarded = _build()
@@ -558,9 +560,7 @@ def test_a_statement_that_moves_the_key_while_archiving_sweeps_the_key_it_held()
     kiosk = Kiosk.objects.create(label='Foyer-side', placard=held)
 
     # One statement, both writes: the owner goes away and its key moves in the same UPDATE.
-    Kiosk._all_objects.filter(pk=kiosk.pk).update(
-        _deleted_at=timezone.now(), placard=moved_to
-    )
+    Kiosk._all_objects.filter(pk=kiosk.pk).update(_deleted_at=timezone.now(), placard=moved_to)
 
     assert not Placard.objects.filter(pk=held.pk).exists()  # the key it actually held
     assert Placard.objects.filter(pk=moved_to.pk).exists()  # never owned by a live row
@@ -607,7 +607,9 @@ def test_a_key_rewrite_a_co_owner_on_another_table_covers_is_not_refused():
     Kiosk.objects.create(label='Mezzanine', placard=placard)
     Foyer.objects.create(label='Balcony', placard=placard)  # a co-owner arm, another table
 
-    Kiosk._all_objects.filter(placard=placard).update(id=F('id') + 1000, _deleted_at=timezone.now())
+    Kiosk._all_objects.filter(placard=placard).update(
+        id=F('id') + 1000, _deleted_at=timezone.now()
+    )
 
     assert Placard.objects.filter(pk=placard.pk).exists()  # the foyer's arm spared it
 
@@ -622,7 +624,9 @@ def test_a_key_rewrite_over_an_already_archived_dependent_is_not_refused():
     Kiosk.objects.create(label='Mezzanine', placard=placard)
     Placard._all_objects.filter(pk=placard.pk).update(_deleted_at=timezone.now())
 
-    Kiosk._all_objects.filter(placard=placard).update(id=F('id') + 1000, _deleted_at=timezone.now())
+    Kiosk._all_objects.filter(placard=placard).update(
+        id=F('id') + 1000, _deleted_at=timezone.now()
+    )
 
     assert not Placard.objects.filter(pk=placard.pk).exists()
 
@@ -1475,9 +1479,7 @@ def test_one_row_owning_the_target_twice_is_not_its_own_owner(band):
     through both of its owning columns satisfies its own sibling arm without it, and no owner
     is ever left to archive the kit."""
     kit = PressKit.objects.create(headline='Hemispheres, reissued')
-    album = Album.objects.create(
-        title='Hemispheres', band=band, press_kit=kit, alt_press_kit=kit
-    )
+    album = Album.objects.create(title='Hemispheres', band=band, press_kit=kit, alt_press_kit=kit)
 
     album.delete()
 

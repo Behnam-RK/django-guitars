@@ -4,7 +4,6 @@ from django.db import migrations
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ('crossapp_tenant_ancestor', '0002_tenantedancestor_label'),
         ('testapp', '0017_auto_enforcement_parent_trigger_function'),
@@ -27,7 +26,6 @@ class Migration(migrations.Migration):
             DROP TRIGGER updated_at_trigger ON "crossapp_tenant_child_tenantedchild";
         """,
         ),
-
         # MTI Soft Delete Rule on "crossapp_tenant_child_tenantedchild" table (parent "crossapp_tenant_ancestor_tenantedancestor")! [SQL:89a2d5c62d24]
         migrations.RunSQL(
             sql="""
@@ -44,7 +42,6 @@ class Migration(migrations.Migration):
             DROP RULE soft_delete ON "crossapp_tenant_child_tenantedchild";
         """,
         ),
-
         # Tenant RLS on "crossapp_tenant_child_tenantedchild" table! [POLICY:1209285662f1] [SQL:5832b323a8a9]
         migrations.RunSQL(
             sql=[
@@ -68,5 +65,4 @@ class Migration(migrations.Migration):
                 """DROP POLICY IF EXISTS tenant_scope ON crossapp_tenant_child_tenantedchild""",
             ],
         ),
-
     ]

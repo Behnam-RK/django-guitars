@@ -5,7 +5,6 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ('crossapp_tenant_ancestor', '0001_initial'),
     ]
@@ -14,7 +13,12 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name='tenantedancestor',
             name='label',
-            field=models.ForeignKey(default=1, on_delete=django.db.models.deletion.CASCADE, related_name='ancestors', to='crossapp_tenant_ancestor.locallabel'),
+            field=models.ForeignKey(
+                default=1,
+                on_delete=django.db.models.deletion.CASCADE,
+                related_name='ancestors',
+                to='crossapp_tenant_ancestor.locallabel',
+            ),
             preserve_default=False,
         ),
     ]

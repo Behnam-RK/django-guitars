@@ -4,7 +4,6 @@ from django.db import migrations
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ('testapp', '0011_auto_enforcement_trigger_function'),
     ]
@@ -31,5 +30,4 @@ class Migration(migrations.Migration):
             DROP FUNCTION set_parent_updated_at();
         """,
         ),
-
     ]

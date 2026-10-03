@@ -4,7 +4,6 @@ from django.db import migrations
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ('testapp', '0045_auto_enforcement'),
     ]
@@ -96,7 +95,6 @@ class Migration(migrations.Migration):
             DROP FUNCTION "soft_delete_self_cascade_15_testapp_setlist_9_parent_id"();
         """,
         ),
-
         # Soft Delete Self Cascade Trigger on "testapp_rack" via "parent_id"! [SQL:5ca18451ea00]
         migrations.RunSQL(
             sql="""
@@ -183,7 +181,6 @@ class Migration(migrations.Migration):
             DROP FUNCTION "soft_delete_self_cascade_12_testapp_rack_9_parent_id"();
         """,
         ),
-
         # Soft Delete Self Cascade Trigger on "testapp_troupe" via "parent_id"! [SQL:a7fca3da7b27]
         migrations.RunSQL(
             sql="""
@@ -270,5 +267,4 @@ class Migration(migrations.Migration):
             DROP FUNCTION "soft_delete_self_cascade_14_testapp_troupe_9_parent_id"();
         """,
         ),
-
     ]

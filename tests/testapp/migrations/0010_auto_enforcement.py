@@ -6,10 +6,9 @@ from guitars import sql
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ("testapp", "0006_auto_advanced_parent_trigger_function"),
-        ("testapp", "0002_auto_advanced_trigger_function"),
+        ('testapp', '0006_auto_advanced_parent_trigger_function'),
+        ('testapp', '0002_auto_advanced_trigger_function'),
         ('testapp', '0009_tour_label_release_review_worldtour_tour_label_track_and_more'),
     ]
 
@@ -19,49 +18,41 @@ class Migration(migrations.Migration):
             sql=sql.CREATE_UPDATED_AT_TRIGGER.format(table='testapp_label', primary_key='id'),
             reverse_sql=sql.DROP_UPDATED_AT_TRIGGER.format(table='testapp_label'),
         ),
-
         # Soft Delete Rule on "testapp_label" table!
         migrations.RunSQL(
             sql=sql.CREATE_SOFT_DELETE_RULE.format(table='testapp_label', primary_key='id'),
             reverse_sql=sql.DROP_SOFT_DELETE_RULE.format(table='testapp_label'),
         ),
-
         # Updated at Trigger on "testapp_release" table!
         migrations.RunSQL(
             sql=sql.CREATE_UPDATED_AT_TRIGGER.format(table='testapp_release', primary_key='id'),
             reverse_sql=sql.DROP_UPDATED_AT_TRIGGER.format(table='testapp_release'),
         ),
-
         # Soft Delete Rule on "testapp_release" table!
         migrations.RunSQL(
             sql=sql.CREATE_SOFT_DELETE_RULE.format(table='testapp_release', primary_key='id'),
             reverse_sql=sql.DROP_SOFT_DELETE_RULE.format(table='testapp_release'),
         ),
-
         # Updated at Trigger on "testapp_track" table!
         migrations.RunSQL(
             sql=sql.CREATE_UPDATED_AT_TRIGGER.format(table='testapp_track', primary_key='id'),
             reverse_sql=sql.DROP_UPDATED_AT_TRIGGER.format(table='testapp_track'),
         ),
-
         # Soft Delete Rule on "testapp_track" table!
         migrations.RunSQL(
             sql=sql.CREATE_SOFT_DELETE_RULE.format(table='testapp_track', primary_key='id'),
             reverse_sql=sql.DROP_SOFT_DELETE_RULE.format(table='testapp_track'),
         ),
-
         # Updated at Trigger on "testapp_tour" table!
         migrations.RunSQL(
             sql=sql.CREATE_UPDATED_AT_TRIGGER.format(table='testapp_tour', primary_key='id'),
             reverse_sql=sql.DROP_UPDATED_AT_TRIGGER.format(table='testapp_tour'),
         ),
-
         # Soft Delete Rule on "testapp_tour" table!
         migrations.RunSQL(
             sql=sql.CREATE_SOFT_DELETE_RULE.format(table='testapp_tour', primary_key='id'),
             reverse_sql=sql.DROP_SOFT_DELETE_RULE.format(table='testapp_tour'),
         ),
-
         # MTI Updated at Trigger on "testapp_worldtour" table (parent "testapp_tour")!
         migrations.RunSQL(
             sql=sql.CREATE_PARENT_UPDATED_AT_TRIGGER.format(
@@ -72,7 +63,6 @@ class Migration(migrations.Migration):
             ),
             reverse_sql=sql.DROP_PARENT_UPDATED_AT_TRIGGER.format(child_table='testapp_worldtour'),
         ),
-
         # MTI Soft Delete Rule on "testapp_worldtour" table (parent "testapp_tour")!
         migrations.RunSQL(
             sql=sql.CREATE_MTI_SOFT_DELETE_RULE.format(
@@ -83,7 +73,6 @@ class Migration(migrations.Migration):
             ),
             reverse_sql=sql.DROP_MTI_SOFT_DELETE_RULE.format(child_table='testapp_worldtour'),
         ),
-
         # MTI Updated at Trigger on "testapp_stadiumtour" table (parent "testapp_tour")!
         migrations.RunSQL(
             sql=sql.CREATE_PARENT_UPDATED_AT_TRIGGER.format(
@@ -92,9 +81,10 @@ class Migration(migrations.Migration):
                 parent_pk='id',
                 child_pk='worldtour_ptr_id',
             ),
-            reverse_sql=sql.DROP_PARENT_UPDATED_AT_TRIGGER.format(child_table='testapp_stadiumtour'),
+            reverse_sql=sql.DROP_PARENT_UPDATED_AT_TRIGGER.format(
+                child_table='testapp_stadiumtour'
+            ),
         ),
-
         # MTI Soft Delete Rule on "testapp_stadiumtour" table (parent "testapp_tour")!
         migrations.RunSQL(
             sql=sql.CREATE_MTI_SOFT_DELETE_RULE.format(
@@ -105,31 +95,26 @@ class Migration(migrations.Migration):
             ),
             reverse_sql=sql.DROP_MTI_SOFT_DELETE_RULE.format(child_table='testapp_stadiumtour'),
         ),
-
         # Updated at Trigger on "testapp_booking" table!
         migrations.RunSQL(
             sql=sql.CREATE_UPDATED_AT_TRIGGER.format(table='testapp_booking', primary_key='id'),
             reverse_sql=sql.DROP_UPDATED_AT_TRIGGER.format(table='testapp_booking'),
         ),
-
         # Soft Delete Rule on "testapp_booking" table!
         migrations.RunSQL(
             sql=sql.CREATE_SOFT_DELETE_RULE.format(table='testapp_booking', primary_key='id'),
             reverse_sql=sql.DROP_SOFT_DELETE_RULE.format(table='testapp_booking'),
         ),
-
         # Updated at Trigger on "testapp_review" table!
         migrations.RunSQL(
             sql=sql.CREATE_UPDATED_AT_TRIGGER.format(table='testapp_review', primary_key='id'),
             reverse_sql=sql.DROP_UPDATED_AT_TRIGGER.format(table='testapp_review'),
         ),
-
         # Soft Delete Rule on "testapp_review" table!
         migrations.RunSQL(
             sql=sql.CREATE_SOFT_DELETE_RULE.format(table='testapp_review', primary_key='id'),
             reverse_sql=sql.DROP_SOFT_DELETE_RULE.format(table='testapp_review'),
         ),
-
         # Soft Delete Related Rule on "testapp_booking" that is related to "testapp_label"!
         migrations.RunSQL(
             sql=sql.CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE.format(
@@ -142,7 +127,6 @@ class Migration(migrations.Migration):
                 table='testapp_label', related_table='testapp_booking'
             ),
         ),
-
         # Soft Delete Related Rule on "testapp_release" that is related to "testapp_label"!
         migrations.RunSQL(
             sql=sql.CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE.format(
@@ -155,7 +139,6 @@ class Migration(migrations.Migration):
                 table='testapp_label', related_table='testapp_release'
             ),
         ),
-
         # Soft Delete Related Rule on "testapp_tour" that is related to "testapp_label"!
         migrations.RunSQL(
             sql=sql.CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE.format(
@@ -168,7 +151,6 @@ class Migration(migrations.Migration):
                 table='testapp_label', related_table='testapp_tour'
             ),
         ),
-
         # Soft Delete Related Rule on "testapp_track" that is related to "testapp_label"!
         migrations.RunSQL(
             sql=sql.CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE.format(
@@ -181,7 +163,6 @@ class Migration(migrations.Migration):
                 table='testapp_label', related_table='testapp_track'
             ),
         ),
-
         # Soft Delete Related Rule on "testapp_review" that is related to "testapp_release"!
         migrations.RunSQL(
             sql=sql.CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE.format(
@@ -194,7 +175,6 @@ class Migration(migrations.Migration):
                 table='testapp_release', related_table='testapp_review'
             ),
         ),
-
         # Soft Delete Related Rule on "testapp_track" that is related to "testapp_release"!
         migrations.RunSQL(
             sql=sql.CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE.format(
@@ -207,41 +187,58 @@ class Migration(migrations.Migration):
                 table='testapp_release', related_table='testapp_track'
             ),
         ),
-
         # Tenant RLS on "testapp_booking" table! [POLICY:06fac090e67b]
         migrations.RunSQL(
-            sql=sql.create_table_rls(table='testapp_booking', columns={'label': 'label_id'}, force=True),
+            sql=sql.create_table_rls(
+                table='testapp_booking', columns={'label': 'label_id'}, force=True
+            ),
             reverse_sql=sql.drop_table_rls(table='testapp_booking'),
         ),
-
         # Tenant RLS on "testapp_release" table! [POLICY:57ff74989db7]
         migrations.RunSQL(
-            sql=sql.create_table_rls(table='testapp_release', columns={'label': 'label_id'}, force=True),
+            sql=sql.create_table_rls(
+                table='testapp_release', columns={'label': 'label_id'}, force=True
+            ),
             reverse_sql=sql.drop_table_rls(table='testapp_release'),
         ),
-
         # Tenant RLS on "testapp_stadiumtour" table! [POLICY:0b7c94cc2edc]
         migrations.RunSQL(
-            sql=sql.create_table_rls(table='testapp_stadiumtour', columns={}, owner_table='testapp_tour', owner_pk='id', child_pk='worldtour_ptr_id', owner_columns={'label': 'label_id'}, force=True),
+            sql=sql.create_table_rls(
+                table='testapp_stadiumtour',
+                columns={},
+                owner_table='testapp_tour',
+                owner_pk='id',
+                child_pk='worldtour_ptr_id',
+                owner_columns={'label': 'label_id'},
+                force=True,
+            ),
             reverse_sql=sql.drop_table_rls(table='testapp_stadiumtour'),
         ),
-
         # Tenant RLS on "testapp_tour" table! [POLICY:1821981b73dd]
         migrations.RunSQL(
-            sql=sql.create_table_rls(table='testapp_tour', columns={'label': 'label_id'}, force=True),
+            sql=sql.create_table_rls(
+                table='testapp_tour', columns={'label': 'label_id'}, force=True
+            ),
             reverse_sql=sql.drop_table_rls(table='testapp_tour'),
         ),
-
         # Tenant RLS on "testapp_track" table! [POLICY:58c153b1f855]
         migrations.RunSQL(
-            sql=sql.create_table_rls(table='testapp_track', columns={'label': 'label_id'}, force=True),
+            sql=sql.create_table_rls(
+                table='testapp_track', columns={'label': 'label_id'}, force=True
+            ),
             reverse_sql=sql.drop_table_rls(table='testapp_track'),
         ),
-
         # Tenant RLS on "testapp_worldtour" table! [POLICY:26341b4a261a]
         migrations.RunSQL(
-            sql=sql.create_table_rls(table='testapp_worldtour', columns={}, owner_table='testapp_tour', owner_pk='id', child_pk='tour_ptr_id', owner_columns={'label': 'label_id'}, force=True),
+            sql=sql.create_table_rls(
+                table='testapp_worldtour',
+                columns={},
+                owner_table='testapp_tour',
+                owner_pk='id',
+                child_pk='tour_ptr_id',
+                owner_columns={'label': 'label_id'},
+                force=True,
+            ),
             reverse_sql=sql.drop_table_rls(table='testapp_worldtour'),
         ),
-
     ]

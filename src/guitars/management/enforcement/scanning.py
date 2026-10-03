@@ -22,12 +22,15 @@ from guitars.management.enforcement.headers import (
     _RE_PARENT_TRIGGER_FUNCTION,
     _RE_SOFT_DELETE,
     _RE_SOFT_DELETE_OWNED,
+    _RE_SOFT_DELETE_OWNED_RETIRED,
     _RE_SOFT_DELETE_OWNED_SWEEP,
+    _RE_SOFT_DELETE_OWNED_SWEEP_RETIRED,
     _RE_SOFT_DELETE_RELATED,
     _RE_SOFT_DELETE_RELATED_RETIRED,
     _RE_SOFT_DELETE_REVIVE,
     _RE_SOFT_DELETE_REVIVE_RETIRED,
     _RE_SOFT_DELETE_SELF_CASCADE,
+    _RE_SOFT_DELETE_SELF_CASCADE_RETIRED,
     _RE_TENANT_AUTOFILL,
     _RE_TENANT_AUTOFILL_FUNCTION,
     _RE_TENANT_AUTOFILL_RETIRED,
@@ -596,6 +599,27 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
                 revive_retirement_sites.append(
                     CascadeRetirementSite(app.label, path.stem, _cascade_key(match), None)
                 )
+            # #66's three, created and retired in one app on one table, so this file walk is
+            # application order and a pop is enough -- the autofill retirement's shape.
+            trigger_retirements = False
+            for pattern in (_RE_SOFT_DELETE_OWNED_RETIRED, _RE_SOFT_DELETE_OWNED_SWEEP_RETIRED):
+                recorded = (
+                    existing_soft_delete_owned
+                    if pattern is _RE_SOFT_DELETE_OWNED_RETIRED
+                    else existing_soft_delete_owned_sweep
+                )
+                for match in pattern.finditer(content):
+                    dependent, owner, foreign_key = (
+                        _identifiers._unescape_ident(group) for group in match.groups()
+                    )
+                    recorded.pop((dependent, owner, foreign_key), None)
+                    trigger_retirements = True
+            for match in _RE_SOFT_DELETE_SELF_CASCADE_RETIRED.finditer(content):
+                table, foreign_key = (_identifiers._unescape_ident(g) for g in match.groups())
+                existing_soft_delete_self_cascade.pop((table, foreign_key), None)
+                trigger_retirements = True
+            if trigger_retirements:
+                retirement_apps.add(app.label)
             retirements = list(_RE_TENANT_AUTOFILL_RETIRED.finditer(content))
             for match in retirements:
                 existing_tenant_autofill.pop(_autofill_key(match), None)

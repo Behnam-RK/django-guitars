@@ -478,6 +478,20 @@ _REFUSE_RECREATING_DROPPED_RULE = """
     $guitars_retired$;
 """
 
+# The reverse of #66's retirements: what they dropped reads a column or table the models no
+# longer have, so nothing here can rebuild it. ``--adopt`` re-emits what the models call for.
+_REFUSE_REVERSING_RETIREMENT = """
+    DO $guitars_retired$
+    BEGIN
+        RAISE EXCEPTION
+            'guitars: % on % was retired and cannot be rebuilt by reversing this migration. '
+            'Unapply it with --fake, restore the models, then run makeguitarmigrations --adopt.',
+            {literal_name}, {literal_table}
+            USING ERRCODE = 'feature_not_supported';
+    END;
+    $guitars_retired$;
+"""
+
 # ---- Self-referential cascade: a trigger where the family above is a rule. A rule updating the
 # table it fires on is rewritten into itself and PostgreSQL rejects **every** ``UPDATE`` there.
 # Self keys only -- a multi-table cycle has no stable choice of edge. See ADR 0018. ----

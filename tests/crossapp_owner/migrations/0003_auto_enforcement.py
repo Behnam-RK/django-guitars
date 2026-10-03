@@ -4,7 +4,6 @@ from django.db import migrations
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ('crossapp_third', '0001_initial'),
         ('crossapp_owner', '0002_auto_enforcement'),
@@ -103,5 +102,4 @@ class Migration(migrations.Migration):
             DROP FUNCTION "soft_delete_owned_sweep_20_crossapp_owner_owner_25_c_3c717708ab"();
         """,
         ),
-
     ]

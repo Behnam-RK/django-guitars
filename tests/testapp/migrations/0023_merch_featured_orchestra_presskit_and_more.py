@@ -7,7 +7,6 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ('testapp', '0022_auto_enforcement'),
     ]
@@ -16,36 +15,88 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name='merch',
             name='featured_orchestra',
-            field=guitars.models.OwningForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.DO_NOTHING, related_name='featured_by', to='testapp.orchestra'),
+            field=guitars.models.OwningForeignKey(
+                blank=True,
+                null=True,
+                on_delete=django.db.models.deletion.DO_NOTHING,
+                related_name='featured_by',
+                to='testapp.orchestra',
+            ),
         ),
         migrations.CreateModel(
             name='PressKit',
             fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('_deleted_at', models.DateTimeField(editable=False, null=True, verbose_name='Deleted at')),
-                ('_created_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Created at')),
-                ('_updated_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Updated at')),
+                (
+                    'id',
+                    models.BigAutoField(
+                        auto_created=True, primary_key=True, serialize=False, verbose_name='ID'
+                    ),
+                ),
+                (
+                    '_deleted_at',
+                    models.DateTimeField(editable=False, null=True, verbose_name='Deleted at'),
+                ),
+                (
+                    '_created_at',
+                    models.DateTimeField(
+                        db_default=django.db.models.functions.datetime.Now(),
+                        editable=False,
+                        verbose_name='Created at',
+                    ),
+                ),
+                (
+                    '_updated_at',
+                    models.DateTimeField(
+                        db_default=django.db.models.functions.datetime.Now(),
+                        editable=False,
+                        verbose_name='Updated at',
+                    ),
+                ),
                 ('headline', models.CharField(max_length=100)),
             ],
             options={
                 'abstract': False,
                 'default_manager_name': 'objects',
-                'indexes': [models.Index(condition=models.Q(('_deleted_at__isnull', True)), fields=['_deleted_at'], name='presskit_deleted_at')],
+                'indexes': [
+                    models.Index(
+                        condition=models.Q(('_deleted_at__isnull', True)),
+                        fields=['_deleted_at'],
+                        name='presskit_deleted_at',
+                    )
+                ],
             },
         ),
         migrations.AddField(
             model_name='album',
             name='alt_press_kit',
-            field=guitars.models.OwningForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.DO_NOTHING, related_name='alt_albums', to='testapp.presskit'),
+            field=guitars.models.OwningForeignKey(
+                blank=True,
+                null=True,
+                on_delete=django.db.models.deletion.DO_NOTHING,
+                related_name='alt_albums',
+                to='testapp.presskit',
+            ),
         ),
         migrations.AddField(
             model_name='album',
             name='press_kit',
-            field=guitars.models.OwningForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.DO_NOTHING, related_name='albums', to='testapp.presskit'),
+            field=guitars.models.OwningForeignKey(
+                blank=True,
+                null=True,
+                on_delete=django.db.models.deletion.DO_NOTHING,
+                related_name='albums',
+                to='testapp.presskit',
+            ),
         ),
         migrations.AddField(
             model_name='orchestra',
             name='programme',
-            field=guitars.models.OwningForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.DO_NOTHING, related_name='orchestras', to='testapp.presskit'),
+            field=guitars.models.OwningForeignKey(
+                blank=True,
+                null=True,
+                on_delete=django.db.models.deletion.DO_NOTHING,
+                related_name='orchestras',
+                to='testapp.presskit',
+            ),
         ),
     ]

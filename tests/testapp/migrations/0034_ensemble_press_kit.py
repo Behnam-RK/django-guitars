@@ -6,7 +6,6 @@ from django.db import migrations
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ('testapp', '0033_auto_enforcement'),
     ]
@@ -15,6 +14,12 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name='ensemble',
             name='press_kit',
-            field=guitars.models.OwningForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.DO_NOTHING, related_name='ensembles', to='testapp.presskit'),
+            field=guitars.models.OwningForeignKey(
+                blank=True,
+                null=True,
+                on_delete=django.db.models.deletion.DO_NOTHING,
+                related_name='ensembles',
+                to='testapp.presskit',
+            ),
         ),
     ]

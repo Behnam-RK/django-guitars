@@ -4,7 +4,6 @@ from django.db import migrations
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ('testapp', '0032_placard_parent'),
     ]
@@ -45,7 +44,6 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_owned_15_testapp_placard_10_placard_id" ON "testapp_kiosk";
         """,
         ),
-
         # Soft Delete Owned Rule on "testapp_placard" that is owned by "testapp_foyer" via "placard_id"! [SQL:8beade07afd4]
         migrations.RunSQL(
             sql="""
@@ -81,5 +79,4 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_owned_15_testapp_placard_10_placard_id" ON "testapp_foyer";
         """,
         ),
-
     ]

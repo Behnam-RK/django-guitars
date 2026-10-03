@@ -7,7 +7,6 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ('contenttypes', '0002_remove_content_type_name'),
         ('testapp', '0038_auto_enforcement'),
@@ -17,27 +16,86 @@ class Migration(migrations.Migration):
         migrations.CreateModel(
             name='Awning',
             fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('_deleted_at', models.DateTimeField(editable=False, null=True, verbose_name='Deleted at')),
-                ('_created_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Created at')),
-                ('_updated_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Updated at')),
+                (
+                    'id',
+                    models.BigAutoField(
+                        auto_created=True, primary_key=True, serialize=False, verbose_name='ID'
+                    ),
+                ),
+                (
+                    '_deleted_at',
+                    models.DateTimeField(editable=False, null=True, verbose_name='Deleted at'),
+                ),
+                (
+                    '_created_at',
+                    models.DateTimeField(
+                        db_default=django.db.models.functions.datetime.Now(),
+                        editable=False,
+                        verbose_name='Created at',
+                    ),
+                ),
+                (
+                    '_updated_at',
+                    models.DateTimeField(
+                        db_default=django.db.models.functions.datetime.Now(),
+                        editable=False,
+                        verbose_name='Updated at',
+                    ),
+                ),
                 ('fabric', models.CharField(max_length=100)),
             ],
             options={
                 'abstract': False,
                 'default_manager_name': 'objects',
-                'indexes': [models.Index(condition=models.Q(('_deleted_at__isnull', True)), fields=['_deleted_at'], name='awning_deleted_at')],
+                'indexes': [
+                    models.Index(
+                        condition=models.Q(('_deleted_at__isnull', True)),
+                        fields=['_deleted_at'],
+                        name='awning_deleted_at',
+                    )
+                ],
             },
         ),
         migrations.CreateModel(
             name='Banner',
             fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('_deleted_at', models.DateTimeField(editable=False, null=True, verbose_name='Deleted at')),
-                ('_created_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Created at')),
-                ('_updated_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Updated at')),
+                (
+                    'id',
+                    models.BigAutoField(
+                        auto_created=True, primary_key=True, serialize=False, verbose_name='ID'
+                    ),
+                ),
+                (
+                    '_deleted_at',
+                    models.DateTimeField(editable=False, null=True, verbose_name='Deleted at'),
+                ),
+                (
+                    '_created_at',
+                    models.DateTimeField(
+                        db_default=django.db.models.functions.datetime.Now(),
+                        editable=False,
+                        verbose_name='Created at',
+                    ),
+                ),
+                (
+                    '_updated_at',
+                    models.DateTimeField(
+                        db_default=django.db.models.functions.datetime.Now(),
+                        editable=False,
+                        verbose_name='Updated at',
+                    ),
+                ),
                 ('slogan', models.CharField(max_length=100)),
-                ('awning', guitars.models.OwningForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.DO_NOTHING, related_name='banners', to='testapp.awning')),
+                (
+                    'awning',
+                    guitars.models.OwningForeignKey(
+                        blank=True,
+                        null=True,
+                        on_delete=django.db.models.deletion.DO_NOTHING,
+                        related_name='banners',
+                        to='testapp.awning',
+                    ),
+                ),
             ],
             options={
                 'abstract': False,
@@ -47,12 +105,43 @@ class Migration(migrations.Migration):
         migrations.CreateModel(
             name='Billboard',
             fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('_deleted_at', models.DateTimeField(editable=False, null=True, verbose_name='Deleted at')),
-                ('_created_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Created at')),
-                ('_updated_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Updated at')),
+                (
+                    'id',
+                    models.BigAutoField(
+                        auto_created=True, primary_key=True, serialize=False, verbose_name='ID'
+                    ),
+                ),
+                (
+                    '_deleted_at',
+                    models.DateTimeField(editable=False, null=True, verbose_name='Deleted at'),
+                ),
+                (
+                    '_created_at',
+                    models.DateTimeField(
+                        db_default=django.db.models.functions.datetime.Now(),
+                        editable=False,
+                        verbose_name='Created at',
+                    ),
+                ),
+                (
+                    '_updated_at',
+                    models.DateTimeField(
+                        db_default=django.db.models.functions.datetime.Now(),
+                        editable=False,
+                        verbose_name='Updated at',
+                    ),
+                ),
                 ('label', models.CharField(max_length=100)),
-                ('banner', guitars.models.OwningForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.DO_NOTHING, related_name='billboards', to='testapp.banner')),
+                (
+                    'banner',
+                    guitars.models.OwningForeignKey(
+                        blank=True,
+                        null=True,
+                        on_delete=django.db.models.deletion.DO_NOTHING,
+                        related_name='billboards',
+                        to='testapp.banner',
+                    ),
+                ),
             ],
             options={
                 'abstract': False,
@@ -62,13 +151,40 @@ class Migration(migrations.Migration):
         migrations.CreateModel(
             name='Scribble',
             fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('_deleted_at', models.DateTimeField(editable=False, null=True, verbose_name='Deleted at')),
-                ('_created_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Created at')),
-                ('_updated_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Updated at')),
+                (
+                    'id',
+                    models.BigAutoField(
+                        auto_created=True, primary_key=True, serialize=False, verbose_name='ID'
+                    ),
+                ),
+                (
+                    '_deleted_at',
+                    models.DateTimeField(editable=False, null=True, verbose_name='Deleted at'),
+                ),
+                (
+                    '_created_at',
+                    models.DateTimeField(
+                        db_default=django.db.models.functions.datetime.Now(),
+                        editable=False,
+                        verbose_name='Created at',
+                    ),
+                ),
+                (
+                    '_updated_at',
+                    models.DateTimeField(
+                        db_default=django.db.models.functions.datetime.Now(),
+                        editable=False,
+                        verbose_name='Updated at',
+                    ),
+                ),
                 ('text', models.CharField(max_length=100)),
                 ('object_id', models.PositiveBigIntegerField()),
-                ('content_type', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, to='contenttypes.contenttype')),
+                (
+                    'content_type',
+                    models.ForeignKey(
+                        on_delete=django.db.models.deletion.CASCADE, to='contenttypes.contenttype'
+                    ),
+                ),
             ],
             options={
                 'abstract': False,
@@ -78,28 +194,68 @@ class Migration(migrations.Migration):
         migrations.CreateModel(
             name='Signboard',
             fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('_deleted_at', models.DateTimeField(editable=False, null=True, verbose_name='Deleted at')),
-                ('_created_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Created at')),
-                ('_updated_at', models.DateTimeField(db_default=django.db.models.functions.datetime.Now(), editable=False, verbose_name='Updated at')),
+                (
+                    'id',
+                    models.BigAutoField(
+                        auto_created=True, primary_key=True, serialize=False, verbose_name='ID'
+                    ),
+                ),
+                (
+                    '_deleted_at',
+                    models.DateTimeField(editable=False, null=True, verbose_name='Deleted at'),
+                ),
+                (
+                    '_created_at',
+                    models.DateTimeField(
+                        db_default=django.db.models.functions.datetime.Now(),
+                        editable=False,
+                        verbose_name='Created at',
+                    ),
+                ),
+                (
+                    '_updated_at',
+                    models.DateTimeField(
+                        db_default=django.db.models.functions.datetime.Now(),
+                        editable=False,
+                        verbose_name='Updated at',
+                    ),
+                ),
                 ('caption', models.CharField(max_length=100)),
             ],
             options={
                 'abstract': False,
                 'default_manager_name': 'objects',
-                'indexes': [models.Index(condition=models.Q(('_deleted_at__isnull', True)), fields=['_deleted_at'], name='signboard_deleted_at')],
+                'indexes': [
+                    models.Index(
+                        condition=models.Q(('_deleted_at__isnull', True)),
+                        fields=['_deleted_at'],
+                        name='signboard_deleted_at',
+                    )
+                ],
             },
         ),
         migrations.AddIndex(
             model_name='banner',
-            index=models.Index(condition=models.Q(('_deleted_at__isnull', True)), fields=['_deleted_at'], name='banner_deleted_at'),
+            index=models.Index(
+                condition=models.Q(('_deleted_at__isnull', True)),
+                fields=['_deleted_at'],
+                name='banner_deleted_at',
+            ),
         ),
         migrations.AddIndex(
             model_name='billboard',
-            index=models.Index(condition=models.Q(('_deleted_at__isnull', True)), fields=['_deleted_at'], name='billboard_deleted_at'),
+            index=models.Index(
+                condition=models.Q(('_deleted_at__isnull', True)),
+                fields=['_deleted_at'],
+                name='billboard_deleted_at',
+            ),
         ),
         migrations.AddIndex(
             model_name='scribble',
-            index=models.Index(condition=models.Q(('_deleted_at__isnull', True)), fields=['_deleted_at'], name='scribble_deleted_at'),
+            index=models.Index(
+                condition=models.Q(('_deleted_at__isnull', True)),
+                fields=['_deleted_at'],
+                name='scribble_deleted_at',
+            ),
         ),
     ]

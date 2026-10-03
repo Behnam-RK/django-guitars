@@ -178,7 +178,7 @@ class TestWrites:
             Release.objects.bulk_create([Release(title='x', label=tenants.b)])
 
     def test_a_collection_scope_refuses_to_autofill(self, tenants):
-        """"Either of these" is not a value a column can hold -- refused whatever the
+        """ "Either of these" is not a value a column can hold -- refused whatever the
         length, or unwrapping a one-element collection would make behavior depend on it."""
         with (
             tenant(label=[tenants.a, tenants.b]),

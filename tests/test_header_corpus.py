@@ -61,6 +61,16 @@ _BASELINE = {
     '_RE_SOFT_DELETE_SELF_CASCADE': re.compile(
         r'# Soft Delete Self Cascade Trigger on "([^"]+)" via "([^"]+)"!'
     ),
+    # Born derived in 2.13.0 (#66), baselined naively for their siblings' reason.
+    '_RE_SOFT_DELETE_OWNED_RETIRED': re.compile(
+        r'# Soft Delete Owned Rule retired on "([^"]+)" that is owned by "([^"]+)" via "([^"]+)"!'
+    ),
+    '_RE_SOFT_DELETE_OWNED_SWEEP_RETIRED': re.compile(
+        r'# Soft Delete Owned Sweep retired on "([^"]+)" that is owned by "([^"]+)" via "([^"]+)"!'
+    ),
+    '_RE_SOFT_DELETE_SELF_CASCADE_RETIRED': re.compile(
+        r'# Soft Delete Self Cascade Trigger retired on "([^"]+)" via "([^"]+)"!'
+    ),
     '_RE_MTI_UPDATED_AT': re.compile(r'# MTI Updated at Trigger on "([^"]+)" table'),
     '_RE_MTI_SOFT_DELETE': re.compile(r'# MTI Soft Delete Rule on "([^"]+)" table'),
     '_RE_TENANT_POLICY': re.compile(
@@ -87,6 +97,10 @@ _EXPECTED_EMPTY = {
     '_RE_TENANT_AUTOFILL_RETIRED',
     # No committed migration retires a revive trigger either -- the family is new in 2.11.0.
     '_RE_SOFT_DELETE_REVIVE_RETIRED',
+    # Nor any of #66's three, new in 2.13.0.
+    '_RE_SOFT_DELETE_OWNED_RETIRED',
+    '_RE_SOFT_DELETE_OWNED_SWEEP_RETIRED',
+    '_RE_SOFT_DELETE_SELF_CASCADE_RETIRED',
 }
 
 #: ``_RE_TENANT_POLICY``'s baseline captures ``[POLICY:...]`` inline; current reads it via

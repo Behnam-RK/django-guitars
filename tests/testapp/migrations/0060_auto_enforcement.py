@@ -4,7 +4,6 @@ from django.db import migrations
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ('testapp', '0059_retirement_host'),
     ]
@@ -30,7 +29,6 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_related_testapp_headlinefestival" ON "testapp_label";
         """,
         ),
-
         # Soft Delete Revive Trigger on "testapp_headlinefestival" that is related to "testapp_label"! [SQL:93667fdcf44a]
         migrations.RunSQL(
             sql="""
@@ -73,7 +71,6 @@ class Migration(migrations.Migration):
             DROP FUNCTION "soft_delete_revive_13_testapp_label_24_testapp_headlinefestival"();
         """,
         ),
-
         # Soft Delete Related Rule on "testapp_touringfestival" that is related to "testapp_label"! [SQL:d2cd5e100ba2]
         migrations.RunSQL(
             sql="""
@@ -94,7 +91,6 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_related_testapp_touringfestival" ON "testapp_label";
         """,
         ),
-
         # Soft Delete Revive Trigger on "testapp_touringfestival" that is related to "testapp_label"! [SQL:51af0f663483]
         migrations.RunSQL(
             sql="""
@@ -137,5 +133,4 @@ class Migration(migrations.Migration):
             DROP FUNCTION "soft_delete_revive_13_testapp_label_23_testapp_touringfestival"();
         """,
         ),
-
     ]

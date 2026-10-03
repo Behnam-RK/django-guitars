@@ -5,7 +5,6 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ('testapp', '0048_auto_enforcement'),
     ]
@@ -14,6 +13,12 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name='encore',
             name='band',
-            field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='encores', to='testapp.band'),
+            field=models.ForeignKey(
+                blank=True,
+                null=True,
+                on_delete=django.db.models.deletion.SET_NULL,
+                related_name='encores',
+                to='testapp.band',
+            ),
         ),
     ]

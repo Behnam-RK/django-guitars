@@ -101,9 +101,7 @@ class TestScanningSubtracts:
 
         assert existing.retirement_apps == set()
 
-    def test_a_retirement_does_not_pop_a_different_function_on_the_same_table(
-        self, monkeypatch
-    ):
+    def test_a_retirement_does_not_pop_a_different_function_on_the_same_table(self, monkeypatch):
         """The key is the pair. Popping by table alone would retire the live trigger of a
         table tenanted on two dimensions the moment the other one was renamed."""
         live = (_TABLE, 'guitars_fill_5_label_label_id')
@@ -187,7 +185,7 @@ class TestRetirementEmission:
         assert _command._retired_autofill_operations(_testapp(), adopt=True) == []
 
     def test_retirement_sorts_before_the_creates(self, _command):
-        """"Retire, then create" is how a rename reads. Legibility, not correctness -- the
+        """ "Retire, then create" is how a rename reads. Legibility, not correctness -- the
         two names never collide."""
         # Clear the live key too, so this run has both a create and a retirement to order --
         # which is exactly the shape a rename produces.

@@ -4,7 +4,6 @@ from django.db import migrations
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ('crossapp_third', '0001_initial'),
         ('crossapp_owner', '0001_initial'),
@@ -26,7 +25,6 @@ class Migration(migrations.Migration):
             DROP TRIGGER updated_at_trigger ON "crossapp_dependent_shared";
         """,
         ),
-
         # Soft Delete Rule on "crossapp_dependent_shared" table! [SQL:ca3e95cee3aa]
         migrations.RunSQL(
             sql="""
@@ -43,7 +41,6 @@ class Migration(migrations.Migration):
             DROP RULE soft_delete ON "crossapp_dependent_shared";
         """,
         ),
-
         # Updated at Trigger on "crossapp_dependent_localowner" table! [SQL:30b39a19cbe1]
         migrations.RunSQL(
             sql="""
@@ -57,7 +54,6 @@ class Migration(migrations.Migration):
             DROP TRIGGER updated_at_trigger ON "crossapp_dependent_localowner";
         """,
         ),
-
         # Soft Delete Rule on "crossapp_dependent_localowner" table! [SQL:45803860db37]
         migrations.RunSQL(
             sql="""
@@ -74,7 +70,6 @@ class Migration(migrations.Migration):
             DROP RULE soft_delete ON "crossapp_dependent_localowner";
         """,
         ),
-
         # Soft Delete Owned Rule on "crossapp_dependent_shared" that is owned by "crossapp_dependent_localowner" via "target_id"! [SQL:1ab039cc4436]
         migrations.RunSQL(
             sql="""
@@ -109,5 +104,4 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_owned_25_crossapp_dependent_shared_9_target_id" ON "crossapp_dependent_localowner";
         """,
         ),
-
     ]

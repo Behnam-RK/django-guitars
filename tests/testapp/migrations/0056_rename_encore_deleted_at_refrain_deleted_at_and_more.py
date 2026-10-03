@@ -5,7 +5,6 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ('testapp', '0055_rename_callback_to_refrain'),
     ]
@@ -19,6 +18,12 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name='refrain',
             name='band',
-            field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='refrains', to='testapp.band'),
+            field=models.ForeignKey(
+                blank=True,
+                null=True,
+                on_delete=django.db.models.deletion.SET_NULL,
+                related_name='refrains',
+                to='testapp.band',
+            ),
         ),
     ]

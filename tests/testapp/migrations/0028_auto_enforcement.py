@@ -4,7 +4,6 @@ from django.db import migrations
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ('testapp', '0011_auto_enforcement_trigger_function'),
         ('testapp', '0027_stagehand_rider_residency_rider_rider_deleted_at'),
@@ -24,7 +23,6 @@ class Migration(migrations.Migration):
             DROP TRIGGER updated_at_trigger ON "testapp_stagehand";
         """,
         ),
-
         # Soft Delete Rule on "testapp_stagehand" table! [SQL:993bf12b53f1]
         migrations.RunSQL(
             sql="""
@@ -41,7 +39,6 @@ class Migration(migrations.Migration):
             DROP RULE soft_delete ON "testapp_stagehand";
         """,
         ),
-
         # Updated at Trigger on "testapp_rider" table! [SQL:fab05b626783]
         migrations.RunSQL(
             sql="""
@@ -55,7 +52,6 @@ class Migration(migrations.Migration):
             DROP TRIGGER updated_at_trigger ON "testapp_rider";
         """,
         ),
-
         # Soft Delete Rule on "testapp_rider" table! [SQL:30746cebb0e4]
         migrations.RunSQL(
             sql="""
@@ -72,7 +68,6 @@ class Migration(migrations.Migration):
             DROP RULE soft_delete ON "testapp_rider";
         """,
         ),
-
         # Updated at Trigger on "testapp_residency" table! [SQL:0e53a3388893]
         migrations.RunSQL(
             sql="""
@@ -86,7 +81,6 @@ class Migration(migrations.Migration):
             DROP TRIGGER updated_at_trigger ON "testapp_residency";
         """,
         ),
-
         # Soft Delete Rule on "testapp_residency" table! [SQL:cde84c5ac431]
         migrations.RunSQL(
             sql="""
@@ -103,7 +97,6 @@ class Migration(migrations.Migration):
             DROP RULE soft_delete ON "testapp_residency";
         """,
         ),
-
         # Soft Delete Owned Rule on "testapp_stagehand" that is owned by "testapp_rider" via "stagehand_id"! [SQL:b521a9b1c045]
         migrations.RunSQL(
             sql="""
@@ -128,7 +121,6 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_owned_17_testapp_stagehand_12_stagehand_id" ON "testapp_rider";
         """,
         ),
-
         # Soft Delete Owned Rule on "testapp_rider" that is owned by "testapp_residency" via "rider_id"! [SQL:e228c15ca712]
         migrations.RunSQL(
             sql="""
@@ -153,5 +145,4 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_owned_13_testapp_rider_8_rider_id" ON "testapp_residency";
         """,
         ),
-
     ]

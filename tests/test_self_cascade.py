@@ -139,8 +139,7 @@ def test_the_orm_path_stamps_the_cascade_children_the_raw_path_leaves_stale(tran
     Setlist.objects.filter(pk=root.pk).delete()
 
     moved = {
-        row.song: row._updated_at > before[row.song]
-        for row in SetlistEntry._all_objects.all()
+        row.song: row._updated_at > before[row.song] for row in SetlistEntry._all_objects.all()
     }
     assert moved == {'root-song': True, 'middle-song': True, 'leaf-song': True}
 

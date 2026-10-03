@@ -4,7 +4,6 @@ from django.db import migrations
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ('testapp', '0011_auto_enforcement_trigger_function'),
         ('testapp', '0047_encore'),
@@ -24,7 +23,6 @@ class Migration(migrations.Migration):
             DROP TRIGGER updated_at_trigger ON "testapp_encore";
         """,
         ),
-
         # Soft Delete Rule on "testapp_encore" table! [SQL:efa4d06081c9]
         migrations.RunSQL(
             sql="""
@@ -41,7 +39,6 @@ class Migration(migrations.Migration):
             DROP RULE soft_delete ON "testapp_encore";
         """,
         ),
-
         # Soft Delete Related Rule on "testapp_encore" that is related to "testapp_band"! [SQL:dc9882f1e24b]
         migrations.RunSQL(
             sql="""
@@ -59,5 +56,4 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_related_testapp_encore" ON "testapp_band";
         """,
         ),
-
     ]

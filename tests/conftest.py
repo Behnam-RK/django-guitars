@@ -21,7 +21,8 @@ def pytest_configure(config: pytest.Config) -> None:
     actually being passed, or a plain run leaves stray ``.coverage.<host>.pid<N>`` files."""
     if config.getoption('cov_source', default=None):
         os.environ.setdefault(
-            'COVERAGE_PROCESS_START', str(Path(__file__).resolve().parent.parent / 'pyproject.toml')
+            'COVERAGE_PROCESS_START',
+            str(Path(__file__).resolve().parent.parent / 'pyproject.toml'),
         )
 
 

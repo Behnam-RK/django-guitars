@@ -5,7 +5,6 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     initial = True
 
     dependencies = [
@@ -16,16 +15,42 @@ class Migration(migrations.Migration):
         migrations.CreateModel(
             name='Heir',
             fields=[
-                ('retiree_ptr', models.OneToOneField(auto_created=True, on_delete=django.db.models.deletion.CASCADE, parent_link=True, primary_key=True, serialize=False, to='crossapp_retire_owner.retiree')),
+                (
+                    'retiree_ptr',
+                    models.OneToOneField(
+                        auto_created=True,
+                        on_delete=django.db.models.deletion.CASCADE,
+                        parent_link=True,
+                        primary_key=True,
+                        serialize=False,
+                        to='crossapp_retire_owner.retiree',
+                    ),
+                ),
             ],
             bases=('crossapp_retire_owner.retiree',),
         ),
         migrations.CreateModel(
             name='Dependant',
             fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('_deleted_at', models.DateTimeField(editable=False, null=True, verbose_name='Deleted at')),
-                ('heir', models.ForeignKey(null=True, on_delete=django.db.models.deletion.CASCADE, related_name='kids', to='crossapp_retire_child.heir')),
+                (
+                    'id',
+                    models.BigAutoField(
+                        auto_created=True, primary_key=True, serialize=False, verbose_name='ID'
+                    ),
+                ),
+                (
+                    '_deleted_at',
+                    models.DateTimeField(editable=False, null=True, verbose_name='Deleted at'),
+                ),
+                (
+                    'heir',
+                    models.ForeignKey(
+                        null=True,
+                        on_delete=django.db.models.deletion.CASCADE,
+                        related_name='kids',
+                        to='crossapp_retire_child.heir',
+                    ),
+                ),
             ],
         ),
     ]

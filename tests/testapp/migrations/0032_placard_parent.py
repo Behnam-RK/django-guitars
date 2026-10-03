@@ -6,7 +6,6 @@ from django.db import migrations
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ('testapp', '0031_auto_enforcement'),
     ]
@@ -15,6 +14,12 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name='placard',
             name='parent',
-            field=guitars.models.OwningForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.DO_NOTHING, related_name='children', to='testapp.placard'),
+            field=guitars.models.OwningForeignKey(
+                blank=True,
+                null=True,
+                on_delete=django.db.models.deletion.DO_NOTHING,
+                related_name='children',
+                to='testapp.placard',
+            ),
         ),
     ]

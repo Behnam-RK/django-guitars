@@ -5,7 +5,6 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ('crossapp_retire_child', '0003_alter_dependant_heir'),
     ]
@@ -14,6 +13,11 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name='dependant',
             name='heir',
-            field=models.ForeignKey(null=True, on_delete=django.db.models.deletion.CASCADE, related_name='kids', to='crossapp_retire_child.heir'),
+            field=models.ForeignKey(
+                null=True,
+                on_delete=django.db.models.deletion.CASCADE,
+                related_name='kids',
+                to='crossapp_retire_child.heir',
+            ),
         ),
     ]

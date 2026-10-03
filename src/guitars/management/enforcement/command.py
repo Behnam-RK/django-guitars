@@ -103,6 +103,7 @@ class Command(OperationsMixin, BaseCommand):
         self._table_app_labels_cache: dict[str, str] | None = None
         self._routed_away_cache: frozenset[str] | None = None
         self._cascade_key_maps_cache: tuple[dict, dict] | None = None  # see the mixin
+        self._required_self_cascade_keys: set[tuple[str, str]] = set()
         # Lazy, not built here: the graph reads ``self.all_models``, which a caller can *replace*
         # after construction -- the generation tests do, ``isolate_apps`` swapping ``Options.apps``
         # rather than the registry this constructor read. Building it here freezes the old answer.

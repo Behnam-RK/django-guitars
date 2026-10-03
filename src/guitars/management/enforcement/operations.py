@@ -42,7 +42,9 @@ from guitars.management.enforcement.headers import (
     HEADER_MTI_UPDATED_AT,
     HEADER_SOFT_DELETE,
     HEADER_SOFT_DELETE_OWNED,
+    HEADER_SOFT_DELETE_OWNED_RETIRED,
     HEADER_SOFT_DELETE_OWNED_SWEEP,
+    HEADER_SOFT_DELETE_OWNED_SWEEP_RETIRED,
     HEADER_SOFT_DELETE_RELATED,
     HEADER_SOFT_DELETE_RELATED_RETIRED,
     HEADER_SOFT_DELETE_RELATED_VIA,
@@ -52,6 +54,7 @@ from guitars.management.enforcement.headers import (
     HEADER_SOFT_DELETE_REVIVE_VIA,
     HEADER_SOFT_DELETE_REVIVE_VIA_RETIRED,
     HEADER_SOFT_DELETE_SELF_CASCADE,
+    HEADER_SOFT_DELETE_SELF_CASCADE_RETIRED,
     HEADER_TENANT_AUTOFILL,
     HEADER_TENANT_AUTOFILL_RETIRED,
     HEADER_TENANT_FORCE,
@@ -652,6 +655,7 @@ class OperationsMixin:
             # is legibility rather than correctness.
             + self._retired_cascade_operations(app, adopt=adopt)
             + self._retired_autofill_operations(app, adopt=adopt)
+            + self._retired_trigger_operations(app)
             + self._tenant_autofill_operations(app, adopt=adopt)
             + self._tenant_policy_operations(app, adopt=adopt)
         )
@@ -838,6 +842,7 @@ class OperationsMixin:
             return self._cascade_key_maps_cache
         required: dict[tuple[str, str, str | None], str] = {}
         models_by_table: dict[str, type[models.Model]] = {}
+        self._required_self_cascade_keys: set[tuple[str, str]] = set()
         for app in django_apps.get_app_configs():
             if not _generator.is_local(app):
                 continue
@@ -850,13 +855,121 @@ class OperationsMixin:
                 owner_table = column_owner(model, '_deleted_at')._meta.db_table
                 # ``report=False``: this sweep covers apps the run was never asked about, and
                 # their misconfigurations are not its to report -- ``_owned_candidates``' rule.
-                candidates, _self = self._cascade_candidates(model, owner_table, report=False)
+                candidates, selfs = self._cascade_candidates(model, owner_table, report=False)
+                self._required_self_cascade_keys.update(
+                    (owner_table, fk_field.column) for fk_field in selfs
+                )
                 for related_model, fk_field, is_primary in candidates:
                     related_table = related_model._meta.db_table
                     column = fk_field.column
                     required[(related_table, owner_table, None if is_primary else column)] = column
         self._cascade_key_maps_cache = (required, models_by_table)
         return self._cascade_key_maps_cache
+
+    def _required_self_cascades(self) -> set[tuple[str, str]]:
+        """``(table, foreign_key)`` of every self-cascade trigger the models call for, off the
+        same sweep as :meth:`_cascade_key_maps`."""
+        self._cascade_key_maps()
+        return self._required_self_cascade_keys
+
+    @staticmethod
+    def _declared_owned_keys() -> set[tuple[str, str, str]]:
+        """Every owned key a declaration still names, *refused or not*: a refusal escalates a
+        live rule to a failing ``--check`` already, so only an undeclared key is retired."""
+        return {
+            (
+                column_owner(field.related_model, '_deleted_at')._meta.db_table,
+                column_owner(model, '_deleted_at')._meta.db_table,
+                field.column,
+            )
+            for app in django_apps.get_app_configs()
+            if _generator.is_local(app)
+            for model in app.get_models()
+            if has_column(model, '_deleted_at')
+            for field in OperationsMixin._declared_owning_fields(model)
+            if has_column(field.related_model, '_deleted_at')
+        }
+
+    def _retired_trigger_operations(self, app: AppConfig) -> list[str]:
+        """Retire the owned rule, its sweep and the self-cascade trigger whose key the models no
+        longer call for (#66): their plpgsql bodies name the column, so after ``DROP COLUMN ...
+        CASCADE`` each failed every UPDATE on its table. ``IF EXISTS`` and every spelling."""
+        hosting = self._table_app_labels()
+        declared = self._declared_owned_keys()
+        required_selfs = self._required_self_cascades()
+        quote = _identifiers._quote_table
+        operations: list[str] = []
+        owned = set(self.existing.soft_delete_owned) | set(self.existing.soft_delete_owned_sweep)
+        for dependent_table, owner_table, foreign_key in sorted(owned - declared):
+            if hosting.get(owner_table) != app.label:
+                continue
+            key = (dependent_table, owner_table, foreign_key)
+            pairs = [
+                (owner, dependent)
+                for owner in (*self._prior_names(owner_table), owner_table)
+                for dependent in (*self._prior_names(dependent_table), dependent_table)
+            ]
+            slots = {
+                'dependent_table': _identifiers._escape_ident(dependent_table),
+                'table': _identifiers._escape_ident(owner_table),
+                'foreign_key': _identifiers._escape_ident(foreign_key),
+            }
+            for recorded, header, drop, name in (
+                (
+                    self.existing.soft_delete_owned,
+                    HEADER_SOFT_DELETE_OWNED_RETIRED,
+                    self._drop_prior_rules(
+                        quote(owner_table),
+                        sorted({_owned_rule_name(d, foreign_key) for _o, d in pairs}),
+                    ),
+                    _owned_rule_name(dependent_table, foreign_key),
+                ),
+                (
+                    self.existing.soft_delete_owned_sweep,
+                    HEADER_SOFT_DELETE_OWNED_SWEEP_RETIRED,
+                    self._drop_prior_triggers(
+                        {'table': quote(owner_table)},
+                        [_owned_sweep_name(o, d, foreign_key) for o, d in pairs],
+                    ),
+                    _owned_sweep_name(owner_table, dependent_table, foreign_key),
+                ),
+            ):
+                if key in recorded:
+                    operations.append(
+                        self._retirement(
+                            app.label, header.format(**slots), drop, name, owner_table
+                        )
+                    )
+        for table, foreign_key in sorted(
+            set(self.existing.soft_delete_self_cascade) - required_selfs
+        ):
+            if hosting.get(table) != app.label:
+                continue
+            header = HEADER_SOFT_DELETE_SELF_CASCADE_RETIRED.format(
+                table=_identifiers._escape_ident(table),
+                foreign_key=_identifiers._escape_ident(foreign_key),
+            )
+            drop = self._drop_prior_triggers(
+                {'table': quote(table)},
+                [
+                    _self_cascade_name(name, foreign_key)
+                    for name in (*self._prior_names(table), table)
+                ],
+            )
+            name = _self_cascade_name(table, foreign_key)
+            operations.append(self._retirement(app.label, header, drop, name, table))
+        return operations
+
+    def _retirement(self, app_label: str, header: str, drop: str, name: str, table: str) -> str:
+        """One #66 retirement: the drop, and a reverse that refuses and points at ``--adopt``."""
+        # Its operation set may recur once a key is re-adopted and retired again.
+        self.existing.retirement_apps.add(app_label)
+        reverse = _soft_delete._REFUSE_REVERSING_RETIREMENT.format(
+            literal_name=_identifiers._quote_literal(name),
+            literal_table=_identifiers._quote_literal(table),
+        )
+        source, _ = _operation(header, drop, reverse)
+        return source
 
     def _retired_cascade_column(
         self, key: tuple[str, str, str | None], models_by_table: dict[str, type[models.Model]]

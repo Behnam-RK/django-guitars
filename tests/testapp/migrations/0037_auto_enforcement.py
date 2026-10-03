@@ -4,7 +4,6 @@ from django.db import migrations
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ('testapp', '0017_auto_enforcement_parent_trigger_function'),
         ('testapp', '0036_spotlitplacard'),
@@ -26,7 +25,6 @@ class Migration(migrations.Migration):
             DROP TRIGGER updated_at_trigger ON "testapp_spotlitplacard";
         """,
         ),
-
         # MTI Soft Delete Rule on "testapp_spotlitplacard" table (parent "testapp_placard")! [SQL:2e8d9a679be0]
         migrations.RunSQL(
             sql="""
@@ -43,7 +41,6 @@ class Migration(migrations.Migration):
             DROP RULE soft_delete ON "testapp_spotlitplacard";
         """,
         ),
-
         # Soft Delete Owned Rule on "testapp_placard" that is owned by "testapp_kiosk" via "placard_id"! [SQL:65bdcd7cbaa2]
         migrations.RunSQL(
             sql="""
@@ -87,7 +84,6 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_owned_15_testapp_placard_10_placard_id" ON "testapp_kiosk";
         """,
         ),
-
         # Soft Delete Owned Rule on "testapp_placard" that is owned by "testapp_foyer" via "placard_id"! [SQL:a03c26115dfd]
         migrations.RunSQL(
             sql="""
@@ -131,5 +127,4 @@ class Migration(migrations.Migration):
             DROP RULE "soft_delete_owned_15_testapp_placard_10_placard_id" ON "testapp_foyer";
         """,
         ),
-
     ]

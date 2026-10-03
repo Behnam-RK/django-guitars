@@ -16,6 +16,7 @@ from django.db.migrations.operations import (
     RenameModel,
     SeparateDatabaseAndState,
 )
+from django.db.migrations.state import ProjectState
 
 
 if TYPE_CHECKING:
@@ -201,25 +202,27 @@ def dropped_tables(loader: MigrationLoader) -> set[str]:
     """Tables a ``DeleteModel`` dropped and nothing holds by the end of the history, in any app
     the loader knows. Positive evidence that a model was deleted, which an unmapped table alone is
     not: an app dropped from ``LOCAL_APPS`` maps to nothing too, and its tables are live."""
+    # One forward walk over the *graph*, never the files: a pending squash leaves replaced
+    # migrations on disk that the graph has dropped. State is read before each *operation*, so
+    # a create and delete in one migration, or a rename before the delete, is seen as it ran.
+    plan: dict[tuple[str, str], None] = {}
+    for leaf in loader.graph.leaf_nodes():
+        plan.update(dict.fromkeys(loader.graph.forwards_plan(leaf)))
+    state = ProjectState(real_apps=loader.unmigrated_apps)
     dropped: set[str] = set()
-    for (app_label, name), migration in loader.disk_migrations.items():
-        # Top level only: a ``DeleteModel`` inside ``SeparateDatabaseAndState`` moves a model
-        # between apps in state and leaves its table where it is.
-        for operation in migration.operations:
-            if not isinstance(operation, DeleteModel):
-                continue
-            before = loader.project_state((app_label, name), at_end=False)
-            model_state = before.models.get((app_label, operation.name_lower))
-            if model_state is None or not _owns_a_table(model_state):
-                continue
-            dropped.add(_table_of(app_label, operation.name_lower, model_state))
-    if not dropped:
-        return dropped
+    for app_label, name in plan:
+        for operation in loader.graph.nodes[app_label, name].operations:
+            # Top level only: a ``DeleteModel`` inside ``SeparateDatabaseAndState`` moves a
+            # model between apps in state and leaves its table where it is.
+            if isinstance(operation, DeleteModel):
+                model_state = state.models.get((app_label, operation.name_lower))
+                if model_state is not None and _owns_a_table(model_state):
+                    dropped.add(_table_of(app_label, operation.name_lower, model_state))
+            operation.state_forwards(app_label, state)
     # A later model taking the same ``db_table`` holds it again.
-    final = loader.project_state()
     return dropped - {
         _table_of(label, model_name, model_state)
-        for (label, model_name), model_state in final.models.items()
+        for (label, model_name), model_state in state.models.items()
     }
 
 

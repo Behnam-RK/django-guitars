@@ -469,8 +469,9 @@ _REFUSE_RECREATING_DROPPED_RULE = """
     DO $guitars_retired$
     BEGIN
         RAISE EXCEPTION
-            'guitars: rule % on % cannot be recreated -- the model it cascaded into was '
-            'deleted. Reverse the deletion first, then run makeguitarmigrations.',
+            'guitars: % on % cannot be recreated -- the model it read was deleted. To migrate '
+            'back past this, unapply this migration with --fake, then reverse the deletion and '
+            'run makeguitarmigrations.',
             {literal_rule_name}, {literal_table}
             USING ERRCODE = 'feature_not_supported';
     END;

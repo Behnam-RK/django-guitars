@@ -5,8 +5,13 @@ body records no dependency. The trigger then fails every ``UPDATE`` on the owner
 import pytest
 from django.apps import apps
 from django.db import ProgrammingError, connection, migrations, transaction
-from django.db.migrations.operations import DeleteModel, SeparateDatabaseAndState
-from django.db.migrations.state import ModelState, ProjectState
+from django.db.migrations.graph import MigrationGraph
+from django.db.migrations.operations import (
+    CreateModel,
+    DeleteModel,
+    RenameModel,
+    SeparateDatabaseAndState,
+)
 from django.db import models
 
 from guitars.management.enforcement import graph
@@ -104,12 +109,39 @@ class TestADroppedChildIsRetired:
         assert 'DROP TRIGGER IF EXISTS' in _forward_sql(revive)
         assert 'DROP FUNCTION IF EXISTS' in _forward_sql(revive)
 
+    def test_a_renamed_then_deleted_child_drops_every_spelling(self, monkeypatch):
+        """Objects named before the rename are the ones a project generated earliest; dropping
+        only the current spelling left the live trigger, ``IF EXISTS`` hiding that it missed."""
+        command = _command(monkeypatch, dropped={CHILD})
+        command.existing.renamed_tables[CHILD] = ['testapp_oldentry']
+
+        _rule, revive = _retirements(command)
+
+        assert 'soft_delete_revive_15_testapp_setlist_16_testapp_oldentry' in _forward_sql(revive)
+        assert REVIVE in _forward_sql(revive)
+
     def test_the_reverse_refuses(self, monkeypatch):
         for operation in _retirements(_command(monkeypatch, dropped={CHILD})):
             assert 'RAISE EXCEPTION' in operation
 
     def test_it_is_no_longer_named_as_unretirable(self, monkeypatch):
         assert _command(monkeypatch, dropped={CHILD})._unmapped_cascade_notes() == []
+
+    def test_a_run_scoped_away_from_the_owner_still_says_so(self, monkeypatch):
+        """The retirement belongs to the owner's app; a run without it writes the deletion and
+        nothing else, so it has to name what is left broken."""
+        (note,) = _command(monkeypatch, dropped={CHILD})._scoped_cascade_retirement_notes(
+            {'crossapp_owner'}
+        )
+
+        assert OWNER in note
+        assert 'every UPDATE' in note
+
+    def test_a_scoped_run_without_evidence_adds_no_scoped_note(self, monkeypatch):
+        """The unscoped note already names it; the scoped one is for a retirement left unwritten."""
+        command = _command(monkeypatch, dropped=set())
+
+        assert command._scoped_cascade_retirement_notes({'crossapp_owner'}) == []
 
     def test_without_evidence_of_a_deletion_it_is_still_only_named(self, monkeypatch):
         """An app dropped from ``LOCAL_APPS`` looks the same from the registry: no evidence, no
@@ -133,65 +165,72 @@ class TestADroppedChildIsRetired:
 
 
 class _Loader:
-    """The two things ``dropped_tables`` reads off a ``MigrationLoader``."""
+    """What ``dropped_tables`` reads off a ``MigrationLoader``: the graph, and nothing on disk."""
 
-    def __init__(self, before: dict, final: ProjectState, operations: list):
-        self._before, self._final = before, final
-        migration = migrations.Migration('0002_gone', 'shop')
-        migration.operations = operations
-        self.disk_migrations = {('shop', '0002_gone'): migration}
+    def __init__(self, *migrations_in_order):
+        self.graph = MigrationGraph()
+        self.unmigrated_apps: set[str] = set()
+        previous = None
+        for number, operations in enumerate(migrations_in_order, start=1):
+            key = ('shop', f'{number:04d}')
+            migration = migrations.Migration(key[1], 'shop')
+            migration.operations = operations
+            self.graph.add_node(key, migration)
+            if previous:
+                self.graph.add_dependency(migration, key, previous)
+            previous = key
 
-    def project_state(self, nodes=None, at_end=True):
-        return self._final if nodes is None else self._before
 
-
-def _state(*tables: str) -> ProjectState:
-    state = ProjectState()
-    for table in tables:
-        name = table.split('_', 1)[1]
-        state.add_model(
-            ModelState(
-                'shop', name, [('id', models.AutoField(primary_key=True))], {'db_table': table}
-            )
-        )
-    return state
+def _create(name='item', **options):
+    return CreateModel(name, [('id', models.AutoField(primary_key=True))], options=options)
 
 
 class TestDroppedTables:
     def test_a_deleted_model_is_dropped(self):
-        loader = _Loader(_state('shop_item'), _state(), [DeleteModel('item')])
+        loader = _Loader([_create()], [DeleteModel('item')])
 
         assert graph.dropped_tables(loader) == {'shop_item'}
 
     def test_a_table_recreated_later_is_not(self):
-        loader = _Loader(_state('shop_item'), _state('shop_item'), [DeleteModel('item')])
+        loader = _Loader([_create()], [DeleteModel('item')], [_create()])
 
         assert graph.dropped_tables(loader) == set()
 
     def test_a_state_only_move_is_not(self):
         """Moving a model between apps deletes it from one app's *state* alone; the table lives."""
         moved = SeparateDatabaseAndState(state_operations=[DeleteModel('item')])
-        loader = _Loader(_state('shop_item'), _state(), [moved])
+        loader = _Loader([_create()], [moved])
 
         assert graph.dropped_tables(loader) == set()
 
+    def test_a_create_and_delete_in_one_migration_is(self):
+        """A squash's shape once its replaced files are gone: the state before the *operation*,
+        not before the migration, holds the model."""
+        loader = _Loader([_create(), DeleteModel('item')])
 
-def _options_state(**options) -> ProjectState:
-    state = ProjectState()
-    state.add_model(
-        ModelState('shop', 'item', [('id', models.AutoField(primary_key=True))], options)
+        assert graph.dropped_tables(loader) == {'shop_item'}
+
+    def test_a_rename_before_the_delete_names_the_table_it_had(self):
+        loader = _Loader([_create()], [RenameModel('item', 'kit'), DeleteModel('kit')])
+
+        assert graph.dropped_tables(loader) == {'shop_kit'}
+
+    def test_it_reads_the_graph_not_the_files(self):
+        """A pending squash leaves its replaced migrations on disk but out of the graph; reading
+        them asked the graph for nodes it does not have and crashed the generator."""
+        loader = _Loader([_create()], [DeleteModel('item')])
+        loader.disk_migrations = {('shop', '0003_replaced'): migrations.Migration('x', 'shop')}
+
+        assert graph.dropped_tables(loader) == {'shop_item'}
+
+    @pytest.mark.parametrize(
+        'options', [{'proxy': True}, {'managed': False}], ids=['proxy', 'unmanaged']
     )
-    return state
+    def test_a_model_owning_no_table_drops_none(self, options):
+        """Django drops no table for either, so a live one would lose its trigger."""
+        loader = _Loader([_create(**options)], [DeleteModel('item')])
 
-
-@pytest.mark.parametrize(
-    'options', [{'proxy': True}, {'managed': False}], ids=['proxy', 'unmanaged']
-)
-def test_a_model_owning_no_table_drops_none(options):
-    """Django drops no table for either, so a live one would lose its trigger."""
-    loader = _Loader(_options_state(**options), _state(), [DeleteModel('item')])
-
-    assert graph.dropped_tables(loader) == set()
+        assert graph.dropped_tables(loader) == set()
 
 
 def test_an_owner_whose_table_was_dropped_is_not_named(monkeypatch):

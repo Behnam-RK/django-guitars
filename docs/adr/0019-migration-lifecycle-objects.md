@@ -71,7 +71,8 @@ beside ours.
   back off the first remaining foreign key to that owner; where the field is gone the reverse
   raises rather than succeeding into a database missing a rule its history claims.
 - `--adopt` remains the one path that may say `IF EXISTS`, being the one honest about not
-  knowing — except where a rename already made the drop all-`IF EXISTS` over every spelling.
+  knowing — except where a rename already made the drop all-`IF EXISTS` over every spelling,
+  and the retirement of a deleted child's key ([ADR 0029](0029-retiring-a-deleted-childs-revive-trigger.md)).
 
 ## Alternatives rejected
 

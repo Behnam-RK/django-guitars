@@ -1010,8 +1010,15 @@ class OperationsMixin:
                 drop = family.drop_template.format(**slots)
                 if deleted:
                     # ``DROP TABLE ... CASCADE`` took the rule wherever the deletion ran first,
-                    # and #63's stopgap drops the trigger by hand: gone is the goal. ADR 0029.
-                    drop = family.drop_prior(ident_owner_table, [rule_name])
+                    # and #63's stopgap drops the trigger by hand: gone is the goal. Every
+                    # spelling, or a rename before the deletion leaves the live one. ADR 0029.
+                    drop = family.drop_prior(
+                        ident_owner_table,
+                        [
+                            family.name(owner_table, name, via)
+                            for name in (*self._prior_names(related_table), related_table)
+                        ],
+                    )
                 elif self._renamed(related_table):
                     # Which spelling is live depends on when a generation last ran, so every
                     # one goes, ``IF EXISTS``. A bare DROP of a name nothing has fails
@@ -2694,7 +2701,15 @@ class OperationsMixin:
         for key in sorted(recorded - set(required), key=lambda k: (k[0], k[1], k[2] or '')):
             related_table, owner_table, _via = key
             owner_app = hosting.get(owner_table)
-            if owner_app is None or owner_app in requested or related_table not in hosting:
+            if owner_app is None or owner_app in requested:
+                continue
+            if related_table not in hosting:
+                if related_table in self._dropped_tables():
+                    notes.append(
+                        f"Revive trigger on '{owner_table}' names '{related_table}', whose "
+                        f'model was deleted, and fails every UPDATE on that table until it is '
+                        f"retired -- which only a run including '{owner_app}' writes."
+                    )
                 continue
             notes.append(
                 f"Cascade rule on '{owner_table}' related to '{related_table}' is recorded but "
@@ -2713,10 +2728,12 @@ class OperationsMixin:
         return self._loader_cache
 
     def _dropped_tables(self) -> set[str]:
-        """:func:`dropped_tables` over :meth:`_migration_loader`, recomputed with it."""
+        """:func:`dropped_tables` over :meth:`_migration_loader`, recomputed with it, less any
+        table a model of an app with no migrations holds -- migration state cannot see those."""
         loader = self._migration_loader()
         if self._dropped_tables_cache is None or self._dropped_tables_cache[0] is not loader:
-            self._dropped_tables_cache = (loader, dropped_tables(loader))
+            live = {model._meta.db_table for model in django_apps.get_models()}
+            self._dropped_tables_cache = (loader, dropped_tables(loader) - live)
         return self._dropped_tables_cache[1]
 
     def _drop_cached_migration_loader(self) -> None:

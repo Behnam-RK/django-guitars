@@ -6,7 +6,7 @@ import types
 
 import pytest
 from django.apps import apps
-from django.db import ProgrammingError, migrations, transaction
+from django.db import ProgrammingError, connection, migrations, transaction
 
 from guitars.management import _generator
 from guitars.management.enforcement.command import Command
@@ -20,6 +20,7 @@ from guitars.management.enforcement.headers import (
 )
 from guitars.management.enforcement.scanning import scan_existing_operations
 from tests.conftest import clear_cascade_coverage, execute, scalar
+
 
 OWNED = ('testapp_gone_target', 'testapp_setlist', 'gone_id')
 SELF = ('testapp_setlist', 'gone_parent_id')
@@ -237,3 +238,109 @@ def test_a_generation_writes_the_retirement():
         )
         for operation in operations
     )
+
+
+def _retired_for(command: Command) -> list[str]:
+    app = apps.get_app_config('testapp')
+    return command._retired_trigger_operations(app) + command._retired_cascade_operations(app)
+
+
+def _without(command: Command, method: str, drop):
+    """*command* with *method*'s answer less *drop*: the key the models stopped calling for."""
+    original = getattr(command, method)
+
+    def narrowed():
+        answer = original()
+        if isinstance(answer, tuple):  # ``_cascade_key_maps``
+            required, by_table = answer
+            return {k: v for k, v in required.items() if k != drop}, by_table
+        return answer - {drop}
+
+    setattr(command, method, narrowed)
+    return command
+
+
+def _update(table: str) -> None:
+    execute(f'UPDATE {table} SET _deleted_at = _deleted_at')
+
+
+@pytest.mark.django_db
+class TestEveryLeakIsRepairedByItsRetirement:
+    """For each family: the column its trigger names dropped with ``CASCADE`` (what Django 5.x's
+    ``RemoveField`` does), every UPDATE then failing, and the generated retirement repairing it."""
+
+    def _repairs(self, table, column, owner, retirement):
+        with transaction.atomic():
+            execute(f'ALTER TABLE {table} DROP COLUMN {column} CASCADE')
+            with pytest.raises(ProgrammingError), transaction.atomic():
+                _update(owner)
+            for operation in retirement:
+                execute(_forward_sql(operation))
+            _update(owner)
+            transaction.set_rollback(True)
+
+    def test_the_owned_sweep(self):
+        key = ('testapp_stagehand', 'testapp_rider', 'stagehand_id')
+        command = _without(Command(), '_declared_owned_keys', key)
+
+        self._repairs('testapp_rider', 'stagehand_id', 'testapp_rider', _retired_for(command))
+
+    def test_the_revive_after_the_childs_key_is_removed(self):
+        key = ('testapp_setlistentry', 'testapp_setlist', None)
+        command = _without(Command(), '_cascade_key_maps', key)
+
+        self._repairs(
+            'testapp_setlistentry', 'setlist_id', 'testapp_setlist', _retired_for(command)
+        )
+
+    def test_retire_enforcement_first_is_the_path_django_6_needs(self):
+        """``RetireEnforcement`` before the ``RemoveField``: the rule goes, the owner's revive
+        does not, and the generated retirement takes it."""
+        from guitars.operations import RetireEnforcement  # noqa: PLC0415
+
+        key = ('testapp_setlistentry', 'testapp_setlist', None)
+        retirement = _retired_for(_without(Command(), '_cascade_key_maps', key))
+        with transaction.atomic():
+            with connection.schema_editor() as editor:
+                RetireEnforcement('testapp_setlistentry', 'setlist_id').database_forwards(
+                    'testapp', editor, None, None
+                )
+            execute('ALTER TABLE testapp_setlistentry DROP COLUMN setlist_id')
+            with pytest.raises(ProgrammingError), transaction.atomic():
+                _update('testapp_setlist')
+            for operation in retirement:
+                execute(_forward_sql(operation))
+            _update('testapp_setlist')
+            transaction.set_rollback(True)
+
+
+def test_each_retirement_lands_in_the_app_that_wrote_its_create():
+    """The owned, sweep and self retirements carry no ordering edge: they rely on the create and
+    the drop sharing an app, whose own history orders them. ``IF EXISTS`` would otherwise turn a
+    drop run before its create into a no-op, and the create would bring the object back."""
+    command = Command()
+    existing = command.existing
+    hosting = command._table_app_labels()
+    files = {
+        app.label: [content for _path, content in _generator.iter_migration_files(app)]
+        for app in apps.get_app_configs()
+        if _generator.is_local(app)
+    }
+    for header, fires_on, keys in (
+        (
+            HEADER_SOFT_DELETE_OWNED_SWEEP,
+            lambda key: key[1],
+            existing.soft_delete_owned_sweep,
+        ),
+        (HEADER_SOFT_DELETE_SELF_CASCADE, lambda key: key[0], existing.soft_delete_self_cascade),
+    ):
+        for key in keys:
+            text = (
+                header.format(dependent_table=key[0], table=key[1], foreign_key=key[2])
+                if len(key) == 3
+                else header.format(table=key[0], foreign_key=key[1])
+            )
+            writers = {
+                label for label, contents in files.items() if any(text in c for c in contents)
+            }
+            assert writers == {hosting[fires_on(key)]}, key

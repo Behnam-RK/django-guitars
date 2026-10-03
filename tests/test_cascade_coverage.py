@@ -4,6 +4,8 @@ model is eligible"."""
 
 from __future__ import annotations
 
+import types
+
 import pytest
 from django.db import models
 from django.db.models.signals import class_prepared
@@ -609,3 +611,148 @@ class TestTheInboundTestsRemainingExclusions:
         gaps = coverage._enforcement_gaps(kid)
 
         assert [g.blocking for g in gaps] == [True]
+
+
+class TestTheJoinedRefusalsAreOneAnswer:
+    """``joined_refusal`` is what the generator, the cycle graph and ``classify_cascade`` all
+    read; each arm needs its own test, since the model-level gap above masks the E003 one."""
+
+    @staticmethod
+    @isolate_apps('tests.testapp')
+    def _over_a_refused_chain():
+        class Owner(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Plain(models.Model):
+            class Meta:
+                app_label = 'testapp'
+
+        class Soft(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Both(Plain, Soft):
+            owner = models.ForeignKey(Owner, on_delete=models.CASCADE, related_name='boths')
+
+            class Meta:
+                app_label = 'testapp'
+
+        return Both, Both._meta.get_field('owner')
+
+    def test_a_chain_guitars_e003_refuses(self):
+        from guitars.introspection import joined_refusal  # noqa: PLC0415
+
+        both, field = self._over_a_refused_chain()
+
+        assert joined_refusal(both, field) == 'its chain is refused a soft-delete rule (guitars.E003)'
+
+
+class TestWhichKeysAreSafeBelowAnOwnKey:
+    """A key into a model stores that model's primary key, which is the root's id only while it
+    and every model between it and the holder use their parent link as their key (#64)."""
+
+    @staticmethod
+    @isolate_apps('tests.testapp')
+    def _shapes():
+        from django.db.models import AutoField, OneToOneField  # noqa: PLC0415
+
+        from guitars.models import OwningForeignKey  # noqa: PLC0415
+
+        class Root(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Normal(Root):
+            class Meta:
+                app_label = 'testapp'
+
+        class Own(Normal):
+            code = AutoField(primary_key=True)
+            normal_link = OneToOneField(Normal, on_delete=models.CASCADE, parent_link=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Below(Own):
+            class Meta:
+                app_label = 'testapp'
+
+        class IntoRoot(SetarModel):
+            root = models.ForeignKey(Root, on_delete=models.CASCADE, related_name='+')
+
+            class Meta:
+                app_label = 'testapp'
+
+        class IntoNormal(SetarModel):
+            normal = models.ForeignKey(Normal, on_delete=models.CASCADE, related_name='+')
+
+            class Meta:
+                app_label = 'testapp'
+
+        class IntoBelow(SetarModel):
+            below = models.ForeignKey(Below, on_delete=models.CASCADE, related_name='+')
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Owner(SetarModel):
+            own = OwningForeignKey(Own, on_delete=models.DO_NOTHING, null=True, related_name='+')
+
+            class Meta:
+                app_label = 'testapp'
+
+        return types.SimpleNamespace(Own=Own, Below=Below, Normal=Normal, Owner=Owner)
+
+    def test_the_own_key_model_is_blocked_only_by_keys_that_can_store_it(self):
+        """``IntoNormal`` stores ``Normal``'s key (the root's id); ``IntoRoot`` likewise; only a key
+        into ``Own`` or ``Below`` stores ``Own.code``. Here ``Own`` has none, ``Below`` has one."""
+        shapes = self._shapes()
+
+        assert [g.blocking for g in coverage._enforcement_gaps(shapes.Own)] == [False]
+        assert [g.blocking for g in coverage._enforcement_gaps(shapes.Below)] == [True]
+
+    def test_an_owned_key_into_an_own_key_model_blocks_the_owner(self):
+        """The owned rule stamps ``WHERE id = old.<fk>`` and the key stores ``Own.code``: it
+        archives another row. No ``CASCADE`` edge shows it, so ``cascade_plan`` has to."""
+        shapes = self._shapes()
+        clear_cascade_plan_cache()
+
+        gaps, _reached = cascade_plan(shapes.Owner)
+
+        assert [g.blocking for g in gaps if '#64' in g.reason] == [True]
+
+    def test_every_gap_is_reported_once(self, monkeypatch):
+        shapes = self._shapes()
+        monkeypatch.setattr(coverage, 'is_local', lambda config: False)
+
+        gaps = coverage._enforcement_gaps(shapes.Below)
+
+        assert len({(g.edge, g.reason) for g in gaps}) == len(gaps)
+
+    def test_one_reason_from_levels_that_differ_is_blocking_if_any_is(self, monkeypatch):
+        """The leaf needs a rule from its app and the levels above do not: the one reported gap
+        must be the blocking one whichever order they are read in."""
+        shapes = self._shapes()
+        monkeypatch.setattr(coverage, 'is_local', lambda config: False)
+        monkeypatch.setattr(coverage, '_needs_rules_from_its_app', lambda owner: owner is shapes.Below)
+
+        gaps = coverage._enforcement_gaps(shapes.Below)
+
+        assert [g.blocking for g in gaps if 'LOCAL_APPS' in g.reason] == [True]
+
+    def test_the_refusal_does_not_send_a_64_model_to_dot_delete(self):
+        """``.delete()`` archives another row for that shape, so the advice it gets is not that."""
+        from guitars.models.soft_deletion import (  # noqa: PLC0415
+            SoftDeleteUnsupportedError,
+            _require_covered,
+        )
+
+        shapes = self._shapes()
+        clear_cascade_plan_cache()
+
+        with pytest.raises(SoftDeleteUnsupportedError) as raised:
+            _require_covered(shapes.Below, 'default')
+
+        assert '#64' in str(raised.value)
+        assert 'Use .delete()' not in str(raised.value)

@@ -325,9 +325,15 @@ def _require_covered(model: type[Model], using: str) -> None:
     blocking = [gap for gap in cascade_plan(model)[0] if gap.blocking]
     if blocking:
         listed = '; '.join(f'{gap.edge} ({gap.reason})' for gap in blocking)
+        # ``.delete()`` is no way out of #64: its redirect rule archives another row too.
+        advice = (
+            'Fix the model first (#64).'
+            if any('#64' in gap.reason for gap in blocking)
+            else 'Use .delete(), which applies them in Python.'
+        )
         raise SoftDeleteUnsupportedError(
             f'{model._meta.label}.soft_delete() would leave rows live under an archived parent: '
-            f'{listed}. Use .delete(), which applies them in Python.'
+            f'{listed}. {advice}'
         )
 
 

@@ -18,7 +18,6 @@ from guitars.introspection import (
     classify_cascade,
     column_owner,
     has_column,
-    own_key_between,
     rule_update_cycle_edges,
 )
 from guitars.local_apps import is_local
@@ -63,58 +62,69 @@ def _chain(model: type[Model], holder: type[Model]) -> list[type[Model]]:
     return [model, *(m for m in model._meta.get_parent_list() if issubclass(m, holder))]
 
 
+def _own_key_levels(model: type[Model]) -> list[type[Model]]:
+    """The models from *model* up to, not including, its column holder whose primary key is not
+    their link to their parent (#64): a key into any model below one of them stores that key,
+    where the rules on the root's table compare the root's id."""
+    holder = column_owner(model, '_deleted_at')
+    return [
+        level
+        for level in _chain(model, holder)
+        if level is not holder and level._meta.pk not in level._meta.parents.values()
+    ]
+
+
+def _keys_into_it_store_the_roots_id(model: type[Model]) -> bool:
+    """Whether a key into *model* holds the id the rules on the root's table compare it with."""
+    return not _own_key_levels(model)
+
+
 def _enforcement_gaps(model: type[Model]) -> list[Gap]:
     """A reached model whose own ``DELETE`` is not rewritten: nothing archives it. Every gap is
-    reported, never the first: a non-blocking one (the fast path declines) must not hide a
-    blocking one (``soft_delete()`` would leave rows live)."""
+    reported, once: a non-blocking one (the fast path declines) must not hide a blocking one
+    (``soft_delete()`` would leave rows live), and the same reason from two levels is one."""
     # Deferred: ``guitars.checks`` reaches the models package this module is part of.
     from guitars.checks import refuses_soft_delete_rule  # noqa: PLC0415
 
     if not has_column(model, '_deleted_at'):
         return [Gap(model._meta.label, 'is not soft-deletable', True)]
     holder = column_owner(model, '_deleted_at')
-    gaps: list[Gap] = []
+    gaps: dict[str, bool] = {}
+
+    def add(reason: str, blocking: bool) -> None:
+        gaps[reason] = gaps.get(reason, False) or blocking
+
     # Every model on the chain: a rule is written from the pass over its *own* app, so one outside
-    # LOCAL_APPS or routed away has none even under a covered ancestor. Blocking only where a key
-    # cascades into that model -- otherwise nothing is left live, the fast path just declines.
+    # LOCAL_APPS or routed away has none even under a covered ancestor. Blocking only where a rule
+    # is written from that model's app -- otherwise nothing is left live, the fast path declines.
     for owner in dict.fromkeys(_chain(model, holder)):
-        inbound = _needs_rules_from_its_app(owner)
+        needed = _needs_rules_from_its_app(owner)
         if not is_local(django_apps.get_app_config(owner._meta.app_label)):
-            reason = f"'{owner._meta.app_label}' is not in LOCAL_APPS"
-            gaps.append(Gap(model._meta.label, reason, inbound))
+            add(f"'{owner._meta.app_label}' is not in LOCAL_APPS", needed)
         if not migrates_to_postgresql(owner):
-            gaps.append(Gap(model._meta.label, 'is routed off PostgreSQL', inbound))
+            add('is routed off PostgreSQL', needed)
     if refuses_soft_delete_rule(model):
-        gaps.append(
-            Gap(model._meta.label, 'its chain is refused a soft-delete rule (guitars.E003)', True)
-        )
+        add('its chain is refused a soft-delete rule (guitars.E003)', True)
     # Own key not its link to the ancestor (#64): the redirect rule archives another row, and a
-    # key into it stores that key where the root's rule compares the root's id. The stamp is
-    # right, the cascade out of it is not: blocking where a key reaches it, else a decline.
-    if model is not holder and (
-        model._meta.pk is not model._meta.get_ancestor_link(holder)
-        or own_key_between(model, holder) is not None
-    ):
-        below = [m for m in _chain(model, holder) if m is not holder]
-        gaps.append(
-            Gap(
-                model._meta.label,
-                'its primary key is not its parent link (#64)',
-                any(_needs_rules_from_its_app(owner) for owner in below),
-            )
+    # key into a model below it stores that key. The stamp is right, the cascade out of it is
+    # not: blocking where a rule needs such a key, else a decline of the fast path.
+    levels = _own_key_levels(model)
+    if levels:
+        reaching = any(
+            _needs_rules_from_its_app(owner) and not _keys_into_it_store_the_roots_id(owner)
+            for owner in _chain(model, holder)
+            if owner is not holder
         )
-    return gaps
+        add('its primary key is not its parent link (#64)', reaching)
+    return [Gap(model._meta.label, reason, blocking) for reason, blocking in gaps.items()]
 
 
 def _needs_rules_from_its_app(model: type[Model]) -> bool:
-    """Whether a rule is written from this model's own app pass: a ``CASCADE`` key *to* it (not
-    one into an ancestor, a parent link, nor from a referrer with no ``_deleted_at``), or an
-    ``OwningForeignKey`` it declares, whose rule fires on its own table."""
+    """Whether a rule is written from this model's own app pass: a ``CASCADE`` key *to* it (from a
+    model with ``_deleted_at``, not into an ancestor, not a parent link) or an ``OwningForeignKey``
+    it declares. Read without the generator's refusals, so it only over-blocks."""
     concrete = model._meta.concrete_model or model
-    if any(
-        isinstance(field, OwningForeignKey) and field.model is concrete
-        for field in concrete._meta.local_fields
-    ):
+    if any(isinstance(field, OwningForeignKey) for field in concrete._meta.local_fields):
         return True
     return any(
         relation.field.remote_field.on_delete is CASCADE  # ty: ignore[unresolved-attribute]
@@ -141,6 +151,19 @@ def cascade_plan(model: type[Model]) -> tuple[tuple[Gap, ...], frozenset[type[Mo
         reached.add(current)
         reached.update(current._meta.get_parent_list())
         gaps.extend(_enforcement_gaps(current))
+        # An owned key stores its target's own key, and the owned rule stamps the root's row by
+        # it (#64): no ``CASCADE`` edge carries it, so it is read off the declaring model here.
+        gaps.extend(
+            Gap(
+                f'{current._meta.label}.{field.name}',
+                'owns a model whose primary key is not its parent link (#64)',
+                True,
+            )
+            for field in current._meta.local_fields
+            if isinstance(field, OwningForeignKey)
+            and has_column(field.related_model, '_deleted_at')
+            and not _keys_into_it_store_the_roots_id(field.related_model)
+        )
         if not has_column(current, '_deleted_at'):
             continue
         for owner in (current, *current._meta.get_parent_list()):

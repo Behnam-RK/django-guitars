@@ -498,3 +498,33 @@ class TestARedeclaredKeyIsOrderedAfterItsRetirement:
 
         assert ('otherapp', '0008_y') in edges
         assert ('otherapp', '0009_z') in edges
+
+
+def test_a_rename_walked_late_does_not_overwrite_a_newer_record(monkeypatch):
+    """Across apps the walk is registry order, not time: an app walked first can have filed a
+    key under the new name *after* the rename happened, and moving the old entry onto it then
+    replaced the newer record with the older one -- the owned rule re-emitted every run."""
+    from guitars.management.enforcement import scanning  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        scanning, 'renamed_tables', lambda loader, label: {'tgt_prize': ['tgt_target']}
+    )
+    monkeypatch.setattr(
+        scanning,
+        'renames_by_migration',
+        lambda loader, label: {'0001_auto_enforcement': [('tgt_target', 'tgt_prize')]},
+    )
+
+    def header(table, digest):
+        return (
+            HEADER_SOFT_DELETE_OWNED.format(
+                dependent_table=table, table='own_owner', foreign_key='target_id'
+            )
+            + f' [SQL:{digest}]\n'
+        )
+
+    existing = _scan_with(
+        monkeypatch, header('tgt_target', 'old000000000') + header('tgt_prize', 'new000000000'), ''
+    )
+
+    assert existing.soft_delete_owned[('tgt_prize', 'own_owner', 'target_id')] == 'new000000000'

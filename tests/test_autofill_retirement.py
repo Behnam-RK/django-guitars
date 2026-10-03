@@ -259,7 +259,7 @@ class TestNotesRatherThanOperations:
 
         assert len(notes) == 1
         assert 'gone_table' in notes[0]
-        assert f'DROP TRIGGER "{autofill_trigger_name(_STALE)}" ON "gone_table";' in notes[0]
+        assert f'DROP TRIGGER IF EXISTS "{autofill_trigger_name(_STALE)}" ON "gone_table";' in notes[0]
 
     def test_a_required_trigger_with_no_local_host_is_named_too(self, _command):
         """The other direction: the tenant column lives on an ancestor outside LOCAL_APPS, so

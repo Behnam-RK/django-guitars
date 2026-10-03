@@ -1412,7 +1412,7 @@ class OperationsMixin:
                 f"Tenant autofill trigger on '{table}' (function '{function}') is recorded "
                 f'but no local model maps to that table, so it cannot be retired here. If '
                 f'the table still exists, drop it by hand: '
-                f'{_triggers._DROP_TENANT_AUTOFILL_TRIGGER.format(**slots).strip()}'
+                f'{_triggers._ADOPT_DROP_TENANT_AUTOFILL_TRIGGER.format(**slots).strip()}'
             )
         # The other direction: a relocated trigger whose ancestor lives outside LOCAL_APPS.
         # Nothing hosts it, so `audittenancy` would report it missing on every run forever.

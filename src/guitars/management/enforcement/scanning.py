@@ -507,12 +507,8 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
             existing_soft_delete_related,
             existing_soft_delete_revive,
             revive_deps,
-            owned_deps,
-            sweep_deps,
-            self_deps,
-            existing_soft_delete_owned,
-            existing_soft_delete_owned_sweep,
-            existing_soft_delete_self_cascade,
+            # Not #66's three: moved once, after the walk, by ``_rekey``, which keeps an entry
+            # another app filed under the new name -- this move would overwrite it with an older.
             existing_mti_triggers,
             existing_mti_soft_deletes,
             cascade_deps,

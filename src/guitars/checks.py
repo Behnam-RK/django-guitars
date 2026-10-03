@@ -5,6 +5,7 @@ one that destroys a row rather than sparing it."""
 from __future__ import annotations
 
 from django.apps import apps as django_apps
+from django.conf import settings
 from django.core.checks import Error, register
 from django.db import models
 
@@ -12,7 +13,9 @@ from guitars.introspection import column_owner, has_column, owns_column
 
 
 __all__ = [
+    'FAST_PATH_SETTING_ID',
     'ORPHAN_ANCESTOR_ID',
+    'check_delete_fast_path_setting',
     'check_soft_deletable_mti_children_have_a_soft_deletable_ancestor',
     'refuses_soft_delete_rule',
     'register_checks',
@@ -20,6 +23,7 @@ __all__ = [
 
 #: Namespaced to match the field's own ``guitars.E001``/``E002``.
 ORPHAN_ANCESTOR_ID = 'guitars.E003'
+FAST_PATH_SETTING_ID = 'guitars.E004'
 
 
 def _candidate_models(app_configs) -> list[type[models.Model]]:
@@ -130,6 +134,22 @@ def check_soft_deletable_mti_children_have_a_soft_deletable_ancestor(
     ]
 
 
+def check_delete_fast_path_setting(app_configs, **kwargs) -> list[Error]:
+    """``GUITARS_DELETE_FAST_PATH`` is read as a truth value on every ``delete()``, so a string
+    such as ``'False'`` would silently leave the fast path on."""
+    value = getattr(settings, 'GUITARS_DELETE_FAST_PATH', True)
+    if isinstance(value, bool):
+        return []
+    return [
+        Error(
+            f'GUITARS_DELETE_FAST_PATH must be True or False, not {value!r}.',
+            hint='Anything else is read by truthiness, so the string "False" turns it on.',
+            id=FAST_PATH_SETTING_ID,
+        )
+    ]
+
+
 def register_checks() -> None:
     """Register the checks -- idempotent, Django's registry is a set keyed by function."""
     register(check_soft_deletable_mti_children_have_a_soft_deletable_ancestor)
+    register(check_delete_fast_path_setting)

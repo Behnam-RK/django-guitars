@@ -10,6 +10,22 @@ Full history and diffs: [GitHub releases](https://github.com/Behnam-RK/django-gu
 
 ## [Unreleased]
 
+## [2.14.0] - 2026-10-03
+
+### Added
+
+- **`QuerySet.soft_delete()` and `Model.soft_delete()`, with async twins** (#55). It reads the matching keys, then `UPDATE`s by key in batches of 10,000 with `SET _deleted_at = NOW()`, and the rules cascade it, so the cost no longer grows with the tree. Keys first because a rule's cascade runs before the statement that fired it: a `WHERE` reading what the cascade changes would skip the parent. An MTI child queryset stamps its ancestor's row. It returns the number of rows stamped, not `.delete()`'s tuple; it skips `on_delete` and the delete signals, and leaves plain children (an M2M through row) in place, so keep `.delete()` where you need those. It raises the new `SoftDeleteUnsupportedError` where a rules-only archive would leave rows **live** under an archived parent (a `GenericRelation`, a `to_field` key, a cycle-refused or unenforced edge, a model routed off PostgreSQL, or a connection that is not PostgreSQL), and `TypeError` (`NotSupportedError` for a combined queryset) for a sliced, `values()` or `distinct(*fields)` queryset, as `.delete()` does. The instance form keeps the pk and sets `_deleted_at` and `_updated_at` from the database; a row hidden by row-level security stamps 0. Queryset-only, so `Model.objects.soft_delete()` cannot archive a table, and denied on an unscoped tenant queryset as `update()` is.
+- **`.delete()` takes the same shortcut where nothing is lost by it.** It reads the keys, then `DELETE`s by key so the existing rule rewrites it, returning `(0, {})` and clearing `pk` as before (a model nothing depends on returns `(0, {'app.Model': 0})`, as Django's own shortcut does), with Django's guards run first. It declines, running the collector unchanged, for a delete-signal receiver (checked per call, proxies included), `SET_NULL`/`PROTECT`/`RESTRICT`, a plain child or M2M through row, a `GenericRelation`, a `to_field` key, an edge with no rule, a self-referential key, and a non-PostgreSQL alias. `GUITARS_DELETE_FAST_PATH = False` turns it off; a non-boolean value is `guitars.E004`.
+- **What it fixes, precisely.** On Django 5.0 to 6.0 the collector is already constant-time for a clean tree. The per-row parent read appears when an MTI child has an **incoming non-`DO_NOTHING` key**, and a receiver on the child avoids it while one on the parent does not. An app with delete signals on the parent still takes the collector for `.delete()`, and `soft_delete()` is the fix there. See [ADR 0026](docs/adr/0026-soft-delete-and-delete-fast-path.md).
+
+### Changed
+
+- **`introspection.classify_cascade` is now the one place that decides which keys carry a cascade rule.** The generator is rewritten on top of it, with no change in what is emitted (a joined key over a chain `guitars.E003` refuses is now reported as skipped rather than passed over silently), so the runtime reading of "what a rule covers" cannot drift from what the generator writes.
+
+**Known, not fixed here:** the cascade rule for a `to_field` foreign key compares the child's column with the target's *primary key*, so it matches the wrong rows. `soft_delete()` and the fast path refuse that shape rather than inherit it.
+
+**Upgrading.** Nothing to generate, but this changes what `.delete()` executes for covered models: at least two statements (the keys, then a delete per 10,000 of them, in one transaction) instead of the collector's. It declines, running the collector, whenever a delete receiver or an `on_delete` other than `CASCADE`/`DO_NOTHING` is reachable, so neither is skipped. Both it and `soft_delete()` assume a consistent tree, meaning no live row beneath an already-archived ancestor, which the collector would reach and the rules do not, and that your enforcement migrations are applied. Set `GUITARS_DELETE_FAST_PATH = False` to keep the collector.
+
 ## [2.13.0] - 2026-10-03
 
 ### Fixed
@@ -339,7 +355,8 @@ First stable release. **BREAKING:** the instrument ladder shifted down one rung 
 
 - Added: initial release — `SetarModel`, `GuitarModel`, `SoftDeletableModel`, `DisableSignals`, `makeguitarmigrations`.
 
-[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.13.0...HEAD
+[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.14.0...HEAD
+[2.14.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.14.0
 [2.13.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.13.0
 [2.12.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.12.0
 [2.11.2]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.11.2

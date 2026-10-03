@@ -2,13 +2,16 @@ import contextlib
 from collections import defaultdict
 from typing import cast
 
+from asgiref.sync import sync_to_async
 from django.apps import apps as django_apps
-from django.db import connections, transaction
+from django.conf import settings
+from django.db import connections, router, transaction
 from django.db.models import (
     CASCADE,
     DateTimeField,
     Field,
     ForeignKey,
+    Func,
     Index,
     Manager,
     ManyToOneRel,
@@ -17,6 +20,8 @@ from django.db.models import (
     sql,
 )
 from django.db.models.base import Model
+from django.db.models.deletion import Collector
+from django.db.models.signals import post_delete, pre_delete
 
 from guitars.introspection import (
     column_owner,
@@ -29,6 +34,7 @@ from guitars.introspection import (
 from guitars.routing import migrates_to_postgresql
 from guitars.sql import SWITCH_OFF_HARD_DELETION, SWITCH_ON_HARD_DELETION
 
+from ._cascade_coverage import cascade_plan
 from .fields import OwningForeignKey, _targets_primary_key
 
 
@@ -305,12 +311,140 @@ def _mti_table_chain(model: type[Model]) -> list[tuple[str, str]]:
     return [(m._meta.db_table, _pk_column(m)) for m in _mti_model_chain(model)]
 
 
+class SoftDeleteUnsupportedError(Exception):
+    """``soft_delete()`` on a model whose cascade reaches an edge no rule carries, so archiving
+    in SQL would leave rows **live** under an archived parent. Use ``.delete()``."""
+
+
+def _require_covered(model: type[Model], using: str) -> None:
+    if connections[using].vendor != 'postgresql':
+        raise SoftDeleteUnsupportedError(
+            f'{model._meta.label}.soft_delete() on {using!r} ({connections[using].vendor}): the '
+            f'cascade is PostgreSQL rules, so only the matched rows would be archived.'
+        )
+    blocking = [gap for gap in cascade_plan(model)[0] if gap.blocking]
+    if blocking:
+        listed = '; '.join(f'{gap.edge} ({gap.reason})' for gap in blocking)
+        raise SoftDeleteUnsupportedError(
+            f'{model._meta.label}.soft_delete() would leave rows live under an archived parent: '
+            f'{listed}. Use .delete(), which applies them in Python.'
+        )
+
+
+def _write_alias(queryset: QuerySet) -> str:
+    """The alias a write goes to: ``queryset.db`` is the read alias until ``_for_write`` is set."""
+    chained = queryset._chain()  # ty: ignore[unresolved-attribute]
+    chained._for_write = True
+    return chained.db
+
+
+# One statement per this many keys: PostgreSQL refuses a statement over 65535 parameters.
+_PK_BATCH = 10_000
+
+
+def _now() -> Func:
+    """``NOW()``, the transaction's start, which every rule and trigger writes. Django's ``Now()``
+    renders ``STATEMENT_TIMESTAMP()`` on PostgreSQL, so a descendant stamped by a rule would not
+    carry the parent's value, and a revive keys on exactly that equality."""
+    return Func(function='NOW', output_field=DateTimeField())
+
+
+def _guard_bulk(queryset: QuerySet, name: str) -> None:
+    """Django's ``delete()`` guards, under the caller's own name."""
+    queryset._not_support_combined_queries(name)  # ty: ignore[unresolved-attribute]
+    if queryset.query.is_sliced:
+        raise TypeError(f"Cannot use 'limit' or 'offset' with {name}().")
+    if queryset.query.distinct_fields:
+        raise TypeError(f'Cannot call {name}() after .distinct(*fields).')
+    if queryset._fields is not None:  # ty: ignore[unresolved-attribute]
+        raise TypeError(f'Cannot call {name}() after .values() or .values_list()')
+
+
+def _matching_pks(queryset: QuerySet, field: str = 'pk') -> list:
+    """The keys *queryset* matches, read before any rule runs: a rule's cascade runs ahead of the
+    statement that fired it, so a ``WHERE`` reading what the cascade changes would skip the
+    parent, and an aggregate or window cannot be a ``WHERE`` at all. The collector reads first too."""
+    doomed = queryset._chain()  # ty: ignore[unresolved-attribute]
+    doomed._for_write = True
+    doomed.query.select_for_update = False
+    doomed.query.select_related = False
+    doomed.query.clear_ordering(force=True)
+    return list(doomed.values_list(field, flat=True))
+
+
+def _by_pk(model: type[Model], using: str, pks: list):
+    """Querysets over *pks* in batches, on the plain base manager: the keys already carry the
+    original filter, and re-applying it is the hazard above."""
+    for start in range(0, len(pks), _PK_BATCH):
+        yield model._base_manager.using(using).filter(pk__in=pks[start : start + _PK_BATCH])
+
+
+def _fast_delete_applies(model: type[Model], using: str) -> bool:
+    """Whether ``.delete()`` can be one ``DELETE`` the rules rewrite, ending where Django's
+    collector would have. Asked per call: a receiver can be connected at runtime."""
+    if not getattr(settings, 'GUITARS_DELETE_FAST_PATH', True):
+        return False
+    if connections[using].vendor != 'postgresql':
+        return False
+    gaps, reached = cascade_plan(model)
+    if gaps:
+        return False
+    # *model* too, not only what the walk reached: it resolves a proxy to its concrete model, but
+    # the collector signals with the class of the instances it loaded, which is the proxy.
+    return not any(
+        pre_delete.has_listeners(sender) or post_delete.has_listeners(sender)
+        for sender in (model, *reached)
+    )
+
+
 class LiveQuerySet(QuerySet):
     """QuerySet scoped to live (non-deleted) records via ``_deleted_at IS NULL``."""
 
     @property
     def lives(self):
         return self.filter(_deleted_at__isnull=True)
+
+    def soft_delete(self) -> int:
+        """Archive the matching live rows with ``UPDATE``\\ s; the rules cascade them. Returns the
+        number stamped. Skips ``on_delete`` and the delete signals, and raises
+        ``SoftDeleteUnsupportedError`` where the rules alone leave rows live. See ``docs/soft-delete-api.md``."""
+        using = _write_alias(self)
+        _require_covered(self.model, using)
+        _guard_bulk(self, 'soft_delete')
+        # Stamped on the table holding the column, by its own key: through an MTI child, Django's
+        # ``update()`` re-reads the keys and updates the ancestor by id alone, guard dropped.
+        holder = column_owner(self.model, '_deleted_at')
+        pks = _matching_pks(self.filter(_deleted_at__isnull=True), holder._meta.pk.name)
+        # One transaction, as the collector's is: a failing batch leaves nothing half-archived,
+        # and every batch's ``NOW()`` is the one instant.
+        with transaction.atomic(using=using, savepoint=False):
+            return sum(
+                batch.filter(_deleted_at__isnull=True).update(_deleted_at=_now())
+                for batch in _by_pk(holder, using, pks)
+            )
+
+    async def asoft_delete(self) -> int:
+        return await sync_to_async(self.soft_delete)()
+
+    # Never reachable from a manager: `Model.objects.soft_delete()` would archive the table.
+    soft_delete.queryset_only = True  # ty: ignore[unresolved-attribute]
+    asoft_delete.queryset_only = True  # ty: ignore[unresolved-attribute]
+
+    def delete(self):
+        """Django's ``delete()``, as ``DELETE``\\ s the rules rewrite where nothing is lost by it
+        (``_fast_delete_applies``). Same return value, same guards, same end state."""
+        using = _write_alias(self)
+        if not _fast_delete_applies(self.model, using):
+            return super().delete()
+        _guard_bulk(self, 'delete')  # Django's own, ahead of the shortcut
+        with transaction.atomic(using=using, savepoint=False):  # all batches or none
+            for batch in _by_pk(self.model, using, _matching_pks(self)):
+                batch._raw_delete(using=using)
+        self._result_cache = None
+        return 0, {}
+
+    delete.alters_data = True  # ty: ignore[unresolved-attribute]
+    delete.queryset_only = True  # ty: ignore[unresolved-attribute]
 
 
 class LiveManager(Manager):
@@ -464,6 +598,54 @@ class SoftDeletableModel(Model):
     @property
     def is_alive(self):
         return not self.is_deleted
+
+    def delete(self, using=None, keep_parents=False):
+        """Django's ``delete()``, as one ``DELETE`` the rules rewrite where nothing is lost by it
+        -- see :meth:`LiveQuerySet.delete`. Clears the pk as Django does."""
+        using = using or router.db_for_write(self.__class__, instance=self)
+        if self.pk is None or not _fast_delete_applies(type(self), using):
+            return super().delete(using=using, keep_parents=keep_parents)
+        # Django's single-instance shortcut names the model; a model with dependents returns {}.
+        leaf = Collector(using=using, origin=self).can_fast_delete(self)
+        count = type(self)._base_manager.using(using).filter(pk=self.pk)._raw_delete(using)
+        setattr(self, self._meta.pk.attname, None)
+        return (count, {self._meta.label: count}) if leaf else (0, {})
+
+    delete.alters_data = True  # ty: ignore[unresolved-attribute]
+
+    def soft_delete(self, using=None) -> int:
+        """Archive this row in one ``UPDATE`` and set ``_deleted_at`` (and ``_updated_at``) on
+        the instance, keeping the pk -- the row still exists. Returns 1, or 0 if already archived.
+        Same contract as :meth:`LiveQuerySet.soft_delete`."""
+        if self.pk is None:
+            raise ValueError(
+                f"{self.__class__.__name__} object can't be soft-deleted because its "
+                f'{self._meta.pk.attname} attribute is set to None.'
+            )
+        using = using or router.db_for_write(self.__class__, instance=self)
+        _require_covered(type(self), using)
+        # On the holder by its key, for the queryset form's reason. A child cannot redeclare an
+        # inherited field's name, so the holder's pk attribute on this instance is unambiguous.
+        holder = column_owner(type(self), '_deleted_at')
+        stamped = (
+            holder._base_manager.using(using)
+            .filter(pk=getattr(self, holder._meta.pk.attname), _deleted_at__isnull=True)
+            .update(_deleted_at=_now())
+        )
+        fields = [
+            '_deleted_at',
+            *(['_updated_at'] if has_column(type(self), '_updated_at') else []),
+        ]
+        with contextlib.suppress(type(self).DoesNotExist):  # row-level security hides the row
+            self.refresh_from_db(using=using, fields=fields)
+        return stamped
+
+    soft_delete.alters_data = True  # ty: ignore[unresolved-attribute]
+
+    async def asoft_delete(self, using=None) -> int:
+        return await sync_to_async(self.soft_delete)(using=using)
+
+    asoft_delete.alters_data = True  # ty: ignore[unresolved-attribute]
 
     def hard_delete(self):
         """Soft-delete first, then permanently remove this instance, its CASCADE-related rows,

@@ -264,7 +264,7 @@ def test_a_self_referential_cascade_key_aimed_at_a_proxy_still_gets_its_trigger(
 def test_a_proxy_of_the_child_does_not_double_the_arm(plain_proxy):
     """The other direction, on the mapping rather than the rules it feeds: a proxy's
     ``get_fields()`` is its concrete model's, so indexing one files every key twice under one
-    table. ``_is_cascade_candidate`` rejects the copy anyway; this never files it."""
+    table. ``is_cascade_candidate`` rejects the copy anyway; this never files it."""
     plain, proxy = plain_proxy
 
     @isolate_apps('tests.testapp')

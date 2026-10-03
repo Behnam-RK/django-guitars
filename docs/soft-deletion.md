@@ -94,4 +94,5 @@ model — and why an MTI child must declare its own `Meta`; see [MTI](mti.md).
 - [Owned relations](owned-relations.md) — soft deletion in the other direction
 - [Migrations](migrations.md) — how the rules get into the database
 - [MTI](mti.md) — soft deletion across an inheritance chain
+- [`soft_delete()` and the fast path](soft-delete-api.md) — archiving without the collector
 - [Tenancy](tenancy.md) — soft deletion under RLS

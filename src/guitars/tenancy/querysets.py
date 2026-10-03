@@ -242,6 +242,8 @@ def _untenanted_queryset_class(base: type[models.QuerySet]) -> type[models.Query
         # delete every tenant's rows. _hard_delete_own_table/_raw_delete are private but
         # denied in their own right -- both compile a DeleteQuery off self.query directly.
         hard_delete = _hard_delete_own_table = _raw_delete = _deny_query_write
+        # And ``soft_delete()``: one ``UPDATE`` of every matching row, unscoped across tenants.
+        soft_delete = asoft_delete = _deny_query_write
         # iterator()/aiterator() stream without populating _result_cache, skipping
         # _fetch_all entirely -- deny them by name.
         iterator = aiterator = _deny

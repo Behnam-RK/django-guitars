@@ -647,3 +647,66 @@ class Refrain(SetarModel):
 
     def __str__(self) -> str:
         return self.song
+
+
+# The tree issue #55 describes: offer -> tier -> clause -> condition, and tier -> reward, with
+# ``Condition`` and ``Reward`` as MTI roots. Every key is ``CASCADE`` to a soft-deletable model and
+# nothing here has a receiver, so a rules-only archive covers what the collector would have.
+
+
+class Offer(SetarModel):
+    name = CharField(max_length=100)
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class Tier(SetarModel):
+    offer = ForeignKey(Offer, on_delete=CASCADE, related_name='tiers')
+
+
+class Clause(SetarModel):
+    tier = ForeignKey(Tier, on_delete=CASCADE, related_name='clauses')
+
+
+class Condition(SetarModel):
+    clause = ForeignKey(Clause, on_delete=CASCADE, related_name='conditions')
+
+
+class QuantityCondition(Condition):
+    minimum = IntegerField(default=1)
+
+    class Meta:
+        pass
+
+
+class Reward(SetarModel):
+    tier = ForeignKey(Tier, on_delete=CASCADE, related_name='rewards')
+
+
+class DiscountReward(Reward):
+    percent = IntegerField(default=0)
+
+    class Meta:
+        pass
+
+
+class ShippingReward(Reward):
+    free_over = IntegerField(default=0)
+
+    class Meta:
+        pass
+
+
+class GiftReward(Reward):
+    sku = CharField(max_length=40, default='')
+
+    class Meta:
+        pass
+
+
+class ConditionNote(SetarModel):
+    """An incoming ``CASCADE`` key onto an MTI child: what stops Django fast-deleting it, so the
+    collector loads its rows and reads each parent singly. Without one there is no N+1 at all."""
+
+    condition = ForeignKey(QuantityCondition, on_delete=CASCADE, related_name='notes')

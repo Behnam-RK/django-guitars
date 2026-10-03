@@ -4,10 +4,12 @@ generator skipped these, so only Django's Python ``Collector`` archived such chi
 
 from __future__ import annotations
 
+import re
 import types
 from datetime import timedelta
 
 import pytest
+from django.apps import apps
 from django.db.models import CASCADE, ForeignKey
 from django.utils import timezone
 from django.test.utils import isolate_apps
@@ -267,3 +269,105 @@ def test_the_archived_ancestors_updated_at_is_stamped_by_the_trigger(festivals):
     with tenancy_bypassed():
         stamped = Festival._all_objects.get(pk=festivals.touring.pk)._updated_at
     assert stamped == scalar('SELECT now()')
+
+
+class TestTwoJoinedKeysFromOneDescendant:
+    """One child with two keys to the same owner takes the primary and the ``_via`` form, as two
+    flat keys do -- each rule joined, each with its own revive twin, and no shared name."""
+
+    @staticmethod
+    @isolate_apps('tests.testapp')
+    def _operations():
+        class Owner(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Root(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Child(Root):
+            first = ForeignKey(Owner, on_delete=CASCADE, related_name='firsts')
+            second = ForeignKey(Owner, on_delete=CASCADE, related_name='seconds')
+
+            class Meta:
+                app_label = 'testapp'
+
+        command = Command()
+        command._skipped_rule_notes.clear()
+        clear_cascade_coverage(command)
+        command.reverse_relations_mapping[Owner] = {
+            (Child, Child._meta.get_field(name), CASCADE) for name in ('first', 'second')
+        }
+        return command, command._cascade_operations(Owner), Child
+
+    def test_four_operations_with_distinct_names_and_no_clash(self):
+        command, operations, _ = self._operations()
+
+        names = [name for op in operations for name in re.findall(r'(?:RULE|TRIGGER) "([^"]+)"', op)[:1]]
+        assert len(operations) == 4
+        assert len(set(names)) == 4
+        assert command._rule_name_clashes == []
+        assert command._skipped_rule_notes == []
+
+    def test_each_rule_is_joined_and_carries_its_own_column(self):
+        _, operations, _ = self._operations()
+
+        rules = [op for op in operations if 'CREATE OR REPLACE RULE' in op]
+        assert len(rules) == 2
+        assert all('SELECT "root_ptr_id"' in rule and 'IN (' in rule for rule in rules)
+        assert sorted(re.findall(r'WHERE "(\w+)" = old', ' '.join(rules))) == ['first_id', 'second_id']
+
+    def test_the_via_key_recovers_no_column_on_retirement(self):
+        """The ``_via`` spelling names its column in the key, which is not enough: the flat
+        template would still be built against a table with no ``_deleted_at``."""
+        command, _, child = self._operations()
+        key = (child._meta.db_table, 'testapp_owner', 'second_id')
+
+        assert command._retired_cascade_column(key, {child._meta.db_table: child}) is None
+
+
+class TestRetiringAJoinedKey:
+    """Its reverse refuses, for both halves: the key names no ancestor, and rebuilding it with the
+    flat template would fail against a table that has no ``_deleted_at``."""
+
+    @staticmethod
+    def _command_without(model):
+        command = Command()
+        clear_cascade_coverage(command)
+        command.reverse_relations_mapping[Label] = {
+            relation for relation in command.reverse_relations_mapping[Label] if relation[0] is not model
+        }
+        return command
+
+    @staticmethod
+    def _retired(command, kind):
+        app = apps.get_app_config('testapp')
+        return [
+            op
+            for op in command._retired_cascade_operations(app)
+            if op.startswith(f'# Soft Delete {kind} retired')
+        ]
+
+    def test_both_halves_refuse_to_reverse(self):
+        command = self._command_without(TouringFestival)
+        key = (TouringFestival._meta.db_table, Label._meta.db_table, None)
+        command.existing.soft_delete_related[key] = 'abc'
+        command.existing.soft_delete_revive[key] = 'def'
+
+        (cascade,) = self._retired(command, 'Related Rule')
+        (revive,) = self._retired(command, 'Revive Trigger')
+
+        assert 'RAISE EXCEPTION' in cascade
+        assert 'RAISE EXCEPTION' in revive
+
+    def test_a_flat_key_is_still_reversible_so_the_refusal_is_not_universal(self):
+        """The control: the same retirement for a key whose child owns the column rebuilds it."""
+        command = self._command_without(Festival)
+        key = (Festival._meta.db_table, Label._meta.db_table, None)
+        command.existing.soft_delete_related[key] = 'abc'
+
+        (cascade,) = self._retired(command, 'Related Rule')
+
+        assert 'RAISE EXCEPTION' not in cascade
+        assert 'CREATE OR REPLACE RULE' in cascade

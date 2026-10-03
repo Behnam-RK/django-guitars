@@ -1,30 +1,41 @@
-# 0029 — a deleted child's revive trigger is retired on migration-history evidence
+# 0029 — triggers are retired with their key, every retirement says `IF EXISTS`
 
 - **Status:** accepted
 - **Date:** 2026-10-03
-- **Affects:** `graph.dropped_tables`, `_retired_cascade_operations`, `_unmapped_cascade_notes`
+- **Affects:** `graph.dropped_tables`, `graph.recreated_tables`, `_retired_cascade_operations`, `_retired_trigger_operations`, `_subtract_retired`, every `HEADER_*_RETIRED`
 
 ## Context
 
-Since 2.11.0 a cascade key emits a rule and a statement-level revive trigger, both on the owner's table. Deleting the child model runs `DROP TABLE … CASCADE`, which takes the rule (its action references the child through `pg_depend`) but not the trigger (a plpgsql body records no dependency). The trigger then fails **every** `UPDATE` on the owner with `relation … does not exist`, while `--check` stayed green (#63). The retirement path could not help: it retires only when both tables still map to local models, because an unmapped table is a deleted model on one reading and an app outside `LOCAL_APPS` on the other. `RetireEnforcement` cannot help either: it reaches what depends on the named table, and the leaked trigger depends on nothing and sits on another table.
+A plpgsql trigger body records no `pg_depend` dependency on the tables and columns it names. So `DROP TABLE … CASCADE` and `DROP COLUMN … CASCADE` take the rules beside a trigger and leave the trigger, which then fails **every** `UPDATE` on the table it fires on. Four of the kit's triggers name another table or a key column: the revive (on the owner, naming the child, #63), the owned sweep and the self-cascade trigger (naming the key column), and the tenant autofill trigger. Through 2.12.0:
+
+- a deleted child's key was only *named*, since an unmapped table is a deleted model on one reading and an app outside `LOCAL_APPS` on the other;
+- the owned rule, its sweep and the self-cascade trigger were never retired at all;
+- the scan read a column `RetireEnforcement` as dropping the owner's revive and sweep, which it never does;
+- every retirement drop was strict, so a drop of a rule `DROP … CASCADE` had already taken failed `migrate`;
+- a table deleted and recreated with no generation between kept headers for objects it no longer had.
 
 ## Decision
 
-`graph.dropped_tables(loader)` reads positive evidence of a deletion in one forward walk over the migration **graph**, with the state read before each operation: a **top-level** `DeleteModel` in any app the loader knows, whose model owned a table (not a proxy, not unmanaged), and whose table no model holds by the end of the history, nor any model of an app without migrations. A recorded cascade key whose child table is in that set, and whose owner still maps, is retired, both halves, with `DROP … IF EXISTS` over every name the child's table has held and a reverse that refuses, ordered after the migration that deleted the child as well as after the one that created the objects. It is no longer named as unretirable, and neither is a key whose owner table was itself dropped. A run scoped away from the owner's app names the trigger it leaves broken.
+- **Evidence from migration history.** `graph.dropped_tables` walks the migration **graph** forward once, reading state before each operation, and returns each table a top-level `DeleteModel` dropped and no model holds by the end (nor any model of an app without migrations), with the migration that dropped it. A recorded cascade key whose child is in that set is retired, ordered after that migration.
+- **Retire the trigger families.** A recorded owned key no `OwningForeignKey` declares any more, and a self-cascade key the models no longer call for, are retired in the app hosting the table they fire on, which is also the app that wrote the create, so no ordering edge is needed. A declared but refused owned key is left to the existing `--check` failure.
+- **Every retirement says `IF EXISTS`**, over every name the tables have held, and its reverse refuses and points at `--adopt`.
+- **The scan forgets only what `RetireEnforcement` drops**: a trigger only on a whole-table retirement of the table it fires on.
+- **A recreated table fails `--check`.** `graph.recreated_tables` names the migration that took a dropped table back; with no enforcement migration naming the table descending from it, `--check` fails and names `makeguitarmigrations --adopt`.
 
 ## Why
 
-- **Why migration history?** It is the only record that distinguishes "deleted" from "out of scope": an app dropped from `LOCAL_APPS` is still installed and its models are still in the final state. The graph, not the files, because a pending squash leaves replaced migrations on disk that the graph has dropped. Per operation, not per migration, because a squash creates and deletes in one file and a rename can precede the delete. Top level only, so a model moved between apps through `SeparateDatabaseAndState` keeps its table. The final-state check stops a later model reusing the `db_table` from being retired; it does not restore a rule the deletion took from it (#66).
-- **Why `IF EXISTS`, against [ADR 0019](0019-migration-lifecycle-objects.md)'s rule of reserving it for `--adopt`?** That rule exists because `IF EXISTS` on a path where the answer is known hides a diverged database. Here the answer is known to be "possibly already gone" for both halves: the rule went with the table wherever the deletion ran first, nothing orders the two on a fresh `migrate`, and the stopgap documented on #63 drops the trigger by hand. Absent is the desired end state, and the drop names every spelling the table held, so tolerating absence cannot hide a live object under another name.
-- **Why a refusing reverse?** The child model is gone, so nothing says which column the rule read. To migrate back past it, unapply it with `--fake`, reverse the deletion, then run `makeguitarmigrations --adopt`: a plain regeneration still reads the key as covered and writes nothing.
-- **Strongest objection.** A `DeleteModel` that is later undone by hand, outside migrations, would have its trigger retired. That database has already diverged from its own history.
+- **Why migration history?** It is the only record that tells "deleted" from "out of scope": an app dropped from `LOCAL_APPS` is still installed and its models are in the final state. The graph, not the files, because a pending squash leaves replaced migrations on disk that the graph has dropped. Per operation, because a squash creates and deletes in one file and a rename can precede the delete. Top level only, so a `SeparateDatabaseAndState` move between apps keeps its table.
+- **Why `IF EXISTS`, against [ADR 0019](0019-migration-lifecycle-objects.md)?** That rule exists because `IF EXISTS` where the answer is known hides a diverged database. For a retirement the answer is not known: `DROP … CASCADE` takes a rule with the column or table it reads, on Django 5.x before the generator's drop runs, and the docs advised hand-dropping sweep and self-cascade triggers. Absent is the goal, and the drop names every spelling the tables held, so tolerating absence cannot hide a live object under another name. Creates keep the strict forms.
+- **Why detect a recreate rather than repair it?** Repair needs a creating migration recorded per key for every family, tenant policies included, plus adopt-form re-emission ordered after the recreate. `--adopt` already does the re-emission, and its object references resolve to the *last* migration establishing a table, the recreate, so its output descends from it and the check goes green.
+- **Why a refusing reverse?** What a retirement dropped reads a column or table the models no longer have. Unapply with `--fake`, restore the models, run `makeguitarmigrations --adopt`: a plain regeneration still reads the key as covered.
+- **Strongest objection.** `IF EXISTS` would also hide a drop that ran before its create on a fresh `migrate`, the create then bringing the object back. The cascade family orders against its create (ADR 0021) and, for a deleted child, its deletion; the other families share one app with their create, which a test pins.
 
 ## Consequences
 
-**Accepted costs.** An unscoped `--check` turns red for every project that already deleted such a child, until the retirement is generated; that is the point. A project generated before 2.11.0 has no revive to retire and gets a migration that drops only a rule already gone. A deletion the loader cannot see, because the deleting app was later removed with its migrations, is still only named. One extra pass over the migration state per run while a recorded key is unmapped. The fresh-`migrate` ordering between the old enforcement migration and the child's `DeleteModel` is not fixed here (#61), nor are the other plpgsql triggers that outlive what they name: the owned sweep, the self-cascade trigger, and a revive after `RemoveField` (#66).
+**Accepted costs.** An unscoped `--check` turns red for every project carrying such a leak until the retirements are generated; that is the point. A deletion the loader cannot see, because the deleting app was later removed with its migrations, is still only named. One extra pass over the migration state per run while a recorded key is unmapped. A fresh `migrate` can still order a deleted child's `DeleteModel` before the owner's older enforcement migration (#61).
 
-**Reversibility.** Removing the evidence read restores "named, not retired". The retirement migrations it wrote stay valid either way.
+**Reversibility.** Restoring strict drops would break `migrate` for every project that followed the hand-drop advice or ran `RemoveField` on Django 5.x. The retirement migrations already written stay valid either way.
 
 ## Related
 
-- [ADR 0019](0019-migration-lifecycle-objects.md) · [ADR 0021](0021-retirement-ordered-against-its-create.md) · [ADR 0024](0024-inverse-cascade-revive-rules.md) · [`migrations.md`](../migrations.md) · #63
+- [ADR 0019](0019-migration-lifecycle-objects.md) · [ADR 0021](0021-retirement-ordered-against-its-create.md) · [ADR 0024](0024-inverse-cascade-revive-rules.md) · [`migrations.md`](../migrations.md) · #63 · #66

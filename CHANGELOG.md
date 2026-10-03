@@ -10,14 +10,22 @@ Full history and diffs: [GitHub releases](https://github.com/Behnam-RK/django-gu
 
 ## [Unreleased]
 
-## [2.12.1] - 2026-10-03
+## [2.13.0] - 2026-10-03
 
 ### Fixed
 
-- **Deleting a cascading child model no longer leaves a trigger that breaks every `UPDATE` on its owner** (#63). Since 2.11.0 each cascade key also installs a statement-level revive trigger on the owner's table. Deleting the child model runs `DROP TABLE … CASCADE`, which took the cascade rule but not that trigger, whose plpgsql body records no dependency. The trigger then failed every `UPDATE` on the owner, a plain `save()` included, with `relation "<child>" does not exist`, while `--check` stayed green and the generator's note advised a `DROP RULE` for a rule already gone. The generator now reads the migration graph for positive evidence of the deletion (a top-level `DeleteModel` whose table no model holds by the end, across every installed app) and retires both halves with `DROP … IF EXISTS` over every name the table held, and a reverse that refuses. A run scoped away from the owner's app names the trigger it leaves broken. Without that evidence an unmapped table is still only named, since an app dropped from `LOCAL_APPS` looks the same from the registry. See [ADR 0029](docs/adr/0029-retiring-a-deleted-childs-revive-trigger.md).
-- `RetireEnforcement` is **not** a workaround for this: it reaches only the named table's own triggers and what depends on it. The stopgap for a project on 2.11.0 to 2.12.0 is on #63; the generated retirement migrates cleanly over it.
+- **Deleting a cascading child model no longer leaves a trigger that breaks every `UPDATE` on its owner** (#63). Since 2.11.0 each cascade key also installs a statement-level revive trigger on the owner's table. Deleting the child model runs `DROP TABLE … CASCADE`, which took the cascade rule but not that trigger, whose plpgsql body records no dependency. The trigger then failed every `UPDATE` on the owner, a plain `save()` included, with `relation "<child>" does not exist`, while `--check` stayed green. The generator now reads the migration graph for positive evidence of the deletion (a top-level `DeleteModel` whose table no model holds by the end, across every installed app), retires both halves after the migration that deleted the child, and names the trigger in a run scoped away from the owner's app. Without that evidence an unmapped table is still only named, since an app dropped from `LOCAL_APPS` looks the same from the registry.
+- **The same leak in every other trigger the kit writes** (#66). The owned rule and its sweep, and the self-cascade trigger, were never retired at all, so removing or relaxing their key left them live; the sweep and the self-cascade trigger name the key column, so after `RemoveField` (`DROP COLUMN … CASCADE` on Django 5.x) every `UPDATE` on their table failed. A recorded owned key no declaration names any more, and a self-cascade key the models no longer call for, are now retired in the app hosting the table they fire on. A declared owned key that is refused (a cycle, a tenancy mismatch) is left to the existing `--check` failure.
+- **The scan no longer reads `RetireEnforcement` as dropping triggers it leaves live.** It drops rules through `pg_depend` and triggers only on the table it names, whole. The scan forgot the owner's revive trigger after a child's retirement (and a sweep after its target's, and a self-cascade trigger after a column retirement), so nothing retired them. That was why the documented `RetireEnforcement`-before-`RemoveField` path, the one Django 6.0 needs, still broke the owner. The generator now retires what it leaves.
+- **A table recreated on its old `db_table` with no generation in between now fails `--check`.** The old table's rules and triggers went with it while their headers still read as coverage, so a recreated owner really deleted rows on `DELETE`. The note names the table and `makeguitarmigrations --adopt` as the repair; nothing is re-created automatically.
 
-**Upgrading.** Run `makeguitarmigrations` and `migrate`. A project that already deleted such a child, with that `DeleteModel` still in its migration history, gets one retirement migration in the owner's app, and an unscoped `makemigrations --check` is red until it is generated. If the deleting app was removed along with its migrations, there is no evidence and the key is only named: use the stopgap on #63. A fresh `migrate` of such a project can still fail at the old `CREATE RULE` when the child is in another app (#61), and the owned sweep, the self-cascade trigger and a revive after `RemoveField` still leak the same way (#66). Nothing changes for a project that never deleted one.
+### Changed
+
+- **Every retirement drop says `IF EXISTS`**, over every name the table has held, for cascade, revive, owned, sweep, self-cascade and autofill retirements alike, and the notes naming a drop to run by hand say it too. `DROP … CASCADE` and the hand-drops the docs used to advise remove these objects before the generator's drop runs, and a strict drop then failed `migrate`. This reverses ADR 0019's rule reserving `IF EXISTS` for `--adopt`; see [ADR 0029](docs/adr/0029-retiring-a-deleted-childs-revive-trigger.md). Creates keep the strict forms.
+- Three new frozen headers: `HEADER_SOFT_DELETE_OWNED_RETIRED`, `HEADER_SOFT_DELETE_OWNED_SWEEP_RETIRED` and `HEADER_SOFT_DELETE_SELF_CASCADE_RETIRED`. Every retirement's reverse refuses and says to unapply with `--fake`, restore the models and run `makeguitarmigrations --adopt`.
+- `RetireEnforcement` is **not** a workaround for #63 on its own. The stopgap for 2.11.0 to 2.12.0 is on #63, and the generated retirements migrate cleanly over it.
+
+**Upgrading.** Run `makeguitarmigrations` and `migrate`. A project that deleted a cascading child (with that `DeleteModel` still in its history), or removed or relaxed an owned or self-referential key, gets retirement migrations, and an unscoped `makemigrations --check` is red until they are generated. If the deleting app was removed along with its migrations there is no evidence and the key is only named: use the stopgap on #63. A fresh `migrate` of a project that deleted a child in another app than its owner can still fail at the old `CREATE RULE` (#61); add the owner's enforcement migration as a dependency of the deleting migration before applying it.
 
 ## [2.12.0] - 2026-10-03
 
@@ -332,8 +340,8 @@ First stable release. **BREAKING:** the instrument ladder shifted down one rung 
 
 - Added: initial release — `SetarModel`, `GuitarModel`, `SoftDeletableModel`, `DisableSignals`, `makeguitarmigrations`.
 
-[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.12.1...HEAD
-[2.12.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.12.1
+[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.13.0...HEAD
+[2.13.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.13.0
 [2.12.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.12.0
 [2.11.2]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.11.2
 [2.11.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.11.1

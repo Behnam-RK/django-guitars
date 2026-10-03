@@ -7,7 +7,7 @@ from __future__ import annotations
 import pytest
 from zeal import NPlusOneError
 
-from tests.testapp.models import Album, Band
+from tests.testapp.models import Album, Band, Genre
 
 
 @pytest.fixture
@@ -21,6 +21,34 @@ def test_a_forward_foreign_key_loop_is_flagged(albums):
     with pytest.raises(NPlusOneError):
         for album in Album.objects.all():
             album.band  # noqa: B018 - the lazy load is the point
+
+
+def test_a_reverse_foreign_key_loop_is_flagged(albums):
+    Band.objects.create(name='Yes')
+    with pytest.raises(NPlusOneError):
+        for band in Band.objects.all():
+            list(band.albums.all())
+
+
+def test_a_many_to_many_loop_is_flagged(db):
+    genre = Genre.objects.create(name='prog')
+    for name in ('Rush', 'Yes'):
+        Band.objects.create(name=name).genres.add(genre)
+
+    with pytest.raises(NPlusOneError):
+        for band in Band.objects.all():
+            list(band.genres.all())
+
+
+def test_a_deferred_attribute_loop_is_flagged(albums):
+    with pytest.raises(NPlusOneError):
+        for album in Album.objects.only('id'):
+            album.title  # noqa: B018 - the lazy load is the point
+
+
+def test_the_allow_list_stays_exactly_repeated_get(settings):
+    """Each canary above can only be trusted while the allow-list leaves them alone."""
+    assert settings.ZEAL_ALLOWLIST == [{'model': '*', 'field': 'get()'}]
 
 
 def test_select_related_is_clean(albums):

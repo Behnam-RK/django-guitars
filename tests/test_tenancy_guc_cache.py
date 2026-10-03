@@ -9,8 +9,9 @@ from django.db import DatabaseError, connection, transaction
 from django.test.utils import CaptureQueriesContext
 
 from guitars.gucs import guc_name
+from guitars.tenancy import guc
 from guitars.tenancy import tenant
-from tests.conftest import scalar
+from tests.conftest import execute, scalar
 
 
 _LABEL_GUC = guc_name('label')
@@ -89,6 +90,13 @@ class TestARevertedPublishIsRepublished:
 
             assert _published() == str(tenants.b.pk)
 
+
+
+@pytest.mark.django_db
+class TestLexicalNestingStaysCorrect:
+    """Lexical nesting cannot reach a stale publish, so these do not pin the fingerprint. They pin
+    the state compare and the clearing of a dimension no longer in scope, which they alone catch."""
+
     def test_a_tenant_switched_inside_a_rolled_back_savepoint(self, tenants):
         with tenant(label=tenants.a):
             scalar('SELECT 1')
@@ -111,12 +119,52 @@ class TestARevertedPublishIsRepublished:
         assert _published() in ('', None)
 
 
+@pytest.mark.django_db
+class TestARollbackWithTheScopeStillOpen:
+    """The publish for a scope entered inside a savepoint can land on the ``ROLLBACK TO
+    SAVEPOINT`` statement itself, which then reverts it -- and the cache recorded it. Found by a
+    reviewer; present before this branch, on every path ending in that statement."""
+
+    def test_a_scope_entered_in_the_savepoint_with_no_query_before_the_rollback(
+        self, tenants
+    ):
+        with tenant(label=tenants.a), _Interleaved() as interleaved:
+            scalar('SELECT 1')
+            block = interleaved.enter(transaction.atomic())
+            interleaved.enter(tenant(label=tenants.b))
+            interleaved.roll_back(block)
+
+            assert _published() == str(tenants.b.pk)
+
+    def test_the_public_savepoint_api_which_never_reaches_savepoint_ids(self, tenants):
+        with tenant(label=tenants.a):
+            scalar('SELECT 1')
+            sid = transaction.savepoint()
+            with tenant(label=tenants.b):
+                scalar('SELECT 1')
+                transaction.savepoint_rollback(sid)
+
+                assert _published() == str(tenants.b.pk)
+            transaction.savepoint_commit(sid)
+
+    def test_a_savepoint_rolled_back_in_raw_sql(self, tenants):
+        with tenant(label=tenants.a):
+            scalar('SELECT 1')
+            execute('SAVEPOINT guitars_probe')
+            with tenant(label=tenants.b):
+                scalar('SELECT 1')
+                execute('ROLLBACK TO SAVEPOINT guitars_probe')
+
+                assert _published() == str(tenants.b.pk)
+            execute('RELEASE SAVEPOINT guitars_probe')
+
+
 def _set_configs(queries) -> int:
     return sum('set_config' in query['sql'] for query in queries)
 
 
 @pytest.mark.django_db
-class TestASavepointThatRevertsNothingCostsNothing:
+class TestWhatASavepointCosts:
     @pytest.mark.parametrize('blocks', [1, 8])
     def test_pushing_and_releasing_savepoints_does_not_republish(self, tenants, blocks):
         with tenant(label=tenants.a):
@@ -128,7 +176,9 @@ class TestASavepointThatRevertsNothingCostsNothing:
 
         assert _set_configs(captured.captured_queries) == 0
 
-    def test_rolling_back_a_savepoint_that_published_nothing_republishes_nothing(self, tenants):
+    def test_a_rolled_back_savepoint_costs_exactly_one_republish(self, tenants):
+        """The price of distrusting the cache after ``ROLLBACK TO SAVEPOINT``, which can revert a
+        publish it recorded. Rollbacks are the exception; push and release stay free."""
         with tenant(label=tenants.a):
             scalar('SELECT 1')
             with CaptureQueriesContext(connection) as captured:
@@ -137,7 +187,7 @@ class TestASavepointThatRevertsNothingCostsNothing:
                     raise RuntimeError
                 scalar('SELECT 1')
 
-        assert _set_configs(captured.captured_queries) == 0
+        assert _set_configs(captured.captured_queries) == 1
 
 
 @pytest.mark.django_db
@@ -153,3 +203,12 @@ class TestARecoveryStatementOnAnAbortedTransaction:
                     scalar('SELECT 1 / 0')
 
             assert _published() == str(tenants.a.pk)  # and the next block republished A
+
+
+def test_distrusting_a_connection_that_never_published_is_a_no_op(db):
+    """It runs from a ``finally``, so raising here would replace the statement's own error."""
+    setattr(connection, guc._CACHE, None)
+
+    guc._distrust(connection)
+
+    assert getattr(connection, guc._CACHE) is None

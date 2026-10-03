@@ -195,12 +195,22 @@ def _rls_violation(exc: BaseException) -> BaseException | None:
     return None
 
 
+def _distrust(connection: BaseDatabaseWrapper) -> None:
+    """Force the next statement to republish, keeping the dimensions last published so a stale
+    one is still cleared. For ``ROLLBACK TO SAVEPOINT``, which reverts a ``SET LOCAL`` the
+    cache has already recorded -- including the one just made on that very statement."""
+    cached = getattr(connection, _CACHE, None)
+    if cached is not None:
+        setattr(connection, _CACHE, (cached[0], None, cached[2]))
+
+
 def _wrapper(
     execute: Callable, sql: str, params: object, many: bool, context: dict[str, object]
 ) -> object:
     connection: BaseDatabaseWrapper = context['connection']  # ty: ignore[invalid-assignment]
     # Re-entrancy guard: _publish issues SQL of its own through this same path.
-    if not getattr(connection, _SYNCING, False):
+    syncing = getattr(connection, _SYNCING, False)
+    if not syncing:
         _ensure(connection)
     try:
         return execute(sql, params, many, context)
@@ -216,6 +226,10 @@ def _wrapper(
             f'active tenant, or no tenant scope is active -- {remediation("write")} '
             f'Database said: {violation}'
         ) from exc
+    finally:
+        # In ``finally``: a stale cache fails open, one extra republish does not.
+        if not syncing and isinstance(sql, str) and sql[:21].upper() == 'ROLLBACK TO SAVEPOINT':
+            _distrust(connection)
 
 
 def install_on(connection: BaseDatabaseWrapper) -> None:

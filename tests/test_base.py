@@ -282,10 +282,9 @@ def test_repr_does_not_load_deferred_fields():
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize('albums', [1, 8])
-def test_repr_of_a_queryset_issues_no_query_per_row(albums):
+def test_repr_of_loaded_rows_issues_no_query():
     band = Band.objects.create(name='Rush')
-    for number in range(albums):
+    for number in range(3):
         Album.objects.create(title=f'album-{number}', band=band)
     loaded = list(Album.objects.all())  # evaluated here, so only repr() is measured below
 

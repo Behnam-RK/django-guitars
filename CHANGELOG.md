@@ -10,6 +10,12 @@ Full history and diffs: [GitHub releases](https://github.com/Behnam-RK/django-gu
 
 ## [Unreleased]
 
+## [2.11.2] - 2026-10-03
+
+### Added
+
+- Documentation only; no behaviour changes. [ADR 0027](docs/adr/0027-guc-cache-is-distrusted-not-keyed.md) records why the tenant GUC cache dropped the savepoint ids from its key and is distrusted after any transaction-ending statement instead (2.11.1). [ADR 0028](docs/adr/0028-n-plus-one-guard-in-the-suite.md) records why every test runs under a repeated-lazy-load guard and why the collector's own variants opt out by name. `CLAUDE.md` now mentions the guard.
+
 ## [2.11.1] - 2026-10-02
 
 ### Fixed
@@ -303,7 +309,8 @@ First stable release. **BREAKING:** the instrument ladder shifted down one rung 
 
 - Added: initial release — `SetarModel`, `GuitarModel`, `SoftDeletableModel`, `DisableSignals`, `makeguitarmigrations`.
 
-[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.11.1...HEAD
+[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.11.2...HEAD
+[2.11.2]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.11.2
 [2.11.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.11.1
 [2.11.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.11.0
 [2.10.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.10.0

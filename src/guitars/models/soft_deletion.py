@@ -5,7 +5,7 @@ from typing import cast
 from asgiref.sync import sync_to_async
 from django.apps import apps as django_apps
 from django.conf import settings
-from django.db import connections, router, transaction
+from django.db import DEFAULT_DB_ALIAS, connections, router, transaction
 from django.db.models import (
     CASCADE,
     DateTimeField,
@@ -295,6 +295,27 @@ def _owned_targets(
     return list(found.items())
 
 
+@contextlib.contextmanager
+def _hard_deletion_on(using: str | None, *, savepoint: bool = True):
+    """The session switch on for the block, off after it. It is transaction-local, so a rollback
+    restores it; a failing block tries to switch off before re-raising (suppressed, the
+    transaction being likely aborted), but a failing switch-off on success must abort."""
+    alias = using or DEFAULT_DB_ALIAS
+    with (
+        connections[alias].cursor() as cursor,
+        transaction.atomic(using=alias, savepoint=savepoint),
+    ):
+        cursor.execute(SWITCH_ON_HARD_DELETION)
+        try:
+            yield
+        except Exception:
+            with contextlib.suppress(Exception):
+                cursor.execute(SWITCH_OFF_HARD_DELETION)
+            raise
+        else:
+            cursor.execute(SWITCH_OFF_HARD_DELETION)
+
+
 def _mti_table_chain(model: type[Model]) -> list[tuple[str, str]]:
     """``(db_table, pk_column)`` for every table in *model*'s MTI tree, leaf-first (FK-safe:
     a child's parent-link references its parent's row). Covers the whole tree, not just
@@ -488,51 +509,34 @@ class HardDeletableQuerySet(LiveQuerySet):
         placeholders = ', '.join(['%s'] * len(pks))
         db_connection = connections[self.db]
         quote = db_connection.ops.quote_name
-        with db_connection.cursor() as cursor, transaction.atomic(using=self.db):
-            cursor.execute(SWITCH_ON_HARD_DELETION)
-            try:
-                for table, pk_column in _mti_table_chain(model):
-                    # Identifiers come from model._meta (trusted); PK values are parameterized.
-                    sql_stmt = (
-                        f'DELETE FROM {quote(table)} WHERE {quote(pk_column)} IN ({placeholders})'  # noqa: E501  # nosec B608
-                    )
-                    cursor.execute(sql_stmt, pks)
-            except Exception:
-                # Suppressed here (unlike the success path below): the transaction is
-                # likely already aborted, so a failing switch-off would only replace the
-                # real error. See docs/soft-deletion.md on the leaked-switch danger.
-                with contextlib.suppress(Exception):
-                    cursor.execute(SWITCH_OFF_HARD_DELETION)
-                raise
-            else:
-                # Not suppressed: a failed switch-off here must abort the transaction, or
-                # 'rules.hard_deletion' leaks 'on' for the rest of any enclosing transaction.
-                cursor.execute(SWITCH_OFF_HARD_DELETION)
-            return None
+        with _hard_deletion_on(self.db), db_connection.cursor() as cursor:
+            for table, pk_column in _mti_table_chain(model):
+                # Identifiers come from model._meta (trusted); PK values are parameterized.
+                sql_stmt = (
+                    f'DELETE FROM {quote(table)} WHERE {quote(pk_column)} IN ({placeholders})'  # noqa: E501  # nosec B608
+                )
+                cursor.execute(sql_stmt, pks)
+        return None
 
     # Marks `hard_delete` as queryset-only for Manager.from_queryset(); a valid runtime
     # attribute assignment on a function object that stub-based checkers can't model.
     hard_delete.queryset_only = True  # ty: ignore[unresolved-attribute]
 
     def _hard_delete_own_table(self):
-        """Delete only this queryset's own-table rows -- used per table by instance
-        ``hard_delete``, so this must never reach into ancestor tables. Its own
+        """Delete only this queryset's own-table rows -- used by instance ``hard_delete`` and
+        by the MTI form, so this must never reach into ancestor tables. Its own switch and
         ``atomic()``, or autocommit lets the switch expire before the DELETE it unlocks."""
+        with _hard_deletion_on(self.db):
+            return self._delete_own_table_rows()
+
+    def _delete_own_table_rows(self):
+        """The ``DELETE`` alone, for a caller that already holds the switch (see
+        :func:`_hard_deletion_on`): instance ``hard_delete`` runs every table under one."""
         with connections[self.db].cursor() as cursor:
             query = self.query.clone()
             query.__class__ = sql.DeleteQuery
             compiled, params = query.sql_with_params()
-            with transaction.atomic(using=self.db):
-                cursor.execute(SWITCH_ON_HARD_DELETION)
-                try:
-                    result = cursor.execute(compiled, params)
-                except Exception:
-                    with contextlib.suppress(Exception):
-                        cursor.execute(SWITCH_OFF_HARD_DELETION)
-                    raise
-                else:
-                    cursor.execute(SWITCH_OFF_HARD_DELETION)
-                return result
+            return cursor.execute(compiled, params)
 
 
 class ArchiveManager(Manager):
@@ -776,21 +780,25 @@ class SoftDeletableModel(Model):
                     # foreign keys need: whatever references an owned row is in an earlier one.
                     _collect_group(mti_root(owned_model), owned_pks)
 
-            for to_delete, model_order in groups:
-                for model in model_order:
-                    pks = list(to_delete[model])
-                    # `_all_objects` is added dynamically by SoftDeletableModel subclasses, so a
-                    # static checker can't see it -- or `_hard_delete_own_table` on its queryset --
-                    # through the hasattr guard.
-                    if hasattr(model, '_all_objects'):
-                        # Own-table primitive: each MTI table is a separate ``model_order`` entry,
-                        # so this must not reach into ancestor tables (which ``hard_delete`` would).
-                        model._all_objects.using(using).filter(  # ty: ignore[unresolved-attribute]
-                            pk__in=pks
-                        )._hard_delete_own_table()
-                    # `no cover` because no *test* model reaches it, not because nothing can: an
-                    # owned group runs no Collector, so an m2m through row of an owned row lands
-                    # here for real -- add one to `tests/testapp` before trusting this path.
-                    else:  # pragma: no cover - no testapp owned model carries an m2m
-                        # Read through ``_rows``, which no default manager can filter.
-                        _rows(model, using).filter(pk__in=pks).delete()
+            # One switch for every table, not one per table: it is transaction-local and the
+            # walk is one transaction, so the per-table on/off was five statements a table
+            # (savepoint, on, delete, off, release) for nothing a rollback does not already do.
+            with _hard_deletion_on(using, savepoint=False):
+                for to_delete, model_order in groups:
+                    for model in model_order:
+                        pks = list(to_delete[model])
+                        # `_all_objects` is added dynamically by SoftDeletableModel subclasses, so a
+                        # static checker can't see it -- or `_hard_delete_own_table` on its queryset --
+                        # through the hasattr guard.
+                        if hasattr(model, '_all_objects'):
+                            # Own-table primitive: each MTI table is a separate ``model_order`` entry,
+                            # so this must not reach into ancestor tables (which ``hard_delete`` would).
+                            model._all_objects.using(using).filter(  # ty: ignore[unresolved-attribute]
+                                pk__in=pks
+                            )._delete_own_table_rows()
+                        # `no cover` because no *test* model reaches it, not because nothing can: an
+                        # owned group runs no Collector, so an m2m through row of an owned row lands
+                        # here for real -- add one to `tests/testapp` before trusting this path.
+                        else:  # pragma: no cover - no testapp owned model carries an m2m
+                            # Read through ``_rows``, which no default manager can filter.
+                            _rows(model, using).filter(pk__in=pks).delete()

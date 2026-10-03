@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, NamedTuple, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from django.apps import apps as django_apps
 from django.core.exceptions import FieldDoesNotExist
@@ -949,9 +949,10 @@ class OperationsMixin:
                 'table': _identifiers._escape_ident(owner_table),
                 'foreign_key': _identifiers._escape_ident(foreign_key),
             }
-            for recorded, header, drop, name in (
+            for recorded, creates, header, drop, name in (
                 (
                     self.existing.soft_delete_owned,
+                    self.existing.soft_delete_owned_dependencies,
                     HEADER_SOFT_DELETE_OWNED_RETIRED,
                     self._drop_prior_rules(
                         quote(owner_table),
@@ -961,6 +962,7 @@ class OperationsMixin:
                 ),
                 (
                     self.existing.soft_delete_owned_sweep,
+                    self.existing.soft_delete_owned_sweep_dependencies,
                     HEADER_SOFT_DELETE_OWNED_SWEEP_RETIRED,
                     self._drop_prior_triggers(
                         {'table': quote(owner_table)},
@@ -970,6 +972,7 @@ class OperationsMixin:
                 ),
             ):
                 if key in recorded:
+                    self._record_retirement_edge(app.label, key, creates)
                     operations.append(
                         self._retirement(
                             app.label, header.format(**slots), drop, name, owner_table
@@ -992,6 +995,13 @@ class OperationsMixin:
                 ],
             )
             name = _self_cascade_name(table, foreign_key)
+            # Ordered after its create: an MTI descendant's pass writes this trigger into the
+            # descendant's app, while the retirement is hosted by the table's.
+            self._record_retirement_edge(
+                app.label,
+                (table, foreign_key),
+                self.existing.soft_delete_self_cascade_dependencies,
+            )
             operations.append(self._retirement(app.label, header, drop, name, table))
         return operations
 
@@ -1507,8 +1517,8 @@ class OperationsMixin:
     def _record_retirement_edge(
         self,
         app_label: str,
-        key: tuple[str, str, str | None],
-        creates_by_key: dict[tuple[str, str, str | None], list[tuple[str, str]]],
+        key: tuple,
+        creates_by_key: dict[Any, list[tuple[str, str]]],
     ) -> None:
         """Order a cascade retirement against the migration that created the object it drops.
         Read off the scan rather than resolved: neither is visible to migration state, and the
@@ -2148,8 +2158,8 @@ class OperationsMixin:
         the loop above emits (ADR 0018). Appended from inside :meth:`_cascade_operations`, after
         the same refusals -- so which self keys carry a trigger *is* which would carry a rule."""
         # No object refs: CREATE TRIGGER names only the table it fires on and plpgsql resolves
-        # no body at CREATE FUNCTION time. A proxy cannot relocate it (``_is_cascade_candidate``
-        # drops the proxy-declared side) and an MTI child never reaches this branch at all.
+        # no body at CREATE FUNCTION time. An MTI descendant's key at its root does reach here,
+        # from the descendant's pass and app, so its retirement depends on this migration (#66).
         name = _self_cascade_name(owner_table, foreign_key)
         ident_foreign_key = _identifiers._escape_ident(foreign_key)
         slots = {

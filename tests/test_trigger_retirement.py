@@ -104,6 +104,30 @@ class TestAnOwnedKeyNoLongerDeclared:
         assert _retired(command) == []
 
 
+class TestARetirementIsOrderedAfterItsCreate:
+    """An MTI descendant's pass writes a self-cascade trigger into the descendant's app while the
+    retirement lands in the table's: with ``IF EXISTS`` a drop that ran first would be a no-op,
+    and the create would bring the trigger back on a fresh ``migrate`` (#66)."""
+
+    def test_a_self_cascade_created_in_another_app(self):
+        command = _command()
+        command.existing.soft_delete_self_cascade[SELF] = 'abc'
+        command.existing.soft_delete_self_cascade_dependencies[SELF] = [('otherapp', '0002_x')]
+
+        _retired(command)
+
+        assert ('otherapp', '0002_x') in command._retirement_edges['testapp']
+
+    def test_an_owned_sweep_created_in_another_app(self):
+        command = _command()
+        command.existing.soft_delete_owned_sweep[OWNED] = 'def'
+        command.existing.soft_delete_owned_sweep_dependencies[OWNED] = [('otherapp', '0003_y')]
+
+        _retired(command)
+
+        assert ('otherapp', '0003_y') in command._retirement_edges['testapp']
+
+
 class TestASelfCascadeKeyNoLongerRequired:
     def test_it_is_retired(self):
         command = _command()
@@ -315,9 +339,9 @@ class TestEveryLeakIsRepairedByItsRetirement:
 
 
 def test_each_retirement_lands_in_the_app_that_wrote_its_create():
-    """The owned, sweep and self retirements carry no ordering edge: they rely on the create and
-    the drop sharing an app, whose own history orders them. ``IF EXISTS`` would otherwise turn a
-    drop run before its create into a no-op, and the create would bring the object back."""
+    """In a single-app project the create and the retirement share an app, whose own history
+    orders them; where they do not (an MTI descendant's self cascade), the retirement depends on
+    the create -- ``TestARetirementIsOrderedAfterItsCreate``."""
     command = Command()
     existing = command.existing
     hosting = command._table_app_labels()

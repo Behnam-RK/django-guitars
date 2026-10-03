@@ -4,7 +4,6 @@ CLAUDE.md's checklist and :func:`_transaction_marker`."""
 
 from __future__ import annotations
 
-import re
 from typing import TYPE_CHECKING
 
 from django.db import connections, transaction
@@ -40,11 +39,6 @@ _CACHE = '_guitars_tenant_guc'
 _SYNCING = '_guitars_tenant_guc_syncing'
 _NAMES = '_guitars_tenant_guc_names'
 
-# ``ROLLBACK [WORK|TRANSACTION] TO [SAVEPOINT] x`` behind any comments: PostgreSQL accepts all of it.
-_ROLLBACK_TO = re.compile(
-    r'\A(?:\s|/\*.*?\*/|--[^\n]*(?:\n|\Z))*ROLLBACK\s+(?:(?:WORK|TRANSACTION)\s+)?TO\b',
-    re.I | re.S,
-)
 # SQLSTATE 42501 insufficient_privilege -- what a WITH CHECK violation raises.
 _RLS_SQLSTATE = '42501'
 # SQLSTATE 25P02 in_failed_sql_transaction -- every statement is refused until rollback.
@@ -216,12 +210,56 @@ def _distrust(connection: BaseDatabaseWrapper) -> None:
         setattr(connection, _CACHE, (dict.fromkeys(names, ''), None, cached[2]))
 
 
+def _skip_noise(sql: str, at: int) -> int:
+    """Index of the first character at or after *at* that is not whitespace or a comment. A scan,
+    not a pattern: this runs on every statement, and a backtracking one hangs the connection."""
+    size = len(sql)
+    while at < size:
+        if sql[at].isspace():
+            at += 1
+        elif sql.startswith('--', at):
+            end = sql.find('\n', at)
+            at = size if end < 0 else end + 1
+        elif sql.startswith('/*', at):
+            depth, at = 1, at + 2  # PostgreSQL nests them
+            while at < size and depth:
+                if sql.startswith('/*', at):
+                    depth, at = depth + 1, at + 2
+                elif sql.startswith('*/', at):
+                    depth, at = depth - 1, at + 2
+                else:
+                    at += 1
+            if depth:
+                return size
+        else:
+            break
+    return at
+
+
+def _word(sql: str, at: int) -> tuple[str, int]:
+    """The next keyword, upper-cased, and the index after it."""
+    at = _skip_noise(sql, at)
+    end = at
+    while end < len(sql) and (sql[end].isalnum() or sql[end] == '_'):
+        end += 1
+    return sql[at:end].upper(), end
+
+
 def _reverts_a_set(sql: object) -> bool:
-    """Whether *sql* rolls back to a savepoint, however spelled. Text and bytes only: a driver
-    object is not inspected, and cannot be without a connection."""
+    """Whether *sql* is ``ROLLBACK [WORK|TRANSACTION] TO ...``, however spelled: any whitespace or
+    comments between the words. Text and bytes only; a driver object cannot be read without a
+    connection."""
     if isinstance(sql, bytes):
         sql = sql.decode('utf-8', 'replace')
-    return isinstance(sql, str) and _ROLLBACK_TO.match(sql) is not None
+    if not isinstance(sql, str):
+        return False
+    word, at = _word(sql, 0)
+    if word != 'ROLLBACK':
+        return False
+    word, at = _word(sql, at)
+    if word in ('WORK', 'TRANSACTION'):
+        word, at = _word(sql, at)
+    return word == 'TO'
 
 
 def _wrapper(

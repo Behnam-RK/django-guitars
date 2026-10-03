@@ -4,6 +4,9 @@ Probes read ``current_setting`` through an ordinary cursor, so they pass the pub
 
 from __future__ import annotations
 
+import subprocess
+import sys
+
 import pytest
 from django.db import DatabaseError, connection, transaction
 from django.test.utils import CaptureQueriesContext
@@ -181,6 +184,9 @@ class TestEverySpellingOfARollback:
             'ROLLBACK WORK TO SAVEPOINT guitars_probe',
             'ROLLBACK TRANSACTION TO SAVEPOINT guitars_probe',
             b'ROLLBACK TO SAVEPOINT guitars_probe',
+            'ROLLBACK /* x */ TO SAVEPOINT guitars_probe',
+            '/* a /* nested */ still a comment */ ROLLBACK TO SAVEPOINT guitars_probe',
+            '/* one */ -- two\n/* three */ ROLLBACK WORK /* four */ TO guitars_probe',
         ],
         ids=lambda value: repr(value)[:40],
     )
@@ -202,6 +208,45 @@ class TestEverySpellingOfARollback:
                 scalar("SELECT 'ROLLBACK TO SAVEPOINT x'")
 
         assert _set_configs(captured.captured_queries) == 0
+
+
+class TestTheMatcherNeverBacktracks:
+    """It runs on every statement the wrapper sees, so a pattern that backtracks hangs the
+    connection. A catastrophic one holds the GIL, so it is timed in a subprocess."""
+
+    @pytest.mark.parametrize('shape', ['leading', 'later', 'unclosed', 'nested'])
+    def test_many_comments_cost_next_to_nothing(self, shape):
+        code = (
+            'from guitars.tenancy.guc import _reverts_a_set\n'
+            "sql = {'leading': '/* c */ ' * 2000 + 'SELECT 1',"
+            " 'later': '/* a */ SELECT 1 ' + '/* c */ ' * 2000,"
+            " 'unclosed': '/* ' + 'x ' * 20000,"
+            " 'nested': '/* ' * 2000 + '*/ ' * 2000 + 'SELECT 1'}[" + repr(shape) + "]\n"
+            'print(_reverts_a_set(sql))'
+        )
+        done = subprocess.run(
+            [sys.executable, '-c', code], capture_output=True, text=True, timeout=20, check=False
+        )
+
+        assert done.stdout.strip() == 'False', done.stderr[-300:]
+
+
+class TestWhatIsNotARollback:
+    @pytest.mark.parametrize(
+        'statement',
+        ['', '   ', '-- only a comment', '/* only a comment */', '/* unterminated', 'ROLLBACK', 'SELECT 1',
+         'ROLLBACK;', 'BEGIN', "SELECT 'ROLLBACK TO x'", 'ROLLBACKTO x'],
+    )
+    def test_it_is_left_alone(self, statement):
+        """Only the exact statement shape counts: a name that merely starts with ROLLBACK, or one
+        quoted inside another statement, must not cost a republish."""
+        assert guc._reverts_a_set(statement) is False
+
+    def test_a_driver_object_is_not_inspected(self):
+        """A ``psycopg.sql.Composed`` cannot be read without a connection; it is documented, not
+        guessed at, and must not raise from the wrapper's ``finally``."""
+        assert guc._reverts_a_set(object()) is False
+        assert guc._reverts_a_set(None) is False
 
 
 def _set_configs(queries) -> int:

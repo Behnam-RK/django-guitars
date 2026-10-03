@@ -467,7 +467,7 @@ class TestTenancy:
         assert not archived_anywhere(arena)
         assert arena._deleted_at is None
 
-    def test_the_queryset_form_is_asked_the_same_policy(self, tenants):
+    def test_the_queryset_form_agrees_about_a_hidden_row(self, tenants):
         with tenant(label=tenants.a):
             arena = Arena.objects.create(name='a-arena', seats=1)
 

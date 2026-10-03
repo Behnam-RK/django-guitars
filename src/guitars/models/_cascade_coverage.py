@@ -24,7 +24,7 @@ from guitars.introspection import (
 from guitars.local_apps import is_local
 from guitars.routing import migrates_to_postgresql
 
-from .fields import _targets_primary_key
+from .fields import OwningForeignKey, _targets_primary_key
 
 
 if TYPE_CHECKING:
@@ -78,7 +78,7 @@ def _enforcement_gaps(model: type[Model]) -> list[Gap]:
     # LOCAL_APPS or routed away has none even under a covered ancestor. Blocking only where a key
     # cascades into that model -- otherwise nothing is left live, the fast path just declines.
     for owner in dict.fromkeys(_chain(model, holder)):
-        inbound = _has_inbound_cascade_keys(owner)
+        inbound = _needs_rules_from_its_app(owner)
         if not is_local(django_apps.get_app_config(owner._meta.app_label)):
             reason = f"'{owner._meta.app_label}' is not in LOCAL_APPS"
             gaps.append(Gap(model._meta.label, reason, inbound))
@@ -88,22 +88,34 @@ def _enforcement_gaps(model: type[Model]) -> list[Gap]:
         gaps.append(
             Gap(model._meta.label, 'its chain is refused a soft-delete rule (guitars.E003)', True)
         )
-    # The redirect rule joins on the child's own key, which is not its link to the ancestor when
-    # it declares one of its own (#64): ``.delete()`` archives another row. ``soft_delete()``
-    # stamps through the holder's key and is right, so this only declines the fast path.
+    # Own key not its link to the ancestor (#64): the redirect rule archives another row, and a
+    # key into it stores that key where the root's rule compares the root's id. The stamp is
+    # right, the cascade out of it is not: blocking where a key reaches it, else a decline.
     if model is not holder and (
         model._meta.pk is not model._meta.get_ancestor_link(holder)
         or own_key_between(model, holder) is not None
     ):
-        gaps.append(Gap(model._meta.label, 'its primary key is not its parent link (#64)', False))
+        below = [m for m in _chain(model, holder) if m is not holder]
+        gaps.append(
+            Gap(
+                model._meta.label,
+                'its primary key is not its parent link (#64)',
+                any(_needs_rules_from_its_app(owner) for owner in below),
+            )
+        )
     return gaps
 
 
-def _has_inbound_cascade_keys(model: type[Model]) -> bool:
-    """Whether a ``CASCADE`` key *to this model* needs a rule: one written from this model's own
-    app pass. A key into an ancestor is the ancestor's, and ``SET_NULL``, ``PROTECT``,
-    ``DO_NOTHING``, a parent link and a referrer with no ``_deleted_at`` carry no cascade rule."""
+def _needs_rules_from_its_app(model: type[Model]) -> bool:
+    """Whether a rule is written from this model's own app pass: a ``CASCADE`` key *to* it (not
+    one into an ancestor, a parent link, nor from a referrer with no ``_deleted_at``), or an
+    ``OwningForeignKey`` it declares, whose rule fires on its own table."""
     concrete = model._meta.concrete_model or model
+    if any(
+        isinstance(field, OwningForeignKey) and field.model is concrete
+        for field in concrete._meta.local_fields
+    ):
+        return True
     return any(
         relation.field.remote_field.on_delete is CASCADE  # ty: ignore[unresolved-attribute]
         and not relation.field.remote_field.parent_link  # ty: ignore[unresolved-attribute]

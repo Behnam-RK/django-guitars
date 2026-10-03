@@ -269,7 +269,7 @@ class TestAReachedModelTheGeneratorWritesNoRuleFor:
 
         child_app = TenantedChild._meta.app_label
         monkeypatch.setattr(coverage, 'is_local', lambda config: config.label != child_app)
-        monkeypatch.setattr(coverage, '_has_inbound_cascade_keys', lambda owner: True)
+        monkeypatch.setattr(coverage, '_needs_rules_from_its_app', lambda owner: True)
 
         gaps = coverage._enforcement_gaps(TenantedChild)
 
@@ -279,7 +279,7 @@ class TestAReachedModelTheGeneratorWritesNoRuleFor:
         monkeypatch.setattr(
             coverage, 'migrates_to_postgresql', lambda model: model is not QuantityCondition
         )
-        monkeypatch.setattr(coverage, '_has_inbound_cascade_keys', lambda owner: True)
+        monkeypatch.setattr(coverage, '_needs_rules_from_its_app', lambda owner: True)
 
         gaps = coverage._enforcement_gaps(QuantityCondition)
 
@@ -360,7 +360,7 @@ class TestWhatTheModelsOwnAppHasToDoWithIt:
         """``Mid``'s own rule is written from ``Mid``'s app pass, between ``Kid`` and ``Root``."""
         _root, mid, kid = self._an_intermediate()
         monkeypatch.setattr(coverage, 'migrates_to_postgresql', lambda model: model is not mid)
-        monkeypatch.setattr(coverage, '_has_inbound_cascade_keys', lambda owner: True)
+        monkeypatch.setattr(coverage, '_needs_rules_from_its_app', lambda owner: True)
 
         gaps = coverage._enforcement_gaps(kid)
 
@@ -397,6 +397,40 @@ class TestWhatTheModelsOwnAppHasToDoWithIt:
 
     @staticmethod
     @isolate_apps('tests.testapp')
+    def _explicit_pk_with_a_child():
+        from django.db.models import AutoField, OneToOneField  # noqa: PLC0415
+
+        class Root(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Kid(Root):
+            code = AutoField(primary_key=True)
+            root_link = OneToOneField(Root, on_delete=models.CASCADE, parent_link=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Child(SetarModel):
+            kid = models.ForeignKey(Kid, on_delete=models.CASCADE, related_name='children')
+
+            class Meta:
+                app_label = 'testapp'
+
+        return Kid
+
+    def test_a_key_cascading_into_it_makes_the_gap_blocking(self):
+        """The key stores ``Kid.code`` and the rule on the root's table compares it with the
+        root's ``id`` (#64): the stamp is right, the cascade out of it archives the wrong
+        children. ``soft_delete()`` there silently hid a sibling's rows, so it must raise."""
+        kid = self._explicit_pk_with_a_child()
+
+        gaps = coverage._enforcement_gaps(kid)
+
+        assert [g.blocking for g in gaps] == [True]
+
+    @staticmethod
+    @isolate_apps('tests.testapp')
     def _grandchild_over_an_intermediate_with_its_own_key():
         from django.db.models import AutoField, OneToOneField  # noqa: PLC0415
 
@@ -429,7 +463,7 @@ class TestWhatTheModelsOwnAppHasToDoWithIt:
         """An early return let a non-blocking locality gap hide a blocking one behind it."""
         kid = self._explicit_pk()
         monkeypatch.setattr(coverage, 'migrates_to_postgresql', lambda model: False)
-        monkeypatch.setattr(coverage, '_has_inbound_cascade_keys', lambda owner: False)
+        monkeypatch.setattr(coverage, '_needs_rules_from_its_app', lambda owner: False)
 
         gaps = coverage._enforcement_gaps(kid)
 
@@ -444,26 +478,26 @@ class TestWhichKeysCascadeIntoAModel:
     pointing at the model itself makes that model's own app matter."""
 
     def test_a_cascade_key_counts(self):
-        assert coverage._has_inbound_cascade_keys(Offer)
+        assert coverage._needs_rules_from_its_app(Offer)
 
     def test_a_key_that_does_not_cascade_does_not(self):
         """``Stagehand``'s only inbound key is ``DO_NOTHING``."""
         from tests.testapp.models import Stagehand  # noqa: PLC0415
 
-        assert not coverage._has_inbound_cascade_keys(Stagehand)
+        assert not coverage._needs_rules_from_its_app(Stagehand)
 
     def test_set_null_does_not(self):
         from tests.crossapp_retire_child.models import Heir  # noqa: PLC0415
 
-        assert not coverage._has_inbound_cascade_keys(Heir)
+        assert not coverage._needs_rules_from_its_app(Heir)
 
     def test_a_parent_link_does_not(self):
         """``Condition`` is pointed at by its descendants' parent links alone; the one ordinary
         key (``ConditionNote``) aims at ``QuantityCondition``, which is the one that counts."""
         from tests.testapp.models import Condition  # noqa: PLC0415
 
-        assert not coverage._has_inbound_cascade_keys(Condition)
-        assert coverage._has_inbound_cascade_keys(QuantityCondition)
+        assert not coverage._needs_rules_from_its_app(Condition)
+        assert coverage._needs_rules_from_its_app(QuantityCondition)
 
     @staticmethod
     @isolate_apps('tests.testapp')
@@ -488,8 +522,8 @@ class TestWhichKeysCascadeIntoAModel:
         """``Booking -> Root``'s rule is written from ``Root``'s app, whatever ``Kid`` is."""
         root, kid = self._an_inherited_key()
 
-        assert coverage._has_inbound_cascade_keys(root)
-        assert not coverage._has_inbound_cascade_keys(kid)
+        assert coverage._needs_rules_from_its_app(root)
+        assert not coverage._needs_rules_from_its_app(kid)
 
     def test_a_set_null_childless_child_does_not_refuse_soft_delete(self, monkeypatch):
         """The real shape: a non-local descendant whose only inbound key is ``SET_NULL``."""
@@ -501,3 +535,77 @@ class TestWhichKeysCascadeIntoAModel:
         gaps = coverage._enforcement_gaps(Heir)
 
         assert gaps and not [g for g in gaps if g.blocking]
+
+
+class TestAnOwnedRuleIsWrittenFromItsOwnersApp:
+    """An ``OwningForeignKey`` rule fires on the declaring model's table, from that model's own
+    app pass, though no ``CASCADE`` key points at the declarer."""
+
+    @staticmethod
+    @isolate_apps('tests.testapp')
+    def _an_owner():
+        from guitars.models import OwningForeignKey  # noqa: PLC0415
+
+        class Target(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Owner(SetarModel):
+            target = OwningForeignKey(Target, on_delete=models.DO_NOTHING, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        return Owner
+
+    def test_it_counts_as_needing_a_rule_from_its_app(self):
+        assert coverage._needs_rules_from_its_app(self._an_owner())
+
+    def test_a_non_local_owner_leaves_its_target_live_so_it_blocks(self, monkeypatch):
+        owner = self._an_owner()
+        monkeypatch.setattr(coverage, 'is_local', lambda config: False)
+
+        gaps = coverage._enforcement_gaps(owner)
+
+        assert [g.blocking for g in gaps] == [True]
+
+
+class TestTheInboundTestsRemainingExclusions:
+    def test_a_referrer_with_no_deleted_at_carries_no_rule(self):
+        """``Band``'s many-to-many through row has no ``_deleted_at``; it is removed in Python."""
+        from tests.testapp.models import Genre  # noqa: PLC0415
+
+        assert not coverage._needs_rules_from_its_app(Genre)
+
+    @staticmethod
+    @isolate_apps('tests.testapp')
+    def _a_key_to_a_proxy():
+        class Root(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class RootProxy(Root):
+            class Meta:
+                app_label = 'testapp'
+                proxy = True
+
+        class Booking(SetarModel):
+            root = models.ForeignKey(RootProxy, on_delete=models.CASCADE, related_name='+')
+
+            class Meta:
+                app_label = 'testapp'
+
+        return Root
+
+    def test_a_key_aimed_at_a_proxy_counts_for_its_concrete_model(self):
+        assert coverage._needs_rules_from_its_app(self._a_key_to_a_proxy())
+
+    def test_each_chain_owner_is_asked_for_itself_not_the_model(self, monkeypatch):
+        """Only ``Mid`` has rules written from its app; asking about ``Kid`` instead missed it."""
+        _root, mid, kid = TestWhatTheModelsOwnAppHasToDoWithIt._an_intermediate()
+        monkeypatch.setattr(coverage, 'migrates_to_postgresql', lambda model: model is not mid)
+        monkeypatch.setattr(coverage, '_needs_rules_from_its_app', lambda owner: owner is mid)
+
+        gaps = coverage._enforcement_gaps(kid)
+
+        assert [g.blocking for g in gaps] == [True]

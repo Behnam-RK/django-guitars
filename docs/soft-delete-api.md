@@ -12,7 +12,7 @@ One `UPDATE … SET _deleted_at = NOW() WHERE _deleted_at IS NULL`; the rules ca
 
 - **Returns the number of rows stamped**, not `.delete()`'s tuple. `0` for rows already archived, which keep their stamp.
 - **Skips Python.** No `on_delete` (`SET_NULL`, `PROTECT`), no `pre_delete`/`post_delete`, and plain children (no `_deleted_at`, such as an M2M through row) are left in place. Keep `.delete()` where you need those.
-- **Raises `SoftDeleteUnsupportedError`** where a rule-only archive would leave rows **live** under an archived parent: a `GenericRelation`, a cycle-refused or unenforced edge, a model routed off PostgreSQL. It names the edge.
+- **Raises `SoftDeleteUnsupportedError`** where a rule-only archive would leave rows **live** under an archived parent: a `GenericRelation`, a cycle-refused or unenforced edge, a model routed off PostgreSQL, or a non-PostgreSQL connection (the cascade is PostgreSQL rules). It names the edge or the connection.
 - `Model.soft_delete()` keeps the pk and sets `_deleted_at`/`_updated_at` from the database (one `SELECT` after the `UPDATE`). `asoft_delete()` twins both.
 - Unreachable from a manager (`Model.objects.soft_delete()` would archive the table), and denied on an unscoped tenant queryset as `update()` is.
 

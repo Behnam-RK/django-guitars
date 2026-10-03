@@ -315,7 +315,12 @@ class SoftDeleteUnsupportedError(Exception):
     in SQL would leave rows **live** under an archived parent. Use ``.delete()``."""
 
 
-def _require_covered(model: type[Model]) -> None:
+def _require_covered(model: type[Model], using: str) -> None:
+    if connections[using].vendor != 'postgresql':
+        raise SoftDeleteUnsupportedError(
+            f'{model._meta.label}.soft_delete() on {using!r} ({connections[using].vendor}): the '
+            f'cascade is PostgreSQL rules, so only the matched rows would be archived.'
+        )
     blocking = [gap for gap in cascade_plan(model)[0] if gap.blocking]
     if blocking:
         listed = '; '.join(f'{gap.edge} ({gap.reason})' for gap in blocking)
@@ -323,6 +328,13 @@ def _require_covered(model: type[Model]) -> None:
             f'{model._meta.label}.soft_delete() would leave rows live under an archived parent: '
             f'{listed}. Use .delete(), which applies them in Python.'
         )
+
+
+def _write_alias(queryset: QuerySet) -> str:
+    """The alias a write goes to: ``queryset.db`` is the read alias until ``_for_write`` is set."""
+    chained = queryset._chain()  # ty: ignore[unresolved-attribute]
+    chained._for_write = True
+    return chained.db
 
 
 def _fast_delete_applies(model: type[Model], using: str) -> bool:
@@ -335,8 +347,11 @@ def _fast_delete_applies(model: type[Model], using: str) -> bool:
     gaps, reached = cascade_plan(model)
     if gaps:
         return False
+    # *model* too, not only what the walk reached: it resolves a proxy to its concrete model, but
+    # the collector signals with the class of the instances it loaded, which is the proxy.
     return not any(
-        pre_delete.has_listeners(sender) or post_delete.has_listeners(sender) for sender in reached
+        pre_delete.has_listeners(sender) or post_delete.has_listeners(sender)
+        for sender in (model, *reached)
     )
 
 
@@ -351,11 +366,11 @@ class LiveQuerySet(QuerySet):
         """Archive the matching live rows in one ``UPDATE``; the rules cascade it. Returns the
         number stamped. Skips ``on_delete`` and the delete signals, and raises
         ``SoftDeleteUnsupportedError`` where the rules alone leave rows live. See ``docs/soft-delete-api.md``."""
-        _require_covered(self.model)
+        _require_covered(self.model, _write_alias(self))
         return self.filter(_deleted_at__isnull=True).update(_deleted_at=Now())
 
     async def asoft_delete(self) -> int:
-        _require_covered(self.model)
+        _require_covered(self.model, _write_alias(self))
         return await self.filter(_deleted_at__isnull=True).aupdate(_deleted_at=Now())
 
     # Never reachable from a manager: `Model.objects.soft_delete()` would archive the table.
@@ -365,7 +380,7 @@ class LiveQuerySet(QuerySet):
     def delete(self):
         """Django's ``delete()``, as one ``DELETE`` the rules rewrite where nothing is lost by it
         (``_fast_delete_applies``). Same return value, same guards, same end state."""
-        if not _fast_delete_applies(self.model, self.db):
+        if not _fast_delete_applies(self.model, _write_alias(self)):
             return super().delete()
         # Django's own guards, ahead of the shortcut: `.update()` raises differently on these.
         self._not_support_combined_queries('delete')  # ty: ignore[unresolved-attribute]
@@ -561,8 +576,8 @@ class SoftDeletableModel(Model):
                 f"{self.__class__.__name__} object can't be soft-deleted because its "
                 f'{self._meta.pk.attname} attribute is set to None.'
             )
-        _require_covered(type(self))
         using = using or router.db_for_write(self.__class__, instance=self)
+        _require_covered(type(self), using)
         stamped = (
             type(self)
             ._base_manager.using(using)

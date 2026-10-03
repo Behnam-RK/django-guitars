@@ -8,7 +8,7 @@ import pytest
 from asgiref.sync import async_to_sync
 from django.db import connection
 from django.db.models.signals import pre_delete
-from django.test.utils import CaptureQueriesContext
+from django.test.utils import CaptureQueriesContext, isolate_apps
 
 from zeal import zeal_ignore
 
@@ -150,6 +150,79 @@ class TestItStandsAside:
             pre_delete.disconnect(receiver, sender=Condition)
 
         assert len(seen) == 1
+
+
+@pytest.mark.django_db
+class TestAReceiverOnAProxy:
+    """The collector sends a signal with the class of the instances it loaded, so a receiver
+    connected for a proxy of the model being deleted is as much a reason to decline as one on
+    the model itself -- and the registry walk resolves a proxy to its concrete model."""
+
+    @staticmethod
+    @isolate_apps('tests.testapp')
+    def _delete_through_a_proxy(how, settings):
+        settings.GUITARS_DELETE_FAST_PATH = True
+
+        class OfferProxy(Offer):
+            class Meta:
+                proxy = True
+                app_label = 'testapp'
+
+        offer, *_ = build(1)
+        seen: list[str] = []
+
+        def receiver(sender, instance, **kwargs):
+            seen.append(sender.__name__)
+
+        pre_delete.connect(receiver, sender=OfferProxy)
+        try:
+            if how == 'queryset':
+                OfferProxy.objects.filter(pk=offer.pk).delete()
+            else:
+                OfferProxy.objects.get(pk=offer.pk).delete()
+        finally:
+            pre_delete.disconnect(receiver, sender=OfferProxy)
+        return seen
+
+    @pytest.mark.parametrize('how', ['queryset', 'instance'])
+    def test_it_is_called(self, settings, how):
+        assert self._delete_through_a_proxy(how, settings) == ['OfferProxy']
+
+
+class _ReadElsewhere:
+    """Reads go to the non-PostgreSQL alias, writes to ``default``: the backend that matters to
+    ``soft_delete()`` and ``delete()`` is the one they write to."""
+
+    def db_for_read(self, model, **hints):
+        return 'nonpg'
+
+    def db_for_write(self, model, **hints):
+        return 'default'
+
+
+@pytest.mark.django_db
+class TestTheBackendIsTheOneWrittenTo:
+    @pytest.fixture(autouse=True)
+    def _route_reads_elsewhere(self, settings):
+        settings.DATABASE_ROUTERS = ['tests.test_delete_fast_path._ReadElsewhere']
+
+    def test_soft_delete_is_allowed(self):
+        offer, *_ = build(1)
+
+        assert Offer.objects.filter(pk=offer.pk).soft_delete() == 1
+
+    def test_the_delete_fast_path_still_engages(self, settings):
+        settings.GUITARS_DELETE_FAST_PATH = True
+        offer, *_ = build(1)
+
+        assert statements(lambda: Offer.objects.filter(pk=offer.pk).delete()) == 1
+
+
+def test_soft_delete_refuses_a_non_postgresql_alias():
+    """The rules are PostgreSQL DDL: elsewhere ``soft_delete()`` would stamp the matched rows and
+    cascade nothing. Raised before any query, so the alias needs no tables."""
+    with pytest.raises(SoftDeleteUnsupportedError, match='PostgreSQL'):
+        Offer.objects.using('nonpg').all().soft_delete()
 
 
 def test_a_non_postgresql_alias_never_takes_the_fast_path(settings):

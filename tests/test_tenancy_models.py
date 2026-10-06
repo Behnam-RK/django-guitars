@@ -5,6 +5,7 @@ every assertion also exercises a non-default field name. Two tenants throughout.
 from __future__ import annotations
 
 import pytest
+from django.core.exceptions import EmptyResultSet
 from django.db.utils import IntegrityError
 
 from guitars.tenancy import TenantScopeError, reporting, tenancy_bypassed, tenant
@@ -261,7 +262,7 @@ class TestWrites:
         with tenant(label=tenants.a):
             Review.objects.create(body='kept', release=tenants.release_a)
 
-        with tenant(label=[]), pytest.raises(Exception):  # noqa: B017, PT011
+        with tenant(label=[]), pytest.raises(EmptyResultSet):
             tenants.release_a.hard_delete()
 
         with tenancy_bypassed():

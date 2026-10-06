@@ -14,7 +14,7 @@ Full history and diffs: [GitHub releases](https://github.com/Behnam-RK/django-gu
 
 ### Added
 
-- **Two decision records for 2.14.3's `hard_delete()` changes.** [ADR 0030](docs/adr/0030-queryset-hard-delete-refuses-what-delete-refuses.md): queryset `hard_delete()` refuses exactly what `delete()` refuses, in both forms, including shapes that did no harm before. [ADR 0031](docs/adr/0031-hard-delete-resolves-its-alias-as-delete-does.md): `hard_delete()` resolves its database as `delete()` does. Documentation only; no code changes.
+- **Two decision records for 2.14.3's `hard_delete()` changes.** [ADR 0030](docs/adr/0030-queryset-hard-delete-refuses-what-delete-refuses.md): queryset `hard_delete()` refuses exactly what `delete()` refuses, in both forms, including shapes that did no harm before. [ADR 0031](docs/adr/0031-hard-delete-resolves-its-alias-as-delete-does.md): `hard_delete()` resolves its database as `delete()` does. Documentation and comments only; no behaviour changes.
 
 ## [2.14.3] - 2026-10-03
 

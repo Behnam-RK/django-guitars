@@ -6,7 +6,7 @@
 
 ## Context
 
-The plain form of queryset `hard_delete()` compiled `self.query` as a `DeleteQuery`. A `DELETE` has no `LIMIT`, `OFFSET`, combinator or `DISTINCT ON`, so the compile dropped them: `order_by('pk')[:1].hard_delete()` permanently removed every row the filter matched, and a combined queryset kept one operand's filter: a `union()` removed its first half only, an `intersection()` or `difference()` more than it matched. The MTI form read its keys with `values_list('pk')` first, so it honoured every one of those shapes, and a plain `.values()` changed nothing a `DELETE` reads. Found in round 5 of the review loop on #69.
+The plain form of queryset `hard_delete()` compiled `self.query` as a `DeleteQuery`. A `DELETE` has no `LIMIT`, `OFFSET`, combinator or `DISTINCT ON`, so the compile dropped them: `order_by('pk')[:1].hard_delete()` permanently removed every row the filter matched, and a combined queryset kept only its first operand's filter: a `union()` removed its first half only, an `intersection()` or `difference()` more than it matched. The MTI form read its keys with `values_list('pk')` first, so it honoured every one of those shapes, and a plain `.values()` changed nothing a `DELETE` reads. Found in round 5 of the review loop on #69.
 
 ## Decision
 

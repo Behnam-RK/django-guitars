@@ -528,3 +528,27 @@ class TestAnInstanceNoDatabaseHasLoaded:
 
         left = dict(Setlist._all_objects.using('secondary').values_list('title', '_deleted_at'))
         assert left == {'unrelated': None}
+
+
+class _WritesToSecondary:
+    def db_for_write(self, model, **hints):
+        return 'secondary'
+
+
+@pytest.mark.django_db(databases=['default', 'secondary'])
+def test_a_router_outranks_the_alias_an_instance_was_read_from(settings):
+    """``delete()`` asks the router before ``_state.db``, so Phase 1 archives where the router
+    writes; the walk after it must remove there too, not where the instance was read."""
+    for alias in ('default', 'secondary'):
+        Setlist.objects.using(alias).create(pk=9001, title='root')
+        Setlist.objects.using(alias).create(pk=9002, title='child', parent_id=9001)
+    loaded = Setlist._all_objects.using('default').get(pk=9001)
+    settings.DATABASE_ROUTERS = ['tests.test_hard_delete_depth._WritesToSecondary']
+
+    loaded.hard_delete()
+
+    assert not Setlist._all_objects.using('secondary').exists()
+    assert dict(Setlist._all_objects.using('default').values_list('title', '_deleted_at')) == {
+        'root': None,
+        'child': None,
+    }

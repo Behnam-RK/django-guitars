@@ -8,7 +8,7 @@
 
 `hard_delete()` is two phases in one transaction: Phase 1 is the instance's own `delete()`, which archives through the rules, and Phase 2 reads the tree and removes it under a transaction-local switch. Through 2.14.2 the two phases could pick different databases:
 
-- the instance form used `_state.db`, while Phase 1's `delete()` asks `router.db_for_write(instance=self)`, which consults the router **before** `_state.db`. An instance read from one alias, under a router writing to another, was archived there and then removed with its tree where it was read. An instance built as `Model(pk=...)` has no `_state.db`, so its reads went to the read alias;
+- the instance form used `_state.db`, while Phase 1's `delete()` asks `router.db_for_write(instance=self)`, which consults the router **before** `_state.db`. An instance read from one alias, under a router writing to another, was archived there and then removed with its tree where it was read. An instance built as `Model(pk=...)` has no `_state.db`, so its walk read and removed its tree on the read alias;
 - the queryset forms used `self.db`, the **read** alias, and asked the router for it again for the `atomic()`. A split router had rows deleted on the replica; a router answering differently on each call left the switch's cursor in autocommit, so the rows were archived rather than removed.
 
 Found across rounds 2–4 of the review loop on #69, the first while #69 itself briefly made the split worse.

@@ -714,7 +714,7 @@ class ConditionNote(SetarModel):
 
 class Ledger(SetarModel):
     """Two self-referential ``CASCADE`` keys on one table: a subtree is reached through either,
-    so following them takes a fixpoint rather than one recursion (``hard_delete()``, #55)."""
+    so one recursion must follow both keys at every level (``hard_delete()``, #55)."""
 
     name = CharField(max_length=100)
     parent = ForeignKey('self', on_delete=CASCADE, null=True, blank=True, related_name='children')

@@ -582,6 +582,9 @@ class HardDeletableQuerySet(LiveQuerySet):
         """Permanently remove matching rows. For an MTI model, also removes every other
         table in the chain by shared PK, regardless of level. Blunt: unlike instance
         ``hard_delete()``, this does not walk reverse-FK cascade children."""
+        # First: compiled as a ``DELETE``, a slice, a union or ``DISTINCT ON`` is dropped, and
+        # every row the narrower queryset left out would go too.
+        _guard_bulk(self, 'hard_delete')
         model = self.model
         if not _is_mti_model(model):
             return self._hard_delete_own_table()

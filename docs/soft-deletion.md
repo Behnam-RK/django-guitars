@@ -71,6 +71,7 @@ nothing back: no key column, so no constraint to fail.
 
 Queryset-level `hard_delete()` is blunter: it deletes matched rows (and, for
 MTI, the whole chain) but walks no reverse-FK children and no owned relations.
+It refuses a sliced, combined, `distinct(*fields)` or `values()` queryset, as `delete()` does.
 
 ## Managers and the base manager
 

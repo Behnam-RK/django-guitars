@@ -3,7 +3,7 @@
 import contextlib
 
 import pytest
-from django.db import transaction
+from django.db import NotSupportedError, transaction
 from django.db.backends.utils import CursorWrapper
 
 from guitars.models.soft_deletion import (
@@ -133,6 +133,30 @@ def test_queryset_hard_delete_removes_rows():
     Band._all_objects.all().hard_delete()
 
     assert Band._all_objects.count() == 0
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize('model', [Band, Orchestra], ids=['plain', 'mti'])
+@pytest.mark.parametrize(
+    ('shape', 'message'),
+    [
+        (lambda qs: qs.order_by('pk')[:1], "Cannot use 'limit' or 'offset'"),
+        (lambda qs: qs.filter(name='a').union(qs.filter(name='b')), r'after union\(\)'),
+        (lambda qs: qs.order_by('name', 'pk').distinct('name'), r'distinct\(\*fields\)'),
+        (lambda qs: qs.values('name'), r'\.values\(\)'),
+    ],
+    ids=['sliced', 'combined', 'distinct-on', 'values'],
+)
+def test_queryset_hard_delete_refuses_what_delete_refuses(model, shape, message):
+    """The plain form compiles ``self.query`` as a ``DELETE``, which drops a slice, a union and
+    ``DISTINCT ON``: it removed every row a narrower queryset left out. Django's guards, first."""
+    for name in ('a', 'a', 'b'):
+        model.objects.create(name=name)
+
+    with pytest.raises((TypeError, NotSupportedError), match=message):
+        shape(model._all_objects.all()).hard_delete()
+
+    assert model._all_objects.count() == 3
 
 
 @pytest.mark.django_db(transaction=True)

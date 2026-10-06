@@ -586,13 +586,16 @@ class HardDeletableQuerySet(LiveQuerySet):
         if not _is_mti_model(model):
             return self._hard_delete_own_table()
 
-        pks = list(self.values_list('pk', flat=True))
+        # The write alias, once: ``self.db`` is the read alias and is asked of the router afresh
+        # each time, so the switch and the ``DELETE`` could otherwise land on different ones.
+        using = _write_alias(self)
+        pks = list(self.using(using).values_list('pk', flat=True))
         if not pks:
             return None
         placeholders = ', '.join(['%s'] * len(pks))
-        db_connection = connections[self.db]
+        db_connection = connections[using]
         quote = db_connection.ops.quote_name
-        with _hard_deletion_on(self.db), db_connection.cursor() as cursor:
+        with _hard_deletion_on(using), db_connection.cursor() as cursor:
             for table, pk_column in _mti_table_chain(model):
                 # Identifiers come from model._meta (trusted); PK values are parameterized.
                 sql_stmt = (
@@ -608,9 +611,10 @@ class HardDeletableQuerySet(LiveQuerySet):
     def _hard_delete_own_table(self):
         """Delete only this queryset's own-table rows, never an ancestor table's: the non-MTI
         queryset ``hard_delete``. Its own switch and ``atomic()``, or autocommit lets the
-        switch expire before the DELETE it unlocks."""
-        with _hard_deletion_on(self.db):
-            return self._delete_own_table_rows()
+        switch expire before the DELETE it unlocks. Both on the write alias, resolved once."""
+        using = _write_alias(self)
+        with _hard_deletion_on(using):
+            return self.using(using)._delete_own_table_rows()
 
     def _delete_own_table_rows(self):
         """The ``DELETE`` alone, for a caller that already holds the switch (see

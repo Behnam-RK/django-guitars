@@ -10,6 +10,7 @@ from django.test.utils import CaptureQueriesContext, isolate_apps
 
 from tests.testapp.models import (
     Clause,
+    Condition,
     Offer,
     QuantityCondition,
     Setlist,
@@ -552,3 +553,69 @@ def test_a_router_outranks_the_alias_an_instance_was_read_from(settings):
         'root': None,
         'child': None,
     }
+
+
+class _ReadsFromSecondary:
+    def db_for_read(self, model, **hints):
+        return 'secondary'
+
+    def db_for_write(self, model, **hints):
+        return 'default'
+
+
+@pytest.mark.django_db(databases=['default', 'secondary'])
+class TestAQuerysetHardDeleteUnderASplitRouter:
+    """A queryset's ``db`` is its read alias until it is written through. ``hard_delete()`` is a
+    write: it removes where the router writes, and takes the switch there, as ``delete()`` does."""
+
+    @pytest.fixture(autouse=True)
+    def _split(self, settings):
+        settings.DATABASE_ROUTERS = ['tests.test_hard_delete_depth._ReadsFromSecondary']
+
+    def test_a_plain_model_is_removed_where_it_is_written(self):
+        offer = Offer.objects.using('default').create(name='o')
+
+        Offer._all_objects.filter(pk=offer.pk).hard_delete()
+
+        assert not Offer._all_objects.using('default').filter(pk=offer.pk).exists()
+
+    def test_an_mti_chain_is_removed_where_it_is_written(self):
+        offer, _tier, _clause, (condition, *_) = _tree(conditions=1)
+
+        QuantityCondition._all_objects.filter(pk=condition.pk).hard_delete()
+
+        assert not QuantityCondition._all_objects.using('default').filter(pk=condition.pk).exists()
+        assert not Condition._all_objects.using('default').filter(pk=condition.pk).exists()
+
+
+def test_the_owned_rule_graph_is_redone_only_for_a_model_outside_the_registry(monkeypatch):
+    """Computed once for the walk; a claimed model the registry does not hold was not in that
+    sweep, so its first appearance must redo it."""
+    from guitars.models import soft_deletion  # noqa: PLC0415
+
+    calls = []
+    monkeypatch.setattr(
+        soft_deletion, 'rule_update_cycle_edges', lambda swept: calls.append(swept) or set()
+    )
+    monkeypatch.setattr(soft_deletion, 'owned_tenancy_refusals', lambda swept: {})
+
+    @isolate_apps('tests.testapp')
+    def unregistered():
+        from guitars.models import SetarModel  # noqa: PLC0415
+
+        class Stray(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        return Stray
+
+    stray = unregistered()
+    scan = soft_deletion._OwnedScan()
+    scan.graph({Offer: {1}})
+    scan.graph({Offer: {1}, Tier: {2}})
+    assert len(calls) == 1
+    scan.graph({Offer: {1}, stray: {3}})
+    assert len(calls) == 2
+    assert stray in calls[-1]
+    scan.graph({Offer: {1}, stray: {3}, Tier: {4}})
+    assert len(calls) == 2

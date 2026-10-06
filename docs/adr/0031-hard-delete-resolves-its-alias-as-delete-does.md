@@ -15,18 +15,19 @@ Found across rounds 2–4 of the review loop on #69, the first while #69 itself 
 
 ## Decision
 
-- The instance form resolves `using = router.db_for_write(self.__class__, instance=self)` once, the same call `delete()` makes, and every read, the switch and every `DELETE` of the walk use it. Phase 1 still calls `self.delete()` with no arguments, so an override without a `using` parameter keeps working.
+- The instance form resolves `using = router.db_for_write(self.__class__, instance=self)`, the same call `delete()` makes, and every read, the switch and every `DELETE` of Phase 2 use it. Phase 1 still calls `self.delete()` with no arguments, which asks the router again, so an override without a `using` parameter keeps working.
 - The queryset forms resolve `_write_alias(self)` once, as `delete()`'s fast path and `soft_delete()` do; an explicit `.using()` still wins. The MTI form reads its keys there too.
 
 ## Why
 
-- **One database per walk.** A walk whose phases land on different aliases archives in one place and removes in another, and nothing raises. Resolving once removes the question.
+- **One database per walk.** A walk whose phases land on different aliases archives in one place and removes in another, and nothing raises. Resolving the same way removes the question for any router that answers the same twice.
 - **`delete()`'s answer, not a new one.** Phase 1 *is* `delete()`, so any other resolution can disagree with it. The router-first order is Django's own documented precedence.
 - **Rejected: `_state.db` first.** It keeps a loaded instance where it was read, but only for Phase 2; Phase 1 would still go where the router says.
+- **Strongest objection.** Phase 1 asks the router a second time, so a write router answering differently between the two calls still splits the walk: an alternating router had an unrelated row sharing the pk archived on the other alias. Passing `using` to `self.delete()` would close that and break every `delete()` override taking no `using`. Write routers are expected to answer the same for the same model, so the override wins.
 
 ## Consequences
 
-**Accepted costs.** Under a router, an instance loaded from one alias is now hard-deleted where the router writes, not where it was read. That matches `delete()`, but it is a change for anyone who relied on the read alias. A queryset `hard_delete()` on a non-PostgreSQL write alias raises a raw `OperationalError` from `set_config`, not `SoftDeleteUnsupportedError`.
+**Accepted costs.** Under a router, an instance loaded from one alias is now hard-deleted where the router writes, not where it was read. That matches `delete()`, but it is a change for anyone who relied on the read alias.
 
 **Reversibility.** Going back would restore the split, a silent partial result. Without a router nothing changed: `db_for_write` falls back to `_state.db`, then `default`.
 

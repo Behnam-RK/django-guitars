@@ -5,6 +5,7 @@ from typing import cast
 from asgiref.sync import sync_to_async
 from django.apps import apps as django_apps
 from django.conf import settings
+from django.core.exceptions import EmptyResultSet
 from django.db import DEFAULT_DB_ALIAS, connections, router, transaction
 from django.db.models import (
     CASCADE,
@@ -625,7 +626,10 @@ class HardDeletableQuerySet(LiveQuerySet):
         with connections[self.db].cursor() as cursor:
             query = self.query.clone()
             query.__class__ = sql.DeleteQuery
-            compiled, params = query.sql_with_params()
+            try:
+                compiled, params = query.sql_with_params()
+            except EmptyResultSet:  # ``none()``, ``pk__in=[]``: matches nothing, so no SQL
+                return None
             return cursor.execute(compiled, params)
 
 

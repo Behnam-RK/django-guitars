@@ -159,6 +159,19 @@ def test_queryset_hard_delete_refuses_what_delete_refuses(model, shape, message)
     assert model._all_objects.count() == 3
 
 
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    'empty', [lambda qs: qs.none(), lambda qs: qs.filter(pk__in=[])], ids=['none', 'empty-in']
+)
+def test_queryset_hard_delete_on_a_queryset_matching_nothing_by_construction(empty):
+    """Django compiles such a ``WHERE`` to ``EmptyResultSet`` rather than SQL; the plain form
+    raised it where the MTI form and ``delete()`` return having removed nothing."""
+    Band.objects.create(name='kept')
+
+    assert empty(Band._all_objects.all()).hard_delete() is None
+    assert Band._all_objects.count() == 1
+
+
 @pytest.mark.django_db(transaction=True)
 def test_mti_queryset_hard_delete_no_op_on_empty_queryset():
     """The MTI branch of QuerySet.hard_delete short-circuits when nothing matches,

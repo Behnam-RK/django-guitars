@@ -37,3 +37,5 @@ New ADR? Start from [`template.md`](template.md).
 | [`0027`](0027-guc-cache-is-distrusted-not-keyed.md) | why the GUC cache drops the savepoint ids from its key and is distrusted after any transaction-ending statement instead, and why that scan is linear (2.11.1) |
 | [`0028`](0028-n-plus-one-guard-in-the-suite.md) | why every test runs under a repeated-lazy-load guard, and why the collector's own variants opt out by name rather than by allow-list |
 | [`0029`](0029-retiring-a-deleted-childs-revive-trigger.md) | why every trigger is retired with its key, why a deleted child is read off the migration graph, and why every retirement says `IF EXISTS` (2.13.0) |
+| [`0030`](0030-queryset-hard-delete-refuses-what-delete-refuses.md) | why queryset `hard_delete()` refuses a slice, a combined queryset, `distinct(*fields)` and `values()` in both forms, including shapes that did no harm before (2.14.3) |
+| [`0031`](0031-hard-delete-resolves-its-alias-as-delete-does.md) | why `hard_delete()` resolves its database as the `delete()` its Phase 1 calls does, the router first, and why Phase 1 still asks the router again (2.14.3) |

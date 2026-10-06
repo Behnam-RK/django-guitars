@@ -445,3 +445,86 @@ class TestWhichSelfKeysAreFollowedInOneQuery:
         )
 
         assert _self_cascade_fields(plain, None) == []
+
+    @staticmethod
+    @isolate_apps('tests.testapp')
+    def _other_shapes():
+        from django.db import models as dj_models  # noqa: PLC0415
+
+        from guitars.models import SetarModel  # noqa: PLC0415
+
+        class Pinned(SetarModel):
+            parent = dj_models.ForeignKey('self', on_delete=dj_models.DO_NOTHING, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Account(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Profile(SetarModel):
+            account = dj_models.OneToOneField(
+                Account, on_delete=dj_models.CASCADE, primary_key=True
+            )
+            parent = dj_models.ForeignKey('self', on_delete=dj_models.CASCADE, null=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        return Pinned, Profile
+
+    def test_a_key_that_does_not_cascade_is_not_followed(self):
+        """Followed, its referrers would be collected and removed with the row they point at."""
+        from guitars.models.soft_deletion import _self_cascade_fields  # noqa: PLC0415
+
+        pinned, _profile = self._other_shapes()
+
+        assert _self_cascade_fields(pinned, None) == []
+
+    def test_a_pk_that_is_a_key_keeps_the_level_walk(self):
+        """The ORM reads such a pk through its target's converters too, which the pk's own
+        ``get_db_converters`` does not list; raw SQL would return it unconverted."""
+        from guitars.models.soft_deletion import _self_cascade_fields  # noqa: PLC0415
+
+        _pinned, profile = self._other_shapes()
+
+        assert _self_cascade_fields(profile, None) == []
+
+
+class _ToSecondary:
+    def db_for_read(self, model, **hints):
+        return 'secondary'
+
+    def db_for_write(self, model, **hints):
+        return 'secondary'
+
+
+@pytest.mark.django_db(databases=['default', 'secondary'])
+class TestAnInstanceNoDatabaseHasLoaded:
+    """``Model(pk=...)`` has no ``_state.db``: every read, the switch and every ``DELETE`` must
+    land on the one alias the router writes to, as ``delete()`` resolves it."""
+
+    @pytest.fixture(autouse=True)
+    def _route_to_secondary(self, settings):
+        settings.DATABASE_ROUTERS = ['tests.test_hard_delete_depth._ToSecondary']
+
+    def test_its_tree_is_removed_where_it_lives(self):
+        offer = Offer.objects.using('secondary').create(name='o')
+        Tier.objects.using('secondary').create(offer=offer)
+
+        Offer(pk=offer.pk).hard_delete()
+
+        assert not Offer._all_objects.using('secondary').exists()
+        assert not Tier._all_objects.using('secondary').exists()
+
+    def test_a_subtree_on_another_database_is_not_read(self):
+        Setlist.objects.using('default').create(pk=9001, title='root')
+        Setlist.objects.using('default').create(pk=9002, title='child', parent_id=9001)
+        Setlist.objects.using('secondary').create(pk=9001, title='root')
+        Setlist.objects.using('secondary').create(pk=9002, title='unrelated')
+
+        Setlist(pk=9001).hard_delete()
+
+        left = dict(Setlist._all_objects.using('secondary').values_list('title', '_deleted_at'))
+        assert left == {'unrelated': None}

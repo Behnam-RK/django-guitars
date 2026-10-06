@@ -150,8 +150,10 @@ def _self_cascade_fields(model: type[Model], using: str | None) -> list[Field]:
     model and a key to the primary key. An MTI chain (each level a table, entered from its root)
     and a ``to_field`` key (matching no pk) keep the level-by-level walk."""
     # A pk with a converter would come back from raw SQL unconverted; keep the ORM's read for it.
+    # A pk that is itself a key is read through its target's converters too, so it is refused.
+    pk = model._meta.pk
     connection = connections[using or DEFAULT_DB_ALIAS]
-    if _is_mti_model(model) or model._meta.pk.get_db_converters(connection):
+    if _is_mti_model(model) or pk.is_relation or pk.get_db_converters(connection):
         return []
     return [
         cast('Field', relation.field)
@@ -604,9 +606,9 @@ class HardDeletableQuerySet(LiveQuerySet):
     hard_delete.queryset_only = True  # ty: ignore[unresolved-attribute]
 
     def _hard_delete_own_table(self):
-        """Delete only this queryset's own-table rows -- used by instance ``hard_delete`` and
-        by the MTI form, so this must never reach into ancestor tables. Its own switch and
-        ``atomic()``, or autocommit lets the switch expire before the DELETE it unlocks."""
+        """Delete only this queryset's own-table rows, never an ancestor table's: the non-MTI
+        queryset ``hard_delete``. Its own switch and ``atomic()``, or autocommit lets the
+        switch expire before the DELETE it unlocks."""
         with _hard_deletion_on(self.db):
             return self._delete_own_table_rows()
 
@@ -746,7 +748,9 @@ class SoftDeletableModel(Model):
         """Soft-delete first, then permanently remove this instance, its CASCADE-related rows,
         and whatever it owns -- see ``docs/soft-deletion.md``'s "Hard deletion". Children go
         before parents (CASCADE is Python-level); an owned row goes after its owner."""
-        using = self._state.db
+        # Resolved once, as ``delete()`` does: ``Model(pk=...)`` has no ``_state.db``, and the
+        # raw reads and the switch need the alias the routed ``DELETE``s land on.
+        using = self._state.db or router.db_for_write(self.__class__, instance=self)
         pk = self.pk  # save before Phase 1 resets self.pk to None
         # One (rows, order) group per ownership hop: the first this row and its
         # reverse-CASCADE children, each later one an owned row. Run in order, since an
@@ -877,7 +881,7 @@ class SoftDeletableModel(Model):
                     for model in model_order:
                         pks = list(to_delete[model])
                         # `_all_objects` is added dynamically by SoftDeletableModel subclasses, so a
-                        # static checker can't see it -- or `_hard_delete_own_table` on its queryset --
+                        # static checker can't see it -- or `_delete_own_table_rows` on its queryset --
                         # through the hasattr guard.
                         if hasattr(model, '_all_objects'):
                             # Own-table primitive: each MTI table is a separate ``model_order`` entry,
@@ -889,12 +893,10 @@ class SoftDeletableModel(Model):
                         # owned group runs no Collector, so an m2m through row of an owned row lands
                         # here for real -- add one to `tests/testapp` before trusting this path.
                         else:  # pragma: no cover - no testapp owned model carries an m2m
-                            # Read through ``_rows``, which no default manager can filter. With
-                            # the switch off for it: a receiver that deletes soft-deletable
-                            # rows must archive them, not remove them.
-                            with connections[using or DEFAULT_DB_ALIAS].cursor() as cursor:
+                            # Through ``_rows``, which no default manager filters, switched off: a
+                            # receiver deleting soft-deletable rows archives them. No ``finally``: a
+                            # failure rolls the walk back, and switching on in it would mask that.
+                            with connections[using].cursor() as cursor:
                                 cursor.execute(SWITCH_OFF_HARD_DELETION)
-                                try:
-                                    _rows(model, using).filter(pk__in=pks).delete()
-                                finally:
-                                    cursor.execute(SWITCH_ON_HARD_DELETION)
+                                _rows(model, using).filter(pk__in=pks).delete()
+                                cursor.execute(SWITCH_ON_HARD_DELETION)

@@ -10,6 +10,12 @@ Full history and diffs: [GitHub releases](https://github.com/Behnam-RK/django-gu
 
 ## [Unreleased]
 
+## [2.14.4] - 2026-10-07
+
+### Added
+
+- **Two decision records for 2.14.3's `hard_delete()` changes.** [ADR 0030](docs/adr/0030-queryset-hard-delete-refuses-what-delete-refuses.md): queryset `hard_delete()` refuses exactly what `delete()` refuses, in both forms, including shapes that did no harm before. [ADR 0031](docs/adr/0031-hard-delete-resolves-its-alias-as-delete-does.md): `hard_delete()` resolves its database once, as `delete()` does. Documentation only; no code changes.
+
 ## [2.14.3] - 2026-10-03
 
 ### Changed
@@ -386,7 +392,8 @@ First stable release. **BREAKING:** the instrument ladder shifted down one rung 
 
 - Added: initial release — `SetarModel`, `GuitarModel`, `SoftDeletableModel`, `DisableSignals`, `makeguitarmigrations`.
 
-[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.14.3...HEAD
+[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.14.4...HEAD
+[2.14.4]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.14.4
 [2.14.3]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.14.3
 [2.14.2]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.14.2
 [2.14.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.14.1

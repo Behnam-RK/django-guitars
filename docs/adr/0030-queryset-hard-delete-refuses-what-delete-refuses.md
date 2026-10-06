@@ -6,7 +6,7 @@
 
 ## Context
 
-The plain form of queryset `hard_delete()` compiled `self.query` as a `DeleteQuery`. A `DELETE` has no `LIMIT`, `OFFSET`, combinator or `DISTINCT ON`, so the compile dropped them: `order_by('pk')[:1].hard_delete()` permanently removed every row the filter matched, and a `union()` removed its first half only. The MTI form read its keys with `values_list('pk')` first, so it honoured every one of those shapes, and a plain `.values()` changed nothing a `DELETE` reads. Found in round 5 of the review loop on #69.
+The plain form of queryset `hard_delete()` compiled `self.query` as a `DeleteQuery`. A `DELETE` has no `LIMIT`, `OFFSET`, combinator or `DISTINCT ON`, so the compile dropped them: `order_by('pk')[:1].hard_delete()` permanently removed every row the filter matched, and a combined queryset kept one operand's filter: a `union()` removed its first half only, an `intersection()` or `difference()` more than it matched. The MTI form read its keys with `values_list('pk')` first, so it honoured every one of those shapes, and a plain `.values()` changed nothing a `DELETE` reads. Found in round 5 of the review loop on #69.
 
 ## Decision
 
@@ -15,7 +15,7 @@ Both forms run `_guard_bulk(self, 'hard_delete')` first and refuse exactly the f
 ## Why
 
 - **One rule.** `delete()`, `soft_delete()` and now `hard_delete()` answer the same question about a queryset the same way. A refusal that depends on the form (plain or MTI) or on which of the four shapes is in play is a rule a reader has to look up, for the one operation that cannot be undone.
-- **Rejected: refuse only what lost data.** Refusing a slice, a union and `distinct(*fields)` in the plain form alone would have kept 2.14.2's working shapes working. It leaves the two forms disagreeing with each other and with `delete()`, and a model gaining or losing a concrete parent would silently move a queryset from allowed to refused.
+- **Rejected: refuse only what lost data.** Refusing a slice, a combined queryset and `distinct(*fields)` in the plain form alone would have kept 2.14.2's working shapes working. It leaves the two forms disagreeing with each other and with `delete()`, and a model gaining or losing a concrete parent would silently move a queryset from allowed to refused.
 - **Rejected: honour the shapes.** Reading the keys first, as the MTI form does, would make every shape work. It costs a read on the common path, and a sliced permanent delete is rare enough that refusing it is the safer default.
 - **Strongest objection.** It refuses shapes that were safe, in a patch release: a consumer slicing an MTI queryset before a permanent delete now gets an error instead of the delete it asked for. Accepted because no known consumer does, and loosening later breaks nobody.
 

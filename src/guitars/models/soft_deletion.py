@@ -761,8 +761,8 @@ class SoftDeletableModel(Model):
         """Soft-delete first, then permanently remove this instance, its CASCADE-related rows,
         and whatever it owns -- see ``docs/soft-deletion.md``'s "Hard deletion". Children go
         before parents (CASCADE is Python-level); an owned row goes after its owner."""
-        # Resolved once, exactly as Phase 1's ``delete()`` resolves it -- the router before
-        # ``_state.db``, which ``Model(pk=...)`` lacks -- so every phase lands on one alias.
+        # Resolved as Phase 1's ``delete()`` resolves it -- the router before ``_state.db``, which
+        # ``Model(pk=...)`` lacks -- so both phases land on one alias for a consistent router.
         using = router.db_for_write(self.__class__, instance=self)
         pk = self.pk  # save before Phase 1 resets self.pk to None
         # One (rows, order) group per ownership hop: the first this row and its

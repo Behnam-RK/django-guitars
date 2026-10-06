@@ -23,7 +23,7 @@ Found across rounds 2–4 of the review loop on #69, the first while #69 itself 
 - **One database per walk.** A walk whose phases land on different aliases archives in one place and removes in another, and nothing raises. Resolving the same way removes the question for any router that answers the same twice.
 - **`delete()`'s answer, not a new one.** Phase 1 *is* `delete()`, so any other resolution can disagree with it. The router-first order is Django's own documented precedence.
 - **Rejected: `_state.db` first.** It keeps a loaded instance where it was read, but only for Phase 2; Phase 1 would still go where the router says.
-- **Strongest objection.** Phase 1 asks the router a second time, so a write router answering differently between the two calls still splits the walk: an alternating router had an unrelated row sharing the pk archived on the other alias. Passing `using` to `self.delete()` would close that and break every `delete()` override taking no `using`. Write routers are expected to answer the same for the same model, so the override wins.
+- **Strongest objection.** Phase 1 asks the router a second time, so a write router answering differently between the two calls still splits the walk: an alternating router had an unrelated row sharing the pk archived on the other alias. Passing `using` to `self.delete()` would close that and break every `delete()` override taking no `using`. Write routers are expected to answer the same question the same way, as Django's own `QuerySet.update()` assumes when it asks twice, so the override wins.
 
 ## Consequences
 

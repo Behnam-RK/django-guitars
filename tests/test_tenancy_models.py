@@ -255,6 +255,18 @@ class TestWrites:
             assert list(Release._all_objects.values_list('title', flat=True)) == ['release-b']
             assert list(Track._all_objects.values_list('title', flat=True)) == ['track-b']
 
+    def test_an_empty_scope_does_not_commit_half_a_walk(self, tenants):
+        """``tenant(label=[])`` compiles the root's ``DELETE`` to nothing at all. Skipping that
+        table, as a queryset over nothing may, committed the untenanted child's removal alone."""
+        with tenant(label=tenants.a):
+            Review.objects.create(body='kept', release=tenants.release_a)
+
+        with tenant(label=[]), pytest.raises(Exception):  # noqa: B017, PT011
+            tenants.release_a.hard_delete()
+
+        with tenancy_bypassed():
+            assert Review._all_objects.filter(body='kept').exists()
+
 
 class TestUpdateDisableSignalsReporting:
     """``update(_disable_signals=True)`` suppresses ``pre_save``, where the write guard

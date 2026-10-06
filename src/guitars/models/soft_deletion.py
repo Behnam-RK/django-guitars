@@ -617,8 +617,13 @@ class HardDeletableQuerySet(LiveQuerySet):
         queryset ``hard_delete``. Its own switch and ``atomic()``, or autocommit lets the
         switch expire before the DELETE it unlocks. Both on the write alias, resolved once."""
         using = _write_alias(self)
-        with _hard_deletion_on(using):
-            return self.using(using)._delete_own_table_rows()
+        try:
+            with _hard_deletion_on(using):
+                return self.using(using)._delete_own_table_rows()
+        # ``none()``, ``pk__in=[]``: no SQL, nothing to remove. Here, not in the primitive: the
+        # instance walk collected its rows, so a table compiling to nothing must abort it.
+        except EmptyResultSet:
+            return None
 
     def _delete_own_table_rows(self):
         """The ``DELETE`` alone, for a caller that already holds the switch (see
@@ -626,10 +631,7 @@ class HardDeletableQuerySet(LiveQuerySet):
         with connections[self.db].cursor() as cursor:
             query = self.query.clone()
             query.__class__ = sql.DeleteQuery
-            try:
-                compiled, params = query.sql_with_params()
-            except EmptyResultSet:  # ``none()``, ``pk__in=[]``: matches nothing, so no SQL
-                return None
+            compiled, params = query.sql_with_params()
             return cursor.execute(compiled, params)
 
 

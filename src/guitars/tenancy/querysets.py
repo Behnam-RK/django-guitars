@@ -239,9 +239,11 @@ def _untenanted_queryset_class(base: type[models.QuerySet]) -> type[models.Query
         update = delete = bulk_update = _deny_query_write
         aupdate = adelete = abulk_update = _deny_query_write
         # guitars' own set-wide writes (HardDeletableQuerySet): unscoped, both PERMANENTLY
-        # delete every tenant's rows. _hard_delete_own_table/_raw_delete are private but
-        # denied in their own right -- both compile a DeleteQuery off self.query directly.
-        hard_delete = _hard_delete_own_table = _raw_delete = _deny_query_write
+        # delete every tenant's rows. The ``_``-prefixed ones are private but
+        # denied in their own right -- each deletes off self.query without a public method.
+        hard_delete = _hard_delete_own_table = _delete_own_table_rows = _raw_delete = (
+            _deny_query_write
+        )
         # And ``soft_delete()``: one ``UPDATE`` of every matching row, unscoped across tenants.
         soft_delete = asoft_delete = _deny_query_write
         # iterator()/aiterator() stream without populating _result_cache, skipping

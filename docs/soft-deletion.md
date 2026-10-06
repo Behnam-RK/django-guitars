@@ -46,7 +46,7 @@ article.hard_delete()                            # this row, CASCADE children, o
 Article._all_objects.filter(...).hard_delete()   # in bulk
 ```
 
-`hard_delete()` opts out by setting a transaction-local session variable every rule tests: `SELECT set_config('rules.hard_deletion', 'on', TRUE)`.
+`hard_delete()` opts out by setting a transaction-local session variable every rule tests: `SELECT set_config('rules.hard_deletion', 'on', TRUE)`. An instance walk sets it **once** for every table (a table without `_all_objects` is deleted through the collector with it switched off), and a failing walk is rolled back with it; a plain self-referential `CASCADE` key is read as one `WITH RECURSIVE` query however deep the tree (an MTI chain, a `to_field` key or a pk the ORM converts or that is itself a key keeps the level walk, and Phase 1's collector still reads a level at a time), and the owned-row fixpoint reads each owner once.
 
 **Every rule guard is written `<> 'on'`, never `= 'off'`.** A session variable
 never set reads as `NULL`, but one set transaction-locally and then *rolled
@@ -71,6 +71,7 @@ nothing back: no key column, so no constraint to fail.
 
 Queryset-level `hard_delete()` is blunter: it deletes matched rows (and, for
 MTI, the whole chain) but walks no reverse-FK children and no owned relations.
+It refuses a sliced, combined, `distinct(*fields)` or `values()` queryset, as `delete()` does.
 
 ## Managers and the base manager
 

@@ -5,7 +5,8 @@ from typing import cast
 from asgiref.sync import sync_to_async
 from django.apps import apps as django_apps
 from django.conf import settings
-from django.db import connections, router, transaction
+from django.core.exceptions import EmptyResultSet
+from django.db import DEFAULT_DB_ALIAS, connections, router, transaction
 from django.db.models import (
     CASCADE,
     DateTimeField,
@@ -145,6 +146,52 @@ def _key_values(field: Field, pks: set, using: str | None) -> dict:
     return dict(_rows(target.model, using).filter(pk__in=pks).values_list(target.attname, 'pk'))
 
 
+def _self_cascade_fields(model: type[Model], using: str | None) -> list[Field]:
+    """The ``CASCADE`` keys *model* declares to itself that one recursive query can follow: a plain
+    model and a key to the primary key. An MTI chain (each level a table, entered from its root)
+    and a ``to_field`` key (matching no pk) keep the level-by-level walk."""
+    # A pk with a converter would come back from raw SQL unconverted; keep the ORM's read for it.
+    # A pk that is itself a key is read through its target's converters too, so it is refused.
+    pk = model._meta.pk
+    connection = connections[using or DEFAULT_DB_ALIAS]
+    if _is_mti_model(model) or pk.is_relation or pk.get_db_converters(connection):
+        return []
+    return [
+        cast('Field', relation.field)
+        for relation in _referring_relations(model)
+        if relation.on_delete is CASCADE
+        and relation.related_model is model
+        and not getattr(relation, 'parent_link', False)
+        and _targets_primary_key(cast('ForeignKey', relation.field))
+    ]
+
+
+def _with_self_descendants(model: type[Model], pks: set, using: str | None) -> set:
+    """*pks* and every row below them through *model*'s self-referential cascade keys, in **one**
+    ``WITH RECURSIVE`` instead of a query a level. ``UNION`` ends a cycle in the data. Raw SQL: the
+    database's policies apply, a tenant dimension kept in Python alone (ADR 0003) does not."""
+    fields = _self_cascade_fields(model, using)
+    if not fields or not pks:
+        return set(pks)
+    connection = connections[using or DEFAULT_DB_ALIAS]
+    quote = connection.ops.quote_name
+    table, pk_column = quote(model._meta.db_table), quote(cast(str, model._meta.pk.column))
+    columns = [quote(cast(str, field.column)) for field in fields]
+    # Every key in the one recursion, so a subtree reached by alternating keys is still one query.
+    seeds = ' OR '.join(f'{column} = ANY(%s)' for column in columns)
+    onward = ' OR '.join(f't.{column} = guitars_below.pk' for column in columns)
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f'WITH RECURSIVE guitars_below(pk) AS ('  # nosec B608 - names come from _meta
+            f'SELECT {pk_column} FROM {table} WHERE {seeds} '
+            f'UNION '
+            f'SELECT t.{pk_column} FROM {table} AS t JOIN guitars_below ON {onward}'
+            f') SELECT pk FROM guitars_below',
+            [list(pks)] * len(columns),
+        )
+        return set(pks) | {row[0] for row in cursor.fetchall()}
+
+
 def _referring_relations(model: type[Model]) -> list:
     """Every reverse relation with a *column* pointing at *model* -- the one walk ``_collect``
     and :func:`_still_referenced` share for the rows that can hold each other back.
@@ -180,11 +227,16 @@ def _cascade_closure(root: type[Model], pks: set, using: str | None) -> dict[typ
         fresh = model_pks - taken[model]
         if not fresh:
             continue
+        # The subtree in one query, so the self-referential key below is skipped, not re-walked.
+        fresh = _with_self_descendants(model, fresh, using) - taken[model]
         taken[model].update(fresh)
+        followed = _self_cascade_fields(model, using)
         for relation in _referring_relations(model):
             if relation.on_delete is not CASCADE:
                 continue
             field = cast('Field', relation.field)
+            if field in followed:
+                continue
             related_model = cast('type[Model]', relation.related_model)
             child_pks = set(
                 _rows(related_model, using)
@@ -241,12 +293,38 @@ def _still_referenced(
     return referenced
 
 
+class _OwnedScan:
+    """What the ``hard_delete`` fixpoint has read: owner rows enumerated, targets *spared* (asked
+    again each round, since a referrer holding one back can be claimed later), and the rule graph.
+    A fresh one reproduces a full rescan."""
+
+    def __init__(self) -> None:
+        self.scanned: dict[type[Model], set] = defaultdict(set)
+        self.spared: dict[tuple[type[Model], str], set] = defaultdict(set)
+        self.graph_for: frozenset[type[Model]] | None = None
+        self.cycles: set = set()
+        self.refusals: dict = {}
+
+    def graph(self, claimed: dict[type[Model], set]) -> tuple[set, dict]:
+        # Redone only for a claimed model outside the registry: a registered one is already in
+        # the sweep, so the answer cannot have moved.
+        registry = set(django_apps.get_models())
+        extra = frozenset(model for model in claimed if model not in registry)
+        if self.graph_for is None or not extra <= self.graph_for:
+            swept = [*claimed, *registry]
+            self.cycles = rule_update_cycle_edges(swept)
+            self.refusals = owned_tenancy_refusals(swept)
+            self.graph_for = extra | (self.graph_for or frozenset())
+        return self.cycles, self.refusals
+
+
 def _owned_targets(
-    claimed: dict[type[Model], set], using: str | None
+    claimed: dict[type[Model], set], using: str | None, scan: _OwnedScan | None = None
 ) -> list[tuple[type[Model], set]]:
     """``(model, pks)`` for every owned row *claimed* is the last owner of -- the rule's
     ``NOT EXISTS``, narrowed three ways below because this *removes* the row where the rule
     only stamps a column. *claimed* is every row going away, not one group's; see below."""
+    scan = scan or _OwnedScan()
     found: dict[type[Model], set] = defaultdict(set)
     # The cheap half first: the graph below sweeps the whole registry, and ``hard_delete`` runs
     # this to a fixpoint over models that nearly all own nothing. ``pks`` too -- ``claimed`` is
@@ -256,29 +334,33 @@ def _owned_targets(
     }
     if not owning:
         return []
-    # Once per call, not once per claimed model: the graph is registry-wide and identical for
-    # every one of them. The claimed models are named alongside the registry for the same
-    # reason ``_owned_fields`` names its own -- they may not be registered.
-    swept = [*claimed, *django_apps.get_models()]
-    cycles = rule_update_cycle_edges(swept)
-    # The tenancy half of the same shared answer, and a second sweep of the registry -- paid per
-    # round like the graph above, ``claimed`` growing as rounds run. Skipped outright where
-    # ``GUITARS_TENANT_POLICIES`` is off; otherwise cheapest where no model is tenanted.
-    tenancy_refusals = owned_tenancy_refusals(swept)
+    # Once for the walk, not per round or per claimed model: the rule graph and its tenancy half
+    # are registry-wide. Claimed models are named beside the registry as ``_owned_fields`` names
+    # its own, since they may not be registered.
+    cycles, tenancy_refusals = scan.graph(claimed)
     for model, pks in owning.items():
+        # Only owners not read before: a target of an owner read earlier was asked then, and a
+        # target spared then is carried in ``scan.spared`` and asked again below.
+        new = pks - scan.scanned[model]
         for field in _owned_fields(model, cycles, tenancy_refusals):
-            owned_pks = set(
-                _rows(model, using)
-                .filter(pk__in=pks)
-                .exclude(**{field.attname: None})
-                .values_list(field.attname, flat=True)
+            carried = scan.spared[(model, field.name)]
+            owned_pks = (
+                set(
+                    _rows(model, using)
+                    .filter(pk__in=new)
+                    .exclude(**{field.attname: None})
+                    .values_list(field.attname, flat=True)
+                )
+                if new
+                else set()
             )
-            if not owned_pks:
+            everything = owned_pks | carried
+            if not everything:
                 continue
             # Narrowed: (1) the whole claimed batch is spared, not one row -- all of it is
             # going; (2) no `_deleted_at` filter, an archived referrer's key is still on disk;
             # (3) *any* surviving reference holds the row back, not just the owning column.
-            candidates = owned_pks
+            candidates = everything
             # A *shrinking* fixpoint, not one subtraction: a pk spared here keeps its CASCADE
             # closure alive, so a referrer inside it survives after all and holds another pk
             # back. Each round is a strict subset of the last, which is what terminates it.
@@ -287,12 +369,35 @@ def _owned_targets(
                 if not referenced:
                     break
                 candidates = candidates - referenced
+            scan.spared[(model, field.name)] = everything - candidates
             # Guarded: ``found`` is a defaultdict, so an unguarded ``update`` would mint a
             # ``(model, set())`` row for a relation that spared everything, and the caller
             # would enter a fixpoint round over rows that do not exist.
             if candidates:
                 found[field.related_model].update(candidates)
+        scan.scanned[model] |= new
     return list(found.items())
+
+
+@contextlib.contextmanager
+def _hard_deletion_on(using: str | None, *, savepoint: bool = True):
+    """The session switch on for the block, off after it. It is transaction-local, so a rollback
+    restores it; a failing block tries to switch off before re-raising (suppressed, the
+    transaction being likely aborted), but a failing switch-off on success must abort."""
+    alias = using or DEFAULT_DB_ALIAS
+    with (
+        connections[alias].cursor() as cursor,
+        transaction.atomic(using=alias, savepoint=savepoint),
+    ):
+        cursor.execute(SWITCH_ON_HARD_DELETION)
+        try:
+            yield
+        except Exception:
+            with contextlib.suppress(Exception):
+                cursor.execute(SWITCH_OFF_HARD_DELETION)
+            raise
+        else:
+            cursor.execute(SWITCH_OFF_HARD_DELETION)
 
 
 def _mti_table_chain(model: type[Model]) -> list[tuple[str, str]]:
@@ -478,61 +583,56 @@ class HardDeletableQuerySet(LiveQuerySet):
         """Permanently remove matching rows. For an MTI model, also removes every other
         table in the chain by shared PK, regardless of level. Blunt: unlike instance
         ``hard_delete()``, this does not walk reverse-FK cascade children."""
+        # First: compiled as a ``DELETE``, a slice, a union or ``DISTINCT ON`` is dropped, and
+        # every row the narrower queryset left out would go too.
+        _guard_bulk(self, 'hard_delete')
         model = self.model
         if not _is_mti_model(model):
             return self._hard_delete_own_table()
 
-        pks = list(self.values_list('pk', flat=True))
+        # The write alias, once: ``self.db`` is the read alias and is asked of the router afresh
+        # each time, so the switch and the ``DELETE`` could otherwise land on different ones.
+        using = _write_alias(self)
+        pks = list(self.using(using).values_list('pk', flat=True))
         if not pks:
             return None
         placeholders = ', '.join(['%s'] * len(pks))
-        db_connection = connections[self.db]
+        db_connection = connections[using]
         quote = db_connection.ops.quote_name
-        with db_connection.cursor() as cursor, transaction.atomic(using=self.db):
-            cursor.execute(SWITCH_ON_HARD_DELETION)
-            try:
-                for table, pk_column in _mti_table_chain(model):
-                    # Identifiers come from model._meta (trusted); PK values are parameterized.
-                    sql_stmt = (
-                        f'DELETE FROM {quote(table)} WHERE {quote(pk_column)} IN ({placeholders})'  # noqa: E501  # nosec B608
-                    )
-                    cursor.execute(sql_stmt, pks)
-            except Exception:
-                # Suppressed here (unlike the success path below): the transaction is
-                # likely already aborted, so a failing switch-off would only replace the
-                # real error. See docs/soft-deletion.md on the leaked-switch danger.
-                with contextlib.suppress(Exception):
-                    cursor.execute(SWITCH_OFF_HARD_DELETION)
-                raise
-            else:
-                # Not suppressed: a failed switch-off here must abort the transaction, or
-                # 'rules.hard_deletion' leaks 'on' for the rest of any enclosing transaction.
-                cursor.execute(SWITCH_OFF_HARD_DELETION)
-            return None
+        with _hard_deletion_on(using), db_connection.cursor() as cursor:
+            for table, pk_column in _mti_table_chain(model):
+                # Identifiers come from model._meta (trusted); PK values are parameterized.
+                sql_stmt = (
+                    f'DELETE FROM {quote(table)} WHERE {quote(pk_column)} IN ({placeholders})'  # noqa: E501  # nosec B608
+                )
+                cursor.execute(sql_stmt, pks)
+        return None
 
     # Marks `hard_delete` as queryset-only for Manager.from_queryset(); a valid runtime
     # attribute assignment on a function object that stub-based checkers can't model.
     hard_delete.queryset_only = True  # ty: ignore[unresolved-attribute]
 
     def _hard_delete_own_table(self):
-        """Delete only this queryset's own-table rows -- used per table by instance
-        ``hard_delete``, so this must never reach into ancestor tables. Its own
-        ``atomic()``, or autocommit lets the switch expire before the DELETE it unlocks."""
+        """Delete only this queryset's own-table rows, never an ancestor table's: the non-MTI
+        queryset ``hard_delete``. Its own switch and ``atomic()``, or autocommit lets the
+        switch expire before the DELETE it unlocks. Both on the write alias, resolved once."""
+        using = _write_alias(self)
+        try:
+            with _hard_deletion_on(using):
+                return self.using(using)._delete_own_table_rows()
+        # ``none()``, ``pk__in=[]``: no SQL, nothing to remove. Here, not in the primitive: the
+        # instance walk collected its rows, so a table compiling to nothing must abort it.
+        except EmptyResultSet:
+            return None
+
+    def _delete_own_table_rows(self):
+        """The ``DELETE`` alone, for a caller that already holds the switch (see
+        :func:`_hard_deletion_on`): instance ``hard_delete`` runs every table under one."""
         with connections[self.db].cursor() as cursor:
             query = self.query.clone()
             query.__class__ = sql.DeleteQuery
             compiled, params = query.sql_with_params()
-            with transaction.atomic(using=self.db):
-                cursor.execute(SWITCH_ON_HARD_DELETION)
-                try:
-                    result = cursor.execute(compiled, params)
-                except Exception:
-                    with contextlib.suppress(Exception):
-                        cursor.execute(SWITCH_OFF_HARD_DELETION)
-                    raise
-                else:
-                    cursor.execute(SWITCH_OFF_HARD_DELETION)
-                return result
+            return cursor.execute(compiled, params)
 
 
 class ArchiveManager(Manager):
@@ -661,7 +761,9 @@ class SoftDeletableModel(Model):
         """Soft-delete first, then permanently remove this instance, its CASCADE-related rows,
         and whatever it owns -- see ``docs/soft-deletion.md``'s "Hard deletion". Children go
         before parents (CASCADE is Python-level); an owned row goes after its owner."""
-        using = self._state.db
+        # Resolved once, exactly as Phase 1's ``delete()`` resolves it -- the router before
+        # ``_state.db``, which ``Model(pk=...)`` lacks -- so every phase lands on one alias.
+        using = router.db_for_write(self.__class__, instance=self)
         pk = self.pk  # save before Phase 1 resets self.pk to None
         # One (rows, order) group per ownership hop: the first this row and its
         # reverse-CASCADE children, each later one an owned row. Run in order, since an
@@ -679,8 +781,12 @@ class SoftDeletableModel(Model):
                 new_pks = pks - claimed[model]
                 if not new_pks:
                     return
+                # The whole subtree below a self-referential key in one recursive query, so
+                # that key is not walked a level at a time below.
+                new_pks = _with_self_descendants(model, new_pks, using) - claimed[model]
                 claimed[model].update(new_pks)
                 to_delete[model].update(new_pks)
+                followed = _self_cascade_fields(model, using)
                 # ``_referring_relations``, not ``_meta.related_objects``: that drops a
                 # ``related_name='+'`` key, leaving a hidden CASCADE child behind to dangle.
                 # It is also the list ``_still_referenced`` discounts against.
@@ -689,6 +795,8 @@ class SoftDeletableModel(Model):
                         continue
                     related_model = relation.related_model
                     field = cast('Field', relation.field)
+                    if field in followed:
+                        continue
                     # Through ``_key_values``, as ``_still_referenced`` reads the same relations:
                     # missing a ``to_field`` child is not a smaller collection but a broken one,
                     # discounted there *because* this collects it. An empty ``__in`` needs no guard.
@@ -749,7 +857,8 @@ class SoftDeletableModel(Model):
 
         with transaction.atomic(using=using):
             # Phase 1 — soft-delete first (idempotent; PG rules cascade to related objects,
-            # and stamp whatever this row was the last owner of).
+            # and stamp whatever this row was the last owner of). Still ``self.delete()``: an
+            # override of it runs, and a survivor's ``_updated_at`` is the collector's to move.
             self.delete()
 
             # Phase 2 — collect related rows and hard-delete child-first. self.pk is None
@@ -759,9 +868,10 @@ class SoftDeletableModel(Model):
             # batch references, and `claimed` grows as rounds run, so a row held back by a
             # not-yet-collected reference becomes collectable later.
             dispatched: dict[type[Model], set] = defaultdict(set)
+            scan = _OwnedScan()  # one for the fixpoint: each round reads only what is new
             while True:
                 fresh: list[tuple[type[Model], set]] = []
-                for owned_model, owned_pks in _owned_targets(claimed, using):
+                for owned_model, owned_pks in _owned_targets(claimed, using, scan):
                     # `dispatched`, not `claimed`: every pk is collected at most once, which
                     # is what bounds this loop. `claimed` is keyed by the model actually
                     # collected, which for an MTI target is the root, not `owned_model`.
@@ -776,21 +886,30 @@ class SoftDeletableModel(Model):
                     # foreign keys need: whatever references an owned row is in an earlier one.
                     _collect_group(mti_root(owned_model), owned_pks)
 
-            for to_delete, model_order in groups:
-                for model in model_order:
-                    pks = list(to_delete[model])
-                    # `_all_objects` is added dynamically by SoftDeletableModel subclasses, so a
-                    # static checker can't see it -- or `_hard_delete_own_table` on its queryset --
-                    # through the hasattr guard.
-                    if hasattr(model, '_all_objects'):
-                        # Own-table primitive: each MTI table is a separate ``model_order`` entry,
-                        # so this must not reach into ancestor tables (which ``hard_delete`` would).
-                        model._all_objects.using(using).filter(  # ty: ignore[unresolved-attribute]
-                            pk__in=pks
-                        )._hard_delete_own_table()
-                    # `no cover` because no *test* model reaches it, not because nothing can: an
-                    # owned group runs no Collector, so an m2m through row of an owned row lands
-                    # here for real -- add one to `tests/testapp` before trusting this path.
-                    else:  # pragma: no cover - no testapp owned model carries an m2m
-                        # Read through ``_rows``, which no default manager can filter.
-                        _rows(model, using).filter(pk__in=pks).delete()
+            # One switch for every table, not one per table: it is transaction-local and the
+            # walk is one transaction, so the per-table on/off was five statements a table
+            # (savepoint, on, delete, off, release) for nothing a rollback does not already do.
+            with _hard_deletion_on(using, savepoint=False):
+                for to_delete, model_order in groups:
+                    for model in model_order:
+                        pks = list(to_delete[model])
+                        # `_all_objects` is added dynamically by SoftDeletableModel subclasses, so a
+                        # static checker can't see it -- or `_delete_own_table_rows` on its queryset --
+                        # through the hasattr guard.
+                        if hasattr(model, '_all_objects'):
+                            # Own-table primitive: each MTI table is a separate ``model_order`` entry,
+                            # so this must not reach into ancestor tables (which ``hard_delete`` would).
+                            model._all_objects.using(using).filter(  # ty: ignore[unresolved-attribute]
+                                pk__in=pks
+                            )._delete_own_table_rows()
+                        # `no cover` because no *test* model reaches it, not because nothing can: an
+                        # owned group runs no Collector, so an m2m through row of an owned row lands
+                        # here for real -- add one to `tests/testapp` before trusting this path.
+                        else:  # pragma: no cover - no testapp owned model carries an m2m
+                            # Through ``_rows``, which no default manager filters, switched off: a
+                            # receiver deleting soft-deletable rows archives them. No ``finally``: a
+                            # failure rolls the walk back, and switching on in it would mask that.
+                            with connections[using].cursor() as cursor:
+                                cursor.execute(SWITCH_OFF_HARD_DELETION)
+                                _rows(model, using).filter(pk__in=pks).delete()
+                                cursor.execute(SWITCH_ON_HARD_DELETION)

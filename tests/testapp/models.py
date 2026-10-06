@@ -710,3 +710,37 @@ class ConditionNote(SetarModel):
     collector loads its rows and reads each parent singly. Without one there is no N+1 at all."""
 
     condition = ForeignKey(QuantityCondition, on_delete=CASCADE, related_name='notes')
+
+
+class Ledger(SetarModel):
+    """Two self-referential ``CASCADE`` keys on one table: a subtree is reached through either,
+    so one recursion must follow both keys at every level (``hard_delete()``, #55)."""
+
+    name = CharField(max_length=100)
+    parent = ForeignKey('self', on_delete=CASCADE, null=True, blank=True, related_name='children')
+    mirror = ForeignKey('self', on_delete=CASCADE, null=True, blank=True, related_name='mirrors')
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class Stagecraft(SetarModel):
+    """Owns a ``Ledger``, a tree: ``hard_delete()`` has to decide whether the owned root may go,
+    which reads the cascade closure of a self-referential model."""
+
+    name = CharField(max_length=100)
+    ledger = OwningForeignKey(
+        Ledger, on_delete=DO_NOTHING, null=True, blank=True, related_name='crafts'
+    )
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class Cue(SetarModel):
+    """Goes with a ``Ledger`` through its cascade key *and* points at another, plainly: whether
+    that anchor is held back by it depends on the cue going with the tree it sits in."""
+
+    label = CharField(max_length=50, default='')
+    ledger = ForeignKey(Ledger, on_delete=CASCADE, related_name='cues')
+    anchor = ForeignKey(Ledger, on_delete=DO_NOTHING, null=True, blank=True, related_name='anchored')

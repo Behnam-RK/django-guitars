@@ -989,7 +989,6 @@ class SoftDeletableModel(Model):
             # One switch for every table, not one per table: it is transaction-local and the
             # walk is one transaction, so the per-table on/off was five statements a table
             # (savepoint, on, delete, off, release) for nothing a rollback does not already do.
-            by_collector: dict[str, int] = defaultdict(int)  # rows the fallback took early
             with _hard_deletion_on(using, savepoint=False):
                 for to_delete, model_order in groups:
                     for model in model_order:
@@ -1014,20 +1013,10 @@ class SoftDeletableModel(Model):
                         # A plain model under an owned row (an owned group runs no Collector): an
                         # m2m through row, or a plain MTI chain (`Amp`/`Gear` in `tests/testapp`).
                         else:
-                            # Through ``_rows``, which no default manager filters, switched off: a
-                            # receiver deleting soft-deletable rows archives them. No ``finally``: a
-                            # failure rolls the walk back, and switching on in it would mask that.
+                            # Switched off, so a receiver archives soft-deletable rows; no ``finally``.
+                            # Not counted (ADR 0032): the collector cascades by its own rules, so a
+                            # row can go before its own entry, and no row policy hides a plain row.
                             with connections[using].cursor() as cursor:
                                 cursor.execute(SWITCH_OFF_HARD_DELETION)
-                                _, per_model = _rows(model, using).filter(pk__in=pks).delete()
+                                _rows(model, using).filter(pk__in=pks).delete()
                                 cursor.execute(SWITCH_ON_HARD_DELETION)
-                            label = model._meta.label
-                            removed = per_model.get(label, 0) + by_collector.pop(label, 0)
-                            _require_removed(model._meta.db_table, len(pks), removed)
-                            # The collector takes the MTI parent rows with their child, and their
-                            # own entries, later in child-first order, find them gone. Anything else
-                            # it cascades to sits earlier in that order and is gone already.
-                            for parent in model._meta.get_parent_list():
-                                by_collector[parent._meta.label] += per_model.get(
-                                    parent._meta.label, 0
-                                )

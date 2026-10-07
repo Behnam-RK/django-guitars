@@ -153,9 +153,9 @@ def test_a_root_already_gone_is_named_among_the_causes():
 
 
 @pytest.mark.django_db
-def test_a_plain_mti_chain_under_an_owned_row_is_counted_once():
+def test_a_plain_mti_chain_under_an_owned_row_goes_without_a_false_abort():
     """A model without ``_all_objects`` goes through Django's collector, which removes its MTI
-    parent rows with it: the parent's own entry then finds them gone, which is not a shortfall."""
+    parent rows with it, ahead of their own entry: such a table is not counted (ADR 0032)."""
     from tests.testapp.models import Amp, Gear, Rig, Roadie  # noqa: PLC0415
 
     rig = Rig.objects.create(name='r')

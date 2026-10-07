@@ -314,3 +314,122 @@ class TestTheDatabase:
         assert _fast_delete_applies(Catalog, 'default') is True
         assert Catalog.objects.filter(pk=owner.pk).soft_delete() == 1
         assert Listing._all_objects.get(pk=child.pk)._deleted_at is not None
+
+
+class TestAKeyIntoAModelGuitarsE005Refuses:
+    """Its column stores the refused child's own key where the ancestor's rule compares the
+    ancestor's id (#64): the rule would archive another row, so none is written."""
+
+    @staticmethod
+    @isolate_apps('tests.testapp')
+    def _shapes():
+        from django.db.models import AutoField, OneToOneField  # noqa: PLC0415
+
+        class Root(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Kid(Root):
+            code = AutoField(primary_key=True)
+            link = OneToOneField(Root, on_delete=CASCADE, parent_link=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Pointer(SetarModel):
+            kid = ForeignKey(Kid, on_delete=CASCADE, related_name='pointers')
+
+            class Meta:
+                app_label = 'testapp'
+
+        return Root, Kid, Pointer
+
+    def test_it_is_refused_and_named(self):
+        root, _kid, pointer = self._shapes()
+        field = pointer._meta.get_field('kid')
+
+        assert classify_cascade(pointer, field, CASCADE, root._meta.db_table, set()) is (
+            CascadeKind.REFUSED
+        )
+        command = _command(root, (pointer, 'kid'))
+        assert command._cascade_operations(root) == []
+        assert any('guitars.E005' in note for note in command._skipped_rule_notes)
+
+
+class TestRetiringAKeyThatBecameUnreadable:
+    def test_the_reverse_refuses_rather_than_naming_a_column_the_table_lacks(self):
+        root, _kid, by_slug = _shapes()[4:]
+        command = Command()
+        key = (by_slug._meta.db_table, root._meta.db_table, None)
+        models_by_table = {by_slug._meta.db_table: by_slug}
+
+        assert command._retired_cascade_column(key, models_by_table) is None
+
+    def test_a_readable_key_keeps_its_column(self):
+        owner, by_code, *_ = _shapes()
+        command = Command()
+        key = (by_code._meta.db_table, owner._meta.db_table, None)
+
+        assert command._retired_cascade_column(key, {by_code._meta.db_table: by_code}) == 'owner_id'
+
+
+class TestTheRetirementsRebuildWhatTheyDrop:
+    """A retired key is rebuilt on unapply as it was written: the same ``to_field`` column."""
+
+    @staticmethod
+    def _retire(table: str, owner: str, command: Command | None = None):
+        from django.apps import apps  # noqa: PLC0415
+
+        command = command or Command()
+        clear_cascade_coverage(command)
+        key = (table, owner, None)
+        command.existing.soft_delete_related[key] = 'abc'
+        command.existing.soft_delete_revive[key] = 'def'
+        required, models_by_table = command._cascade_key_maps()
+        command._cascade_key_maps_cache = (
+            {k: v for k, v in required.items() if k != key},
+            models_by_table,
+        )
+        return command._retired_cascade_operations(apps.get_app_config('testapp'))
+
+    def test_a_relaxed_key_rebuilds_its_rule_and_revive_on_the_column(self):
+        retired = '\n'.join(self._retire('testapp_seat', 'testapp_ticket'))
+
+        assert 'WHERE "ticket_id" = old."number"' in retired
+        assert 'guitars_revived."number"' in retired
+        assert 'old."id"' not in retired.split('reverse_sql')[1]
+
+    def test_a_superseded_per_key_revive_rebuilds_on_the_column(self):
+        """The 2.16.0 upgrade retires every per-key revive; unapplying rebuilds this one."""
+        from django.apps import apps  # noqa: PLC0415
+
+        command = Command()
+        clear_cascade_coverage(command)
+        command.existing.soft_delete_revive[('testapp_listing', 'testapp_catalog', None)] = 'x'
+
+        (retirement,) = command._retired_cascade_operations(apps.get_app_config('testapp'))
+
+        assert 'guitars_child."catalog_id" = guitars_revived."code"' in retirement
+
+
+@pytest.mark.django_db
+def test_a_statement_that_archives_and_rewrites_the_column_archives_by_the_before_image():
+    """Pairing a row across a statement is on the pk, so rewriting its ``to_field`` value in the
+    same statement is no obstacle; the children hold the *old* value, which is what is matched."""
+    from django.db import connection  # noqa: PLC0415
+
+    from tests.testapp.models import Catalog, Listing  # noqa: PLC0415
+
+    owner = Catalog.objects.create(code='old')
+    child = Listing.objects.create(catalog=owner, name='x')
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            'UPDATE testapp_catalog SET _deleted_at = NOW(), code = %s WHERE id = %s',
+            ['new', owner.pk],
+        )
+        archived = Listing._all_objects.get(pk=child.pk)._deleted_at is not None
+        # The deferred key would fail at teardown otherwise: the child follows its parent's value.
+        cursor.execute('UPDATE testapp_listing SET catalog_id = %s WHERE id = %s', ['new', child.pk])
+
+    assert archived

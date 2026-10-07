@@ -10,19 +10,19 @@ Issue #64. An MTI child may declare `code = AutoField(primary_key=True)` beside 
 
 ## Decision
 
-`guitars.E005` is an `Error` for an MTI child the kit writes for (it carries `_updated_at` or `_deleted_at`) whose primary key is not one of its parent links, one finding per model declaring it, as E003 reports. The generator re-asks the **whole-chain** predicate, since `--skip-checks` reaches it: no MTI redirect rule and no parent trigger for the chain, no owned arm for a refused inheriting owner, no tenant owner-join policy (Python scoping still applies), each with a note naming E005. The coverage-plan gaps for it stay, as the guard under `--skip-checks`.
+`guitars.E005` is an `Error` for an MTI child the kit writes for (it carries `_updated_at` or `_deleted_at`, or a tenant spec, whose owner join reads the key) whose primary key is not one of its parent links, one finding per model declaring it, as E003 reports. The generator re-asks the **whole-chain** predicate, since `--skip-checks` reaches it: no MTI redirect rule and no parent trigger for the chain, no owned arm for a refused inheriting owner, no tenant owner-join policy (Python scoping still applies), no cascade rule for a key *into* such a model, each with a note naming E005. `hard_delete()`, which runs no check, raises `ImproperlyConfigured` for it. The coverage-plan gaps stay, as the guard under `--skip-checks`.
 
 ## Why
 
 - **Fixing the join covers one of eight.** `get_ancestor_link` fixes the redirect rule and trigger for a direct child and keeps every normal shape byte-identical. A mid-chain model would need a join the one-hop templates cannot say, and a key into such a model needs target-side templates in every family; the tenant policy and `hard_delete` each want their own change.
-- **Refusing fails closed everywhere at once**, including tenancy, which is the site where a wrong join is a security problem rather than a wrong archive.
+- **One answer at every site that joins**, tenancy included, where a wrong join is a security problem rather than a wrong archive.
 - **Rejected: fix the direct child, refuse the rest.** A partial fix whose boundary users must learn, in a shape this rare, with two security-relevant sites in the diff.
 - **Rejected: fix everything.** The largest change in the kit's history for a shape nothing in the project uses.
 - **Strongest objection.** A project with this shape cannot run `check` or `migrate` until it restructures. Accepted because the alternative is a generated rule archiving rows that are not the model's own, and the fix is mechanical: drop the explicit key, or make the model its own with a foreign key to its parent.
 
 ## Consequences
 
-**Accepted costs.** A multi-parent model is left alone (its primary key is one of its links, a separate shape). A plain Django MTI model carrying no kit column is not checked: nothing here joins on its key.
+**Accepted costs.** A multi-parent model is left alone (its primary key is one of its links, a separate shape). A plain Django MTI model carrying no kit column and no tenant spec is not checked: nothing here joins on its key. Under `--skip-checks` the refused chain gets no redirect rule, so a `.delete()` of the child removes its row for good where it archived an unrelated ancestor row: E005 is an `Error` for E003's reason. An `OwningForeignKey` aimed at such a model is not re-asked by the generator, and stays a coverage-plan gap.
 
 **Reversibility.** Removing the check is one line; the generator's gates would then need the join fixed, per site.
 

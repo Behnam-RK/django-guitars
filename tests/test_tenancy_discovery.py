@@ -356,6 +356,9 @@ class TestAnOwnPrimaryKeyBesideTheParentLink:
 
         assert coverage is None
         assert any('guitars.E005' in note for note in notes)
+        # Said once: "no column on any ancestor" would be false of it, and a second note about
+        # one fact reads as two findings.
+        assert not any('have no column' in note for note in notes)
 
     def test_a_descendant_of_it_is_refused_with_it(self):
         coverage, notes = self._shapes()['Below']

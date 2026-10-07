@@ -26,6 +26,7 @@ from guitars.introspection import (
     owner_arms,
     owns_column,
     rule_update_cycle_edges,
+    to_field_refusal,
 )
 from guitars.management import _generator
 from guitars.management.enforcement.graph import (
@@ -1108,19 +1109,24 @@ class OperationsMixin:
         # would rebuild it against a table with no ``_deleted_at``. So the reverse refuses.
         if _is_joined(related_model):
             return None
-        if key[2] is not None:
-            return key[2]
         # Not filtered to cascade candidates: the relaxed field is the one that stopped being
         # one, and is the common case. So the net is wide, and where it catches more than one
         # the reverse refuses -- guessing rebuilds the rule on a column it never read.
-        columns = sorted(
-            field.column
+        fields = {
+            field.column: field
             for field in related_model._meta.local_fields
             if isinstance(field, models.ForeignKey)
             and has_column(field.related_model, '_deleted_at')
             and column_owner(field.related_model, '_deleted_at')._meta.db_table == key[1]
+        }
+        column = (
+            key[2] if key[2] is not None else (next(iter(fields)) if len(fields) == 1 else None)
         )
-        return columns[0] if len(columns) == 1 else None
+        # A ``to_field`` column since moved below the holder is one no rule can read (#59): the
+        # reverse refuses where it would emit SQL against a column the table does not have.
+        if column in fields and to_field_refusal(fields[column], key[1]) is not None:
+            return None
+        return column
 
     def _retired_cascade_families(self, key: tuple[str, str, str | None]) -> list[_RetiredFamily]:
         """The cascade rule and its inverse, as the retirement loop needs to see them. Both or

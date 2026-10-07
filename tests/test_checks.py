@@ -507,8 +507,7 @@ class TestAnOwnPrimaryKeyBesideTheParentLink:
         (error,) = errors
         assert error.id == PK_NOT_PARENT_LINK_ID == 'guitars.E005'
         assert error.obj is kid
-        assert 'root_link' in error.msg or 'parent link' in error.msg
-        assert 'code' in error.msg
+        assert "'root_link'" in error.msg and "'code'" in error.msg
 
     def test_the_generator_refuses_the_whole_chain_below_it(self):
         from guitars.checks import refuses_pk_not_parent_link  # noqa: PLC0415
@@ -562,9 +561,9 @@ class TestTheGeneratorRefusesTheSameShape:
             assert f'MTI Soft Delete Rule on "{table}"' not in rendered
             assert f'MTI Updated at Trigger on "{table}"' not in rendered
         notes = [n for n in command._skipped_rule_notes if 'guitars.E005' in n]
-        assert {'testapp_kid', 'testapp_grandkid'} == {
-            table for table in ('testapp_kid', 'testapp_grandkid') if any(table in n for n in notes)
-        }
+        # One note each, opening on its own table: the grandkid's also *names* the kid.
+        for table in ('testapp_kid', 'testapp_grandkid'):
+            assert any(n.startswith(f"MTI rule and parent trigger on '{table}'") for n in notes)
 
     def test_a_refused_owner_gives_no_owned_arm(self):
         from django.db.models import DO_NOTHING  # noqa: PLC0415
@@ -604,3 +603,103 @@ class TestTheGeneratorRefusesTheSameShape:
 
         assert refused == {}
         assert [arm.owner_table for arm in sound['testapp_dep']] == ['testapp_sound']
+
+
+class TestAModelOnlyATenantPolicyWritesFor:
+    """A tenanted MTI child with a key of its own and no kit column: the owner-join policy is the
+    only thing here joining on its key, and joins the wrong tenant's row (#64)."""
+
+    @staticmethod
+    @isolate_apps('tests.testapp')
+    def _shapes():
+        from django.db.models import CASCADE, ForeignKey, OneToOneField  # noqa: PLC0415
+
+        from guitars.tenancy import tenanted_manager  # noqa: PLC0415
+
+        class Plain(Model):
+            label = ForeignKey('testapp.Label', on_delete=CASCADE)
+            objects = tenanted_manager(label='label')
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Kid(Plain):
+            code = AutoField(primary_key=True)
+            link = OneToOneField(Plain, on_delete=CASCADE, parent_link=True)
+            objects = tenanted_manager(label='label')
+
+            class Meta:
+                app_label = 'testapp'
+
+        return Plain, Kid
+
+    def test_the_check_names_it(self):
+        from guitars.checks import check_mti_children_keep_their_parent_link_as_pk  # noqa: PLC0415
+
+        plain, kid = self._shapes()
+
+        (error,) = check_mti_children_keep_their_parent_link_as_pk([_Config(plain, kid)])
+
+        assert error.obj is kid
+
+    def test_discovery_writes_no_owner_join_for_it(self):
+        from guitars.tenancy.discovery import _classify  # noqa: PLC0415
+
+        _plain, kid = self._shapes()
+
+        coverage, notes = _classify(kid)
+
+        assert coverage is None
+        assert any('guitars.E005' in note for note in notes)
+
+    def test_a_plain_model_with_neither_columns_nor_a_tenant_is_still_left_alone(self):
+        from guitars.checks import pk_not_parent_link  # noqa: PLC0415
+
+        *_rest, plain_django_child = TestAnOwnPrimaryKeyBesideTheParentLink._shapes()
+
+        assert pk_not_parent_link([plain_django_child]) == []
+
+
+class TestAProxyIsNotAChild:
+    """A proxy declares ``parents = {concrete: None}`` and owns no key of its own."""
+
+    def test_it_is_never_flagged(self):
+        from guitars.checks import pk_not_parent_link  # noqa: PLC0415
+
+        @isolate_apps('tests.testapp')
+        def _build():
+            class Root(SetarModel):
+                class Meta:
+                    app_label = 'testapp'
+
+            class Proxy(Root):
+                class Meta:
+                    proxy = True
+                    app_label = 'testapp'
+
+            return Root, Proxy
+
+        root, proxy = _build()
+
+        assert pk_not_parent_link([root, proxy]) == []
+
+
+class TestHardDeleteRefusesTheShape:
+    """``hard_delete()`` runs no checks, and seeded its walk with the child's own key as if it
+    were the root's id: it permanently deleted an unrelated ancestor row (#64)."""
+
+    def test_the_instance_form_raises_before_touching_a_table(self):
+        from django.core.exceptions import ImproperlyConfigured  # noqa: PLC0415
+
+        _root, kid, *_rest = TestAnOwnPrimaryKeyBesideTheParentLink._shapes()
+
+        with pytest.raises(ImproperlyConfigured, match='guitars.E005'):
+            kid(pk=1).hard_delete()
+
+    def test_the_queryset_form_raises_too(self):
+        from django.core.exceptions import ImproperlyConfigured  # noqa: PLC0415
+
+        _root, kid, *_rest = TestAnOwnPrimaryKeyBesideTheParentLink._shapes()
+
+        with pytest.raises(ImproperlyConfigured, match='guitars.E005'):
+            kid._all_objects.filter(pk=1).hard_delete()

@@ -85,13 +85,19 @@ def pk_not_parent_link(candidates: list[type[models.Model]]) -> list[type[models
     key is **its own** rather than a link to a parent -- ``code = AutoField(primary_key=True)``
     beside ``root_link = OneToOneField(Root, parent_link=True)`` (#64)."""
     # A plain Django model is none of the kit's business: nothing here joins on its key. Gated on
-    # the columns the generator writes for, as :func:`orphaned_soft_delete_ancestors` is on one.
+    # what the generator writes for: a column, or a tenant policy, whose owner join reads the key.
+    from guitars.tenancy.spec import tenant_spec  # noqa: PLC0415 - the tenancy runtime is heavy
+
     return [
         model
         for model in candidates
         if not model._meta.proxy
         and model._meta.parents
-        and (has_column(model, '_updated_at') or has_column(model, '_deleted_at'))
+        and (
+            has_column(model, '_updated_at')
+            or has_column(model, '_deleted_at')
+            or tenant_spec(model)
+        )
         and model._meta.pk not in model._meta.parents.values()
     ]
 

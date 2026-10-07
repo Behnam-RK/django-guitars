@@ -5,7 +5,7 @@ from typing import cast
 from asgiref.sync import sync_to_async
 from django.apps import apps as django_apps
 from django.conf import settings
-from django.core.exceptions import EmptyResultSet
+from django.core.exceptions import EmptyResultSet, ImproperlyConfigured
 from django.db import DEFAULT_DB_ALIAS, connections, router, transaction
 from django.db.models import (
     CASCADE,
@@ -25,6 +25,7 @@ from django.db.models.deletion import Collector
 from django.db.models.signals import post_delete, pre_delete
 
 from guitars import GuitarsError
+from guitars.checks import refuses_pk_not_parent_link
 from guitars.introspection import (
     column_owner,
     has_column,
@@ -530,6 +531,18 @@ def _now() -> Func:
     return Func(function='NOW', output_field=DateTimeField())
 
 
+def _refuse_an_own_key(model: type[Model]) -> None:
+    """``hard_delete()`` runs no system check, and its walk seeds the ancestor with the child's
+    own key as if it were the link: for a model ``guitars.E005`` refuses it removed an unrelated
+    row of the ancestor for good (#64)."""
+    if refuses_pk_not_parent_link(model):
+        raise ImproperlyConfigured(
+            f"hard_delete() on '{model._meta.label}': it, or a model above it, declares a primary "
+            f'key of its own beside its multi-table-inheritance parent link (guitars.E005), so '
+            f'the walk would remove another row of the ancestor. Fix the model first.'
+        )
+
+
 def _guard_bulk(queryset: QuerySet, name: str) -> None:
     """Django's ``delete()`` guards, under the caller's own name."""
     queryset._not_support_combined_queries(name)  # ty: ignore[unresolved-attribute]
@@ -657,6 +670,7 @@ class HardDeletableQuerySet(LiveQuerySet):
         # the statement removes rows other than the ones the queryset matches.
         _guard_bulk(self, 'hard_delete')
         model = self.model
+        _refuse_an_own_key(model)
         if not _is_mti_model(model):
             return self._hard_delete_own_table()
 
@@ -863,6 +877,7 @@ class SoftDeletableModel(Model):
         before parents (CASCADE is Python-level); an owned row goes after its owner."""
         # Resolved as Phase 1's ``delete()`` resolves it -- the router before ``_state.db``, which
         # ``Model(pk=...)`` lacks -- so both phases land on one alias for a consistent router.
+        _refuse_an_own_key(type(self))
         using = router.db_for_write(self.__class__, instance=self)
         pk = self.pk  # save before Phase 1 resets self.pk to None
         # One (rows, order) group per ownership hop: the first this row and its

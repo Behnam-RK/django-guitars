@@ -131,8 +131,13 @@ def to_field_refusal(fk_field, owner_table: str) -> str | None:
 
 
 def cascade_refusal(related_model, fk_field, owner_table: str) -> str | None:
-    """:func:`joined_refusal` for a joined key, :func:`to_field_refusal` for a flat one: the one
-    reason a key is :attr:`CascadeKind.REFUSED`, so a report names what classified it."""
+    """Why a key is :attr:`CascadeKind.REFUSED`, so a report names it: its target is a model
+    ``guitars.E005`` refuses (the column holds that model's own key, not the ancestor's id), else
+    :func:`joined_refusal` for a joined key and :func:`to_field_refusal` for a flat one."""
+    from guitars.checks import refuses_pk_not_parent_link  # noqa: PLC0415 - checks imports this
+
+    if refuses_pk_not_parent_link(fk_field.related_model):
+        return f"it points at '{fk_field.related_model._meta.label}', refused by guitars.E005"
     if not owns_column(related_model, '_deleted_at'):
         return joined_refusal(related_model, fk_field)
     return to_field_refusal(fk_field, owner_table)
@@ -183,7 +188,7 @@ def classify_cascade(
     # A self key takes a trigger (ADR 0018): a rule updating the table it fires on is rewritten
     # into itself. Routed before the cycle check, which still holds this edge for the owned family.
     if related_model._meta.db_table == owner_table:
-        return CascadeKind.REFUSED if to_field_refusal(fk_field, owner_table) else CascadeKind.SELF
+        return CascadeKind.SELF
     # The table the rule *updates*: the child's own for the flat form, the ancestor holding
     # ``_deleted_at`` for the joined one (a key declared on an MTI descendant).
     joined = not owns_column(related_model, '_deleted_at')

@@ -187,7 +187,11 @@ def classify_cascade(
         return CascadeKind.NONE
     # A self key takes a trigger (ADR 0018): a rule updating the table it fires on is rewritten
     # into itself. Routed before the cycle check, which still holds this edge for the owned family.
+
+    # Refused where the trigger cannot read the column: a parent keyed to its own MTI child.
     if related_model._meta.db_table == owner_table:
+        if to_field_refusal(fk_field, owner_table) is not None:
+            return CascadeKind.REFUSED
         return CascadeKind.SELF
     # The table the rule *updates*: the child's own for the flat form, the ancestor holding
     # ``_deleted_at`` for the joined one (a key declared on an MTI descendant).

@@ -62,6 +62,25 @@ def _shapes():
     return Owner, ByCode, ByPk, Folder, Root, Kid, BySlug
 
 
+@isolate_apps('tests.testapp')
+def _a_parent_keyed_to_its_own_child():
+    class Parent(SetarModel):
+        kid = ForeignKey(
+            'testapp.Child', on_delete=CASCADE, to_field='slug', null=True, related_name='+'
+        )
+
+        class Meta:
+            app_label = 'testapp'
+
+    class Child(Parent):
+        slug = CharField(max_length=20, unique=True)
+
+        class Meta:
+            app_label = 'testapp'
+
+    return Parent, Child
+
+
 def _command(owner, *relations) -> Command:
     command = Command()
     clear_cascade_coverage(command)
@@ -151,6 +170,16 @@ class TestWhatTheRuleCannotRead:
         assert (
             classify_cascade(by_slug, field, CASCADE, owner_table, set()) is CascadeKind.REFUSED
         )
+
+    def test_a_parent_keyed_to_its_own_child_is_refused_not_routed_to_the_self_trigger(self):
+        """Same table, so ``SELF`` -- but the trigger reads ``guitars_after."slug"`` off a table
+        that has no such column, and every ``UPDATE`` of it would fail."""
+        parent, _child = _a_parent_keyed_to_its_own_child()
+        field = parent._meta.get_field('kid')
+
+        kind = classify_cascade(parent, field, CASCADE, parent._meta.db_table, set())
+
+        assert kind is CascadeKind.REFUSED
 
     def test_it_is_named_and_writes_nothing(self):
         _owner, _by_code, _by_pk, _folder, root, kid, by_slug = _shapes()

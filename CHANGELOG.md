@@ -10,6 +10,23 @@ Full history and diffs: [GitHub releases](https://github.com/Behnam-RK/django-gu
 
 ## [Unreleased]
 
+## [2.15.0] - 2026-10-07
+
+### Added
+
+- **`HardDeleteIncompleteError`**, exported from `guitars.models`. `hard_delete()` raises it when a `DELETE` removed fewer rows from a table than were collected for it, and the walk rolls back rather than commit part of the tree. A tenant scope or row-level policy hiding a row, another transaction removing one first, or a row already gone because its table has no soft-delete rule yet (enforcement not migrated: `hard_delete()` completed there through 2.14) are the causes it names without claiming which ([ADR 0032](docs/adr/0032-hard-delete-removes-everything-it-collected.md)).
+
+### Changed
+
+- Queryset `hard_delete()` returns `None` in every form; the plain form returned a closed database cursor.
+- Locked dev dependencies: Django 5.2.18 and 6.0.9, sqlparse 0.6.0 (supersedes dependabot #44, whose lock would have merged the two Django forks).
+
+### Fixed
+
+- **Instance `hard_delete()` under another tenant's scope committed half a tree** (#72). The row policy hid the root, so its `DELETE` removed nothing, while children on a table with no policy were removed for good and the root stayed live. Every soft-deletable table the walk deletes from is now held to the rows it collected, and so is the MTI queryset form's own chain, where a hidden row left the chain half removed. An empty scope (`tenant(label=[])`) now raises `HardDeleteIncompleteError` too, where it raised Django's `EmptyResultSet`.
+- **An owned target was not spared when an outside row pointed into its cascade** (#71). Sparing asked which surviving rows point at the target, not at the rows its cascade takes along, so a plain key into a descendant aborted the walk at `COMMIT`. The closure now records which target takes each row, and a key into any of them spares exactly those targets. That is one more read per relation into each model the closure reaches, again when a row gains a target, never one per row. A `GenericRelation` child is not in that closure yet (#76).
+- **Queryset `hard_delete()` failed on a filter over a window function or a single-table aggregate** (#73), which the `DELETE`'s `WHERE` cannot hold. It now reads the keys first, as `delete()` does; a plain filter stays one `DELETE`.
+
 ## [2.14.4] - 2026-10-07
 
 ### Added
@@ -392,7 +409,8 @@ First stable release. **BREAKING:** the instrument ladder shifted down one rung 
 
 - Added: initial release — `SetarModel`, `GuitarModel`, `SoftDeletableModel`, `DisableSignals`, `makeguitarmigrations`.
 
-[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.14.4...HEAD
+[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.15.0...HEAD
+[2.15.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.15.0
 [2.14.4]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.14.4
 [2.14.3]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.14.3
 [2.14.2]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.14.2

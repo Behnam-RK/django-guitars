@@ -39,6 +39,7 @@ MUST_BE_DENIED = {
     'aiterator',
     'hard_delete',
     '_hard_delete_own_table',
+    '_hard_delete_by_key',
     '_delete_own_table_rows',
     '_raw_delete',
     'soft_delete',

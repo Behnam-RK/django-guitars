@@ -61,6 +61,7 @@ blocks nest instead of clobbering each other's restore.
 | `HardDeletableQuerySet` | `LiveQuerySet` subclass adding `.hard_delete()` in bulk; backs `ArchiveManager` / `AllObjectsManager`. |
 | `LiveQuerySet.soft_delete()` / `asoft_delete()` | Read the keys, then archive with `UPDATE`s by key, returning the rows stamped; queryset-only, denied unscoped. See [soft_delete()](soft-delete-api.md). |
 | `SoftDeletableModel.soft_delete()` / `asoft_delete()` | Instance form; keeps the pk, sets `_deleted_at`. Raises `SoftDeleteUnsupportedError` where the rules alone would leave rows live. |
+| `HardDeleteIncompleteError` | `GuitarsError` raised when `hard_delete()` removed fewer rows from a table than it collected; the walk is rolled back. See [ADR 0032](adr/0032-hard-delete-removes-everything-it-collected.md). |
 
 ## Tenancy public API (`guitars.tenancy`)
 

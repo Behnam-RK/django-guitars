@@ -5,6 +5,8 @@ import contextlib
 import pytest
 from django.db import NotSupportedError, transaction
 from django.db.backends.utils import CursorWrapper
+from django.db.models import Count, Window
+from django.db.models.functions import RowNumber
 
 from guitars.models.soft_deletion import (
     AllObjectsManager,
@@ -157,6 +159,58 @@ def test_queryset_hard_delete_refuses_what_delete_refuses(model, shape, message)
         shape(model._all_objects.all()).hard_delete()
 
     assert model._all_objects.count() == 3
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    'narrowed',
+    [
+        lambda qs: qs.annotate(rn=Window(RowNumber(), order_by='pk')).filter(rn=1),
+        lambda qs: qs.filter(name='a').annotate(n=Count('pk')).filter(n=1),
+    ],
+    ids=['window', 'aggregate'],
+)
+def test_queryset_hard_delete_reads_the_keys_a_where_cannot_hold(narrowed):
+    """A filter on a window or an aggregate cannot sit in a ``DELETE``'s ``WHERE`` (#73):
+    PostgreSQL refused it where ``delete()`` reads the keys first and succeeds."""
+    first = Band.objects.create(name='a')
+    Band.objects.create(name='b')
+
+    narrowed(Band._all_objects.all()).hard_delete()
+
+    assert list(Band._all_objects.values_list('name', flat=True)) == ['b']
+    assert not Band._all_objects.filter(pk=first.pk).exists()
+
+
+@pytest.mark.django_db
+def test_queryset_hard_delete_reading_no_keys_takes_no_switch():
+    from django.db import connection  # noqa: PLC0415
+    from django.test.utils import CaptureQueriesContext  # noqa: PLC0415
+
+    Band.objects.create(name='kept')
+    nothing = Band._all_objects.annotate(rn=Window(RowNumber(), order_by='pk')).filter(rn=99)
+
+    with CaptureQueriesContext(connection) as captured:
+        assert nothing.hard_delete() is None
+
+    assert not any('set_config' in query['sql'] for query in captured.captured_queries)
+    assert Band._all_objects.count() == 1
+
+
+@pytest.mark.django_db
+def test_queryset_hard_delete_keeps_one_statement_for_a_plain_filter():
+    """The key read is for the shapes that need it: a bulk purge stays one ``DELETE``."""
+    from django.db import connection  # noqa: PLC0415
+    from django.test.utils import CaptureQueriesContext  # noqa: PLC0415
+
+    Band.objects.create(name='a')
+
+    with CaptureQueriesContext(connection) as captured:
+        Band._all_objects.filter(name='a').hard_delete()
+
+    statements = [query['sql'] for query in captured.captured_queries]
+    assert sum(s.startswith('DELETE') for s in statements) == 1
+    assert not any(s.startswith('SELECT "testapp_band"') for s in statements)
 
 
 @pytest.mark.django_db

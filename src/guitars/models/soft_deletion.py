@@ -24,6 +24,7 @@ from django.db.models.base import Model
 from django.db.models.deletion import Collector
 from django.db.models.signals import post_delete, pre_delete
 
+from guitars import GuitarsError
 from guitars.introspection import (
     column_owner,
     has_column,
@@ -421,6 +422,21 @@ class SoftDeleteUnsupportedError(Exception):
     in SQL would leave rows **live** under an archived parent. Use ``.delete()``."""
 
 
+class HardDeleteIncompleteError(GuitarsError):
+    """``hard_delete()`` removed fewer rows from a table than it collected for it, so it rolled
+    back rather than commit part of the tree. A tenant scope or row policy hiding a row, or
+    another transaction removing one first; see ``docs/soft-deletion.md``'s "Hard deletion"."""
+
+
+def _require_removed(table: str, collected: int, removed: int) -> None:
+    if removed != collected:
+        raise HardDeleteIncompleteError(
+            f'hard_delete() removed {removed} of the {collected} rows it collected from {table}: '
+            f'a tenant scope or row-level policy hides a row, or another transaction removed '
+            f'one first. Rolled back; nothing was removed.'
+        )
+
+
 def _require_covered(model: type[Model], using: str) -> None:
     if connections[using].vendor != 'postgresql':
         raise SoftDeleteUnsupportedError(
@@ -599,6 +615,9 @@ class HardDeletableQuerySet(LiveQuerySet):
         placeholders = ', '.join(['%s'] * len(pks))
         db_connection = connections[using]
         quote = db_connection.ops.quote_name
+        # Every key has a row in the model's own table and each ancestor's; a descendant's
+        # table holds rows only for the keys that are one, so it has no count to meet.
+        own_chain = {m._meta.db_table for m in (model, *model._meta.get_parent_list())}
         with _hard_deletion_on(using), db_connection.cursor() as cursor:
             for table, pk_column in _mti_table_chain(model):
                 # Identifiers come from model._meta (trusted); PK values are parameterized.
@@ -606,6 +625,9 @@ class HardDeletableQuerySet(LiveQuerySet):
                     f'DELETE FROM {quote(table)} WHERE {quote(pk_column)} IN ({placeholders})'  # noqa: E501  # nosec B608
                 )
                 cursor.execute(sql_stmt, pks)
+                # A table's row hidden or gone would leave the rest of the chain half removed.
+                if table in own_chain:
+                    _require_removed(table, len(pks), cursor.rowcount)
         return None
 
     # Marks `hard_delete` as queryset-only for Manager.from_queryset(); a valid runtime
@@ -619,20 +641,23 @@ class HardDeletableQuerySet(LiveQuerySet):
         using = _write_alias(self)
         try:
             with _hard_deletion_on(using):
-                return self.using(using)._delete_own_table_rows()
+                self.using(using)._delete_own_table_rows()
         # ``none()``, ``pk__in=[]``: no SQL, nothing to remove. Here, not in the primitive: the
         # instance walk collected its rows, so a table compiling to nothing must abort it.
         except EmptyResultSet:
-            return None
+            pass
+        return None
 
-    def _delete_own_table_rows(self):
+    def _delete_own_table_rows(self) -> int:
         """The ``DELETE`` alone, for a caller that already holds the switch (see
-        :func:`_hard_deletion_on`): instance ``hard_delete`` runs every table under one."""
+        :func:`_hard_deletion_on`): instance ``hard_delete`` runs every table under one. Returns
+        the rows it removed."""
         with connections[self.db].cursor() as cursor:
             query = self.query.clone()
             query.__class__ = sql.DeleteQuery
             compiled, params = query.sql_with_params()
-            return cursor.execute(compiled, params)
+            cursor.execute(compiled, params)
+            return cursor.rowcount
 
 
 class ArchiveManager(Manager):
@@ -899,9 +924,17 @@ class SoftDeletableModel(Model):
                         if hasattr(model, '_all_objects'):
                             # Own-table primitive: each MTI table is a separate ``model_order`` entry,
                             # so this must not reach into ancestor tables (which ``hard_delete`` would).
-                            model._all_objects.using(using).filter(  # ty: ignore[unresolved-attribute]
+                            rows = model._all_objects.using(using).filter(  # ty: ignore[unresolved-attribute]
                                 pk__in=pks
-                            )._delete_own_table_rows()
+                            )
+                            # A table compiling to nothing (``tenant(label=[])``) removed none.
+                            try:
+                                removed = rows._delete_own_table_rows()
+                            except EmptyResultSet:
+                                removed = 0
+                            # Every row collected, or none: a hidden or vanished row (#72)
+                            # rolls the walk back rather than commit the rest of the tree.
+                            _require_removed(model._meta.db_table, len(pks), removed)
                         # `no cover` because no *test* model reaches it, not because nothing can: an
                         # owned group runs no Collector, so an m2m through row of an owned row lands
                         # here for real -- add one to `tests/testapp` before trusting this path.
@@ -911,5 +944,7 @@ class SoftDeletableModel(Model):
                             # failure rolls the walk back, and switching on in it would mask that.
                             with connections[using].cursor() as cursor:
                                 cursor.execute(SWITCH_OFF_HARD_DELETION)
-                                _rows(model, using).filter(pk__in=pks).delete()
+                                _, per_model = _rows(model, using).filter(pk__in=pks).delete()
                                 cursor.execute(SWITCH_ON_HARD_DELETION)
+                            removed = per_model.get(model._meta.label, 0)
+                            _require_removed(model._meta.db_table, len(pks), removed)

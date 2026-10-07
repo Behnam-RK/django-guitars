@@ -921,6 +921,9 @@ class SoftDeletableModel(Model):
                         .filter(**{f'{field.attname}__in': keys})
                         .values_list('pk', flat=True)
                     )
+                    # Refused here too: its own key seeded into its root removes an unrelated row.
+                    _refuse_an_own_key(related_model)
+
                     # From the child's MTI *root*, as the seed and the owned hop both are:
                     # the declaring level alone strands its ancestors' rows. A parent-link
                     # walks *down* instead, and re-entering at its root collects nothing.
@@ -959,6 +962,7 @@ class SoftDeletableModel(Model):
                                 'pk', flat=True
                             )
                         )
+                        _refuse_an_own_key(private.related_model)
                         _collect(mti_root(private.related_model), generic_pks)
                 if model not in model_order:
                     model_order.append(model)

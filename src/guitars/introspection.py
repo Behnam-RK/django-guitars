@@ -216,6 +216,7 @@ def _rule_update_edges(candidates: Iterable[type[models.Model]]) -> set[tuple[st
     # behind it -- a cost only a caller asking about rules should pay.
     from django.db.models import CASCADE, ForeignKey  # noqa: PLC0415 - see the comment above
 
+    from guitars.checks import refuses_pk_not_parent_link  # noqa: PLC0415 - checks imports this
     from guitars.models.fields import (  # noqa: PLC0415 - see the comment above
         OwningForeignKey,
         _targets_primary_key,
@@ -261,7 +262,9 @@ def _rule_update_edges(candidates: Iterable[type[models.Model]]) -> set[tuple[st
             if (
                 field.remote_field.on_delete is CASCADE
                 and not getattr(field.remote_field, 'parent_link', False)
-                # The generator's own refusals, through the one predicate both read.
+                # The generator's own refusals, through the one predicate both read -- a target
+                # ``guitars.E005`` refuses included, as ``cascade_refusal`` asks it first.
+                and not refuses_pk_not_parent_link(field.related_model)
                 and (
                     to_field_refusal(field, target_table) is None
                     if owns

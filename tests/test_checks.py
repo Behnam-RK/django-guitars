@@ -703,3 +703,148 @@ class TestHardDeleteRefusesTheShape:
 
         with pytest.raises(ImproperlyConfigured, match='guitars.E005'):
             kid._all_objects.filter(pk=1).hard_delete()
+
+
+class TestItNamesOnlyWhereAnAncestorHoldsWhatTheJoinReads:
+    """A column or tenant dimension the child holds itself is read off its own table: nothing
+    joins up on its key, so a key of its own is harmless there."""
+
+    @staticmethod
+    @isolate_apps('tests.testapp')
+    def _shapes():
+        from django.db.models import CASCADE, ForeignKey, OneToOneField  # noqa: PLC0415
+
+        from guitars.tenancy import tenanted_manager  # noqa: PLC0415
+
+        class Plain(Model):
+            class Meta:
+                app_label = 'testapp'
+
+        class OwnsItsColumn(Plain, DutarModel):
+            code = AutoField(primary_key=True)
+            link = OneToOneField(Plain, on_delete=CASCADE, parent_link=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class OwnsItsTenant(Plain):
+            code = AutoField(primary_key=True)
+            link = OneToOneField(Plain, on_delete=CASCADE, parent_link=True)
+            label = ForeignKey('testapp.Label', on_delete=CASCADE)
+            objects = tenanted_manager(label='label')
+
+            class Meta:
+                app_label = 'testapp'
+
+        return OwnsItsColumn, OwnsItsTenant
+
+    def test_a_kit_column_the_child_holds_itself_is_not_flagged(self):
+        from guitars.checks import pk_not_parent_link  # noqa: PLC0415
+
+        owns_its_column, _tenant = self._shapes()
+
+        assert pk_not_parent_link([owns_its_column]) == []
+
+    def test_a_tenant_dimension_the_child_holds_itself_is_not_flagged(self):
+        from guitars.checks import pk_not_parent_link  # noqa: PLC0415
+
+        _column, owns_its_tenant = self._shapes()
+
+        assert pk_not_parent_link([owns_its_tenant]) == []
+
+
+class TestAnInventedEdgeFromARefusedTarget:
+    """``cascade_refusal`` refuses a key into a ``guitars.E005`` model, so the cycle graph may
+    not carry an edge for the rule that is never written: it closed a cycle with the legitimate
+    rule pointing back and cost that one its rule too."""
+
+    @staticmethod
+    @isolate_apps('tests.testapp')
+    def _shapes():
+        from django.db.models import CASCADE, ForeignKey, OneToOneField  # noqa: PLC0415
+
+        class Root(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Kid(Root):
+            code = AutoField(primary_key=True)
+            root_link = OneToOneField(Root, on_delete=CASCADE, parent_link=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Holder(SetarModel):
+            kid = ForeignKey(Kid, on_delete=CASCADE, related_name='+')
+
+            class Meta:
+                app_label = 'testapp'
+
+        class Pointer(Root):
+            holder = ForeignKey(Holder, on_delete=CASCADE, related_name='+')
+
+            class Meta:
+                app_label = 'testapp'
+
+        return Root, Kid, Holder, Pointer
+
+    def test_the_refused_key_adds_no_edge_and_the_legitimate_rule_stays(self):
+        from guitars.introspection import _rule_update_edges  # noqa: PLC0415
+
+        root, kid, holder, pointer = self._shapes()
+
+        edges = _rule_update_edges([root, kid, holder, pointer])
+
+        # ``Holder.kid`` is refused, so nothing fires on ``Root`` and updates ``Holder``.
+        assert (root._meta.db_table, holder._meta.db_table) not in edges
+        # ``Pointer.holder`` is joined: it fires on ``Holder`` and updates ``Root``, its holder.
+        assert (holder._meta.db_table, root._meta.db_table) in edges
+
+
+@pytest.mark.django_db(transaction=True)
+class TestHardDeleteRefusesAtEveryModelItWalksTo:
+    """The entry model's chain is not the only one the walk seeds from: a key from a refused
+    model into the one being deleted seeds its *root* with the refused model's own keys."""
+
+    def test_a_cascade_child_refused_by_E005_stops_the_walk(self, monkeypatch):
+        from django.core.exceptions import ImproperlyConfigured  # noqa: PLC0415
+
+        from guitars.models import soft_deletion  # noqa: PLC0415
+        from tests.testapp.models import Catalog, Listing  # noqa: PLC0415
+
+        catalog = Catalog.objects.create(code='c1')
+        Listing.objects.create(catalog=catalog)
+        pk = catalog.pk  # Phase 1 clears it on the instance
+        real = soft_deletion.refuses_pk_not_parent_link
+        monkeypatch.setattr(
+            soft_deletion,
+            'refuses_pk_not_parent_link',
+            lambda model: [model] if model is Listing else real(model),
+        )
+
+        with pytest.raises(ImproperlyConfigured, match='guitars.E005'):
+            catalog.hard_delete()
+
+        assert Catalog._all_objects.filter(pk=pk, _deleted_at__isnull=True).exists()
+        assert Listing._all_objects.filter(catalog_id='c1', _deleted_at__isnull=True).exists()
+
+    def test_a_generic_child_refused_by_E005_stops_the_walk(self, monkeypatch):
+        from django.core.exceptions import ImproperlyConfigured  # noqa: PLC0415
+
+        from guitars.models import soft_deletion  # noqa: PLC0415
+        from tests.testapp.models import Scribble, Signboard  # noqa: PLC0415
+
+        board = Signboard.objects.create(caption='b')
+        Scribble.objects.create(content_object=board, text='t')
+        pk = board.pk
+        real = soft_deletion.refuses_pk_not_parent_link
+        monkeypatch.setattr(
+            soft_deletion,
+            'refuses_pk_not_parent_link',
+            lambda model: [model] if model is Scribble else real(model),
+        )
+
+        with pytest.raises(ImproperlyConfigured, match='guitars.E005'):
+            board.hard_delete()
+
+        assert Signboard._all_objects.filter(pk=pk, _deleted_at__isnull=True).exists()

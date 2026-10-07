@@ -84,9 +84,10 @@ def pk_not_parent_link(candidates: list[type[models.Model]]) -> list[type[models
     """Every concrete MTI child a rule, trigger or policy of this kit writes for, whose primary
     key is **its own** rather than a link to a parent -- ``code = AutoField(primary_key=True)``
     beside ``root_link = OneToOneField(Root, parent_link=True)`` (#64)."""
-    # A plain Django model is none of the kit's business: nothing here joins on its key. Gated on
-    # what the generator writes for: a column, or a tenant policy, whose owner join reads the key.
-    from guitars.tenancy.spec import tenant_spec  # noqa: PLC0415 - the tenancy runtime is heavy
+    # Gated on what the generator joins *up* for: a column or tenant dimension an ANCESTOR holds.
+    # One the child holds is read off its own table, and ``_deleted_at`` over a plain parent is
+    # ``guitars.E003``'s -- a plain Django model is none of the kit's business.
+    from guitars.tenancy.spec import local_tenant_fields  # noqa: PLC0415 - tenancy is heavy
 
     return [
         model
@@ -94,9 +95,11 @@ def pk_not_parent_link(candidates: list[type[models.Model]]) -> list[type[models
         if not model._meta.proxy
         and model._meta.parents
         and (
-            has_column(model, '_updated_at')
-            or has_column(model, '_deleted_at')
-            or tenant_spec(model)
+            any(
+                has_column(model, column) and not owns_column(model, column)
+                for column in ('_updated_at', '_deleted_at')
+            )
+            or any(not owns_column(model, name) for name in local_tenant_fields(model).values())
         )
         and model._meta.pk not in model._meta.parents.values()
     ]

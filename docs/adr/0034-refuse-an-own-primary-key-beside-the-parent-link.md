@@ -10,7 +10,7 @@ Issue #64. An MTI child may declare `code = AutoField(primary_key=True)` beside 
 
 ## Decision
 
-`guitars.E005` is an `Error` for an MTI child the kit writes for (it carries `_updated_at` or `_deleted_at`, or a tenant spec, whose owner join reads the key) whose primary key is not one of its parent links, one finding per model declaring it, as E003 reports. The generator re-asks the **whole-chain** predicate, since `--skip-checks` reaches it: no MTI redirect rule and no parent trigger for the chain, no owned arm for a refused inheriting owner, no tenant owner-join policy (Python scoping still applies), no cascade rule for a key *into* such a model, each with a note naming E005. `hard_delete()`, which runs no check, raises `ImproperlyConfigured` for it. The coverage-plan gaps stay, as the guard under `--skip-checks`.
+`guitars.E005` is an `Error` for an MTI child whose primary key is not one of its parent links, where an *ancestor* holds what the kit joins up for: `_updated_at` or `_deleted_at`, or a local tenant dimension, whose owner join reads the key, one finding per model declaring it, as E003 reports. The generator re-asks the **whole-chain** predicate, since `--skip-checks` reaches it: no MTI redirect rule and no parent trigger for the chain, no owned arm for a refused inheriting owner, no tenant owner-join policy (Python scoping still applies), no cascade rule for a key *into* such a model. Each says so in a note naming E005 except the owned arm, dropped without one of its own. `hard_delete()`, which runs no check, raises `ImproperlyConfigured` for it, for the model it is called on and for every cascade or generic child its walk reaches. The coverage-plan gaps stay, as the guard under `--skip-checks`.
 
 ## Why
 
@@ -22,7 +22,7 @@ Issue #64. An MTI child may declare `code = AutoField(primary_key=True)` beside 
 
 ## Consequences
 
-**Accepted costs.** A multi-parent model is left alone (its primary key is one of its links, a separate shape). A plain Django MTI model carrying no kit column and no tenant spec is not checked: nothing here joins on its key. Under `--skip-checks` the refused chain gets no redirect rule, so a `.delete()` of the child removes its row for good where it archived an unrelated ancestor row: E005 is an `Error` for E003's reason. An `OwningForeignKey` aimed at such a model is not re-asked by the generator, and stays a coverage-plan gap.
+**Accepted costs.** A multi-parent model is left alone (its primary key is one of its links, a separate shape). A plain Django MTI model carrying no kit column and no tenant spec is not checked, nor is a child holding the column or tenant dimension itself, which is read off its own table: nothing here joins on its key. Under `--skip-checks` the refused chain gets no redirect rule, so a `.delete()` of the child removes its row for good where it archived an unrelated ancestor row: E005 is an `Error` for E003's reason. An `OwningForeignKey` aimed at such a model is not re-asked by the generator, nor by the owned hop of `hard_delete()`, and stays a coverage-plan gap.
 
 **Reversibility.** Removing the check is one line; the generator's gates would then need the join fixed, per site.
 

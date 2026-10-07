@@ -908,8 +908,8 @@ class OperationsMixin:
         created it; else the table's own host, as retirement's is; else -- an owner outside
         ``LOCAL_APPS`` -- the smallest-label app contributing an arm."""
         # Kept with its creator because any other host could move -- contributors change, the
-        # owner's app joins ``LOCAL_APPS`` -- and the new one's ``DROP TRIGGER`` would run before
-        # the old one's ``CREATE`` on a fresh ``migrate``. Routed away is no host (ADR 0022).
+        # owner's app joins ``LOCAL_APPS`` -- and a second app would create it again. A creator
+        # gone from ``LOCAL_APPS`` is unscanned, as for every family. Routed away is no host.
         if owner_table in self._routed_away_tables():
             return None
         # And an owner outside ``LOCAL_APPS``, which that set cannot see: its model can.
@@ -1914,15 +1914,19 @@ class OperationsMixin:
                 continue
             slots = self._revive_owner_slots(owner_table)
             if slots is None:
+                # Every arm, or the owner, refused: nothing is emitted and, its keys still
+                # calling for arms, nothing retires it -- so a recorded one is named for a hand
+                # drop, as the per-key trigger's refusal was, failing ``--check``.
+                if (owner_table,) in self.existing.soft_delete_revive_owner:
+                    name = _revive_owner_name(owner_table)
+                    self._refusals_over_live_rules.append(
+                        f"Revive trigger on '{owner_table}' is refused but already exists in "
+                        "this project's migrations. It is still live in any migrated database. "
+                        f'Drop it by hand: DROP TRIGGER {name} ON '
+                        f'{_identifiers._quote_table(owner_table)}; DROP FUNCTION {name}();'
+                    )
                 continue
             name = slots['function']
-            # The one move :meth:`_revive_host` allows -- its creator gone from ``LOCAL_APPS`` --
-            # leaves a create elsewhere that this replace must follow on a fresh ``migrate``.
-            for node in self.existing.soft_delete_revive_owner_dependencies.get(
-                (owner_table,), []
-            ):
-                if node[0] != app.label:
-                    self._record_edge(self._retirement_edges, app.label, node)
             # Claimed on the name alone, as every trigger family's function is: a function is
             # namespaced per schema, so two owner tables could otherwise meet on one name.
             self._claim_sweep_function_name(name, (owner_table, owner_table, None), kind='Revive')
@@ -2870,29 +2874,33 @@ class OperationsMixin:
         for key in sorted(recorded - set(required), key=lambda k: (k[0], k[1], k[2] or '')):
             related_table, owner_table, via = key
             owner_app = hosting.get(owner_table)
-            if owner_app is None or owner_app in requested:
-                continue
             if related_table not in hosting:
                 # Only where a revive was recorded: before 2.11.0 there is none, and nothing
                 # is broken. Named per trigger, so two keys to one owner read as two.
                 if related_table not in self._dropped_tables():
                     continue
                 if key in self.existing.soft_delete_revive:
-                    notes.append(
-                        f'Revive trigger {_revive_name(owner_table, related_table, via)} on '
-                        f"'{owner_table}' names '{related_table}', whose model was deleted, and "
-                        f'fails every UPDATE on that table until it is retired -- which only a '
-                        f"run including '{owner_app}' writes."
-                    )
+                    if owner_app is not None and owner_app not in requested:
+                        notes.append(
+                            f'Revive trigger {_revive_name(owner_table, related_table, via)} on '
+                            f"'{owner_table}' names '{related_table}', whose model was deleted, "
+                            'and fails every UPDATE on that table until it is retired -- which '
+                            f"only a run including '{owner_app}' writes."
+                        )
                 # The owner's one trigger (#70) carries the arm instead, failing only an UPDATE
-                # that revives a row -- the early exit spares the rest -- until it is re-emitted.
+                # that revives a row, the early exit sparing the rest. Its own host writes it,
+                # the app that created it (ADR 0033), which need not be the table's.
                 elif (owner_table,) in self.existing.soft_delete_revive_owner:
-                    notes.append(
-                        f'Revive trigger {_revive_owner_name(owner_table)} on '
-                        f"'{owner_table}' names '{related_table}', whose model was deleted, and "
-                        f'fails every UPDATE reviving a row there until it is re-emitted -- '
-                        f"which only a run including '{owner_app}' writes."
-                    )
+                    revive_app = self._revive_host(owner_table)
+                    if revive_app is not None and revive_app not in requested:
+                        notes.append(
+                            f'Revive trigger {_revive_owner_name(owner_table)} on '
+                            f"'{owner_table}' names '{related_table}', whose model was deleted, "
+                            'and fails every UPDATE reviving a row there until it is re-emitted '
+                            f"or retired -- which only a run including '{revive_app}' writes."
+                        )
+                continue
+            if owner_app is None or owner_app in requested:
                 continue
             notes.append(
                 f"Cascade rule on '{owner_table}' related to '{related_table}' is recorded but "

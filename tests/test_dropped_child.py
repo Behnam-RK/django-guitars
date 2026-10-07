@@ -227,6 +227,26 @@ class TestADroppedChildIsRetired:
         assert REVIVE in note
         assert 'reviving a row' in note
 
+    def test_a_per_key_trigger_whose_owner_is_in_scope_is_not_named(self, monkeypatch):
+        """The run in scope writes its retirement itself."""
+        command = _command(monkeypatch, dropped={CHILD})
+
+        assert command._scoped_cascade_retirement_notes({'testapp'}) == []
+
+    def test_the_owners_trigger_is_named_with_its_own_host(self, monkeypatch, settings):
+        """Kept by the app that created it (ADR 0033), which need not host the table: the note
+        sends the reader to that app, and an in-scope one is not told to wait for itself."""
+        settings.LOCAL_APPS = [*settings.LOCAL_APPS, 'tests.crossapp_owner']
+        command = _command(monkeypatch, dropped={CHILD})
+        command.existing.soft_delete_revive.clear()
+        command.existing.soft_delete_revive_owner_dependencies[(OWNER,)] = [
+            ('crossapp_owner', '0003_auto_enforcement')
+        ]
+
+        assert command._scoped_cascade_retirement_notes({'crossapp_owner'}) == []
+        (note,) = command._scoped_cascade_retirement_notes({'other'})
+        assert "'crossapp_owner'" in note
+
     def test_two_keys_to_one_owner_name_two_triggers(self, monkeypatch):
         command = _command(monkeypatch, dropped={CHILD})
         for family in (command.existing.soft_delete_related, command.existing.soft_delete_revive):

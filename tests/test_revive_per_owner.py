@@ -137,6 +137,8 @@ class TestWhereTheTriggerIsWritten:
     def test_an_owner_outside_local_apps_is_hosted_by_a_contributing_app(self, monkeypatch):
         command = self._without_band(Command(), monkeypatch)
         clear_cascade_coverage(command)
+        # A first create: no app has written it yet, so none keeps it.
+        command.existing.soft_delete_revive_owner_dependencies.pop(('testapp_band',), None)
 
         assert command._revive_host('testapp_band') == 'testapp'
         assert any(
@@ -180,18 +182,6 @@ class TestWhereTheTriggerIsWritten:
         ]
 
         assert command._revive_host('testapp_band') == 'crossapp_owner'
-
-    def test_a_creator_gone_from_local_apps_hands_it_on_after_its_create(self, monkeypatch):
-        """The one move left: the new host's replace is ordered after every earlier create."""
-        command = self._without_band(Command(), monkeypatch)
-        command.existing.soft_delete_revive_owner[('testapp_band',)] = 'stale0000000'
-        command.existing.soft_delete_revive_owner_dependencies[('testapp_band',)] = [
-            ('goneapp', '0003_auto_enforcement')
-        ]
-
-        assert command._revive_host('testapp_band') == 'testapp'
-        command._revive_operations(_app())
-        assert ('goneapp', '0003_auto_enforcement') in command._retirement_edges['testapp']
 
     def test_its_retirement_lands_where_it_was_created(self, monkeypatch):
         command = self._without_band(Command(), monkeypatch)
@@ -358,3 +348,18 @@ class TestAQuietReadReportsNothing:
 
         assert command._revive_arm(key, child, 'owner_id', 'id', quiet=True) is None
         assert command._skipped_rule_notes == []
+
+
+def test_a_recorded_trigger_whose_every_arm_is_refused_fails_check(monkeypatch):
+    """Not emitted, not retired -- its key still calls for an arm -- and so live in every
+    migrated database with nothing to say so: named for a hand drop, as the per-key one was."""
+    command = Command()
+    command._refusals_over_live_rules.clear()
+    monkeypatch.setattr(command, '_revive_arm', lambda *args, **kwargs: None)
+
+    command._revive_operations(_app())
+
+    assert any(
+        "Revive trigger on 'testapp_album'" in refusal and 'DROP TRIGGER' in refusal
+        for refusal in command._refusals_over_live_rules
+    )

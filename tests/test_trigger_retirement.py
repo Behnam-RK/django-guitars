@@ -294,19 +294,15 @@ def _without(command: Command, method: str, drop):
     setattr(command, method, narrowed)
     if method == '_cascade_key_maps':
         # The key's revive arm goes with it: the owner's one trigger is built off the same sweep.
+        dropped_arm = (drop[0], drop[1], original()[0][drop])
         def arms():
             narrowed()
             return {
                 owner: kept
                 for owner, keyed in command._revive_arm_sources.items()
-                # Arms are keyed on the real column: a ``None`` key form owns every column.
-                if (
-                    kept := {
-                        key: arm
-                        for key, arm in keyed.items()
-                        if (key[:2] != drop[:2] if drop[2] is None else key != drop)
-                    }
-                )
+                # Arms are keyed on the real column, which a ``None`` key form leaves out: the
+                # relation it stands for is the one ``required`` mapped it to.
+                if (kept := {key: arm for key, arm in keyed.items() if key != dropped_arm})
             }
 
         command._revive_arms_by_owner = arms

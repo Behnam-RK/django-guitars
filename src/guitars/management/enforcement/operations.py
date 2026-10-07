@@ -903,31 +903,28 @@ class OperationsMixin:
         self._cascade_key_maps()
         return self._revive_arm_sources
 
-    def _revive_retirement_host(self, owner_table: str) -> str | None:
-        """Where an owner's revive trigger is retired: the table's host, or -- an owner outside
-        ``LOCAL_APPS``, whose contributing apps are gone with its last key -- the app that wrote
-        its newest create."""
-        hosted = self._table_app_labels().get(owner_table)
-        if hosted is not None:
-            return hosted
-        # Routed away maps to nothing, which is what withholds a DROP there (ADR 0022).
+    def _revive_host(self, owner_table: str) -> str | None:
+        """The app writing *owner_table*'s revive trigger, for life: the app whose migrations
+        created it; else the table's own host, as retirement's is; else -- an owner outside
+        ``LOCAL_APPS`` -- the smallest-label app contributing an arm."""
+        # Kept with its creator because any other host could move -- contributors change, the
+        # owner's app joins ``LOCAL_APPS`` -- and the new one's ``DROP TRIGGER`` would run before
+        # the old one's ``CREATE`` on a fresh ``migrate``. Routed away is no host (ADR 0022).
         if owner_table in self._routed_away_tables():
             return None
+        # And an owner outside ``LOCAL_APPS``, which that set cannot see: its model can.
+        self._cascade_key_maps()
+        owner, contributors = self._revive_owners.get(owner_table, (None, set()))
+        if owner is not None and not migrates_to_postgresql(owner):
+            return None
+        local = {app.label for app in django_apps.get_app_configs() if _generator.is_local(app)}
         creates = self.existing.soft_delete_revive_owner_dependencies.get((owner_table,), [])
-        return creates[-1][0] if creates else None
-
-    def _revive_host(self, owner_table: str) -> str | None:
-        """The app writing *owner_table*'s revive trigger: the table's own host, as retirement's
-        is, or -- an owner outside ``LOCAL_APPS`` -- the first app contributing an arm to it,
-        where 2.15's per-key trigger was written. One host, or two apps create one trigger."""
+        created_in = [label for label, _migration in creates if label in local]
+        if created_in:
+            return created_in[-1]
         hosted = self._table_app_labels().get(owner_table)
         if hosted is not None:
             return hosted
-        self._cascade_key_maps()
-        owner, contributors = self._revive_owners.get(owner_table, (None, set()))
-        # Routed off PostgreSQL maps to nothing by design (ADR 0022): no trigger, no host.
-        if owner is None or not migrates_to_postgresql(owner):
-            return None
         return min(contributors, default=None)
 
     def _required_self_cascades(self) -> set[tuple[str, str]]:
@@ -1036,7 +1033,7 @@ class OperationsMixin:
         # owner keeping any key is re-emitted with the arm gone instead, by its digest moving.
         owed = set(self._revive_arms_by_owner())
         for (table,) in sorted(set(self.existing.soft_delete_revive_owner)):
-            if table in owed or self._revive_retirement_host(table) != app.label:
+            if table in owed or self._revive_host(table) != app.label:
                 continue
             header = HEADER_SOFT_DELETE_REVIVE_OWNER_RETIRED.format(
                 table=_identifiers._escape_ident(table)
@@ -1919,6 +1916,13 @@ class OperationsMixin:
             if slots is None:
                 continue
             name = slots['function']
+            # The one move :meth:`_revive_host` allows -- its creator gone from ``LOCAL_APPS`` --
+            # leaves a create elsewhere that this replace must follow on a fresh ``migrate``.
+            for node in self.existing.soft_delete_revive_owner_dependencies.get(
+                (owner_table,), []
+            ):
+                if node[0] != app.label:
+                    self._record_edge(self._retirement_edges, app.label, node)
             # Claimed on the name alone, as every trigger family's function is: a function is
             # namespaced per schema, so two owner tables could otherwise meet on one name.
             self._claim_sweep_function_name(name, (owner_table, owner_table, None), kind='Revive')
@@ -2843,28 +2847,13 @@ class OperationsMixin:
                         continue
                     related_table = related_model._meta.db_table
                     key = (related_table, table, None if is_primary else fk_field.column)
-                    # Both families: a project upgrading has the cascade recorded and the revive
-                    # not, so asking about the cascade alone reports no gap for the inverse this
-                    # scoped run is equally failing to create -- the owner's one trigger (#70).
-                    revive_recorded = (table,) in self.existing.soft_delete_revive_owner
-                    if key in self.existing.soft_delete_related and revive_recorded:
+                    # The cascade alone: since 2.16.0 the inverse is the owner's one trigger, whose
+                    # host need not be this app -- ``_scoped_revive_notes`` names it, by digest.
+                    if key in self.existing.soft_delete_related:
                         continue
-                    # Which half is missing, not "Cascade" flat: every project upgrading to
-                    # 2.11.0 has the cascade recorded and the inverse not, so naming the
-                    # cascade sends the reader to a rule their migrations already carry.
-                    absent = [
-                        label
-                        for label, recorded in (
-                            ('Cascade', key in self.existing.soft_delete_related),
-                            ('Revive', revive_recorded),
-                        )
-                        if not recorded
-                    ]
-                    missing = ' and '.join(absent)
                     notes.append(
-                        f"{missing} rule{'s' if len(absent) > 1 else ''} on '{related_table}' "
-                        f"related to '{table}' skipped: parent app '{app.label}' is not "
-                        f'in this scoped run.'
+                        f"Cascade rule on '{related_table}' related to '{table}' skipped: parent "
+                        f"app '{app.label}' is not in this scoped run."
                     )
         return notes + self._scoped_cascade_retirement_notes(requested)
 
@@ -2960,7 +2949,7 @@ class OperationsMixin:
                     continue
                 state = 'missing' if (owner_table,) not in recorded else 'out of date'
             else:
-                host = self._revive_retirement_host(owner_table)
+                host = self._revive_host(owner_table)
                 state = 'no longer called for'
             if host is None or host in requested:
                 continue

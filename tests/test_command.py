@@ -1083,14 +1083,12 @@ def _record_cascade_key(*, both: bool):
                 _fake_app_config('fake.banda', 'banda', [Band]),
                 _fake_app_config('fake.albumb', 'albumb', [Album]),
             ],
-            # The shape every project upgrading to 2.11.0 is in: the cascade recorded, the
-            # inverse not. The scoped run is still failing to create one, so it is a gap.
+            # The cascade recorded, the owner's revive trigger not: the trigger is not this
+            # note's -- its host need not be the parent's app -- but `_scoped_revive_notes`'.
             _record_cascade_key(both=False),
             {'albumb'},
-            # "Revive", not "Cascade": the cascade rule is in their migrations already, and
-            # naming it sends the operator to an object that is not the missing one.
-            ["Revive rule on 'testapp_album' related to 'testapp_band' skipped"],
-            id='reported_when_only_the_cascade_half_exists',
+            [],
+            id='the_revive_half_is_left_to_the_owners_trigger_note',
         ),
     ],
 )

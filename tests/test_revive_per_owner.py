@@ -151,12 +151,47 @@ class TestWhereTheTriggerIsWritten:
 
         command = self._without_band(Command(), monkeypatch)
         command._revive_arms_by_owner()  # the sweep, before the owner is routed away
+        # Outside ``LOCAL_APPS``, which ``_routed_away_tables`` reads: only the model can say.
+        monkeypatch.setattr(command, '_routed_away_tables', frozenset)
         routed = operations_module.migrates_to_postgresql
         monkeypatch.setattr(
             operations_module, 'migrates_to_postgresql', lambda model: model is not Band and routed(model)
         )
 
         assert command._revive_host('testapp_band') is None
+
+    def test_the_app_that_created_it_keeps_it(self, monkeypatch, settings):
+        """A computed host would move as contributors change, and the new one's ``DROP TRIGGER``
+        would run before the old one's ``CREATE`` on a fresh ``migrate``: one host for life."""
+        settings.LOCAL_APPS = [*settings.LOCAL_APPS, 'tests.crossapp_owner']
+        command = self._without_band(Command(), monkeypatch)
+        command.existing.soft_delete_revive_owner_dependencies[('testapp_band',)] = [
+            ('crossapp_owner', '0003_auto_enforcement')
+        ]
+
+        assert command._revive_host('testapp_band') == 'crossapp_owner'
+
+    def test_even_once_its_table_is_hosted(self, settings):
+        """The owner's own app joining ``LOCAL_APPS`` does not move it either."""
+        settings.LOCAL_APPS = [*settings.LOCAL_APPS, 'tests.crossapp_owner']
+        command = Command()
+        command.existing.soft_delete_revive_owner_dependencies[('testapp_band',)] = [
+            ('crossapp_owner', '0003_auto_enforcement')
+        ]
+
+        assert command._revive_host('testapp_band') == 'crossapp_owner'
+
+    def test_a_creator_gone_from_local_apps_hands_it_on_after_its_create(self, monkeypatch):
+        """The one move left: the new host's replace is ordered after every earlier create."""
+        command = self._without_band(Command(), monkeypatch)
+        command.existing.soft_delete_revive_owner[('testapp_band',)] = 'stale0000000'
+        command.existing.soft_delete_revive_owner_dependencies[('testapp_band',)] = [
+            ('goneapp', '0003_auto_enforcement')
+        ]
+
+        assert command._revive_host('testapp_band') == 'testapp'
+        command._revive_operations(_app())
+        assert ('goneapp', '0003_auto_enforcement') in command._retirement_edges['testapp']
 
     def test_its_retirement_lands_where_it_was_created(self, monkeypatch):
         command = self._without_band(Command(), monkeypatch)

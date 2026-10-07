@@ -17,11 +17,11 @@ from guitars.checks import refuses_pk_not_parent_link, refuses_soft_delete_rule
 from guitars.introspection import (
     CascadeKind,
     OwnerArm,
+    cascade_refusal,
     classify_cascade,
     column_owner,
     has_column,
     is_mti_child,
-    joined_refusal,
     owned_tenancy_refusals,
     owner_arms,
     owns_column,
@@ -201,6 +201,22 @@ def _revive_owner_name(owner_table: str) -> str:
         _sized(bare_owner),
     ]
     return _identifiers._safe_ident('_'.join(parts))
+
+
+def _referenced_key(model: type[models.Model], column: str, owner_pk: str) -> str:
+    """The owner's column a key into it matches on: its ``to_field``'s where it declares one,
+    else *owner_pk* -- already escaped, and returned untouched so every key into the primary key
+    renders exactly as before (#59). Pairing a row across a statement stays on the primary key."""
+    model = model._meta.concrete_model or model  # a proxy declares no fields of its own
+    for field in model._meta.local_fields:
+        if isinstance(field, models.ForeignKey) and field.column == column:
+            try:
+                if not _targets_primary_key(field):
+                    return _identifiers._escape_ident(cast(str, field.target_field.column))
+            except FieldDoesNotExist:  # a to_field naming nothing: refused upstream, a pk here
+                pass
+            break
+    return owner_pk
 
 
 def _owned_rule_name(dependent_table: str, foreign_key: str) -> str:
@@ -1209,6 +1225,7 @@ class OperationsMixin:
             'related_table': _identifiers._quote_table(related_table),
             'primary_key': ident_owner_pk,
             'foreign_key': _identifiers._escape_ident(column),
+            'referenced_key': _referenced_key(related_model, column, ident_owner_pk),
             'updated_at_assignment': (
                 _soft_delete._SOFT_DELETE_REVIVE_UPDATED_AT
                 if owns_column(target, '_updated_at')
@@ -1313,6 +1330,13 @@ class OperationsMixin:
                             cast(str, models_by_table[owner_table]._meta.pk.column)
                         ),
                         foreign_key=_identifiers._escape_ident(column),
+                        referenced_key=_referenced_key(
+                            models_by_table[related_table],
+                            column,
+                            _identifiers._escape_ident(
+                                cast(str, models_by_table[owner_table]._meta.pk.column)
+                            ),
+                        ),
                         updated_at_assignment=self._revive_updated_at(related_table),
                     )
                     if column is not None
@@ -1792,7 +1816,8 @@ class OperationsMixin:
                 if report:
                     self._skipped_rule_notes.append(
                         f"Cascade '{related_table}' -> '{owner_table}' skipped: "
-                        f'{joined_refusal(related_model, fk_field)}; Django archives it in Python.'
+                        f'{cascade_refusal(related_model, fk_field, owner_table)}; Django archives it '
+                        'in Python.'
                     )
                 continue
             is_primary = related_table not in seen_related_tables
@@ -2033,6 +2058,7 @@ class OperationsMixin:
             'related_table': _identifiers._quote_table(related_table),
             'primary_key': ident_owner_pk,
             'foreign_key': _identifiers._escape_ident(column),
+            'referenced_key': _referenced_key(related_model, column, ident_owner_pk),
             # This runs at trigger depth 1, where ``updated_at_trigger``'s ``WHEN`` suppresses
             # it, so the column has to move here or it moves on neither path.
             'updated_at_assignment': (
@@ -2160,6 +2186,7 @@ class OperationsMixin:
                     related_table=ident_related_table,
                     primary_key=ident_owner_pk,
                     foreign_key=ident_foreign_key,
+                    referenced_key=_referenced_key(related_model, fk_field.column, ident_owner_pk),
                 )
             # A rule's name embeds the child's table, so a rename leaves the carried-over rule
             # live beside the new one -- both cascading, and nothing later retires either.
@@ -2229,6 +2256,7 @@ class OperationsMixin:
             'table': ident_owner_table,
             'primary_key': ident_owner_pk,
             'foreign_key': ident_foreign_key,
+            'referenced_key': _referenced_key(owner, foreign_key, ident_owner_pk),
             # The sweep's reason: this UPDATE runs at trigger depth >= 1, where
             # ``updated_at_trigger``'s ``WHEN`` suppresses it. Conditional because a model can
             # carry ``_deleted_at`` with no ``_updated_at`` -- not the MTI shape, E003 refuses it.

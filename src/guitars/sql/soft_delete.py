@@ -75,7 +75,7 @@ _CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE = """
         DO ALSO (
             UPDATE {related_table}
             SET _deleted_at = new._deleted_at
-            WHERE "{foreign_key}" = old."{primary_key}"
+            WHERE "{foreign_key}" = old."{referenced_key}"
               AND _deleted_at IS NULL
         );
 """
@@ -109,7 +109,7 @@ _CREATE_SOFT_DELETE_REVIVE_FUNCTION = """
                 WHERE guitars_before._deleted_at IS NOT NULL
                   AND guitars_after._deleted_at IS NULL
             ) AS guitars_revived
-            WHERE guitars_child."{foreign_key}" = guitars_revived."{primary_key}"
+            WHERE guitars_child."{foreign_key}" = guitars_revived."{referenced_key}"
               AND guitars_child._deleted_at = guitars_revived._deleted_at;
         END IF;
         RETURN NULL;
@@ -244,7 +244,7 @@ _SOFT_DELETE_REVIVE_ARM = """
                 WHERE guitars_before._deleted_at IS NOT NULL
                   AND guitars_after._deleted_at IS NULL
             ) AS guitars_revived
-            WHERE guitars_child."{foreign_key}" = guitars_revived."{primary_key}"
+            WHERE guitars_child."{foreign_key}" = guitars_revived."{referenced_key}"
               AND guitars_child._deleted_at = guitars_revived._deleted_at;"""
 
 _SOFT_DELETE_REVIVE_ARM_JOINED = """
@@ -600,9 +600,9 @@ _CREATE_SOFT_DELETE_SELF_CASCADE_FUNCTION = """
                       SELECT 1 FROM {table} AS guitars_child
                       WHERE guitars_child._deleted_at IS NULL
                         AND (
-                            guitars_child."{foreign_key}" = guitars_after."{primary_key}"
+                            guitars_child."{foreign_key}" = guitars_after."{referenced_key}"
                             OR guitars_child."{foreign_key}" IN (
-                                SELECT guitars_vanished."{primary_key}"
+                                SELECT guitars_vanished."{referenced_key}"
                                 FROM guitars_self_before AS guitars_vanished
                                 WHERE guitars_vanished._deleted_at IS NULL
                                   AND NOT EXISTS (
@@ -636,7 +636,7 @@ _CREATE_SOFT_DELETE_SELF_CASCADE_FUNCTION = """
             UPDATE {table} AS guitars_child
             SET _deleted_at = NOW(){updated_at_assignment}
             FROM (
-                SELECT guitars_before."{primary_key}" AS guitars_key
+                SELECT guitars_before."{referenced_key}" AS guitars_key
                 FROM guitars_self_before AS guitars_before
                 JOIN guitars_self_after AS guitars_after
                     ON guitars_after."{primary_key}" = guitars_before."{primary_key}"

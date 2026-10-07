@@ -200,8 +200,6 @@ def _classify(
             f"another tenant's row (guitars.E005); Python scoping still applies."
         )
         by_owner = {}
-        if not own:
-            return None, notes
 
     if len(by_owner) > 1:
         owners = sorted(_meta(owner).db_table for owner in by_owner)
@@ -225,7 +223,10 @@ def _classify(
             return None, notes
 
     if not own and not by_owner:
-        notes.append(_skip_note(model, spec))
+        # Said once: a refused owner join already named itself, and "no column on any ancestor"
+        # would be false of it.
+        if not own_key:
+            notes.append(_skip_note(model, spec))
         return None, notes
 
     owner_columns: dict[str, str] = {}

@@ -10,6 +10,21 @@ Full history and diffs: [GitHub releases](https://github.com/Behnam-RK/django-gu
 
 ## [Unreleased]
 
+## [2.17.0] - 2026-10-07
+
+### Added
+
+- **`guitars.E005`** refuses an MTI child that declares a primary key of its own beside its parent link (#64, [ADR 0034](docs/adr/0034-refuse-an-own-primary-key-beside-the-parent-link.md)). Every join the kit writes from such a child to its ancestor read its key as that link: a `DELETE` of the child archived an unrelated ancestor row, the parent `_updated_at` trigger and owned arms touched or matched one, and a tenant policy's owner join matched another tenant's row. `manage.py check` and `migrate` now stop on it, with a hint: drop the explicit key, or make the model its own with a foreign key to its parent. The generator re-asks the question for a project that skips checks, and writes no MTI redirect rule, parent trigger, owned arm or owner-join policy for the chain, naming E005 in a note.
+
+### Fixed
+
+- **A `CASCADE` key through `to_field` matched on the owner's primary key** (#59, [ADR 0035](docs/adr/0035-cascade-keys-through-to-field.md)). With an integer column the rule archived the wrong rows (a seat holding `number` 2 matched the ticket whose pk was 2); with a char column `CREATE RULE` compared `varchar` with `bigint` and `migrate` failed. The cascade rule, its revive arm and the self-cascade trigger now match children on the `to_field` column, pairing a row across a statement on the pk. A key into the primary key renders as it did: nothing re-emits for it. A column declared on a descendant, below the table holding `_deleted_at`, is a column the rule cannot read, and is refused with a note instead.
+- `soft_delete()` and the `.delete()` fast path take a `to_field` key now: it was a refusal, and a decline, while the rule matched the wrong rows.
+
+### Changed
+
+- **Upgrade step.** A project with a `to_field` cascade key regenerates one enforcement migration (`makemigrations`); `--check` is red until it does. A project with the E005 shape cannot start until it restructures the model.
+
 ## [2.16.0] - 2026-10-07
 
 ### Changed
@@ -421,7 +436,8 @@ First stable release. **BREAKING:** the instrument ladder shifted down one rung 
 
 - Added: initial release — `SetarModel`, `GuitarModel`, `SoftDeletableModel`, `DisableSignals`, `makeguitarmigrations`.
 
-[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.16.0...HEAD
+[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.17.0...HEAD
+[2.17.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.17.0
 [2.16.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.16.0
 [2.15.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.15.0
 [2.14.4]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.14.4

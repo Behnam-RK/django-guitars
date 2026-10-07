@@ -7,6 +7,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import TYPE_CHECKING, NamedTuple, cast
 
+from django.core.exceptions import FieldDoesNotExist
 from django.db.models import CASCADE
 
 from guitars.routing import migrates_to_postgresql
@@ -23,6 +24,7 @@ if TYPE_CHECKING:
 __all__ = [
     'CascadeKind',
     'OwnerArm',
+    'cascade_refusal',
     'classify_cascade',
     'column_owner',
     'has_column',
@@ -105,6 +107,37 @@ def is_cascade_candidate(related_model, fk_field, on_delete) -> bool:
     )
 
 
+def to_field_refusal(fk_field, owner_table: str) -> str | None:
+    """Why a key into a column other than the primary key gets no rule, or ``None`` (#59). The
+    rule fires on *owner_table*, the table holding ``_deleted_at``, and reads the column off
+    ``old.``: one declared on a descendant, below the holder, is not on that table."""
+    from django.db.models import ForeignKey  # noqa: PLC0415 - see joined_refusal
+
+    from guitars.models.fields import _targets_primary_key  # noqa: PLC0415 - see joined_refusal
+
+    # Only a real key has a ``to_field``; a relation this reads is always one, a stand-in is not.
+    if not isinstance(fk_field, ForeignKey) or _targets_primary_key(fk_field):
+        return None
+    try:
+        column = fk_field.target_field
+    except FieldDoesNotExist:
+        return f"'{fk_field.name}' declares a to_field naming no field"
+    if column.model._meta.db_table != owner_table:
+        return (
+            f"its to_field '{column.name}' is declared on '{column.model._meta.db_table}', not "
+            f"on '{owner_table}', the table the rule fires on and so the only one it can read"
+        )
+    return None
+
+
+def cascade_refusal(related_model, fk_field, owner_table: str) -> str | None:
+    """:func:`joined_refusal` for a joined key, :func:`to_field_refusal` for a flat one: the one
+    reason a key is :attr:`CascadeKind.REFUSED`, so a report names what classified it."""
+    if not owns_column(related_model, '_deleted_at'):
+        return joined_refusal(related_model, fk_field)
+    return to_field_refusal(fk_field, owner_table)
+
+
 class CascadeKind(Enum):
     """What a cascade relation earns from the generator."""
 
@@ -112,7 +145,9 @@ class CascadeKind(Enum):
     RULE = 'rule'  # the ``soft_delete_related_*`` rule, flat or joined
     SELF = 'self'  # the statement-level trigger a self-referential key takes (ADR 0018)
     CYCLE = 'cycle'  # refused: its rule would close a cycle of ON UPDATE rules
-    REFUSED = 'refused'  # a joined key no rule can read right: see :func:`joined_refusal`
+    REFUSED = (
+        'refused'  # a key no rule can read right: :func:`joined_refusal`, :func:`to_field_refusal`
+    )
 
 
 def joined_refusal(related_model, fk_field) -> str | None:
@@ -148,7 +183,7 @@ def classify_cascade(
     # A self key takes a trigger (ADR 0018): a rule updating the table it fires on is rewritten
     # into itself. Routed before the cycle check, which still holds this edge for the owned family.
     if related_model._meta.db_table == owner_table:
-        return CascadeKind.SELF
+        return CascadeKind.REFUSED if to_field_refusal(fk_field, owner_table) else CascadeKind.SELF
     # The table the rule *updates*: the child's own for the flat form, the ancestor holding
     # ``_deleted_at`` for the joined one (a key declared on an MTI descendant).
     joined = not owns_column(related_model, '_deleted_at')
@@ -162,7 +197,7 @@ def classify_cascade(
     # may not be in the registry graph.
     if (owner_table, target_table) in cycle_edges or (joined and target_table == owner_table):
         return CascadeKind.CYCLE
-    if joined and joined_refusal(related_model, fk_field) is not None:
+    if cascade_refusal(related_model, fk_field, owner_table) is not None:
         return CascadeKind.REFUSED
     return CascadeKind.RULE
 
@@ -222,7 +257,11 @@ def _rule_update_edges(candidates: Iterable[type[models.Model]]) -> set[tuple[st
                 field.remote_field.on_delete is CASCADE
                 and not getattr(field.remote_field, 'parent_link', False)
                 # The generator's own refusals, through the one predicate both read.
-                and (owns or joined_refusal(model, field) is None)
+                and (
+                    to_field_refusal(field, target_table) is None
+                    if owns
+                    else joined_refusal(model, field) is None
+                )
             ):
                 edges.add((target_table, updates_table))  # fires on the target, updates here
     return edges

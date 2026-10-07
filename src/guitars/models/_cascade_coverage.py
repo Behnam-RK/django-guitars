@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, NamedTuple, cast
 
 from django.apps import apps as django_apps
 from django.core.signals import setting_changed
-from django.db.models import CASCADE, DO_NOTHING, ForeignKey
+from django.db.models import CASCADE, DO_NOTHING
 from django.db.models.deletion import get_candidate_relations_to_delete
 from django.db.models.signals import class_prepared
 
@@ -23,7 +23,7 @@ from guitars.introspection import (
 from guitars.local_apps import is_local
 from guitars.routing import migrates_to_postgresql
 
-from .fields import OwningForeignKey, _targets_primary_key
+from .fields import OwningForeignKey
 
 
 if TYPE_CHECKING:
@@ -205,17 +205,6 @@ def cascade_plan(model: type[Model]) -> tuple[tuple[Gap, ...], frozenset[type[Mo
                     column_owner(target, '_deleted_at')._meta.db_table,
                     set(cycle_edges),
                 )
-                if kind in (CascadeKind.RULE, CascadeKind.SELF) and not _targets_primary_key(
-                    cast(ForeignKey, field)
-                ):
-                    # The rule correlates ``fk = old.<pk>``, so a ``to_field`` key archives nothing.
-                    gaps.append(
-                        Gap(
-                            edge,
-                            f'targets to_field {field.target_field.name!r}, not the primary key',
-                            True,
-                        )
-                    )
                 if kind is CascadeKind.SELF:
                     # Below the first level the trigger's own UPDATE runs at depth 1, where
                     # ``updated_at_trigger`` is suppressed; the collector's single depth-0

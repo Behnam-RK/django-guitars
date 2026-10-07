@@ -167,30 +167,39 @@ def _self_cascade_fields(model: type[Model], using: str | None) -> list[Field]:
     ]
 
 
-def _with_self_descendants(model: type[Model], pks: set, using: str | None) -> set:
-    """*pks* and every row below them through *model*'s self-referential cascade keys, in **one**
-    ``WITH RECURSIVE`` instead of a query a level. ``UNION`` ends a cycle in the data. Raw SQL: the
-    database's policies apply, a tenant dimension kept in Python alone (ADR 0003) does not."""
+def _self_descendant_origins(model: type[Model], pks: set, using: str | None) -> dict:
+    """``{row: the rows of *pks* it descends from}`` through *model*'s self-referential cascade
+    keys, in **one** ``WITH RECURSIVE``; ``UNION`` over the pairs ends a cycle. Raw SQL: database
+    policies apply, a tenant dimension kept in Python alone (ADR 0003) does not."""
+    origins: dict = defaultdict(set)
+    for pk in pks:
+        origins[pk].add(pk)
     fields = _self_cascade_fields(model, using)
     if not fields or not pks:
-        return set(pks)
+        return origins
     connection = connections[using or DEFAULT_DB_ALIAS]
     quote = connection.ops.quote_name
     table, pk_column = quote(model._meta.db_table), quote(cast(str, model._meta.pk.column))
-    columns = [quote(cast(str, field.column)) for field in fields]
     # Every key in the one recursion, so a subtree reached by alternating keys is still one query.
-    seeds = ' OR '.join(f'{column} = ANY(%s)' for column in columns)
-    onward = ' OR '.join(f't.{column} = guitars_below.pk' for column in columns)
+    onward = ' OR '.join(f't.{quote(cast(str, f.column))} = guitars_below.pk' for f in fields)
     with connection.cursor() as cursor:
         cursor.execute(
-            f'WITH RECURSIVE guitars_below(pk) AS ('  # nosec B608 - names come from _meta
-            f'SELECT {pk_column} FROM {table} WHERE {seeds} '
+            f'WITH RECURSIVE guitars_below(pk, origin) AS ('  # nosec B608 - names from _meta
+            f'SELECT {pk_column}, {pk_column} FROM {table} WHERE {pk_column} = ANY(%s) '
             f'UNION '
-            f'SELECT t.{pk_column} FROM {table} AS t JOIN guitars_below ON {onward}'
-            f') SELECT pk FROM guitars_below',
-            [list(pks)] * len(columns),
+            f'SELECT t.{pk_column}, guitars_below.origin FROM {table} AS t '
+            f'JOIN guitars_below ON {onward}'
+            f') SELECT pk, origin FROM guitars_below',
+            [list(pks)],
         )
-        return set(pks) | {row[0] for row in cursor.fetchall()}
+        for pk, origin in cursor.fetchall():
+            origins[pk].add(origin)
+    return origins
+
+
+def _with_self_descendants(model: type[Model], pks: set, using: str | None) -> set:
+    """*pks* and every row below them through *model*'s self-referential cascade keys."""
+    return set(_self_descendant_origins(model, pks, using))
 
 
 def _referring_relations(model: type[Model]) -> list:
@@ -217,19 +226,31 @@ def _referring_relations(model: type[Model]) -> list:
     ]
 
 
-def _cascade_closure(root: type[Model], pks: set, using: str | None) -> dict[type[Model], set]:
+def _cascade_closure(
+    root: type[Model], pks: set, using: str | None
+) -> tuple[dict[type[Model], set], dict[type[Model], dict]]:
     """Every row, by model, that collecting *pks* of *root* takes along through reverse ``CASCADE``
-    -- the walk ``_collect`` performs, to the same depth. One hop is not enough: a *grand*child goes
-    too, and counting its plain key holds the row back forever, not for one fixpoint pass."""
+    -- the walk ``_collect`` performs, to the same depth -- and, per row, which of *pks* takes it.
+    One hop is not enough: a *grand*child goes too, and a plain key into it dangles just as hard."""
     taken: dict[type[Model], set] = defaultdict(set)
-    pending: list[tuple[type[Model], set]] = [(root, pks)]
+    origins: dict[type[Model], dict] = defaultdict(lambda: defaultdict(set))
+    pending: list[tuple[type[Model], dict]] = [(root, {pk: {pk} for pk in pks})]
     while pending:
-        model, model_pks = pending.pop()
-        fresh = model_pks - taken[model]
+        model, reached = pending.pop()
+        known = origins[model]
+        # A row is walked again when it gains a target it was not yet known to go with: a row
+        # two targets reach must spare both, so each has to arrive at it.
+        fresh = {pk: new for pk, came in reached.items() if (new := came - known[pk])}
         if not fresh:
             continue
         # The subtree in one query, so the self-referential key below is skipped, not re-walked.
-        fresh = _with_self_descendants(model, fresh, using) - taken[model]
+        below: dict = defaultdict(set)
+        for pk, seeds in _self_descendant_origins(model, set(fresh), using).items():
+            for seed in seeds:
+                below[pk] |= fresh[seed]
+        fresh = {pk: new for pk, came in below.items() if (new := came - known[pk])}
+        for pk, new in fresh.items():
+            known[pk] |= new
         taken[model].update(fresh)
         followed = _self_cascade_fields(model, using)
         for relation in _referring_relations(model):
@@ -239,11 +260,14 @@ def _cascade_closure(root: type[Model], pks: set, using: str | None) -> dict[typ
             if field in followed:
                 continue
             related_model = cast('type[Model]', relation.related_model)
-            child_pks = set(
+            keys = _key_values(field, set(fresh), using)
+            children: dict = defaultdict(set)
+            for child_pk, value in (
                 _rows(related_model, using)
-                .filter(**{f'{field.attname}__in': _key_values(field, fresh, using)})
-                .values_list('pk', flat=True)
-            )
+                .filter(**{f'{field.attname}__in': keys})
+                .values_list('pk', field.attname)
+            ):
+                children[child_pk] |= fresh[keys[value]]
             # From the child's MTI *root*, and a parent-link from the level it names -- the
             # same two cases ``_collect`` distinguishes, since this has to reach exactly the
             # rows it will. The declaring level alone would leave its ancestors' rows out.
@@ -252,45 +276,54 @@ def _cascade_closure(root: type[Model], pks: set, using: str | None) -> dict[typ
                     related_model
                     if getattr(relation, 'parent_link', False)
                     else mti_root(related_model),
-                    child_pks,
+                    children,
                 )
             )
-    return taken
+    return taken, origins
 
 
 def _still_referenced(
     target: type[Model], pks: set, claimed: dict[type[Model], set], using: str | None
 ) -> set:
     """Which of *pks* a row that outlives the collection still points at, through **any**
-    foreign key, not only the one that declared ownership: removing a row is not stamping one,
-    and a surviving key of any kind dangles at ``COMMIT`` and fails the deferred constraint."""
+    foreign key, not only the one that declared ownership, at the target **or any row its
+    cascade takes along** (#71): a surviving key of any kind dangles at ``COMMIT``."""
     # Rows collecting the chain takes along, by **row**, not relation: one model can hold a
     # ``CASCADE`` key *and* a plain one to the same target, and discounting the relation alone
     # held the target back forever. Whole closure, not one hop -- see ``_cascade_closure``.
-    taken = _cascade_closure(mti_root(target), pks, using)
+    taken, origins = _cascade_closure(mti_root(target), pks, using)
+    # By MTI tree, not level: a parent-link walk records one row at every level it reaches.
+    trees: dict[type[Model], dict] = defaultdict(lambda: defaultdict(set))
+    for level, level_origins in origins.items():
+        for pk, came in level_origins.items():
+            trees[mti_root(level)][pk] |= came
     referenced: set = set()
-    # Every model in *target*'s MTI tree, not *target* alone: collecting it removes the whole
-    # chain, so a key into any level holds the same pk value and dangles just as hard. Deduped --
-    # an inherited relation is reported per level, and one read of it answers for them all.
-    relations = dict.fromkeys(
-        relation for level in _mti_model_chain(target) for relation in _referring_relations(level)
-    )
-    for relation in relations:
-        # A parent-link is the same object one table down, collected with the chain; a
-        # ``CASCADE`` referrer goes with the row it points at, and is in ``taken`` above.
-        if getattr(relation, 'parent_link', False) or relation.on_delete is CASCADE:
-            continue
-        related_model = cast('type[Model]', relation.related_model)
-        field = cast('Field', relation.field)
-        # No emptiness guard: an ``__in`` over no keys is an empty result either way.
-        keys = _key_values(field, pks, using)
-        rows = _rows(related_model, using).filter(**{f'{field.attname}__in': keys})
-        going = claimed.get(related_model, set()) | taken.get(related_model, set())
-        if going:
-            rows = rows.exclude(pk__in=going)
-        referenced.update(keys[value] for value in rows.values_list(field.attname, flat=True))
-        if referenced >= pks:  # nothing left to spare; skip the remaining relations
-            return referenced
+    for model, reached in trees.items():
+        # Every model in the row's MTI tree, not its level alone: removing it removes the whole
+        # chain, so a key into any level holds the same pk value and dangles just as hard.
+        # Deduped -- an inherited relation is reported per level, and one read answers for all.
+        relations = dict.fromkeys(
+            relation
+            for level in _mti_model_chain(model)
+            for relation in _referring_relations(level)
+        )
+        for relation in relations:
+            # A parent-link is the same object one table down, collected with the chain; a
+            # ``CASCADE`` referrer goes with the row it points at, and is in ``taken`` above.
+            if getattr(relation, 'parent_link', False) or relation.on_delete is CASCADE:
+                continue
+            related_model = cast('type[Model]', relation.related_model)
+            field = cast('Field', relation.field)
+            # No emptiness guard: an ``__in`` over no keys is an empty result either way.
+            keys = _key_values(field, set(reached), using)
+            rows = _rows(related_model, using).filter(**{f'{field.attname}__in': keys})
+            going = claimed.get(related_model, set()) | taken.get(related_model, set())
+            if going:
+                rows = rows.exclude(pk__in=going)
+            for value in rows.values_list(field.attname, flat=True):
+                referenced |= reached[keys[value]]
+            if referenced >= pks:  # nothing left to spare; skip the remaining relations
+                return referenced
     return referenced
 
 

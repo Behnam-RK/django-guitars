@@ -744,3 +744,11 @@ class Cue(SetarModel):
     label = CharField(max_length=50, default='')
     ledger = ForeignKey(Ledger, on_delete=CASCADE, related_name='cues')
     anchor = ForeignKey(Ledger, on_delete=DO_NOTHING, null=True, blank=True, related_name='anchored')
+
+
+class CueNote(SetarModel):
+    """Points plainly at a ``Cue``: a row outside a ``Ledger`` tree keying into a row the tree's
+    cascade takes along that is not a ``Ledger`` itself, which holds the owned root back (#71)."""
+
+    text = CharField(max_length=50, default='')
+    cue = ForeignKey(Cue, on_delete=DO_NOTHING, related_name='notes')

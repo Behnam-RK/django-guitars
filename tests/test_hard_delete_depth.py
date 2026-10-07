@@ -267,6 +267,99 @@ class TestAnOwnedTree:
 
         assert Ledger._all_objects.filter(pk=nodes[0].pk).exists()
 
+    @pytest.mark.parametrize('depth', [1, 2], ids=['child', 'grandchild'])
+    def test_a_cue_outside_the_tree_anchoring_a_descendant_holds_the_root_back(self, depth):
+        """Removing the root removes its subtree, so a plain key into any node of it dangles
+        just as hard (#71): the walk aborted at ``COMMIT`` instead of sparing the tree."""
+        from tests.testapp.models import Cue, Ledger, Stagecraft  # noqa: PLC0415
+
+        nodes = _ledger(3)
+        outside = Ledger.objects.create(name='outside')
+        Cue.objects.create(label='outside', ledger=outside, anchor=nodes[depth])
+        craft = Stagecraft.objects.create(name='c', ledger=nodes[0])
+
+        craft.hard_delete()
+        with connection.cursor() as cursor:
+            cursor.execute('SET CONSTRAINTS ALL IMMEDIATE')
+
+        assert not Stagecraft._all_objects.exists()
+        assert Ledger._all_objects.filter(pk__in=[n.pk for n in nodes]).count() == 3
+
+
+@pytest.mark.django_db
+class TestWhichOwnedTargetsAnOutsideKeySpares:
+    """A hit on a closure row spares exactly the targets whose closure holds it."""
+
+    def test_only_the_target_whose_subtree_is_anchored(self):
+        from guitars.models.soft_deletion import _still_referenced  # noqa: PLC0415
+        from tests.testapp.models import Cue, Ledger  # noqa: PLC0415
+
+        first, second = _ledger(3), _ledger(3)
+        outside = Ledger.objects.create(name='outside')
+        Cue.objects.create(label='outside', ledger=outside, anchor=first[2])
+
+        spared = _still_referenced(Ledger, {first[0].pk, second[0].pk}, {}, 'default')
+
+        assert spared == {first[0].pk}
+
+    def test_a_row_both_subtrees_reach_spares_both(self):
+        from guitars.models.soft_deletion import _still_referenced  # noqa: PLC0415
+        from tests.testapp.models import Cue, Ledger  # noqa: PLC0415
+
+        first, second = _ledger(2), _ledger(2)
+        shared = Ledger.objects.create(name='shared', parent=first[1], mirror=second[1])
+        outside = Ledger.objects.create(name='outside')
+        Cue.objects.create(label='outside', ledger=outside, anchor=shared)
+
+        spared = _still_referenced(Ledger, {first[0].pk, second[0].pk}, {}, 'default')
+
+        assert spared == {first[0].pk, second[0].pk}
+
+    def test_a_key_into_a_row_of_another_model_the_tree_takes_counts(self):
+        """The cue goes with the tree; the note pointing at it does not, so the tree must stay."""
+        from guitars.models.soft_deletion import _still_referenced  # noqa: PLC0415
+        from tests.testapp.models import Cue, CueNote, Ledger, Stagecraft  # noqa: PLC0415
+
+        nodes = _ledger(2)
+        CueNote.objects.create(cue=Cue.objects.create(label='in-tree', ledger=nodes[1]))
+
+        assert _still_referenced(Ledger, {nodes[0].pk}, {}, 'default') == {nodes[0].pk}
+
+        Stagecraft.objects.create(name='c', ledger=nodes[0]).hard_delete()
+        with connection.cursor() as cursor:
+            cursor.execute('SET CONSTRAINTS ALL IMMEDIATE')
+        assert Ledger._all_objects.count() == 2
+
+    def test_a_row_reached_along_two_relations_carries_both_targets(self):
+        """``Merch`` reaches ``Album`` twice, so one row arrives once per relation; the second
+        arrival must still add its target, or a key into it would spare only the first."""
+        from guitars.models.soft_deletion import _cascade_closure  # noqa: PLC0415
+        from tests.testapp.models import Album, Band, Merch  # noqa: PLC0415
+
+        first, second = Band.objects.create(name='a'), Band.objects.create(name='b')
+        shared = Merch.objects.create(
+            description='m',
+            album=Album.objects.create(title='a', band=first),
+            bonus_album=Album.objects.create(title='b', band=second),
+        )
+
+        _taken, origins = _cascade_closure(Band, {first.pk, second.pk}, 'default')
+
+        assert origins[Merch][shared.pk] == {first.pk, second.pk}
+
+    def test_a_row_going_anyway_spares_nothing(self):
+        """The anchoring cue is claimed by the walk, so its key goes with it."""
+        from guitars.models.soft_deletion import _still_referenced  # noqa: PLC0415
+        from tests.testapp.models import Cue, Ledger  # noqa: PLC0415
+
+        nodes = _ledger(3)
+        outside = Ledger.objects.create(name='outside')
+        cue = Cue.objects.create(label='outside', ledger=outside, anchor=nodes[2])
+
+        spared = _still_referenced(Ledger, {nodes[0].pk}, {Cue: {cue.pk}}, 'default')
+
+        assert spared == set()
+
 
 @pytest.mark.django_db
 class TestTheOwnedFixpointReadsWhatIsNew:

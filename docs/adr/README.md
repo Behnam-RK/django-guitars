@@ -40,3 +40,4 @@ New ADR? Start from [`template.md`](template.md).
 | [`0030`](0030-queryset-hard-delete-refuses-what-delete-refuses.md) | why queryset `hard_delete()` refuses a slice, a combined queryset, `distinct(*fields)` and `values()` in both forms, including shapes that did no harm before (2.14.3) |
 | [`0031`](0031-hard-delete-resolves-its-alias-as-delete-does.md) | why `hard_delete()` resolves its database as the `delete()` its Phase 1 calls does, the router first, and why Phase 1 still asks the router again (2.14.3) |
 | [`0032`](0032-hard-delete-removes-everything-it-collected.md) | why `hard_delete()` rolls back when a `DELETE` removes fewer rows than it collected, where it counts, and why the error names no cause (2.15.0) |
+| [`0033`](0033-one-revive-trigger-per-owner.md) | why every cascade key's revive is one arm of one trigger per owner table, behind one early exit, and why that quiets a dropped child's broken arm (2.16.0) |

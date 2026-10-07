@@ -175,32 +175,74 @@ def test_a_renamed_cascade_child_drops_the_rule_it_left_behind():
     assert 'CREATE OR REPLACE RULE "soft_delete_related_testapp_album"' in operation
 
 
-def test_a_renamed_cascade_child_drops_its_inverse_rules_old_name_too():
-    """The inverse rule's name embeds the child's table as the cascade's does, so a rename
-    strands it the same way -- and it sizes the table, so the old spelling carries the old
-    length and cannot be produced by truncating the new one."""
+def _per_key_revive_retirement(command):
+    (operation,) = [
+        candidate
+        for candidate in command._build_operations(apps.get_app_config('testapp'))
+        if candidate.startswith(
+            '# Soft Delete Revive Trigger retired on "testapp_album" that is related to '
+            '"testapp_band"!'
+        )
+    ]
+    return operation.split('reverse_sql')[0]
+
+
+def test_a_renamed_cascade_childs_per_key_revive_is_retired_under_its_old_name_too():
+    """2.16.0 retires every per-key revive (#70). Its name embeds the child's table, sized, so a
+    rename stranded it under the old spelling, which the retirement must drop as well."""
     command = Command()
     command.existing.renamed_tables['testapp_album'] = ['testapp_oldalbum']
     command.existing.soft_delete_revive[('testapp_album', 'testapp_band', None)] = 'stale00000'
 
+    forward = _per_key_revive_retirement(command)
+
+    for name in (
+        'soft_delete_revive_12_testapp_band_16_testapp_oldalbum',
+        'soft_delete_revive_12_testapp_band_13_testapp_album',
+    ):
+        assert f'DROP TRIGGER IF EXISTS "{name}" ON "testapp_band"' in forward
+        # The function goes with it: a trigger and its function share one name here.
+        assert f'DROP FUNCTION IF EXISTS "{name}"()' in forward
+
+
+def test_a_renamed_owners_per_key_revive_is_retired_under_its_old_name_too():
+    """The per-key name folds in the owner as well, and a renamed owner carries the trigger with
+    it under the old spelling: asking about the related table alone left that pair live."""
+    command = Command()
+    command.existing.renamed_tables['testapp_band'] = ['testapp_oldband']
+    command.existing.soft_delete_revive[('testapp_album', 'testapp_band', None)] = 'stale00000'
+
+    forward = _per_key_revive_retirement(command)
+
+    assert 'DROP TRIGGER IF EXISTS "soft_delete_revive_15_testapp_oldband_13_testapp_album"' in (
+        forward
+    )
+    assert 'DROP FUNCTION IF EXISTS "soft_delete_revive_15_testapp_oldband_13_testapp_album"()' in (
+        forward
+    )
+
+
+def _owner_revive(command):
     (operation,) = [
         candidate
         for candidate in command._build_operations(apps.get_app_config('testapp'))
-        if candidate.startswith('# Soft Delete Revive Trigger on "testapp_album"')
+        if candidate.startswith('# Soft Delete Revive Trigger on "testapp_band" table!')
     ]
+    return operation.split('reverse_sql')[0]
 
-    assert (
-        'DROP TRIGGER IF EXISTS "soft_delete_revive_12_testapp_band_16_testapp_oldalbum" '
-        'ON "testapp_band"'
-    ) in operation
-    # The function goes with it: a trigger and its function share one name here, and the
-    # carried-over function would otherwise keep a body reading the old table's key.
-    assert (
-        'DROP FUNCTION IF EXISTS "soft_delete_revive_12_testapp_band_16_testapp_oldalbum"()'
-    ) in operation
-    assert (
-        'CREATE TRIGGER "soft_delete_revive_12_testapp_band_13_testapp_album"' in operation
-    )
+
+def test_a_renamed_owners_revive_drops_its_old_name():
+    """The per-owner name spells the owner, so its rename strands the old trigger and function,
+    both running the same arms on every update of that table."""
+    command = Command()
+    command.existing.renamed_tables['testapp_band'] = ['testapp_oldband']
+    command.existing.soft_delete_revive_owner[('testapp_band',)] = 'stale00000'
+
+    forward = _owner_revive(command)
+
+    assert 'DROP TRIGGER IF EXISTS "soft_delete_revive_on_15_testapp_oldband"' in forward
+    assert 'DROP FUNCTION IF EXISTS "soft_delete_revive_on_15_testapp_oldband"()' in forward
+    assert 'CREATE TRIGGER "soft_delete_revive_on_12_testapp_band"' in forward
 
 
 def test_a_rename_wrapped_in_separate_database_and_state_is_still_seen():
@@ -507,38 +549,14 @@ def test_a_graph_node_with_no_disk_migration_is_skipped_by_the_rename_walk(loade
     assert missing not in graph.renames_by_migration(loader, 'testapp')
 
 
-def test_a_renamed_revive_drops_both_of_its_tables_old_names():
-    """The name folds in two tables since the trigger conversion, so either rename strands the
-    pair -- and asking about the related table alone left the old *owner*'s trigger and function
-    live for good, both running the same predicate on every update to that table."""
-    command = Command()
-    command.existing.renamed_tables['testapp_band'] = ['testapp_oldband']
-    command.existing.soft_delete_revive[('testapp_album', 'testapp_band', None)] = 'stale00000'
-
-    (operation,) = [
-        candidate
-        for candidate in command._build_operations(apps.get_app_config('testapp'))
-        if candidate.startswith('# Soft Delete Revive Trigger on "testapp_album"')
-    ]
-
-    assert 'soft_delete_revive_15_testapp_oldband_13_testapp_album' in operation
-    assert 'DROP TRIGGER IF EXISTS' in operation
-    assert 'DROP FUNCTION IF EXISTS' in operation
-
-
 def test_a_revive_re_emission_drops_its_trigger_before_creating_it():
     """``CREATE TRIGGER`` has no ``OR REPLACE``. A stale digest re-emits the operation, and a
     bare create over a live trigger aborts the migration with *already exists* -- taking the
     rule beside it down too, the operation being atomic."""
     command = Command()
-    command.existing.soft_delete_revive[('testapp_album', 'testapp_band', None)] = 'stale00000'
+    command.existing.soft_delete_revive_owner[('testapp_band',)] = 'stale00000'
 
-    (operation,) = [
-        candidate
-        for candidate in command._build_operations(apps.get_app_config('testapp'))
-        if candidate.startswith('# Soft Delete Revive Trigger on "testapp_album"')
-    ]
+    forward = _owner_revive(command)
 
-    forward = operation.split('reverse_sql')[0]
-    assert 'DROP TRIGGER "soft_delete_revive_12_testapp_band_13_testapp_album"' in forward
+    assert 'DROP TRIGGER "soft_delete_revive_on_12_testapp_band"' in forward
     assert forward.index('DROP TRIGGER') < forward.index('CREATE TRIGGER')

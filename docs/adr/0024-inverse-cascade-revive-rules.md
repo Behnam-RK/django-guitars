@@ -1,6 +1,6 @@
 # 0024 — an inverse trigger revives what a cascade archived
 
-- **Status:** accepted
+- **Status:** accepted — its one-trigger-per-key shape is superseded by [ADR 0033](0033-one-revive-trigger-per-owner.md) (2.16.0); the provenance test and the statement-level trigger stand
 - **Date:** 2026-09-22
 - **Affects:** `guitars.sql.soft_delete._CREATE_SOFT_DELETE_REVIVE`, `guitars.management.enforcement`
 

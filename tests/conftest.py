@@ -127,3 +127,4 @@ def clear_cascade_coverage(command) -> None:
     inverse family too, whose committed records would silently suppress what it counts."""
     command.existing.soft_delete_related.clear()
     command.existing.soft_delete_revive.clear()
+    command.existing.soft_delete_revive_owner.clear()

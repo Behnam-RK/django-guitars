@@ -306,15 +306,27 @@ def test_the_scan_forgets_what_a_retirement_dropped(monkeypatch):
 
 def test_the_scan_keeps_the_owners_revive_after_the_childs_retirement(monkeypatch):
     """The wiring for #66: retiring the child drops the cascade rule but not the revive on the
-    owner, so the scan must go on reading that trigger as live for the generator to retire."""
+    owner, so the scan must go on reading that trigger as live for the generator to re-emit.
+    Since 2.16.0 that trigger is the owner's one, keyed on the owner alone (#70)."""
     key = ('testapp_setlistentry', 'testapp_setlist', None)
-    assert key in scan_existing_operations().soft_delete_revive
+    owner = ('testapp_setlist',)
+    assert owner in scan_existing_operations().soft_delete_revive_owner
 
     _retire_at(monkeypatch, _stem_after_every_create(), 'testapp_setlistentry')
 
     existing = scan_existing_operations()
     assert key not in existing.soft_delete_related
-    assert key in existing.soft_delete_revive
+    assert owner in existing.soft_delete_revive_owner
+
+
+def test_a_whole_table_retirement_of_the_owner_forgets_its_revive(monkeypatch):
+    """``RetireEnforcement`` drops every ``soft_delete_revive%`` trigger on the table it names,
+    the per-owner one included, so the scan must stop reading it as live."""
+    owner = ('testapp_setlist',)
+
+    _retire_at(monkeypatch, _stem_after_every_create(), 'testapp_setlist')
+
+    assert owner not in scan_existing_operations().soft_delete_revive_owner
 
 
 def test_a_migration_after_the_retirement_records_the_key_again(monkeypatch):

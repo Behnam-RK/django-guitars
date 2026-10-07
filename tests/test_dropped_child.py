@@ -40,7 +40,10 @@ from tests.conftest import clear_cascade_coverage, execute, scalar
 
 CHILD, OWNER = 'testapp_setlistentry', 'testapp_setlist'
 KEY = (CHILD, OWNER, None)
-REVIVE = 'soft_delete_revive_15_testapp_setlist_20_testapp_setlistentry'
+# The owner's one revive trigger since 2.16.0 (#70), carrying the child's arm.
+REVIVE = 'soft_delete_revive_on_15_testapp_setlist'
+# The per-key trigger it superseded, which a retirement still drops ``IF EXISTS``.
+PER_KEY_REVIVE = 'soft_delete_revive_15_testapp_setlist_20_testapp_setlistentry'
 
 
 def _revive_is_live() -> bool:
@@ -53,12 +56,25 @@ def _update_owner():
 
 @pytest.mark.django_db
 class TestTheLeak:
-    def test_dropping_the_child_leaves_a_trigger_that_breaks_the_owner(self):
+    def test_dropping_the_child_leaves_a_trigger_that_breaks_a_revive_of_the_owner(self):
+        """The arm naming the dropped child runs only once the trigger's ``EXISTS`` finds a
+        row revived, so the failure is the revive's -- every plain UPDATE through 2.15."""
+        from tests.testapp.models import Setlist  # noqa: PLC0415
+
+        Setlist.objects.create(title='s')
+        execute(f'UPDATE {OWNER} SET _deleted_at = NOW()')
         with pytest.raises(ProgrammingError, match=f'relation "{CHILD}" does not exist'):
             with transaction.atomic():
                 execute(f'DROP TABLE {CHILD} CASCADE')
                 assert _revive_is_live()
-                _update_owner()
+                execute(f'UPDATE {OWNER} SET _deleted_at = NULL')
+
+    def test_a_plain_update_of_the_owner_survives_the_dropped_child(self):
+        """The early exit's side effect (#70): nothing revived, no arm runs, nothing fails."""
+        with transaction.atomic():
+            execute(f'DROP TABLE {CHILD} CASCADE')
+            _update_owner()
+            transaction.set_rollback(True)
 
     def test_retire_enforcement_on_the_child_does_not_reach_it(self):
         """It drops what *depends* on the child and the child's own triggers. The owner's revive
@@ -86,13 +102,23 @@ def _command(monkeypatch, *, dropped: set[str]):
             {table: model for table, model in by_table.items() if table != CHILD},
         )
 
+    def arms_without_child():
+        arms = command._revive_arm_sources if command._cascade_key_maps() else {}
+        return {
+            owner: kept
+            for owner, keyed in arms.items()
+            if (kept := {key: arm for key, arm in keyed.items() if key[0] != CHILD})
+        }
+
     monkeypatch.setattr(command, '_table_app_labels', without_child)
     monkeypatch.setattr(command, '_cascade_key_maps', maps_without_child)
+    monkeypatch.setattr(command, '_revive_arms_by_owner', arms_without_child)
     monkeypatch.setattr(
         command, '_dropped_tables', lambda: {table: ('otherapp', '0009_gone') for table in dropped}
     )
     command.existing.soft_delete_related[KEY] = 'abc'
     command.existing.soft_delete_revive[KEY] = 'def'
+    command.existing.soft_delete_revive_owner[(OWNER,)] = 'ghi'
     return command
 
 
@@ -139,7 +165,7 @@ class TestADroppedChildIsRetired:
         _rule, revive = _retirements(command)
 
         assert 'soft_delete_revive_15_testapp_setlist_16_testapp_oldentry' in _forward_sql(revive)
-        assert REVIVE in _forward_sql(revive)
+        assert PER_KEY_REVIVE in _forward_sql(revive)
 
     def test_the_retirement_is_ordered_after_the_deletion(self, monkeypatch):
         """Run before the ``DeleteModel``, it dropped both objects while the child was live, and
@@ -186,8 +212,55 @@ class TestADroppedChildIsRetired:
         """Before 2.11.0 there was no revive trigger, so nothing is broken to warn about."""
         command = _command(monkeypatch, dropped={CHILD})
         command.existing.soft_delete_revive.clear()
+        command.existing.soft_delete_revive_owner.clear()
 
         assert command._scoped_cascade_retirement_notes({'crossapp_owner'}) == []
+
+    def test_the_owners_one_trigger_is_named_once_its_per_key_trigger_is_gone(self, monkeypatch):
+        """Since 2.16.0 the per-key trigger is gone and the owner's carries the arm (#70). It
+        fails only a revive, the early exit sparing every other UPDATE, until re-emitted."""
+        command = _command(monkeypatch, dropped={CHILD})
+        command.existing.soft_delete_revive.clear()
+
+        notes = [
+            note
+            for note in (
+                *command._scoped_cascade_retirement_notes({'crossapp_owner'}),
+                *command._scoped_trigger_retirement_notes({'crossapp_owner'}),
+            )
+            if REVIVE in note
+        ]
+
+        # Once, by the note comparing digests: the arm went with its last key, so retired.
+        (note,) = notes
+        assert 'no longer called for' in note
+
+    def test_a_per_key_trigger_whose_owner_is_in_scope_is_not_named(self, monkeypatch):
+        """The run in scope writes its retirement itself."""
+        command = _command(monkeypatch, dropped={CHILD})
+
+        assert command._scoped_cascade_retirement_notes({'testapp'}) == []
+
+    def test_the_owners_trigger_is_named_with_its_own_host(self, monkeypatch, settings):
+        """Kept by the app that created it (ADR 0033), which need not host the table: the note
+        sends the reader to that app, and an in-scope one is not told to wait for itself."""
+        settings.LOCAL_APPS = [*settings.LOCAL_APPS, 'tests.crossapp_owner']
+        command = _command(monkeypatch, dropped={CHILD})
+        command.existing.soft_delete_revive.clear()
+        command.existing.soft_delete_revive_owner_dependencies[(OWNER,)] = [
+            ('crossapp_owner', '0003_auto_enforcement')
+        ]
+
+        def revive_notes(requested):
+            return [
+                note
+                for note in command._scoped_trigger_retirement_notes(requested)
+                if REVIVE in note
+            ]
+
+        assert revive_notes({'crossapp_owner'}) == []
+        (note,) = revive_notes({'other'})
+        assert "'crossapp_owner'" in note
 
     def test_two_keys_to_one_owner_name_two_triggers(self, monkeypatch):
         command = _command(monkeypatch, dropped={CHILD})
@@ -214,14 +287,25 @@ class TestADroppedChildIsRetired:
 
     @pytest.mark.django_db
     def test_running_it_repairs_the_owner(self, monkeypatch):
-        retired = _retirements(_command(monkeypatch, dropped={CHILD}))
+        """The child was the owner's only arm, so its one trigger goes with it (2.16.0)."""
+        from tests.testapp.models import Setlist  # noqa: PLC0415
+
+        command = _command(monkeypatch, dropped={CHILD})
+        app = apps.get_app_config('testapp')
+        retired = [
+            *_retirements(command),
+            *[op for op in command._retired_trigger_operations(app) if f'"{OWNER}"' in op],
+            *[op for op in command._revive_operations(app) if f'"{OWNER}"' in op],
+        ]
+        Setlist.objects.create(title='s')
 
         with transaction.atomic():
+            execute(f'UPDATE {OWNER} SET _deleted_at = NOW()')
             execute(f'DROP TABLE {CHILD} CASCADE')
             for operation in retired:
                 execute(_forward_sql(operation))
             assert not _revive_is_live()
-            _update_owner()
+            execute(f'UPDATE {OWNER} SET _deleted_at = NULL')
             transaction.set_rollback(True)
 
 

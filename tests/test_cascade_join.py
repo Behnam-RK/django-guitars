@@ -61,21 +61,26 @@ class TestTheJoinedRule:
         assert '"market_id" = old."id"' in rule
         assert 'SELECT' not in rule
 
-    def test_each_joined_rule_has_a_revive_twin_against_the_ancestor(self):
-        _, blob = _label_operations()
+    def test_each_joined_rule_has_a_revive_arm_against_the_ancestor(self):
+        """In the owner's one revive trigger since 2.16.0 (#70), beside the flat arms."""
+        command = Command()
+        clear_cascade_coverage(command)
+        (revive,) = [
+            op
+            for op in command._revive_operations(apps.get_app_config('testapp'))
+            if op.startswith('# Soft Delete Revive Trigger on "testapp_label" table!')
+        ]
 
         for related, link in (
             ('testapp_touringfestival', 'festival_ptr_id'),
             ('testapp_headlinefestival', 'touringfestival_ptr_id'),
         ):
-            header = (
-                f'# Soft Delete Revive Trigger on "{related}" that is related to "testapp_label"!'
-            )
-            assert header in blob, related
-            revive = blob.split(header)[1].split('\n# ')[0]
-            assert 'UPDATE "testapp_festival" AS guitars_child' in revive
+            arm = revive.split(f'SELECT guitars_link."{link}" FROM "{related}"')[0].rsplit(
+                'UPDATE ', 1
+            )[1]
+            assert arm.startswith('"testapp_festival" AS guitars_child'), related
             assert f'guitars_link."{link}"' in revive
-            assert 'guitars_child._deleted_at = guitars_revived._deleted_at' in revive
+        assert 'guitars_child._deleted_at = guitars_revived._deleted_at' in revive
 
     def test_nothing_is_reported_skipped_any_more(self):
         command, _ = _label_operations()
@@ -309,16 +314,20 @@ class TestTwoJoinedKeysFromOneDescendant:
         }
         return command, command._cascade_operations(Owner), Child
 
-    def test_four_operations_with_distinct_names_and_no_clash(self):
-        command, operations, _ = self._operations()
+    def test_two_rules_with_distinct_names_and_no_clash(self):
+        """Two rules; their inverses are two arms of the owner's one trigger (2.16.0)."""
+        command, operations, child = self._operations()
 
-        names = [
-            name for op in operations for name in re.findall(r'(?:RULE|TRIGGER) "([^"]+)"', op)[:1]
-        ]
-        assert len(operations) == 4
-        assert len(set(names)) == 4
+        names = [name for op in operations for name in re.findall(r'RULE "([^"]+)"', op)[:1]]
+        assert len(operations) == 2
+        assert len(set(names)) == 2
         assert command._rule_name_clashes == []
         assert command._skipped_rule_notes == []
+        owner_table = child._meta.get_field('first').related_model._meta.db_table
+        for column in ('first_id', 'second_id'):
+            arm = command._revive_arm((child._meta.db_table, owner_table, column), child, column, 'id')
+            assert f'guitars_link."{column}" = guitars_revived."id"' in arm
+            assert 'guitars_link."root_ptr_id"' in arm
 
     def test_each_rule_is_joined_and_carries_its_own_column(self):
         _, operations, _ = self._operations()
@@ -601,12 +610,15 @@ class TestTheParentLinkIsTheAncestorsNotTheDescendantsPk:
         assert 'SELECT "root_link_id" FROM "testapp_kid"' in blob
         assert '"code"' not in blob
 
-    def test_the_revive_twin_reads_it_too(self):
+    def test_the_revive_arm_reads_it_too(self):
         owner, kid = self._explicit_pk()
+        command, _ = self._operations(owner, kid)
 
-        _, blob = self._operations(owner, kid)
+        arm = command._revive_arm(
+            (kid._meta.db_table, owner._meta.db_table, None), kid, 'owner_id', 'id'
+        )
 
-        assert 'guitars_link."root_link_id"' in blob
+        assert 'guitars_link."root_link_id"' in arm
 
     @staticmethod
     @isolate_apps('tests.testapp')

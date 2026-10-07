@@ -672,6 +672,10 @@ class HardDeletableQuerySet(LiveQuerySet):
         queryset ``hard_delete``. Its own switch and ``atomic()``, or autocommit lets the
         switch expire before the DELETE it unlocks. Both on the write alias, resolved once."""
         using = _write_alias(self)
+        where = self.query.where
+        if where.contains_aggregate or where.contains_over_clause:
+            # Not a ``WHERE`` at all (#73): read the keys, as ``delete()`` does, and remove those.
+            return self._hard_delete_by_key(using)
         try:
             with _hard_deletion_on(using):
                 self.using(using)._delete_own_table_rows()
@@ -679,6 +683,21 @@ class HardDeletableQuerySet(LiveQuerySet):
         # instance walk collected its rows, so a table compiling to nothing must abort it.
         except EmptyResultSet:
             pass
+        return None
+
+    def _hard_delete_by_key(self, using: str) -> None:
+        """The matched keys, read first, removed in batches: a bare queryset, since the keys
+        already carry this one's filter and scope, and every batch must remove all it names."""
+        pks = _matching_pks(self.using(using))
+        if not pks:
+            return None
+        with _hard_deletion_on(using):
+            for start in range(0, len(pks), _PK_BATCH):
+                batch = pks[start : start + _PK_BATCH]
+                bare = HardDeletableQuerySet(model=self.model, using=using).filter(pk__in=batch)
+                _require_removed(
+                    self.model._meta.db_table, len(batch), bare._delete_own_table_rows()
+                )
         return None
 
     def _delete_own_table_rows(self) -> int:

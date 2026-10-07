@@ -88,3 +88,22 @@ def test_a_walk_that_removes_everything_it_collected_still_commits():
     with connection.cursor() as cursor:
         cursor.execute("SELECT current_setting('rules.hard_deletion', true)")
         assert cursor.fetchone()[0] in (None, '', 'off')
+
+
+@pytest.mark.django_db
+def test_the_key_read_path_removes_every_key_it_read_or_nothing(monkeypatch):
+    """A window filter's keys are read first (#73); one gone by its ``DELETE`` aborts it too."""
+    from django.db.models import Window  # noqa: PLC0415
+    from django.db.models.functions import RowNumber  # noqa: PLC0415
+
+    from tests.testapp.models import Band  # noqa: PLC0415
+
+    bands = [Band.objects.create(name=name) for name in ('a', 'b')]
+    _removing_first(monkeypatch, 'testapp_band', bands[0].pk)
+    ranked = Band._all_objects.annotate(rn=Window(RowNumber(), order_by='pk')).filter(rn__lte=2)
+
+    with pytest.raises(HardDeleteIncompleteError, match='removed 1 of the 2 rows'):
+        ranked.hard_delete()
+
+    monkeypatch.undo()
+    assert Band._all_objects.count() == 2

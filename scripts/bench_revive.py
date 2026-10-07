@@ -104,7 +104,7 @@ def _measure(install, keys: int, updates: int) -> float:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or '').split('\n\n')[0])
     parser.add_argument('--keys', type=int, default=16)
     parser.add_argument('--updates', type=int, default=2000)
     args = parser.parse_args()

@@ -32,6 +32,12 @@ def _command() -> Command:
     return command
 
 
+def _non_revive(notes: list[str]) -> list[str]:
+    """*notes* less the revive family's: ``_command`` clears every recorded owner trigger, so a
+    scoped run names each as missing beside the family a test is about."""
+    return [note for note in notes if not note.startswith('Revive trigger')]
+
+
 def _retired(command: Command) -> list[str]:
     return command._retired_trigger_operations(apps.get_app_config('testapp'))
 
@@ -293,7 +299,14 @@ def _without(command: Command, method: str, drop):
             return {
                 owner: kept
                 for owner, keyed in command._revive_arm_sources.items()
-                if (kept := {key: arm for key, arm in keyed.items() if key != drop})
+                # Arms are keyed on the real column: a ``None`` key form owns every column.
+                if (
+                    kept := {
+                        key: arm
+                        for key, arm in keyed.items()
+                        if (key[:2] != drop[:2] if drop[2] is None else key != drop)
+                    }
+                )
             }
 
         command._revive_arms_by_owner = arms
@@ -410,7 +423,7 @@ class TestAScopedRunNamesWhatItLeaves:
         command = _command()
         command.existing.soft_delete_owned_sweep[OWNED] = 'def'
 
-        (note,) = command._scoped_trigger_retirement_notes({'crossapp_owner'})
+        (note,) = _non_revive(command._scoped_trigger_retirement_notes({'crossapp_owner'}))
 
         assert OWNED[1] in note
         assert 'testapp' in note
@@ -419,7 +432,7 @@ class TestAScopedRunNamesWhatItLeaves:
         command = _command()
         command.existing.soft_delete_self_cascade[SELF] = 'abc'
 
-        (note,) = command._scoped_trigger_retirement_notes({'crossapp_owner'})
+        (note,) = _non_revive(command._scoped_trigger_retirement_notes({'crossapp_owner'}))
 
         assert SELF[0] in note
 

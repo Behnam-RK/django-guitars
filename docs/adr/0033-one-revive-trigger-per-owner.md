@@ -12,8 +12,8 @@
 ## Decision
 
 - **One trigger and function per owner table**, `soft_delete_revive_on_<owner>`, every cascade key's revive an arm of its body, flat and joined forms alike. The body asks once, behind the hard-deletion guard, whether any row went from archived to live; only then do the arms run.
-- **Keyed `(owner_table,)`**, hosted by the owner table's app as retirement is, its arms off the registry-wide sweep so an MTI descendant in another app contributes to its ancestor's owner. Its `[SQL:]` digest covers the whole body: a key added or gone re-emits it, and the trigger is retired only with the owner's last key.
-- **Every recorded per-key revive is retired** by the upgrade, `IF EXISTS` over both tables' spellings ([ADR 0029](0029-retiring-a-deleted-childs-revive-trigger.md)), ordered after its create ([ADR 0021](0021-retirement-ordered-against-its-create.md)). Its reverse rebuilds that trigger, flat or joined, so the migration unapplies. The per-key headers and scanners stay, to read history.
+- **Keyed `(owner_table,)`**, hosted by the owner table's app as retirement is, or, for an owner outside `LOCAL_APPS`, by the first app contributing an arm, where the per-key trigger was written. A routed-away owner gets none ([ADR 0022](0022-router-gated-enforcement.md)). Its arms come off the registry-wide sweep, one per relation, so an MTI descendant in another app contributes to its ancestor's owner. Its `[SQL:]` digest covers the whole body: a key added or gone re-emits it, and the trigger is retired only with the owner's last key.
+- **Every recorded per-key revive is retired** by the upgrade, a routed-away owner's excepted, in the app writing its owner's trigger, `IF EXISTS` over both tables' spellings ([ADR 0029](0029-retiring-a-deleted-childs-revive-trigger.md)), ordered after its create ([ADR 0021](0021-retirement-ordered-against-its-create.md)). Its reverse rebuilds that trigger, flat or joined, so the migration unapplies. The per-key headers and scanners stay, to read history.
 
 ## Why
 
@@ -21,11 +21,11 @@
 - **Keyed by the owner, not the key.** The trigger fires on the owner, so that is what decides how many fire. A per-key header kept beside it would have two families claiming one object.
 - **Rejected: keep per-key triggers, add the early exit to each.** Far less generator work, a changed body re-emitting each, but still N trigger invocations a statement.
 - **Rejected: measure first.** The issue's numbers already attribute the cost; the benchmark confirms the shape rather than choosing it.
-- **Strongest objection.** A child table dropped without its retirement (#63) used to fail every `UPDATE` of the owner, loudly. Now it fails only an `UPDATE` that revives a row, which is rare and may first happen in production. Accepted because the generator still sees it: deleting the child's model removes its arm, the owner's digest moves, and `makemigrations --check` fails until it is regenerated. A run scoped away from the owner's app names the trigger instead.
+- **Strongest objection.** A child table dropped without its retirement (#63) used to fail every `UPDATE` of the owner, loudly. Now it fails only an `UPDATE` that revives a row, which is rare and may first happen in production. Accepted because the generator still sees it: deleting the child's model removes its arm, the owner's digest moves, and `makemigrations --check` in a run including the owner's app fails until it is regenerated. A run scoped away from that app names the trigger as missing, out of date or no longer called for, comparing digests.
 
 ## Consequences
 
-**Accepted costs.** Every consumer gets one enforcement migration on upgrade, retiring its per-key revives and creating the per-owner ones; `--check` is red until it is generated. Changing one key's arm rebuilds the owner's whole function. The two MTI keys that used to clash on a per-key name (a model keyed to both a parent and its child) no longer do: both are arms of one function.
+**Accepted costs.** Every consumer gets one enforcement migration on upgrade in each app hosting an owner, retiring its per-key revives and creating the per-owner ones; `--check` is red until it is generated. Changing one key's arm rebuilds the owner's whole function. The two MTI keys that used to clash on a per-key name (a model keyed to both a parent and its child) no longer do: both are arms of one function.
 
 **Reversibility.** The upgrade migration unapplies to the per-key triggers. Returning to them in code would need the same transition the other way.
 

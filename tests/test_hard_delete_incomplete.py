@@ -148,8 +148,12 @@ def test_the_key_read_path_counts_a_key_matched_twice_once():
 def test_a_root_already_gone_is_named_among_the_causes():
     """A row gone before the walk deletes it -- here a pk that never existed, as a table with
     no soft-delete rule yet loses its row to Phase 1 -- fails closed, the message saying where."""
-    with pytest.raises(HardDeleteIncompleteError, match='makeguitarmigrations'):
+    with pytest.raises(
+        HardDeleteIncompleteError, match='removed 0 of the 1 rows it collected from testapp_offer'
+    ) as raised:
         Offer(pk=987654).hard_delete()
+
+    assert 'makeguitarmigrations' in str(raised.value)
 
 
 @pytest.mark.django_db

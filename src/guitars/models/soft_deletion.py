@@ -1015,7 +1015,7 @@ class SoftDeletableModel(Model):
                         else:
                             # Switched off, so a receiver archives soft-deletable rows; no ``finally``.
                             # Not counted (ADR 0032): the collector cascades by its own rules, so a
-                            # row can go before its own entry, and no row policy hides a plain row.
+                            # row can go before its own entry; a row policy hides a row from both.
                             with connections[using].cursor() as cursor:
                                 cursor.execute(SWITCH_OFF_HARD_DELETION)
                                 _rows(model, using).filter(pk__in=pks).delete()

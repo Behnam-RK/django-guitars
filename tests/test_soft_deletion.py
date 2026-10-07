@@ -183,6 +183,21 @@ def test_queryset_hard_delete_reads_the_keys_a_where_cannot_hold(narrowed):
 
 
 @pytest.mark.django_db
+def test_queryset_hard_delete_reading_no_keys_takes_no_switch():
+    from django.db import connection  # noqa: PLC0415
+    from django.test.utils import CaptureQueriesContext  # noqa: PLC0415
+
+    Band.objects.create(name='kept')
+    nothing = Band._all_objects.annotate(rn=Window(RowNumber(), order_by='pk')).filter(rn=99)
+
+    with CaptureQueriesContext(connection) as captured:
+        assert nothing.hard_delete() is None
+
+    assert not any('set_config' in query['sql'] for query in captured.captured_queries)
+    assert Band._all_objects.count() == 1
+
+
+@pytest.mark.django_db
 def test_queryset_hard_delete_keeps_one_statement_for_a_plain_filter():
     """The key read is for the shapes that need it: a bulk purge stays one ``DELETE``."""
     from django.db import connection  # noqa: PLC0415

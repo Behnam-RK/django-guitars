@@ -712,3 +712,27 @@ def test_the_owned_rule_graph_is_redone_only_for_a_model_outside_the_registry(mo
     assert stray in calls[-1]
     scan.graph({Offer: {1}, stray: {3}, Tier: {4}})
     assert len(calls) == 2
+
+
+@pytest.mark.django_db
+def test_the_walks_subtree_read_returns_each_row_once(monkeypatch):
+    """The collection walk needs the rows, not which seed each descends from: reading pairs
+    returned a row once per seed above it, quadratic in depth when every node is a seed."""
+    from django.db.backends.postgresql.base import Cursor  # noqa: PLC0415
+
+    from guitars.models.soft_deletion import _with_self_descendants  # noqa: PLC0415
+
+    nodes = _ledger(20)
+    fetched = []
+    real = Cursor.fetchall
+
+    def fetchall(self):
+        fetched.append(real(self))
+        return fetched[-1]
+
+    monkeypatch.setattr(Cursor, 'fetchall', fetchall)
+
+    below = _with_self_descendants(type(nodes[0]), {n.pk for n in nodes}, 'default')
+
+    assert below == {n.pk for n in nodes}
+    assert [len(rows) for rows in fetched] == [len(nodes) - 1]

@@ -198,8 +198,28 @@ def _self_descendant_origins(model: type[Model], pks: set, using: str | None) ->
 
 
 def _with_self_descendants(model: type[Model], pks: set, using: str | None) -> set:
-    """*pks* and every row below them through *model*'s self-referential cascade keys."""
-    return set(_self_descendant_origins(model, pks, using))
+    """*pks* and every row below them through *model*'s self-referential cascade keys: each row
+    once, where :func:`_self_descendant_origins` returns one per seed above it -- the walk needs
+    the rows alone, and the pairs grow with the depth when every node is a seed."""
+    fields = _self_cascade_fields(model, using)
+    if not fields or not pks:
+        return set(pks)
+    connection = connections[using or DEFAULT_DB_ALIAS]
+    quote = connection.ops.quote_name
+    table, pk_column = quote(model._meta.db_table), quote(cast(str, model._meta.pk.column))
+    columns = [quote(cast(str, field.column)) for field in fields]
+    seeds = ' OR '.join(f'{column} = ANY(%s)' for column in columns)
+    onward = ' OR '.join(f't.{column} = guitars_below.pk' for column in columns)
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f'WITH RECURSIVE guitars_below(pk) AS ('  # nosec B608 - names come from _meta
+            f'SELECT {pk_column} FROM {table} WHERE {seeds} '
+            f'UNION '
+            f'SELECT t.{pk_column} FROM {table} AS t JOIN guitars_below ON {onward}'
+            f') SELECT pk FROM guitars_below',
+            [list(pks)] * len(columns),
+        )
+        return set(pks) | {row[0] for row in cursor.fetchall()}
 
 
 def _referring_relations(model: type[Model]) -> list:
@@ -216,9 +236,9 @@ def _referring_relations(model: type[Model]) -> list:
     # Which is why the two walks are no longer identical: what ``_collect`` takes there,
     # :func:`_cascade_closure` does not model, so they can disagree.
 
-    # Only ever toward sparing, though -- a generic child holds nothing back, so a closure
-    # counting a referrer collection will in fact remove can only leave an owned target
-    # archived rather than removed.
+    # Since 2.15.0 that cuts the other way too: sparing reads the referrers of every closure
+    # row, so a plain key into a generic child goes unseen and the walk aborts at ``COMMIT``
+    # rather than sparing its target -- #76.
     return [
         relation
         for relation in model._meta.get_fields(include_hidden=True)
@@ -465,8 +485,9 @@ def _require_removed(table: str, collected: int, removed: int) -> None:
     if removed != collected:
         raise HardDeleteIncompleteError(
             f'hard_delete() removed {removed} of the {collected} rows it collected from {table}: '
-            f'a tenant scope or row-level policy hides a row, or another transaction removed '
-            f'one first. Rolled back; nothing was removed.'
+            f'a tenant scope or row-level policy hides a row, another transaction removed one '
+            f'first, or the row was already gone (a table with no soft-delete rule yet loses it '
+            f'to delete(): run makeguitarmigrations and migrate). Rolled back; nothing removed.'
         )
 
 
@@ -642,7 +663,9 @@ class HardDeletableQuerySet(LiveQuerySet):
         # The write alias, once: ``self.db`` is the read alias and is asked of the router afresh
         # each time, so the switch and the ``DELETE`` could otherwise land on different ones.
         using = _write_alias(self)
-        pks = list(self.using(using).values_list('pk', flat=True))
+        # Distinct: a filter across a many-valued relation returns a key once per joined row, and
+        # the count below is of rows.
+        pks = list(dict.fromkeys(self.using(using).values_list('pk', flat=True)))
         if not pks:
             return None
         placeholders = ', '.join(['%s'] * len(pks))
@@ -688,7 +711,7 @@ class HardDeletableQuerySet(LiveQuerySet):
     def _hard_delete_by_key(self, using: str) -> None:
         """The matched keys, read first, removed in batches: a bare queryset, since the keys
         already carry this one's filter and scope, and every batch must remove all it names."""
-        pks = _matching_pks(self.using(using))
+        pks = list(dict.fromkeys(_matching_pks(self.using(using))))  # distinct, as the MTI form
         if not pks:
             return None
         with _hard_deletion_on(using):

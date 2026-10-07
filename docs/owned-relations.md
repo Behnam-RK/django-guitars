@@ -53,7 +53,7 @@ their own last owners. **Index every owning column.** See
 it — the reverse of child-first `CASCADE` order, since the owner still references it. Three
 narrowings, because it *removes* the row where the rule only stamps a column: the whole batch is
 spared rather than one row; an **archived** referrer still counts, its key being on disk; and **any**
-surviving foreign key holds it back, at *any* level of an MTI chain and into *any* row its cascade takes along (2.15.0) — all three because a
+surviving foreign key holds it back, at *any* level of an MTI chain and into *any* row its cascade takes along by a key column (2.15.0; a `GenericRelation` child not yet, #76) — all three because a
 still-referenced row fails the deferred constraint at `COMMIT`. Collection runs to a fixpoint, so a
 row spared by a reference itself collected later is picked up later; a `CASCADE` referrer never
 counts, going *with* the row, discounted by **row** rather than relation and at any depth. Queryset

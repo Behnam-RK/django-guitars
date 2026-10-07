@@ -107,3 +107,46 @@ def test_the_key_read_path_removes_every_key_it_read_or_nothing(monkeypatch):
 
     monkeypatch.undo()
     assert Band._all_objects.count() == 2
+
+
+@pytest.mark.django_db
+def test_an_mti_queryset_matching_a_row_twice_counts_it_once():
+    """A filter across a many-valued relation returns a key once per joined row: the count is of
+    rows, so the keys are counted distinct, or a clean delete reads as one that fell short."""
+    from tests.testapp.models import Merch  # noqa: PLC0415
+
+    orchestra = Orchestra.objects.create(name='o', conductor='c')
+    for description in ('mug', 'mat'):
+        Merch.objects.create(description=description, featured_orchestra=orchestra)
+
+    Orchestra._all_objects.filter(featured_by__description__startswith='m').hard_delete()
+
+    assert not Orchestra._all_objects.filter(pk=orchestra.pk).exists()
+    Merch._all_objects.all().hard_delete()  # the queryset form walks no referrers
+
+
+@pytest.mark.django_db
+def test_the_key_read_path_counts_a_key_matched_twice_once():
+    from django.db.models import Window  # noqa: PLC0415
+    from django.db.models.functions import RowNumber  # noqa: PLC0415
+
+    from tests.testapp.models import Band, Genre  # noqa: PLC0415
+
+    band = Band.objects.create(name='a')
+    band.genres.set([Genre.objects.create(name='g1'), Genre.objects.create(name='g2')])
+    ranked = Band._all_objects.annotate(rn=Window(RowNumber(), order_by='pk')).filter(
+        rn__gte=1, genres__name__in=['g1', 'g2']
+    )
+
+    ranked.hard_delete()
+
+    assert not Band._all_objects.exists()
+    Band.genres.through.objects.all().delete()  # the queryset form walks no referrers
+
+
+@pytest.mark.django_db
+def test_a_root_already_gone_is_named_among_the_causes():
+    """Without its soft-delete rule a table loses the row to Phase 1's ``delete()``; the walk
+    still fails closed, and the message says where to look."""
+    with pytest.raises(HardDeleteIncompleteError, match='makeguitarmigrations'):
+        Offer(pk=987654).hard_delete()

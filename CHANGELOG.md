@@ -10,6 +10,18 @@ Full history and diffs: [GitHub releases](https://github.com/Behnam-RK/django-gu
 
 ## [Unreleased]
 
+## [2.16.0] - 2026-10-07
+
+### Changed
+
+- **One revive trigger per owner table** (#70, [ADR 0033](docs/adr/0033-one-revive-trigger-per-owner.md)). Since 2.11.0 every cascade key carried its own statement-level revive trigger on the owner table, each running a full `UPDATE … FROM` join over the transition tables on every `UPDATE` of that table: one consumer table had 16. The generator now emits one trigger and function per owner, `soft_delete_revive_on_<owner>`, with every key's revive as an arm, joined forms included, behind one test of whether the statement revived a row at all. On 16 keys `scripts/bench_revive.py` measures +0.245 ms an `UPDATE` per key against +0.047 ms per owner. **Upgrade step:** `makemigrations` (or `makeguitarmigrations`) emits one migration that retires every per-key revive, `IF EXISTS` over every spelling its tables held, and creates the per-owner triggers; `--check` fails until it is generated. Its reverse rebuilds the per-key triggers.
+- A child table dropped without its retirement (#63) now breaks only an `UPDATE` that revives a row of the owner, where it broke every `UPDATE`. Quieter, so keep `makemigrations --check` in CI: deleting the child's model moves the owner trigger's digest, and `--check` fails until the trigger is regenerated without that arm.
+- An MTI parent and its child both keyed from one model no longer clash on a revive name: their revives are two arms of one function. The cascade rule clash on that shape is unchanged.
+
+### Added
+
+- `scripts/bench_revive.py`, timing a single-row `UPDATE` with N keys' revives per key and per owner. Not run in CI.
+
 ## [2.15.0] - 2026-10-07
 
 ### Added
@@ -409,7 +421,8 @@ First stable release. **BREAKING:** the instrument ladder shifted down one rung 
 
 - Added: initial release — `SetarModel`, `GuitarModel`, `SoftDeletableModel`, `DisableSignals`, `makeguitarmigrations`.
 
-[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.15.0...HEAD
+[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.16.0...HEAD
+[2.16.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.16.0
 [2.15.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.15.0
 [2.14.4]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.14.4
 [2.14.3]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.14.3

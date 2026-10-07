@@ -115,7 +115,7 @@ def _enforcement_gaps(model: type[Model]) -> list[Gap]:
             for owner in _chain(model, holder)
             if owner is not holder
         )
-        add('its primary key is not its parent link (#64)', reaching)
+        add('its primary key is not its parent link (#64, guitars.E005)', reaching)
     return [Gap(model._meta.label, reason, blocking) for reason, blocking in gaps.items()]
 
 
@@ -156,7 +156,7 @@ def cascade_plan(model: type[Model]) -> tuple[tuple[Gap, ...], frozenset[type[Mo
         gaps.extend(
             Gap(
                 f'{current._meta.label}.{field.name}',
-                'owns a model whose primary key is not its parent link (#64)',
+                'owns a model whose primary key is not its parent link (#64, guitars.E005)',
                 True,
             )
             for field in current._meta.local_fields

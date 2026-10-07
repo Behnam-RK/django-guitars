@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, NamedTuple, TypedDict
 from django.apps import apps as django_apps
 from django.conf import settings
 
+from guitars.checks import refuses_pk_not_parent_link
 from guitars.gucs import BYPASS_GUC, guc_name
 from guitars.introspection import column_owner, owns_column
 from guitars.local_apps import is_local
@@ -187,6 +188,20 @@ def _classify(
             f'not covered by its policy, which enforces {sorted(local)} '
             f'(Python scoping still applies to all of them).'
         )
+
+    # Re-asked here, as the generator re-asks ``guitars.E003``: the join below reads this table's
+    # primary key as its link to the ancestor, and for a child with a key of its own that matches
+    # another tenant's row. No policy rather than a wrong one; Python scoping still applies.
+    own_key = refuses_pk_not_parent_link(model) if by_owner else []
+    if own_key:
+        notes.append(
+            f"'{_meta(model).db_table}': no owner-join policy -- '{_meta(own_key[0]).db_table}' "
+            f'declares a primary key of its own beside its parent link, so the join would match '
+            f"another tenant's row (guitars.E005); Python scoping still applies."
+        )
+        by_owner = {}
+        if not own:
+            return None, notes
 
     if len(by_owner) > 1:
         owners = sorted(_meta(owner).db_table for owner in by_owner)

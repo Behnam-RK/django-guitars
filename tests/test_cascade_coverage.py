@@ -459,7 +459,7 @@ class TestWhatTheModelsOwnAppHasToDoWithIt:
 
         gaps = coverage._enforcement_gaps(kid)
 
-        assert [g.reason for g in gaps] == ['its primary key is not its parent link (#64)']
+        assert [g.reason for g in gaps] == ['its primary key is not its parent link (#64, guitars.E005)']
 
     def test_every_gap_is_reported_not_the_first(self, monkeypatch):
         """An early return let a non-blocking locality gap hide a blocking one behind it."""
@@ -471,7 +471,7 @@ class TestWhatTheModelsOwnAppHasToDoWithIt:
 
         assert {g.reason for g in gaps} == {
             'is routed off PostgreSQL',
-            'its primary key is not its parent link (#64)',
+            'its primary key is not its parent link (#64, guitars.E005)',
         }
 
 

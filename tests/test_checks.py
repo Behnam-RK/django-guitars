@@ -4,6 +4,7 @@ row while the ancestor's unguarded DELETE removes what that row points at."""
 
 import pytest
 from django.core.checks import registry
+from django.db.models import CASCADE as models_CASCADE
 from django.db.models import AutoField, Model
 from django.test.utils import isolate_apps
 
@@ -448,3 +449,158 @@ def test_the_setting_check_is_registered_with_django(settings):
 
     with pytest.raises(SystemCheckError, match='guitars.E004'):
         call_command('check')
+
+
+class TestAnOwnPrimaryKeyBesideTheParentLink:
+    """``guitars.E005`` (#64): every join this kit writes from an MTI child to its ancestor reads
+    the child's primary key as the link, and for ``code`` beside ``root_link`` it is not -- the
+    redirect rule archives an unrelated ancestor row, a tenant policy matches the wrong owner."""
+
+    @staticmethod
+    @isolate_apps('tests.testapp')
+    def _shapes():
+        from django.db.models import OneToOneField  # noqa: PLC0415
+
+        class Root(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Kid(Root):
+            code = AutoField(primary_key=True)
+            root_link = OneToOneField(Root, on_delete=models_CASCADE, parent_link=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        class GrandKid(Kid):
+            class Meta:
+                app_label = 'testapp'
+
+        class Plain(Root):
+            class Meta:
+                app_label = 'testapp'
+
+        class PlainDjango(Model):
+            class Meta:
+                app_label = 'testapp'
+
+        class PlainDjangoChild(PlainDjango):
+            code = AutoField(primary_key=True)
+            link = OneToOneField(PlainDjango, on_delete=models_CASCADE, parent_link=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        return Root, Kid, GrandKid, Plain, PlainDjango, PlainDjangoChild
+
+    def test_the_model_declaring_the_own_key_is_the_one_finding(self):
+        from guitars.checks import PK_NOT_PARENT_LINK_ID  # noqa: PLC0415
+        from guitars.checks import check_mti_children_keep_their_parent_link_as_pk  # noqa: PLC0415
+
+        root, kid, grandkid, plain, plain_django, plain_django_child = self._shapes()
+
+        errors = check_mti_children_keep_their_parent_link_as_pk(
+            [_Config(root, kid, grandkid, plain, plain_django, plain_django_child)]
+        )
+
+        # One per root cause, as E003 reports: the descendant is refused with it, not named.
+        (error,) = errors
+        assert error.id == PK_NOT_PARENT_LINK_ID == 'guitars.E005'
+        assert error.obj is kid
+        assert 'root_link' in error.msg or 'parent link' in error.msg
+        assert 'code' in error.msg
+
+    def test_the_generator_refuses_the_whole_chain_below_it(self):
+        from guitars.checks import refuses_pk_not_parent_link  # noqa: PLC0415
+
+        root, kid, grandkid, plain, plain_django, plain_django_child = self._shapes()
+
+        assert refuses_pk_not_parent_link(kid) == [kid]
+        assert refuses_pk_not_parent_link(grandkid) == [kid]
+        assert refuses_pk_not_parent_link(root) == []
+        assert refuses_pk_not_parent_link(plain) == []
+
+    def test_a_model_the_kit_writes_no_column_for_is_left_alone(self):
+        """Plain Django inheritance: nothing here joins on its key."""
+        from guitars.checks import refuses_pk_not_parent_link  # noqa: PLC0415
+
+        *_rest, plain_django_child = self._shapes()
+
+        assert refuses_pk_not_parent_link(plain_django_child) == []
+
+    def test_a_normal_mti_child_is_not_flagged(self):
+        from guitars.checks import check_mti_children_keep_their_parent_link_as_pk  # noqa: PLC0415
+
+        assert check_mti_children_keep_their_parent_link_as_pk(None) == []
+
+
+def test_the_pk_check_is_registered_with_django():
+    registered = {check.__name__ for check in registry.registry.get_checks()}
+
+    assert 'check_mti_children_keep_their_parent_link_as_pk' in registered
+
+
+class TestTheGeneratorRefusesTheSameShape:
+    """``--skip-checks`` reaches the generator, and ``hard_delete()`` runs no checks at all."""
+
+    @staticmethod
+    def _models():
+        return TestAnOwnPrimaryKeyBesideTheParentLink._shapes()
+
+    def test_no_mti_rule_or_parent_trigger_is_written_and_E005_is_named(self):
+        command = Command()
+        command._skipped_rule_notes.clear()
+        root, kid, grandkid, plain, *_ = self._models()
+
+        rendered = '\n'.join(command._build_operations(_Config(root, kid, grandkid, plain)))
+
+        # The ordinary child keeps both; the refused chain gets neither -- either would join
+        # the ancestor on ``code`` and touch a row that is not its own.
+        assert 'MTI Soft Delete Rule on "testapp_plain"' in rendered
+        assert 'MTI Updated at Trigger on "testapp_plain"' in rendered
+        for table in ('testapp_kid', 'testapp_grandkid'):
+            assert f'MTI Soft Delete Rule on "{table}"' not in rendered
+            assert f'MTI Updated at Trigger on "{table}"' not in rendered
+        notes = [n for n in command._skipped_rule_notes if 'guitars.E005' in n]
+        assert {'testapp_kid', 'testapp_grandkid'} == {
+            table for table in ('testapp_kid', 'testapp_grandkid') if any(table in n for n in notes)
+        }
+
+    def test_a_refused_owner_gives_no_owned_arm(self):
+        from django.db.models import DO_NOTHING  # noqa: PLC0415
+
+        from guitars.introspection import owner_arms  # noqa: PLC0415
+        from guitars.models import OwningForeignKey  # noqa: PLC0415
+
+        @isolate_apps('tests.testapp')
+        def _build():
+            from django.db.models import OneToOneField  # noqa: PLC0415
+
+            class Dep(SetarModel):
+                class Meta:
+                    app_label = 'testapp'
+
+            class Root(SetarModel):
+                class Meta:
+                    app_label = 'testapp'
+
+            class Refused(Root):
+                code = AutoField(primary_key=True)
+                link = OneToOneField(Root, on_delete=models_CASCADE, parent_link=True)
+                dep = OwningForeignKey(Dep, on_delete=DO_NOTHING, related_name='+')
+
+                class Meta:
+                    app_label = 'testapp'
+
+            class Sound(Root):
+                dep = OwningForeignKey(Dep, on_delete=DO_NOTHING, related_name='+')
+
+                class Meta:
+                    app_label = 'testapp'
+
+            return owner_arms([Refused]), owner_arms([Sound])
+
+        refused, sound = _build()
+
+        assert refused == {}
+        assert [arm.owner_table for arm in sound['testapp_dep']] == ['testapp_sound']

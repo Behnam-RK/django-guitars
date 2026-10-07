@@ -304,6 +304,7 @@ def owner_arms(candidates: Iterable[type[models.Model]]) -> dict[str, list[Owner
     # Deferred for the reason ``_rule_update_edges`` gives: ``guitars.models.fields`` reaches
     # the tenancy runtime behind ``guitars.models.__init__``, a cost only a caller asking
     # about rules should pay.
+    from guitars.checks import refuses_pk_not_parent_link  # noqa: PLC0415 - checks imports this
     from guitars.models.fields import (  # noqa: PLC0415 - see the comment above
         OwningForeignKey,
         _targets_primary_key,
@@ -325,6 +326,9 @@ def owner_arms(candidates: Iterable[type[models.Model]]) -> dict[str, list[Owner
                 or not _targets_primary_key(field)
                 or not migrates_to_postgresql(model)
                 or not migrates_to_postgresql(field.related_model)
+                # An arm for an inheriting owner joins its root on its own key (#64): with a key
+                # of its own that matches another row, so it has none -- guitars.E005.
+                or (not owns_column(model, '_deleted_at') and refuses_pk_not_parent_link(model))
             ):
                 continue
             dependent_table = column_owner(field.related_model, '_deleted_at')._meta.db_table

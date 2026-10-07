@@ -13,7 +13,7 @@ from django.db import models
 from django.db.migrations.loader import MigrationLoader
 
 from guitars import sql
-from guitars.checks import refuses_soft_delete_rule
+from guitars.checks import refuses_pk_not_parent_link, refuses_soft_delete_rule
 from guitars.introspection import (
     CascadeKind,
     OwnerArm,
@@ -511,6 +511,20 @@ class OperationsMixin:
 
             rows: list[_OperationRow] = []
 
+            # Re-asked here rather than trusted from ``guitars.E005``, as E003 is: both MTI
+            # operations below join the ancestor on *this* table's primary key, which for a child
+            # with a key of its own is not the link -- they would touch another row of the parent.
+            own_key = refuses_pk_not_parent_link(model)
+            if own_key and (
+                is_mti_child(model, '_updated_at') or is_mti_child(model, '_deleted_at')
+            ):
+                self._skipped_rule_notes.append(
+                    f"MTI rule and parent trigger on '{table}' skipped: "
+                    f"'{own_key[0]._meta.db_table}' declares a primary key of its own beside its "
+                    f'parent link, so a join on it would match another row of the ancestor (and, '
+                    f'for a tenant policy, another owner). See guitars.E005 for the fix.'
+                )
+
             # --- updated_at trigger: own table vs. MTI parent-propagation --- `table`/
             # `child_table` are DDL positions (_quote_table); `primary_key`/`parent_pk`/
             # `child_pk` are literal trigger-function arguments (_escape_literal).
@@ -537,7 +551,7 @@ class OperationsMixin:
                         ),
                     )
                 )
-            elif is_mti_child(model, '_updated_at'):
+            elif is_mti_child(model, '_updated_at') and not own_key:
                 mti = self._mti_context(model, table, '_updated_at')
                 # _split_qualified, not the validating _bare_or_qualified: parent_schema/
                 # parent_table become escaped *literal* args, re-quoted by %I at trigger-fire
@@ -606,7 +620,7 @@ class OperationsMixin:
                         reverse=sql.DROP_SOFT_DELETE_RULE.format(table=qualified_table),
                     )
                 )
-            elif is_mti_child(model, '_deleted_at'):
+            elif is_mti_child(model, '_deleted_at') and not own_key:
                 mti = self._mti_context(model, table, '_deleted_at')
                 # The redirect rule's action names the *ancestor's* table and ``_deleted_at``,
                 # both resolved as PostgreSQL parses it, so a chain crossing apps needs the same

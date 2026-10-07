@@ -310,3 +310,61 @@ class TestPolicyDimensions:
 
         assert assumed_policy_dimensions(Release, memo) == frozenset({'label'})
         assert len(memo) == 2  # a second key: same model, the other caller
+
+
+class TestAnOwnPrimaryKeyBesideTheParentLink:
+    """#64: the owner join reads the child's primary key as its link to the ancestor holding the
+    tenant column. With a key of its own that matches another tenant's row -- tenant isolation
+    wrong -- so no policy is written for it (``guitars.E005``), and its Python scoping stays."""
+
+    @staticmethod
+    def _shapes():
+        from django.db.models import AutoField, OneToOneField  # noqa: PLC0415
+        from django.test.utils import isolate_apps  # noqa: PLC0415
+
+        from guitars.tenancy.discovery import _classify  # noqa: PLC0415
+
+        @isolate_apps('tests.testapp')
+        def _build():
+            from django.db.models import CASCADE  # noqa: PLC0415
+
+            class Fleet(Tour):
+                class Meta:
+                    app_label = 'testapp'
+
+            class Refused(Fleet):
+                code = AutoField(primary_key=True)
+                link = OneToOneField(Fleet, on_delete=CASCADE, parent_link=True)
+
+                class Meta:
+                    app_label = 'testapp'
+
+            class Below(Refused):
+                class Meta:
+                    app_label = 'testapp'
+
+            class Sound(Fleet):
+                class Meta:
+                    app_label = 'testapp'
+
+            return {m.__name__: _classify(m) for m in (Refused, Below, Sound)}
+
+        return _build()
+
+    def test_a_refused_child_gets_no_owner_join_and_says_why(self):
+        coverage, notes = self._shapes()['Refused']
+
+        assert coverage is None
+        assert any('guitars.E005' in note for note in notes)
+
+    def test_a_descendant_of_it_is_refused_with_it(self):
+        coverage, notes = self._shapes()['Below']
+
+        assert coverage is None
+        assert any('guitars.E005' in note for note in notes)
+
+    def test_an_ordinary_child_keeps_its_owner_join(self):
+        coverage, _notes = self._shapes()['Sound']
+
+        assert coverage is not None
+        assert coverage.child_pk == 'fleet_ptr_id'

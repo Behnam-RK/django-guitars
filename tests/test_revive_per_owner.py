@@ -363,3 +363,33 @@ def test_a_recorded_trigger_whose_every_arm_is_refused_fails_check(monkeypatch):
         "Revive trigger on 'testapp_album'" in refusal and 'DROP TRIGGER' in refusal
         for refusal in command._refusals_over_live_rules
     )
+
+
+def test_a_trigger_already_rid_of_a_deleted_childs_arm_is_not_named(monkeypatch):
+    """The owner's trigger re-emitted without the arm is current; a note reading only "is it
+    recorded" went on telling every scoped run it was broken, for good."""
+    command = Command()
+    command.existing.soft_delete_related[('gone_child', 'testapp_band', None)] = 'abc'
+    monkeypatch.setattr(command, '_dropped_tables', lambda: {'gone_child': ('testapp', '0099')})
+
+    notes = [
+        *command._scoped_cascade_retirement_notes({'crossapp_owner'}),
+        *command._scoped_trigger_retirement_notes({'crossapp_owner'}),
+    ]
+
+    assert not [note for note in notes if 'soft_delete_revive_on' in note]
+
+
+def test_a_refused_renamed_owners_hand_drop_names_every_spelling(monkeypatch):
+    """PostgreSQL keeps a trigger with its table, so after a rename the live one carries the
+    old name: a hand drop of the current spelling alone would leave it."""
+    command = Command()
+    command._refusals_over_live_rules.clear()
+    command.existing.renamed_tables['testapp_album'] = ['testapp_oldalbum']
+    monkeypatch.setattr(command, '_revive_arm', lambda *args, **kwargs: None)
+
+    command._revive_operations(_app())
+
+    (refusal,) = [r for r in command._refusals_over_live_rules if "'testapp_album'" in r]
+    assert 'soft_delete_revive_on_16_testapp_oldalbum' in refusal
+    assert 'soft_delete_revive_on_13_testapp_album' in refusal

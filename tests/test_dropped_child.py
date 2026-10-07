@@ -222,10 +222,18 @@ class TestADroppedChildIsRetired:
         command = _command(monkeypatch, dropped={CHILD})
         command.existing.soft_delete_revive.clear()
 
-        (note,) = command._scoped_cascade_retirement_notes({'crossapp_owner'})
+        notes = [
+            note
+            for note in (
+                *command._scoped_cascade_retirement_notes({'crossapp_owner'}),
+                *command._scoped_trigger_retirement_notes({'crossapp_owner'}),
+            )
+            if REVIVE in note
+        ]
 
-        assert REVIVE in note
-        assert 'reviving a row' in note
+        # Once, by the note comparing digests: the arm went with its last key, so retired.
+        (note,) = notes
+        assert 'no longer called for' in note
 
     def test_a_per_key_trigger_whose_owner_is_in_scope_is_not_named(self, monkeypatch):
         """The run in scope writes its retirement itself."""
@@ -243,8 +251,15 @@ class TestADroppedChildIsRetired:
             ('crossapp_owner', '0003_auto_enforcement')
         ]
 
-        assert command._scoped_cascade_retirement_notes({'crossapp_owner'}) == []
-        (note,) = command._scoped_cascade_retirement_notes({'other'})
+        def revive_notes(requested):
+            return [
+                note
+                for note in command._scoped_trigger_retirement_notes(requested)
+                if REVIVE in note
+            ]
+
+        assert revive_notes({'crossapp_owner'}) == []
+        (note,) = revive_notes({'other'})
         assert "'crossapp_owner'" in note
 
     def test_two_keys_to_one_owner_name_two_triggers(self, monkeypatch):

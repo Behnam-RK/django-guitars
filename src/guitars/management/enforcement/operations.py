@@ -1907,7 +1907,7 @@ class OperationsMixin:
     def _revive_operations(self, app: AppConfig, *, adopt: bool = False) -> list[str]:
         """One revive trigger per owner table *app* hosts, carrying every cascade key's arm
         (2.16.0, #70, ADR 0033): a plain ``UPDATE`` of the owner fires it once, and it leaves at
-        its first test unless the statement revived a row. Hosted as retirement is."""
+        its first test unless the statement revived a row. Hosted by :meth:`_revive_host`."""
         operations: list[str] = []
         for owner_table in sorted(self._revive_arms_by_owner()):
             if self._revive_host(owner_table) != app.label:
@@ -1918,12 +1918,20 @@ class OperationsMixin:
                 # calling for arms, nothing retires it -- so a recorded one is named for a hand
                 # drop, as the per-key trigger's refusal was, failing ``--check``.
                 if (owner_table,) in self.existing.soft_delete_revive_owner:
-                    name = _revive_owner_name(owner_table)
+                    # Every spelling: a trigger moves with its renamed table under its old name.
+                    drops = ' '.join(
+                        f'DROP TRIGGER IF EXISTS {name} ON '
+                        f'{_identifiers._quote_table(owner_table)}; '
+                        f'DROP FUNCTION IF EXISTS {name}();'
+                        for name in (
+                            _revive_owner_name(table)
+                            for table in (*self._prior_names(owner_table), owner_table)
+                        )
+                    )
                     self._refusals_over_live_rules.append(
                         f"Revive trigger on '{owner_table}' is refused but already exists in "
                         "this project's migrations. It is still live in any migrated database. "
-                        f'Drop it by hand: DROP TRIGGER {name} ON '
-                        f'{_identifiers._quote_table(owner_table)}; DROP FUNCTION {name}();'
+                        f'Drop it by hand: {drops}'
                     )
                 continue
             name = slots['function']
@@ -2887,18 +2895,8 @@ class OperationsMixin:
                             'and fails every UPDATE on that table until it is retired -- which '
                             f"only a run including '{owner_app}' writes."
                         )
-                # The owner's one trigger (#70) carries the arm instead, failing only an UPDATE
-                # that revives a row, the early exit sparing the rest. Its own host writes it,
-                # the app that created it (ADR 0033), which need not be the table's.
-                elif (owner_table,) in self.existing.soft_delete_revive_owner:
-                    revive_app = self._revive_host(owner_table)
-                    if revive_app is not None and revive_app not in requested:
-                        notes.append(
-                            f'Revive trigger {_revive_owner_name(owner_table)} on '
-                            f"'{owner_table}' names '{related_table}', whose model was deleted, "
-                            'and fails every UPDATE reviving a row there until it is re-emitted '
-                            f"or retired -- which only a run including '{revive_app}' writes."
-                        )
+                # The owner's one trigger (#70) is ``_scoped_revive_notes``'s to name: it compares
+                # digests, so a trigger already re-emitted without the arm is not reported.
                 continue
             if owner_app is None or owner_app in requested:
                 continue

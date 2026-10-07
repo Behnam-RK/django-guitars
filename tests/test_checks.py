@@ -848,3 +848,24 @@ class TestHardDeleteRefusesAtEveryModelItWalksTo:
             board.hard_delete()
 
         assert Signboard._all_objects.filter(pk=pk, _deleted_at__isnull=True).exists()
+
+
+class TestTheQuerysetFormGuardsTheWholeTree:
+    """Its ``DELETE`` loop visits every table of the tree from the root, a descendant's own key
+    matched against the pks of the rows asked for: guarding the called model's chain alone left
+    another root's descendant row to go."""
+
+    def test_a_refused_descendant_stops_a_delete_asked_of_its_root(self, monkeypatch):
+        from django.core.exceptions import ImproperlyConfigured  # noqa: PLC0415
+
+        from guitars.models import soft_deletion  # noqa: PLC0415
+
+        real = soft_deletion.refuses_pk_not_parent_link
+        monkeypatch.setattr(
+            soft_deletion,
+            'refuses_pk_not_parent_link',
+            lambda model: [model] if model is SpotlitPlacard else real(model),
+        )
+
+        with pytest.raises(ImproperlyConfigured, match='guitars.E005'):
+            Placard._all_objects.filter(pk=1).hard_delete()

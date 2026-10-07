@@ -670,7 +670,10 @@ class HardDeletableQuerySet(LiveQuerySet):
         # the statement removes rows other than the ones the queryset matches.
         _guard_bulk(self, 'hard_delete')
         model = self.model
-        _refuse_an_own_key(model)
+        # The whole tree, as the ``DELETE`` loop below reaches it: a descendant's own key is
+        # matched against the matched pks of every table above it.
+        for member in _mti_model_chain(model):
+            _refuse_an_own_key(member)
         if not _is_mti_model(model):
             return self._hard_delete_own_table()
 

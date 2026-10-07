@@ -187,8 +187,8 @@ def check_mti_children_keep_their_parent_link_as_pk(app_configs, **kwargs) -> li
                 f"'{model._meta.label}' declares its own primary key '{own.name}' beside its "
                 f"multi-table-inheritance parent link '{link_name}', and the rules, triggers and "
                 f'policies guitars writes join its parent on the primary key: a delete would '
-                f'archive an unrelated row of the parent, and a tenant policy would match the '
-                f"wrong owner's.",
+                f'archive an unrelated row of the parent, an update would stamp one, and a '
+                f"tenant policy would match the wrong owner's.",
                 hint=(
                     f"Drop '{own.name}' so the parent link is the primary key, or make "
                     f"'{model._meta.label}' a model of its own with a foreign key to its parent."

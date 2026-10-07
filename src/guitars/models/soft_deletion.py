@@ -476,9 +476,9 @@ class SoftDeleteUnsupportedError(Exception):
 
 
 class HardDeleteIncompleteError(GuitarsError):
-    """``hard_delete()`` removed fewer rows from a table than it collected for it, so it rolled
-    back rather than commit part of the tree. A tenant scope or row policy hiding a row, or
-    another transaction removing one first; see ``docs/soft-deletion.md``'s "Hard deletion"."""
+    """``hard_delete()`` removed fewer rows from a table than it collected, so it rolled back
+    rather than commit part of the tree: a row hidden by a scope or policy, removed first by
+    another transaction, or already gone. See ``docs/soft-deletion.md``'s "Hard deletion"."""
 
 
 def _require_removed(table: str, collected: int, removed: int) -> None:
@@ -486,8 +486,8 @@ def _require_removed(table: str, collected: int, removed: int) -> None:
         raise HardDeleteIncompleteError(
             f'hard_delete() removed {removed} of the {collected} rows it collected from {table}: '
             f'a tenant scope or row-level policy hides a row, another transaction removed one '
-            f'first, or the row was already gone (a table with no soft-delete rule yet loses it '
-            f'to delete(): run makeguitarmigrations and migrate). Rolled back; nothing removed.'
+            f'first, or the row was already gone (one cause: a table with no soft-delete rule yet '
+            f'loses it to delete(), so run makeguitarmigrations and migrate). Rolled back.'
         )
 
 
@@ -989,6 +989,7 @@ class SoftDeletableModel(Model):
             # One switch for every table, not one per table: it is transaction-local and the
             # walk is one transaction, so the per-table on/off was five statements a table
             # (savepoint, on, delete, off, release) for nothing a rollback does not already do.
+            by_collector: dict[str, int] = defaultdict(int)  # rows the fallback took early
             with _hard_deletion_on(using, savepoint=False):
                 for to_delete, model_order in groups:
                     for model in model_order:
@@ -1010,10 +1011,9 @@ class SoftDeletableModel(Model):
                             # Every row collected, or none: a hidden or vanished row (#72)
                             # rolls the walk back rather than commit the rest of the tree.
                             _require_removed(model._meta.db_table, len(pks), removed)
-                        # `no cover` because no *test* model reaches it, not because nothing can: an
-                        # owned group runs no Collector, so an m2m through row of an owned row lands
-                        # here for real -- add one to `tests/testapp` before trusting this path.
-                        else:  # pragma: no cover - no testapp owned model carries an m2m
+                        # A plain model under an owned row (an owned group runs no Collector): an
+                        # m2m through row, or a plain MTI chain (`Amp`/`Gear` in `tests/testapp`).
+                        else:
                             # Through ``_rows``, which no default manager filters, switched off: a
                             # receiver deleting soft-deletable rows archives them. No ``finally``: a
                             # failure rolls the walk back, and switching on in it would mask that.
@@ -1021,5 +1021,13 @@ class SoftDeletableModel(Model):
                                 cursor.execute(SWITCH_OFF_HARD_DELETION)
                                 _, per_model = _rows(model, using).filter(pk__in=pks).delete()
                                 cursor.execute(SWITCH_ON_HARD_DELETION)
-                            removed = per_model.get(model._meta.label, 0)
+                            label = model._meta.label
+                            removed = per_model.get(label, 0) + by_collector.pop(label, 0)
                             _require_removed(model._meta.db_table, len(pks), removed)
+                            # The collector takes the MTI parent rows with their child, and their
+                            # own entries, later in child-first order, find them gone. Anything else
+                            # it cascades to sits earlier in that order and is gone already.
+                            for parent in model._meta.get_parent_list():
+                                by_collector[parent._meta.label] += per_model.get(
+                                    parent._meta.label, 0
+                                )

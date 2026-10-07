@@ -752,3 +752,26 @@ class CueNote(SetarModel):
 
     text = CharField(max_length=50, default='')
     cue = ForeignKey(Cue, on_delete=DO_NOTHING, related_name='notes')
+
+
+
+class Rig(SetarModel):
+    """An owned target of its own, so the plain chain below it disturbs no other model's plan."""
+
+    name = CharField(max_length=50, default='')
+
+
+class Roadie(SetarModel):
+    name = CharField(max_length=50, default='')
+    rig = OwningForeignKey(Rig, on_delete=DO_NOTHING, null=True, blank=True, related_name='roadies')
+
+
+class Gear(TarModel):
+    """A plain MTI parent, no soft deletion: under an owned ``Rig`` its child goes through
+    Django's collector, which removes this parent row with it (``hard_delete()``'s fallback)."""
+
+    name = CharField(max_length=50, default='')
+
+
+class Amp(Gear):
+    rig = ForeignKey(Rig, on_delete=CASCADE, related_name='amps')

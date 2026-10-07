@@ -146,7 +146,23 @@ def test_the_key_read_path_counts_a_key_matched_twice_once():
 
 @pytest.mark.django_db
 def test_a_root_already_gone_is_named_among_the_causes():
-    """Without its soft-delete rule a table loses the row to Phase 1's ``delete()``; the walk
-    still fails closed, and the message says where to look."""
+    """A row gone before the walk deletes it -- here a pk that never existed, as a table with
+    no soft-delete rule yet loses its row to Phase 1 -- fails closed, the message saying where."""
     with pytest.raises(HardDeleteIncompleteError, match='makeguitarmigrations'):
         Offer(pk=987654).hard_delete()
+
+
+@pytest.mark.django_db
+def test_a_plain_mti_chain_under_an_owned_row_is_counted_once():
+    """A model without ``_all_objects`` goes through Django's collector, which removes its MTI
+    parent rows with it: the parent's own entry then finds them gone, which is not a shortfall."""
+    from tests.testapp.models import Amp, Gear, Rig, Roadie  # noqa: PLC0415
+
+    rig = Rig.objects.create(name='r')
+    Amp.objects.create(name='a', rig=rig)
+
+    Roadie.objects.create(name='r', rig=rig).hard_delete()
+
+    assert not Amp.objects.exists()
+    assert not Gear.objects.exists()
+    assert not Rig._all_objects.exists()

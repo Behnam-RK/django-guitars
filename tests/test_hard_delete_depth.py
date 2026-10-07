@@ -736,3 +736,23 @@ def test_the_walks_subtree_read_returns_each_row_once(monkeypatch):
 
     assert below == {n.pk for n in nodes}
     assert [len(rows) for rows in fetched] == [len(nodes) - 1]
+
+
+@pytest.mark.django_db
+def test_the_collection_walk_does_not_read_origins(monkeypatch):
+    """Origins are the sparing closure's; a tree with no owner never asks for them."""
+    from guitars.models import soft_deletion  # noqa: PLC0415
+
+    calls = []
+    real = soft_deletion._self_descendant_origins
+    monkeypatch.setattr(
+        soft_deletion,
+        '_self_descendant_origins',
+        lambda *args: calls.append(args) or real(*args),
+    )
+    nodes = _ledger(4)
+
+    nodes[0].hard_delete()
+
+    assert calls == []
+    assert not type(nodes[0])._all_objects.exists()

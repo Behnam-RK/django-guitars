@@ -23,7 +23,7 @@ Wherever `hard_delete()` deletes rows by keys it collected first, each `DELETE` 
 
 ## Consequences
 
-**Accepted costs.** Code that called `hard_delete()` under a mismatched scope and relied on it completing now gets an error, and so does a `hard_delete()` on a table whose enforcement migration has not been generated and applied, which completed through 2.14. An empty scope raises `HardDeleteIncompleteError` where it raised Django's `EmptyResultSet`. No extra statement: the count comes with each `DELETE`.
+**Accepted costs.** Code that called `hard_delete()` under a mismatched scope and relied on it completing now gets an error, and so does a `hard_delete()` on a table whose enforcement migration has not been generated and applied, which completed through 2.14. So does an owner whose `OwningForeignKey` (`db_constraint=False`) points at no row: the target is collected from the key and its `DELETE` removes nothing. Null the key first. An empty scope raises `HardDeleteIncompleteError` where it raised Django's `EmptyResultSet`. No extra statement: the count comes with each `DELETE`.
 
 **Reversibility.** Removing the check is one line per site, and would reopen #72.
 

@@ -227,6 +227,79 @@ _ADOPT_SOFT_DELETE_REVIVE_JOINED = (
     + _CREATE_SOFT_DELETE_REVIVE_JOINED
 )
 
+# ---- One revive trigger per owner table (2.16.0, #70, ADR 0033): every cascade key's revive
+# in one function, so a plain ``UPDATE`` of the owner fires one trigger and leaves at its first
+# test. The per-key pair above stays for the retirements that replace it and their reverses. ----
+
+# One arm per cascade key, spliced in key order. Each is the per-key body above without its
+# guard, which the function below asks once for every arm.
+_SOFT_DELETE_REVIVE_ARM = """
+            UPDATE {related_table} AS guitars_child
+            SET _deleted_at = NULL{updated_at_assignment}
+            FROM (
+                SELECT guitars_before.*
+                FROM guitars_revive_before AS guitars_before
+                JOIN guitars_revive_after AS guitars_after
+                    ON guitars_after."{primary_key}" = guitars_before."{primary_key}"
+                WHERE guitars_before._deleted_at IS NOT NULL
+                  AND guitars_after._deleted_at IS NULL
+            ) AS guitars_revived
+            WHERE guitars_child."{foreign_key}" = guitars_revived."{primary_key}"
+              AND guitars_child._deleted_at = guitars_revived._deleted_at;"""
+
+_SOFT_DELETE_REVIVE_ARM_JOINED = """
+            UPDATE {target_table} AS guitars_child
+            SET _deleted_at = NULL{updated_at_assignment}
+            FROM (
+                SELECT guitars_before.*
+                FROM guitars_revive_before AS guitars_before
+                JOIN guitars_revive_after AS guitars_after
+                    ON guitars_after."{primary_key}" = guitars_before."{primary_key}"
+                WHERE guitars_before._deleted_at IS NOT NULL
+                  AND guitars_after._deleted_at IS NULL
+            ) AS guitars_revived
+            WHERE guitars_child."{target_pk}" IN (
+                    SELECT guitars_link."{child_pk}" FROM {related_table} AS guitars_link
+                    WHERE guitars_link."{foreign_key}" = guitars_revived."{primary_key}"
+                )
+              AND guitars_child._deleted_at = guitars_revived._deleted_at;"""
+
+# The ``EXISTS`` is the whole point: a ``save()`` that revives nothing pays one probe of the
+# transition tables, where the per-key pairs each ran a full ``UPDATE ... FROM`` join.
+_CREATE_SOFT_DELETE_REVIVE_OWNER_FUNCTION = """
+    CREATE OR REPLACE FUNCTION {function}()
+       RETURNS TRIGGER
+       LANGUAGE PLPGSQL
+    AS
+    $$
+    BEGIN
+        IF COALESCE(current_setting('rules.hard_deletion', true), '') <> 'on' AND EXISTS (
+            SELECT 1
+            FROM guitars_revive_before AS guitars_before
+            JOIN guitars_revive_after AS guitars_after
+                ON guitars_after."{primary_key}" = guitars_before."{primary_key}"
+            WHERE guitars_before._deleted_at IS NOT NULL
+              AND guitars_after._deleted_at IS NULL
+        ) THEN{arms}
+        END IF;
+        RETURN NULL;
+    END;
+    $$;
+"""
+
+_CREATE_SOFT_DELETE_REVIVE_OWNER = (
+    _CREATE_SOFT_DELETE_REVIVE_OWNER_FUNCTION + _CREATE_SOFT_DELETE_REVIVE_TRIGGER
+)
+_REPLACE_SOFT_DELETE_REVIVE_OWNER = (
+    _DROP_SOFT_DELETE_REVIVE_TRIGGER + _CREATE_SOFT_DELETE_REVIVE_OWNER
+)
+_ADOPT_SOFT_DELETE_REVIVE_OWNER = (
+    """
+    DROP TRIGGER IF EXISTS {trigger} ON {table};
+"""
+    + _CREATE_SOFT_DELETE_REVIVE_OWNER
+)
+
 # ---- Private, non-frozen owned-rule templates: the cascade pair above with the predicate
 # sides swapped, the FK living on the owner. The NOT EXISTS is the last-owner guard, always
 # emitted -- see ADR 0011 for why it is never derived from a unique constraint. ----

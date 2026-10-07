@@ -266,7 +266,12 @@ def test_a_generation_writes_the_retirement():
 
 def _retired_for(command: Command) -> list[str]:
     app = apps.get_app_config('testapp')
-    return command._retired_trigger_operations(app) + command._retired_cascade_operations(app)
+    # The owner's revive re-emitted without the arm, or retired with its last, since 2.16.0.
+    return (
+        command._retired_trigger_operations(app)
+        + command._retired_cascade_operations(app)
+        + command._revive_operations(app)
+    )
 
 
 def _without(command: Command, method: str, drop):
@@ -281,6 +286,17 @@ def _without(command: Command, method: str, drop):
         return answer - {drop}
 
     setattr(command, method, narrowed)
+    if method == '_cascade_key_maps':
+        # The key's revive arm goes with it: the owner's one trigger is built off the same sweep.
+        def arms():
+            narrowed()
+            return {
+                owner: kept
+                for owner, keyed in command._revive_arm_sources.items()
+                if (kept := {key: arm for key, arm in keyed.items() if key != drop})
+            }
+
+        command._revive_arms_by_owner = arms
     return command
 
 
@@ -293,15 +309,28 @@ class TestEveryLeakIsRepairedByItsRetirement:
     """For each family: the column its trigger names dropped with ``CASCADE`` (what Django 5.x's
     ``RemoveField`` does), every UPDATE then failing, and the generated retirement repairing it."""
 
-    def _repairs(self, table, column, owner, retirement):
+    def _repairs(self, table, column, owner, retirement, update=_update):
         with transaction.atomic():
             execute(f'ALTER TABLE {table} DROP COLUMN {column} CASCADE')
             with pytest.raises(ProgrammingError), transaction.atomic():
-                _update(owner)
+                update(owner)
             for operation in retirement:
                 execute(_forward_sql(operation))
-            _update(owner)
+            update(owner)
             transaction.set_rollback(True)
+
+    @staticmethod
+    def _revive(table: str) -> None:
+        """The UPDATE a revive trigger acts on: since 2.16.0 one that revives nothing leaves at
+        the trigger's first test, so only a revive reaches the arm naming the dropped column."""
+        execute(f'UPDATE {table} SET _deleted_at = NULL WHERE _deleted_at IS NOT NULL')
+
+    @staticmethod
+    def _archived_setlist() -> None:
+        from tests.testapp.models import Setlist  # noqa: PLC0415
+
+        Setlist.objects.create(title='s')
+        execute('UPDATE testapp_setlist SET _deleted_at = NOW()')
 
     def test_the_owned_sweep(self):
         key = ('testapp_stagehand', 'testapp_rider', 'stagehand_id')
@@ -312,9 +341,14 @@ class TestEveryLeakIsRepairedByItsRetirement:
     def test_the_revive_after_the_childs_key_is_removed(self):
         key = ('testapp_setlistentry', 'testapp_setlist', None)
         command = _without(Command(), '_cascade_key_maps', key)
+        self._archived_setlist()
 
         self._repairs(
-            'testapp_setlistentry', 'setlist_id', 'testapp_setlist', _retired_for(command)
+            'testapp_setlistentry',
+            'setlist_id',
+            'testapp_setlist',
+            _retired_for(command),
+            update=self._revive,
         )
 
     def test_retire_enforcement_first_is_the_path_django_6_needs(self):
@@ -324,6 +358,7 @@ class TestEveryLeakIsRepairedByItsRetirement:
 
         key = ('testapp_setlistentry', 'testapp_setlist', None)
         retirement = _retired_for(_without(Command(), '_cascade_key_maps', key))
+        self._archived_setlist()
         with transaction.atomic():
             with connection.schema_editor() as editor:
                 RetireEnforcement('testapp_setlistentry', 'setlist_id').database_forwards(
@@ -331,10 +366,10 @@ class TestEveryLeakIsRepairedByItsRetirement:
                 )
             execute('ALTER TABLE testapp_setlistentry DROP COLUMN setlist_id')
             with pytest.raises(ProgrammingError), transaction.atomic():
-                _update('testapp_setlist')
+                self._revive('testapp_setlist')
             for operation in retirement:
                 execute(_forward_sql(operation))
-            _update('testapp_setlist')
+            self._revive('testapp_setlist')
             transaction.set_rollback(True)
 
 

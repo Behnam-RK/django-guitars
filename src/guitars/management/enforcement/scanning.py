@@ -28,6 +28,8 @@ from guitars.management.enforcement.headers import (
     _RE_SOFT_DELETE_RELATED,
     _RE_SOFT_DELETE_RELATED_RETIRED,
     _RE_SOFT_DELETE_REVIVE,
+    _RE_SOFT_DELETE_REVIVE_OWNER,
+    _RE_SOFT_DELETE_REVIVE_OWNER_RETIRED,
     _RE_SOFT_DELETE_REVIVE_RETIRED,
     _RE_SOFT_DELETE_SELF_CASCADE,
     _RE_SOFT_DELETE_SELF_CASCADE_RETIRED,
@@ -94,6 +96,12 @@ class ExistingOperations(NamedTuple):
     #: family, because a revive's drop is ordered against the migration that created *it*.
     soft_delete_revive_dependencies: dict[tuple[str, str, str | None], list[tuple[str, str]]]
     revive_retirement_sites: list[CascadeRetirementSite]
+    #: Keyed on ``(owner_table,)``: since 2.16.0 one revive trigger per owner carries every
+    #: key's arm (#70). A 1-tuple so #66's tuple machinery -- re-keying, settling, the
+    #: trigger family's table index -- takes it unchanged. Its creates and retirements too.
+    soft_delete_revive_owner: dict[tuple[str], str | None]
+    soft_delete_revive_owner_dependencies: dict[tuple[str], list[tuple[str, str]]]
+    revive_owner_retirement_sites: list[CascadeRetirementSite]
     #: Keyed on (dependent_table, table, foreign_key) -- the owner-side mirror of the above.
     #: The FK is never ``None`` here: an owned rule is always named after its column, there
     #: being no pre-2.3.0 plain form to stay compatible with.
@@ -204,7 +212,10 @@ def _current_key(key: tuple, moved: dict[str, str], live: set[str]) -> tuple:
     def _now(table: str) -> str:
         return table if table in live else moved.get(table, table)
 
-    # A self-cascade key spells one table and its column; every other key two tables first.
+    # A per-owner revive key spells its table alone, a self-cascade key one table and its
+    # column; every other key two tables first.
+    if len(key) == 1:
+        return (_now(key[0]),)
     if len(key) == 2:
         return (_now(key[0]), key[1])
     related, owner, via = key
@@ -374,7 +385,9 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
     existing_soft_delete_owned: dict[tuple[str, str, str], str | None] = {}
     existing_soft_delete_owned_sweep: dict[tuple[str, str, str], str | None] = {}
     existing_soft_delete_self_cascade: dict[tuple[str, str], str | None] = {}
+    existing_soft_delete_revive_owner: dict[tuple[str], str | None] = {}
     owned_deps: dict = {}
+    revive_owner_deps: dict = {}
     sweep_deps: dict = {}
     self_deps: dict = {}
     trigger_retirement_sites: dict[int, list[CascadeRetirementSite]] = {}
@@ -412,6 +425,11 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
                 _identifiers._unescape_ident(m.group(2)),
                 _identifiers._unescape_ident(m.group(3)),
             ),
+        ),
+        (
+            _RE_SOFT_DELETE_REVIVE_OWNER,
+            existing_soft_delete_revive_owner,
+            lambda m: (_identifiers._unescape_ident(m.group(1)),),
         ),
         (
             _RE_SOFT_DELETE_SELF_CASCADE,
@@ -484,6 +502,7 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
         'soft_delete_revive': (existing_soft_delete_revive, 1),
         'soft_delete_owned_sweep': (existing_soft_delete_owned_sweep, 1),
         'soft_delete_self_cascade': (existing_soft_delete_self_cascade, 0),
+        'soft_delete_revive_owner': (existing_soft_delete_revive_owner, 0),
     }
     whole_table_families = {
         'triggers': existing_triggers,
@@ -604,6 +623,7 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
                 (_RE_SOFT_DELETE_OWNED, owned_deps),
                 (_RE_SOFT_DELETE_OWNED_SWEEP, sweep_deps),
                 (_RE_SOFT_DELETE_SELF_CASCADE, self_deps),
+                (_RE_SOFT_DELETE_REVIVE_OWNER, revive_owner_deps),
             ):
                 for match in pattern.finditer(content):
                     # A dict as an ordered set: one entry per migration, in walk order.
@@ -649,6 +669,7 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
                 (_RE_SOFT_DELETE_OWNED_RETIRED, existing_soft_delete_owned),
                 (_RE_SOFT_DELETE_OWNED_SWEEP_RETIRED, existing_soft_delete_owned_sweep),
                 (_RE_SOFT_DELETE_SELF_CASCADE_RETIRED, existing_soft_delete_self_cascade),
+                (_RE_SOFT_DELETE_REVIVE_OWNER_RETIRED, existing_soft_delete_revive_owner),
             ):
                 for match in pattern.finditer(content):
                     trigger_retirement_sites.setdefault(id(recorded), []).append(
@@ -712,9 +733,9 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
     )
 
     # #66's three, settled the same way and for the same reason.
-    owned_deps, sweep_deps, self_deps = (
+    owned_deps, sweep_deps, self_deps, revive_owner_deps = (
         {key: list(nodes) for key, nodes in deps.items()}
-        for deps in (owned_deps, sweep_deps, self_deps)
+        for deps in (owned_deps, sweep_deps, self_deps, revive_owner_deps)
     )
     # Onto the names in use first: the walk moves a key only once its rename's app is walked,
     # so an app walked later records the old name, never moved, and retired on every run.
@@ -723,12 +744,14 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
         existing_soft_delete_owned,
         existing_soft_delete_owned_sweep,
         existing_soft_delete_self_cascade,
+        existing_soft_delete_revive_owner,
         owned_deps,
         sweep_deps,
         self_deps,
+        revive_owner_deps,
     ):
         _rekey(recorded, final, live_tables)
-    owned_sites, sweep_sites, self_sites = (
+    owned_sites, sweep_sites, self_sites, revive_owner_sites = (
         _settle_retirement_sites(
             trigger_retirement_sites.get(id(recorded), []),
             recorded,
@@ -741,6 +764,7 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
             (existing_soft_delete_owned, owned_deps),
             (existing_soft_delete_owned_sweep, sweep_deps),
             (existing_soft_delete_self_cascade, self_deps),
+            (existing_soft_delete_revive_owner, revive_owner_deps),
         )
     )
 
@@ -757,6 +781,9 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
         soft_delete_revive=existing_soft_delete_revive,
         soft_delete_revive_dependencies=revive_deps,
         revive_retirement_sites=revive_retirement_sites,
+        soft_delete_revive_owner=existing_soft_delete_revive_owner,
+        soft_delete_revive_owner_dependencies=revive_owner_deps,
+        revive_owner_retirement_sites=revive_owner_sites,
         soft_delete_owned=existing_soft_delete_owned,
         soft_delete_owned_sweep=existing_soft_delete_owned_sweep,
         soft_delete_self_cascade=existing_soft_delete_self_cascade,

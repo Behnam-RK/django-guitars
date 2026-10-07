@@ -55,6 +55,12 @@ _BASELINE = {
         r'# Soft Delete Revive Trigger retired on "([^"]+)" that is related to "([^"]+)"'
         r'(?: via "(?P<foreign_key>[^"]+)")?'
     ),
+    # Born derived in 2.16.0 (#70), baselined naively for its siblings' reason: the corpus
+    # carries the per-key family beside it, which is where "neither reads the other" is proved.
+    '_RE_SOFT_DELETE_REVIVE_OWNER': re.compile(r'# Soft Delete Revive Trigger on "([^"]+)" table!'),
+    '_RE_SOFT_DELETE_REVIVE_OWNER_RETIRED': re.compile(
+        r'# Soft Delete Revive Trigger retired on "([^"]+)" table!'
+    ),
     # Born derived in 2.8.0, baselined naively for its siblings' reason -- and because it is
     # the one family whose header must not read as any of the three above, which the corpus
     # (carrying all four on real files) is where that gets proved rather than argued.
@@ -95,8 +101,8 @@ _BASELINE = {
 _EXPECTED_EMPTY = {
     '_RE_TENANT_FORCE',
     '_RE_TENANT_AUTOFILL_RETIRED',
-    # No committed migration retires a revive trigger either -- the family is new in 2.11.0.
-    '_RE_SOFT_DELETE_REVIVE_RETIRED',
+    # No owner has lost its last cascade key since 2.16.0 introduced the per-owner trigger.
+    '_RE_SOFT_DELETE_REVIVE_OWNER_RETIRED',
     # Nor any of #66's three, new in 2.13.0.
     '_RE_SOFT_DELETE_OWNED_RETIRED',
     '_RE_SOFT_DELETE_OWNED_SWEEP_RETIRED',

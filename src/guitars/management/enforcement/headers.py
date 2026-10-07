@@ -81,6 +81,13 @@ HEADER_SOFT_DELETE_REVIVE_VIA_RETIRED = (
     'via "{foreign_key}"!'
 )
 
+# Every revive on one owner table in one trigger (2.16.0, #70). One slot, the owner: no
+# "that is related to", so neither per-key scanner above reads one, nor this one theirs.
+HEADER_SOFT_DELETE_REVIVE_OWNER = '# Soft Delete Revive Trigger on "{table}" table!'
+HEADER_SOFT_DELETE_REVIVE_OWNER_RETIRED = (
+    '# Soft Delete Revive Trigger retired on "{table}" table!'
+)
+
 # A self-referential CASCADE FK, taking a trigger where every other cascade takes a rule
 # (ADR 0018). "Self Cascade Trigger" shares no token with the three above, so no scanner
 # reads one as another's. One table slot: the trigger fires on the table its key points at.
@@ -156,6 +163,10 @@ _RE_SOFT_DELETE_OWNED_SWEEP = _derive_scanner(HEADER_SOFT_DELETE_OWNED_SWEEP)
 # Derivable too, and disjoint from all three above on "Self": no header of another
 # family carries that token, so nothing reads a self-cascade record as a rule.
 _RE_SOFT_DELETE_SELF_CASCADE = _derive_scanner(HEADER_SOFT_DELETE_SELF_CASCADE)
+# Derivable: one slot and one form. Disjoint from the per-key pair on "table!" right after the
+# owner, where theirs say "that is related to", and from each other on "retired".
+_RE_SOFT_DELETE_REVIVE_OWNER = _derive_scanner(HEADER_SOFT_DELETE_REVIVE_OWNER)
+_RE_SOFT_DELETE_REVIVE_OWNER_RETIRED = _derive_scanner(HEADER_SOFT_DELETE_REVIVE_OWNER_RETIRED)
 # The three retirements of #66, each disjoint from its create on "retired".
 _RE_SOFT_DELETE_OWNED_RETIRED = _derive_scanner(HEADER_SOFT_DELETE_OWNED_RETIRED)
 _RE_SOFT_DELETE_OWNED_SWEEP_RETIRED = _derive_scanner(HEADER_SOFT_DELETE_OWNED_SWEEP_RETIRED)

@@ -221,26 +221,26 @@ def test_cascade_operations_disambiguates_two_fks_to_the_same_related_table():
     ops = command._cascade_operations(Album)
     merch_ops = [op for op in ops if 'testapp_merch' in op]
 
-    # Four, not two: each cascade rule carries its inverse, facing the same collision. This
-    # read 2 until the helper cleared both maps -- the committed revive records suppressed
-    # those operations, so the shape this test exists for went unchecked on the new family.
-    assert len(merch_ops) == 4
+    assert len(merch_ops) == 2
     headers = [op.splitlines()[0] for op in merch_ops]
     assert any(
         '# Soft Delete Related Rule on "testapp_merch" that is related to "testapp_album"!' in h
         for h in headers
     )
-    assert any(
-        '# Soft Delete Revive Trigger on "testapp_merch" that is related to "testapp_album"!' in h
-        for h in headers
-    )
-    assert len([h for h in headers if 'via "bonus_album_id"!' in h]) == 2
-    # Distinct rule names per family -- no op's CREATE OR REPLACE can clobber another's.
+    assert len([h for h in headers if 'via "bonus_album_id"!' in h]) == 1
+    # Distinct rule names -- no op's CREATE OR REPLACE can clobber another's.
     blob = '\n'.join(merch_ops)
     assert 'RULE "soft_delete_related_testapp_merch"\n' in blob
     assert 'RULE "soft_delete_related_testapp_merch_bonus_album_id"' in blob
-    assert 'TRIGGER "soft_delete_revive_13_testapp_album_13_testapp_merch"\n' in blob
-    assert 'TRIGGER "soft_delete_revive_via_13_testapp_album_13_testapp_m_8576eb3445"' in blob
+    # Their inverse is one trigger on the owner since 2.16.0, carrying an arm per key (#70).
+    (revive,) = [
+        op
+        for op in command._revive_operations(django_apps.get_app_config('testapp'))
+        if op.startswith('# Soft Delete Revive Trigger on "testapp_album" table!')
+    ]
+    assert 'TRIGGER "soft_delete_revive_on_13_testapp_album"' in revive
+    assert 'guitars_child."album_id" = guitars_revived."id"' in revive
+    assert 'guitars_child."bonus_album_id" = guitars_revived."id"' in revive
 
 
 def test_owned_rule_name_folds_a_hostile_schema_qualified_table_like_its_cascade_twin():
@@ -976,13 +976,14 @@ def _self_root_fk_reverse_relation():
 
 
 def _record_cascade_key(*, both: bool):
-    """Seed the Album->Band cascade key, optionally in the inverse family too."""
+    """Seed the Album->Band cascade key, optionally its owner's revive trigger too (#70)."""
 
     def setup(command):
         key = (Album._meta.db_table, Band._meta.db_table, None)
         command.existing.soft_delete_related[key] = None
+        command.existing.soft_delete_revive_owner.clear()
         if both:
-            command.existing.soft_delete_revive[key] = None
+            command.existing.soft_delete_revive_owner[(Band._meta.db_table,)] = None
 
     return setup
 
@@ -1946,11 +1947,10 @@ def test_cascade_operations_report_two_relations_that_would_share_a_rule_name():
 
     command, ops = _build()
 
-    # Emitted anyway: what ships works for one of the two, which is the whole problem.
-    # Six operations, not three: each cascade rule is paired with its inverse since 2.11.0.
-    assert len(ops) == 6
-    # Still one clash, and it is the *cascade* family's: the revive names size every segment,
-    # so the two relations that meet on one cascade name cannot meet on a revive one.
+    # Emitted anyway: what ships works for one of the two, which is the whole problem. Three:
+    # the inverse is the owner's one revive trigger since 2.16.0, not an operation per rule.
+    assert len(ops) == 3
+    # One clash, and it is the *cascade* family's: the revive is named after its owner alone.
     assert len(command._rule_name_clashes) == 1
     assert not any('soft_delete_revive' in note for note in command._rule_name_clashes)
     clash = command._rule_name_clashes[0]
@@ -1996,17 +1996,11 @@ def test_cascade_operations_report_an_mti_parent_and_child_sharing_a_rule_name()
 
     command, ops = _build()
 
-    # Four, not two: the inverse rule goes with each cascade.
-    assert len(ops) == 4
-    # *Two* clashes here, one per family -- unlike the sibling test above, where sizing every
-    # segment keeps the revive names apart. Sizing cannot help this shape: both keys reach one
-    # owner table and each is the primary of its own call, so both ask for the plain form.
-    assert len(command._rule_name_clashes) == 2
-    (revive_clash,) = [n for n in command._rule_name_clashes if 'soft_delete_revive' in n]
-    # Reported on the *name* alone, as the owned sweep's function is: a function is namespaced
-    # per schema where a rule is per table, so the clash is not about one table.
-    assert revive_clash.startswith('Revive function')
-    assert "'testapp_referrer'" in revive_clash
+    assert len(ops) == 2
+    # One clash, the cascade family's. Through 2.15 the per-key revives clashed here too, both
+    # keys asking for the plain form on one owner; one trigger per owner carries both as arms.
+    assert len(command._rule_name_clashes) == 1
+    assert not any('soft_delete_revive' in note for note in command._rule_name_clashes)
     clash = command._rule_name_clashes[0]
     assert "via 'p_id'" in clash and "via 'c_id'" in clash
     assert 'the second replaces the first' in clash
@@ -3115,19 +3109,16 @@ def test_upgrading_to_the_revive_family_never_drops_the_cascade_rule_first(adopt
     command = Command()
     command.existing.soft_delete_related[('testapp_album', 'testapp_band', None)] = 'stale0000000'
     command.existing.soft_delete_revive.clear()
+    command.existing.soft_delete_revive_owner.clear()
 
-    ops = [
-        operation
-        for operation in command._build_operations(apps.get_app_config('testapp'), adopt=adopt)
-        if 'testapp_album" that is related to "testapp_band' in operation
+    built = command._build_operations(apps.get_app_config('testapp'), adopt=adopt)
+    (cascade,) = [op for op in built if 'testapp_album" that is related to "testapp_band' in op]
+    # Since 2.16.0 the inverse is the owner's one trigger, carrying this key as an arm (#70).
+    (revive,) = [
+        op for op in built if op.startswith('# Soft Delete Revive Trigger on "testapp_band" table!')
     ]
-
-    assert len(ops) == 2
-    assert [operation.splitlines()[0].split(' on ')[0] for operation in ops] == [
-        '# Soft Delete Related Rule',
-        '# Soft Delete Revive Trigger',
-    ]
-    cascade, revive = ops
+    assert built.index(cascade) < built.index(revive)
+    assert 'guitars_child."band_id" = guitars_revived."id"' in revive
     # The cascade is a rule, idempotent by construction, so it drops nothing on either path.
     assert 'DROP RULE' not in cascade.split('reverse_sql')[0]
     assert 'CREATE OR REPLACE RULE' in cascade
@@ -3144,9 +3135,9 @@ def test_upgrading_to_the_revive_family_never_drops_the_cascade_rule_first(adopt
         assert 'DROP TRIGGER' not in revive_forward
 
 
-def _revive_dollar_command(recorded: bool):
-    """A cascade child whose ``db_table`` carries ``$$``, for the revive family's two refusal
-    branches. The cascade *rule* beside it needs no dollar quoting and is emitted regardless."""
+def _revive_dollar_models():
+    """A cascade child whose ``db_table`` carries ``$$``, for the revive arm's refusal. The
+    cascade *rule* beside it needs no dollar quoting and is emitted regardless."""
 
     @isolate_apps('tests.testapp')
     def _build():
@@ -3162,41 +3153,35 @@ def _revive_dollar_command(recorded: bool):
                 app_label = 'testapp'
                 db_table = 'testapp_dollar$$child'
 
-        command = Command()
-        command._skipped_rule_notes.clear()
-        command._refusals_over_live_rules.clear()
-        clear_cascade_coverage(command)
-        key = ('testapp_dollar$$child', 'testapp_dollar_owner', None)
-        if recorded:
-            command.existing.soft_delete_revive[key] = 'deadbeefcafe'
-        command.reverse_relations_mapping[DollarOwner] = {
-            (DollarChild, DollarChild._meta.get_field('owner'), CASCADE)
-        }
-        return command, command._cascade_operations(DollarOwner)
+        return DollarOwner, DollarChild
 
     return _build()
 
 
-def test_a_revive_refused_for_dollar_quoting_leaves_the_cascade_rule_alone():
-    """The inverse is a dollar-quoted function and the cascade beside it is a rule, so only one
-    of the pair is refused -- the reason the refusal returns rather than skipping the relation."""
-    command, ops = _revive_dollar_command(recorded=False)
+def test_a_revive_arm_refused_for_dollar_quoting_is_left_out_and_named():
+    """The arm is spliced into the owner's dollar-quoted function, so ``$$`` in a name it
+    carries would close that quoting: the arm is left out, the owner's other arms kept."""
+    _owner, child = _revive_dollar_models()
+    command = Command()
+    command._skipped_rule_notes.clear()
+    key = ('testapp_dollar$$child', 'testapp_dollar_owner', None)
+
+    assert command._revive_arm(key, child, 'owner_id', 'id') is None
+    assert len(command._skipped_rule_notes) == 1
+    assert 'Revive arm' in command._skipped_rule_notes[0]
+    assert '"$$"' in command._skipped_rule_notes[0]
+
+
+def test_a_revive_arm_refused_for_dollar_quoting_leaves_the_cascade_rule_alone():
+    """The cascade beside it is a rule, needing no dollar quoting, so it is emitted as ever."""
+    owner, child = _revive_dollar_models()
+    command = Command()
+    command._skipped_rule_notes.clear()
+    clear_cascade_coverage(command)
+    command.reverse_relations_mapping[owner] = {(child, child._meta.get_field('owner'), CASCADE)}
+
+    ops = command._cascade_operations(owner)
 
     assert len(ops) == 1
     assert ops[0].startswith('# Soft Delete Related Rule on')
-    assert len(command._skipped_rule_notes) == 1
-    assert 'Revive trigger' in command._skipped_rule_notes[0]
-    assert '"$$"' in command._skipped_rule_notes[0]
-    assert command._refusals_over_live_rules == []
-
-
-def test_a_revive_refused_for_dollar_quoting_escalates_over_its_own_live_trigger():
-    """Recorded already, so it is live in every migrated database and this run will not replace
-    it. Both objects named, the trigger alone leaving its function behind."""
-    command, _ops = _revive_dollar_command(recorded=True)
-
-    assert len(command._refusals_over_live_rules) == 1
-    escalation = command._refusals_over_live_rules[0]
-    assert "Revive trigger on 'testapp_dollar_owner'" in escalation
-    assert 'DROP TRIGGER' in escalation
-    assert 'DROP FUNCTION' in escalation
+    assert command._skipped_rule_notes == []

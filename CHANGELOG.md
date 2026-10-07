@@ -24,7 +24,7 @@ Full history and diffs: [GitHub releases](https://github.com/Behnam-RK/django-gu
 ### Fixed
 
 - **Instance `hard_delete()` under another tenant's scope committed half a tree** (#72). The row policy hid the root, so its `DELETE` removed nothing, while children on a table with no policy were removed for good and the root stayed live. Every table the walk deletes from is now held to the rows it collected, and so is the MTI queryset form's own chain, where a hidden row left the chain half removed. An empty scope (`tenant(label=[])`) now raises `HardDeleteIncompleteError` too, where it raised Django's `EmptyResultSet`.
-- **An owned target was not spared when an outside row pointed into its cascade** (#71). Sparing asked which surviving rows point at the target, not at the rows its cascade takes along, so a plain key into a descendant aborted the walk at `COMMIT`. The closure now records which target takes each row, and a key into any of them spares exactly those targets, with no more queries than before.
+- **An owned target was not spared when an outside row pointed into its cascade** (#71). Sparing asked which surviving rows point at the target, not at the rows its cascade takes along, so a plain key into a descendant aborted the walk at `COMMIT`. The closure now records which target takes each row, and a key into any of them spares exactly those targets. That is one more read per relation into each model the closure reaches, never one per row.
 - **Queryset `hard_delete()` failed on a filter over a window function or a single-table aggregate** (#73), which the `DELETE`'s `WHERE` cannot hold. It now reads the keys first, as `delete()` does; a plain filter stays one `DELETE`.
 
 ## [2.14.4] - 2026-10-07

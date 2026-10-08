@@ -560,3 +560,265 @@ def test_a_revive_re_emission_drops_its_trigger_before_creating_it():
 
     assert 'DROP TRIGGER "soft_delete_revive_on_12_testapp_band"' in forward
     assert forward.index('DROP TRIGGER') < forward.index('CREATE TRIGGER')
+
+
+class TestAModelHandedToAnotherApp:
+    """A scan walks one app's files at a time, so another app's files may land under the new
+    name before or after the move (#66). Read through the cross-app route, the coverage ends
+    where the same-app rename put it."""
+
+    @staticmethod
+    def _as_a_move(monkeypatch, *, at=None):
+        """Read ``testapp``'s own renames as cross-app moves, optionally all at migration *at*."""
+        loader = MigrationLoader(None, ignore_no_migrations=True)
+        real = graph.renames_by_migration
+        moves = real(loader, 'testapp')
+        monkeypatch.setattr(
+            scanning,
+            'renames_by_migration',
+            lambda loader, label: {} if label == 'testapp' else real(loader, label),
+        )
+        handed = {at: [pair for pairs in moves.values() for pair in pairs]} if at else moves
+        monkeypatch.setattr(
+            scanning,
+            'moves_between_apps_by_migration',
+            lambda loader, label: handed if label == 'testapp' else {},
+        )
+
+    def test_moved_where_it_happened_it_lands_as_a_rename_does(self, monkeypatch):
+        baseline = scan_existing_operations()
+        self._as_a_move(monkeypatch)
+
+        existing = scan_existing_operations()
+
+        assert existing.triggers == baseline.triggers
+        assert existing.soft_deletes == baseline.soft_deletes
+        assert set(existing.soft_delete_related_dependencies) == set(
+            baseline.soft_delete_related_dependencies
+        )
+
+    @pytest.mark.parametrize(
+        'at', ['0001_initial', '0078_retirement_host_after_catalog'], ids=['before', 'after']
+    )
+    def test_a_name_another_model_holds_keeps_its_own_coverage(self, monkeypatch, at):
+        """A freed name a live model retook is not the moved table's to take with it: neither
+        at the move, once its coverage is recorded, nor when the walk is done."""
+        baseline = scan_existing_operations()
+        monkeypatch.setattr(
+            scanning,
+            'moves_between_apps_by_migration',
+            lambda loader, label: {at: [('testapp_catalog', 'testapp_elsewhere')]}
+            if label == 'testapp'
+            else {},
+        )
+
+        existing = scan_existing_operations()
+
+        assert 'testapp_catalog' in baseline.triggers
+        assert 'testapp_catalog' in existing.triggers
+        assert 'testapp_elsewhere' not in existing.triggers
+
+    def test_a_move_never_overwrites_and_a_rename_always_does(self, monkeypatch):
+        """Chronology holds inside one app's walk and not across two, so only the cross-app
+        route keeps what the destination already has."""
+        flags = []
+        real = scanning._move_renamed
+        monkeypatch.setattr(
+            scanning,
+            '_move_renamed',
+            lambda old, new, recorded, **kwargs: (
+                flags.append(kwargs.get('keep_existing', False)) or real(old, new, recorded, **kwargs)
+            ),
+        )
+        scan_existing_operations()
+        as_renames = set(flags)
+        flags.clear()
+        self._as_a_move(monkeypatch)
+
+        scan_existing_operations()
+
+        assert as_renames == {False}
+        assert set(flags) == {True}
+
+    def test_what_another_app_filed_after_the_move_is_carried_to_the_end_of_the_chain(
+        self, monkeypatch
+    ):
+        """The move is read before ``testapp``'s own files, which then record the old name: the
+        cross-app hop is followed through the renames the app made after it."""
+        baseline = scan_existing_operations()
+        self._as_a_move(monkeypatch, at='0001_initial')
+
+        existing = scan_existing_operations()
+
+        assert 'testapp_callbacks' in existing.triggers
+        assert 'testapp_encore' not in existing.triggers
+        assert existing.triggers == baseline.triggers
+        assert existing.soft_deletes == baseline.soft_deletes
+        key = ('testapp_callbacks', 'testapp_band', None)
+        assert key in baseline.soft_delete_related_dependencies
+        assert key in existing.soft_delete_related_dependencies
+        assert ('testapp_encore', 'testapp_band', None) not in existing.soft_delete_related_dependencies
+
+class TestMovingEntriesWithoutOverwriting:
+    def test_an_entry_already_under_the_new_name_is_kept(self):
+        recorded = {('old', 'owner', None): 'older', ('new', 'owner', None): 'newer'}
+
+        scanning._move_renamed('old', 'new', recorded, keep_existing=True)
+
+        assert recorded == {('new', 'owner', None): 'newer'}
+
+    def test_dependency_lists_are_merged_not_dropped(self):
+        recorded = {'old': [('a', '1')], 'new': [('b', '2')]}
+
+        scanning._move_renamed('old', 'new', recorded, keep_existing=True)
+
+        assert recorded == {'new': [('a', '1'), ('b', '2')]}
+
+    def test_a_gap_is_filled(self):
+        recorded = {('old', 'owner', None): 'older'}
+
+        scanning._move_renamed('old', 'new', recorded, keep_existing=True)
+
+        assert recorded == {('new', 'owner', None): 'older'}
+
+    def test_a_rename_still_overwrites(self):
+        """Same app, one chronological walk: whatever is under the destination predates it."""
+        recorded = {('old', 'owner', None): 'newer', ('new', 'owner', None): 'older'}
+
+        scanning._move_renamed('old', 'new', recorded)
+
+        assert recorded == {('new', 'owner', None): 'newer'}
+
+
+class TestFollowingAChainOfMoves:
+    def test_two_moves_end_at_the_last(self):
+        ends = scanning._chain_ends({'a': 'b', 'b': 'c'}, {})
+
+        assert ends == {'a': 'c', 'b': 'c'}
+
+    def test_a_move_then_a_rename_ends_at_the_rename(self):
+        ends = scanning._chain_ends({'a': 'b'}, {'b': 'c'})
+
+        assert ends == {'a': 'c', 'b': 'c'}
+
+    def test_a_cycle_ends_the_walk_rather_than_looping(self):
+        assert scanning._chain_ends({'a': 'b', 'b': 'a'}, {}) == {'a': 'b', 'b': 'a'}
+
+    def test_a_rename_alone_is_not_this_chain(self):
+        assert scanning._chain_ends({}, {'a': 'b'}) == {}
+
+
+class TestChainsJoinedAcrossApps:
+    def test_a_chain_is_extended_by_the_chains_of_the_names_in_it(self):
+        joined = scanning._join_chains({'c': ['b'], 'b': ['a']})
+
+        assert joined == {'c': ['a', 'b']}
+
+    def test_a_chain_already_whole_is_left_out(self):
+        assert scanning._join_chains({'b': ['a'], 'c': ['a', 'b']}) == {}
+
+    def test_a_cycle_does_not_loop(self):
+        assert scanning._join_chains({'a': ['b'], 'b': ['a']}) == {}
+
+    def test_the_scan_answers_with_the_whole_history(self, monkeypatch):
+        """``testapp_zzz`` was a rename of the table ``testapp_callbacks`` came to be, in
+        another app's history: its prior names include everything that table held."""
+        real = graph.renamed_tables
+        monkeypatch.setattr(
+            scanning,
+            'renamed_tables',
+            lambda loader, label: (
+                {**real(loader, label), 'testapp_zzz': ['testapp_callbacks']}
+                if label == 'testapp'
+                else real(loader, label)
+            ),
+        )
+
+        existing = scan_existing_operations()
+
+        assert existing.renamed_tables['testapp_zzz'] == [
+            'testapp_encore',
+            'testapp_callback',
+            'testapp_callbacks',
+        ]
+
+
+class TestWhichNameAChainEndsAt:
+    def test_the_longest_chain_says_where_a_name_ended(self):
+        """Dict order is not time: the intermediate chain only says where it stopped."""
+        joined = {'zed_child': ['anc_child', 'shop_child'], 'shop_child': ['anc_child']}
+
+        assert scanning._latest_names(joined)['anc_child'] == 'zed_child'
+        assert scanning._latest_names(dict(reversed(joined.items())))['anc_child'] == 'zed_child'
+
+    def test_the_name_nearest_the_end_is_carried_first(self):
+        """So where two names of one chain both hold an entry, the newer one is the one kept."""
+        ends = scanning._chain_ends({'a': 'b', 'b': 'c'}, {})
+
+        assert list(ends) == ['b', 'a']
+
+    def test_where_the_newer_entry_is_it_wins_whatever_the_hash_seed(self):
+        recorded = {'a': 'old', 'b': 'newer'}
+
+        for old, new in scanning._chain_ends({'a': 'b', 'b': 'c'}, {}).items():
+            scanning._move_renamed(old, new, recorded, keep_existing=True)
+
+        assert recorded == {'c': 'newer'}
+
+
+class TestTheWalkAloneAndTheEndAlone:
+    def test_a_move_where_it_happened_is_carried_by_the_walk_alone(self, monkeypatch):
+        """What is recorded after the move is moved there; the post-walk only sweeps the rest."""
+        baseline = scan_existing_operations()
+        TestAModelHandedToAnotherApp._as_a_move(monkeypatch)
+        monkeypatch.setattr(scanning, '_chain_ends', lambda moves, renames: {})
+
+        existing = scan_existing_operations()
+
+        assert existing.triggers == baseline.triggers
+        assert existing.soft_deletes == baseline.soft_deletes
+
+    def test_the_renames_after_a_move_carry_it_on(self, monkeypatch):
+        """Only the first hop is a move: ``testapp``'s own rename, read as no walk step, is what
+        takes the entries on to the name in use."""
+        baseline = scan_existing_operations()
+        loader = MigrationLoader(None, ignore_no_migrations=True)
+        real = graph.renames_by_migration
+        first = real(loader, 'testapp')['0051_rename_encore_to_callback']
+        monkeypatch.setattr(
+            scanning,
+            'renames_by_migration',
+            lambda loader, label: {} if label == 'testapp' else real(loader, label),
+        )
+        monkeypatch.setattr(
+            scanning,
+            'moves_between_apps_by_migration',
+            lambda loader, label: {'0001_initial': first} if label == 'testapp' else {},
+        )
+
+        existing = scan_existing_operations()
+
+        assert existing.triggers == baseline.triggers
+        assert 'testapp_encore' not in existing.triggers
+
+
+class TestSettlingAKeyAfterAChain:
+    def test_a_retirement_names_the_key_by_where_its_table_ended(self):
+        """``zed_child`` held ``shop_child`` and ``anc_child``; the shorter chain, written last,
+        would stop the key at ``shop_child``, which no model has any more."""
+        from types import SimpleNamespace  # noqa: PLC0415
+
+        site = scanning.CascadeRetirementSite('shop', '0006', ('anc_child', 'shop_parent', None), None)
+        renames = {'zed_child': ['anc_child', 'shop_child'], 'shop_child': ['anc_child']}
+
+        for ordered in (renames, dict(reversed(renames.items()))):
+            (settled,) = scanning._settle_retirement_sites(
+                [site],
+                {},
+                {},
+                ordered,
+                {'zed_child', 'shop_parent'},
+                lambda: SimpleNamespace(graph=None),
+            )
+
+            assert settled.key == ('zed_child', 'shop_parent', None)

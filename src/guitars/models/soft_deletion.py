@@ -234,12 +234,8 @@ def _referring_relations(model: type[Model]) -> list:
     # A ``GenericRelation`` cannot dangle, having no column to dangle by; ``_collect`` walks
     # ``_meta.private_fields`` separately to take those along -- see the doc.
 
-    # Which is why the two walks are no longer identical: what ``_collect`` takes there,
-    # :func:`_cascade_closure` does not model, so they can disagree.
-
-    # Since 2.15.0 that cuts the other way too: sparing reads the referrers of every closure
-    # row, so a plain key into a generic child goes unseen and the walk aborts at ``COMMIT``
-    # rather than sparing its target -- #76.
+    # What ``_collect`` takes there, :func:`_cascade_closure` walks itself (#76), so sparing
+    # reads the referrers of a generic child as it does a cascade child's.
     return [
         relation
         for relation in model._meta.get_fields(include_hidden=True)
@@ -300,11 +296,28 @@ def _cascade_closure(
                     children,
                 )
             )
+        # A ``GenericRelation`` child, which ``_collect`` takes along from ``_meta.private_fields``
+        # and ``_referring_relations`` cannot see: one read of its rows per relation, each mapped
+        # back to its parent through the object id, converted to the parent's primary key type.
+        generic = [p for p in model._meta.private_fields if hasattr(p, 'bulk_related_objects')]
+        if generic:
+            instances = list(_rows(model, using).filter(pk__in=fresh))
+            for private in generic:
+                found: dict = defaultdict(set)
+                for child_pk, object_id in private.bulk_related_objects(
+                    instances, using
+                ).values_list('pk', private.object_id_field_name):
+                    found[child_pk] |= fresh[model._meta.pk.to_python(object_id)]
+                pending.append((mti_root(private.related_model), found))
     return taken, origins
 
 
 def _still_referenced(
-    target: type[Model], pks: set, claimed: dict[type[Model], set], using: str | None
+    target: type[Model],
+    pks: set,
+    claimed: dict[type[Model], set],
+    using: str | None,
+    closure: tuple[dict, dict] | None = None,
 ) -> set:
     """Which of *pks* a row that outlives the collection still points at, through **any**
     foreign key, not only the one that declared ownership, at the target **or any row its
@@ -312,7 +325,9 @@ def _still_referenced(
     # Rows collecting the chain takes along, by **row**, not relation: one model can hold a
     # ``CASCADE`` key *and* a plain one to the same target, and discounting the relation alone
     # held the target back forever. Whole closure, not one hop -- see ``_cascade_closure``.
-    taken, origins = _cascade_closure(mti_root(target), pks, using)
+    taken, origins = (
+        closure if closure is not None else _cascade_closure(mti_root(target), pks, using)
+    )
     # By MTI tree, not level: a parent-link walk records one row at every level it reaches.
     trees: dict[type[Model], dict] = defaultdict(lambda: defaultdict(set))
     for level, level_origins in origins.items():
@@ -359,6 +374,32 @@ class _OwnedScan:
         self.graph_for: frozenset[type[Model]] | None = None
         self.cycles: set = set()
         self.refusals: dict = {}
+        # The cascade closure of each root read so far, by the root's MTI tree: the rows do not
+        # change while the walk runs, so a root asked about again -- a shrinking candidate set,
+        # a spared target carried into the next round -- is narrowed from here, not read again.
+        self.reached: dict[type[Model], dict[type[Model], dict]] = {}
+        self.read: dict[type[Model], set] = defaultdict(set)
+
+    def closure(
+        self, target: type[Model], roots: set, using: str | None
+    ) -> tuple[dict[type[Model], set], dict[type[Model], dict]]:
+        """:func:`_cascade_closure` of *roots* alone, reading only those not read before. Each
+        row's roots are complete, so the rows of a subset are the ones one of them reaches."""
+        tree = mti_root(target)
+        if new := roots - self.read[tree]:
+            cached = self.reached.setdefault(tree, {})
+            for model, rows in _cascade_closure(tree, new, using)[1].items():
+                known = cached.setdefault(model, defaultdict(set))
+                for pk, came in rows.items():
+                    known[pk] |= came
+            self.read[tree] |= new
+        taken: dict[type[Model], set] = {}
+        origins: dict[type[Model], dict] = {}
+        for model, rows in self.reached.get(tree, {}).items():
+            narrowed = {pk: came & roots for pk, came in rows.items() if came & roots}
+            if narrowed:
+                origins[model], taken[model] = narrowed, set(narrowed)
+        return taken, origins
 
     def graph(self, claimed: dict[type[Model], set]) -> tuple[set, dict]:
         # Redone only for a claimed model outside the registry: a registered one is already in
@@ -420,7 +461,13 @@ def _owned_targets(
             # closure alive, so a referrer inside it survives after all and holds another pk
             # back. Each round is a strict subset of the last, which is what terminates it.
             while candidates:
-                referenced = _still_referenced(field.related_model, candidates, claimed, using)
+                referenced = _still_referenced(
+                    field.related_model,
+                    candidates,
+                    claimed,
+                    using,
+                    scan.closure(field.related_model, candidates, using),
+                )
                 if not referenced:
                     break
                 candidates = candidates - referenced
@@ -541,6 +588,32 @@ def _refuse_an_own_key(model: type[Model]) -> None:
             f'key of its own beside its multi-table-inheritance parent link (guitars.E005), so '
             f'the walk would remove another row of the ancestor. Fix the model first.'
         )
+
+
+def _refuse_an_own_key_in_reach(model: type[Model]) -> None:
+    """:func:`_refuse_an_own_key` for every model an instance ``hard_delete()`` of *model* can
+    seed from -- its MTI tree, each ``CASCADE``, generic and owned hop, and theirs."""
+    # Before Phase 1: a refused model met mid-walk had already fired signals and cleared the
+    # instance's key. Asked of the registry, not the rows, so it refuses whatever the data.
+    seen: set[type[Model]] = set()
+    pending = [model]
+    while pending:
+        for level in _mti_model_chain(pending.pop()):
+            if level in seen:
+                continue
+            seen.add(level)
+            _refuse_an_own_key(level)
+            pending.extend(
+                cast('type[Model]', relation.related_model)
+                for relation in _referring_relations(level)
+                if relation.on_delete is CASCADE
+            )
+            pending.extend(
+                private.related_model
+                for private in level._meta.private_fields
+                if hasattr(private, 'bulk_related_objects')
+            )
+            pending.extend(field.related_model for field in _declared_owning_fields(level))
 
 
 def _guard_bulk(queryset: QuerySet, name: str) -> None:
@@ -880,7 +953,7 @@ class SoftDeletableModel(Model):
         before parents (CASCADE is Python-level); an owned row goes after its owner."""
         # Resolved as Phase 1's ``delete()`` resolves it -- the router before ``_state.db``, which
         # ``Model(pk=...)`` lacks -- so both phases land on one alias for a consistent router.
-        _refuse_an_own_key(type(self))
+        _refuse_an_own_key_in_reach(type(self))
         using = router.db_for_write(self.__class__, instance=self)
         pk = self.pk  # save before Phase 1 resets self.pk to None
         # One (rows, order) group per ownership hop: the first this row and its
@@ -924,9 +997,6 @@ class SoftDeletableModel(Model):
                         .filter(**{f'{field.attname}__in': keys})
                         .values_list('pk', flat=True)
                     )
-                    # Refused here too: its own key seeded into its root removes an unrelated row.
-                    _refuse_an_own_key(related_model)
-
                     # From the child's MTI *root*, as the seed and the owned hop both are:
                     # the declaring level alone strands its ancestors' rows. A parent-link
                     # walks *down* instead, and re-entering at its root collects nothing.
@@ -965,7 +1035,6 @@ class SoftDeletableModel(Model):
                                 'pk', flat=True
                             )
                         )
-                        _refuse_an_own_key(private.related_model)
                         _collect(mti_root(private.related_model), generic_pks)
                 if model not in model_order:
                     model_order.append(model)

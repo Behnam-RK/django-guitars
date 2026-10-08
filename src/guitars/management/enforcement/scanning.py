@@ -12,6 +12,7 @@ from django.apps import apps as django_apps
 
 from guitars.management import _generator
 from guitars.management.enforcement.graph import (
+    moves_between_apps_by_migration,
     renamed_tables,
     renames_by_migration,
     retired_enforcement,
@@ -233,7 +234,7 @@ def _settle_retirement_sites(
     """Match each retirement to the create it dropped and pop the key where the drop wins. The
     walk itself never pops: which of a create and its drop it sees last is registry order, not
     time, so both questions are settled here, once, by the graph. See ADR 0021."""
-    moved = {old: new for new, chain in renames.items() for old in chain}
+    moved = _latest_names(renames)
     graph = ensure_loader().graph
     by_key: dict[Any, list[CascadeRetirementSite]] = {}
     for site in sites:
@@ -341,8 +342,58 @@ def _subtract_retired(
         recorded.pop(table, None)
 
 
-def _move_renamed(old: str, new: str, recorded: dict | set) -> None:
-    """Move *recorded*'s entries from table *old* onto *new*, in place."""
+def _join_chains(renames: dict[str, list[str]]) -> dict[str, list[str]]:
+    """*renames* (``current -> every name it held, oldest first``) with each chain extended by the
+    chains of the names in it: ``{'c': ['b'], 'b': ['a']}`` says ``c`` held ``a`` and ``b``."""
+
+    def _held(name: str, seen: frozenset[str]) -> list[str]:
+        names: list[str] = []
+        for old in renames.get(name, []):
+            if old not in seen:
+                names += [*_held(old, seen | {old}), old]
+        return names
+
+    return {
+        new: list(dict.fromkeys(_held(new, frozenset({new}))))
+        for new in renames
+        if len(set(_held(new, frozenset({new})))) > len(renames[new])
+    }
+
+
+def _latest_names(renames: dict[str, list[str]]) -> dict[str, str]:
+    """``old -> the name it ends at``, from ``current -> every name it held``. The longest chain
+    is written last so it wins: a joined chain says where a name ended, the intermediate one
+    only where it stopped, and dict order is not time."""
+    return {
+        old: new
+        for new, chain in sorted(renames.items(), key=lambda item: (len(item[1]), item[0]))
+        for old in chain
+    }
+
+
+def _chain_ends(moves: dict[str, str], renames: dict[str, str]) -> dict[str, str]:
+    """Where each name in *moves*, and each name it moved onto, ends up after every hop *moves*
+    and *renames* (old table -> new) say it made, nearest the end first, so that of two names
+    holding an entry the newer is kept. A name that ends where it began is left out."""
+    ends: dict[str, tuple[int, str]] = {}
+    for start in {*moves, *moves.values()}:
+        current, seen = start, {start}
+        while (following := moves.get(current) or renames.get(current)) and following not in seen:
+            seen.add(following)
+            current = following
+        if current != start:
+            ends[start] = (len(seen), current)
+    return {
+        start: end for start, (_hops, end) in sorted(ends.items(), key=lambda i: (i[1][0], i[0]))
+    }
+
+
+def _move_renamed(
+    old: str, new: str, recorded: dict | set, *, keep_existing: bool = False
+) -> None:
+    """Move *recorded*'s entries from table *old* onto *new*, in place. A model moved between
+    apps (*keep_existing*) lands on a name another app's files may already have filed, older or
+    newer than the move, so what is there stays and the moving entry only fills a gap (#66)."""
     # Called as the scan crosses the renaming migration, not over the finished scan: order is
     # what makes a **cycle** right. ``A -> B`` and back leaves two entries under ``A`` and only
     # the walk knows which is newer -- a post-pass guessed, and the pre-cycle one won.
@@ -360,6 +411,12 @@ def _move_renamed(old: str, new: str, recorded: dict | set) -> None:
             else tuple(new if part == old else part for part in key)
         )
         if moved != key:
+            if keep_existing and moved in recorded:
+                value = recorded.pop(key)
+                if isinstance(value, list):
+                    kept = recorded[moved]
+                    kept[:0] = [node for node in value if node not in kept]
+                continue
             # Overwrite, never ``setdefault``: this runs at the rename, so anything already
             # filed under the destination predates it and the moving entry is the newer.
             recorded[moved] = recorded.pop(key)
@@ -474,6 +531,8 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
     autofill_function_sql: dict[str, str | None] = {}
     built_loader = loader
     _pending_renames: dict[str, list[str]] = {}
+    # Old table -> new, for the models an app handed to another (#66).
+    _between_apps: dict[str, str] = {}
     live_tables = {
         model._meta.db_table for app in django_apps.get_app_configs() for model in app.get_models()
     }
@@ -511,33 +570,39 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
         'mti_soft_deletes': existing_mti_soft_deletes,
     }
 
+    every_family = (
+        existing_triggers,
+        existing_soft_deletes,
+        existing_soft_delete_related,
+        existing_soft_delete_revive,
+        revive_deps,
+        # Not #66's three: moved once, after the walk, by ``_rekey``, which keeps an entry
+        # another app filed under the new name -- this move would overwrite it with an older.
+        existing_mti_triggers,
+        existing_mti_soft_deletes,
+        cascade_deps,
+        existing_tenant_autofill,
+        existing_tenant_policies,
+        existing_policy_identities,
+        existing_policy_sql,
+        existing_policy_force,
+        existing_tenant_forces,
+    )
     for app in django_apps.get_app_configs():
         if _generator.is_local(app):
             _pending_renames.update(renamed_tables(_ensure_loader(), app.label))
+            for pairs in moves_between_apps_by_migration(_ensure_loader(), app.label).values():
+                _between_apps.update(pairs)
+    # Each app's chain ends where its own history does: a model moved to another app and renamed
+    # there has the first hop in one and the second in the other.
+    _pending_renames.update(_join_chains(_pending_renames))
 
     for app in django_apps.get_app_configs():
         if not _generator.is_local(app):
             continue
         retired = retired_enforcement(_ensure_loader(), app.label)
         moves = renames_by_migration(_ensure_loader(), app.label)
-        every_family = (
-            existing_triggers,
-            existing_soft_deletes,
-            existing_soft_delete_related,
-            existing_soft_delete_revive,
-            revive_deps,
-            # Not #66's three: moved once, after the walk, by ``_rekey``, which keeps an entry
-            # another app filed under the new name -- this move would overwrite it with an older.
-            existing_mti_triggers,
-            existing_mti_soft_deletes,
-            cascade_deps,
-            existing_tenant_autofill,
-            existing_tenant_policies,
-            existing_policy_identities,
-            existing_policy_sql,
-            existing_policy_force,
-            existing_tenant_forces,
-        )
+        handed_over = moves_between_apps_by_migration(_ensure_loader(), app.label)
         # A retirement names the table as spelled *now*, while the keys it must subtract may
         # still be filed under a name a rename left behind -- the post-pass would then move the
         # old key back over the hole and a dropped object would read as covered.
@@ -555,6 +620,11 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
                     continue
                 for recorded in every_family:
                     _move_renamed(old_table, new_table, recorded)
+            for old_table, new_table in handed_over.get(path.stem, ()):
+                if old_table in live_tables:
+                    continue
+                for recorded in every_family:
+                    _move_renamed(old_table, new_table, recorded, keep_existing=True)
 
             for table, column in retired.get(path.stem, ()):
                 for spelling in spellings[table]:
@@ -709,6 +779,17 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
                 for m in _RE_TENANT_FORCE.finditer(content)
             )
 
+    # Onto the names in use first: the walk moves a key only once its rename's app is walked,
+    # so an app walked later records the old name, never moved, and retired on every run.
+    final = _latest_names(_pending_renames)
+    # What another app filed under the old name, or one the model held on the way, is walked in
+    # its own order: it cannot be moved at the move, and a second hop (a rename, another move)
+    # found nothing to carry. Followed to its end, keeping what is already there.
+    for old_table, new_table in _chain_ends(_between_apps, final).items():
+        if old_table in live_tables:
+            continue
+        for recorded in every_family:
+            _move_renamed(old_table, new_table, recorded, keep_existing=True)
     # Settled after the walk, because the walk is registry order and this question is graph
     # order: a retirement in an app scanned first pops a key its create then re-records, and
     # the retirement re-emits on every run with ``--check`` never going green.
@@ -737,9 +818,6 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
         {key: list(nodes) for key, nodes in deps.items()}
         for deps in (owned_deps, sweep_deps, self_deps, revive_owner_deps)
     )
-    # Onto the names in use first: the walk moves a key only once its rename's app is walked,
-    # so an app walked later records the old name, never moved, and retired on every run.
-    final = {old: new for new, chain in _pending_renames.items() for old in chain}
     for recorded in (
         existing_soft_delete_owned,
         existing_soft_delete_owned_sweep,

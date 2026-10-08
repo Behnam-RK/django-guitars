@@ -362,6 +362,88 @@ class TestWhichOwnedTargetsAnOutsideKeySpares:
 
 
 @pytest.mark.django_db
+class TestAGenericChildIsInTheClosure:
+    """``_collect`` takes a ``GenericRelation`` child along, so sparing has to read what points at
+    it too (#76): the walk aborted at ``COMMIT`` instead of sparing the target."""
+
+    @staticmethod
+    def _board():
+        from tests.testapp.models import Scribble, Signboard  # noqa: PLC0415
+
+        board = Signboard.objects.create(caption='b')
+        return board, Scribble.objects.create(content_object=board, text='t')
+
+    def test_the_closure_takes_the_child_and_names_its_parent(self):
+        from guitars.models.soft_deletion import _cascade_closure  # noqa: PLC0415
+        from tests.testapp.models import Scribble, Signboard  # noqa: PLC0415
+
+        board, scribble = self._board()
+
+        taken, origins = _cascade_closure(Signboard, {board.pk}, 'default')
+
+        assert taken[Scribble] == {scribble.pk}
+        assert origins[Scribble][scribble.pk] == {board.pk}
+
+    def test_a_child_naming_its_parent_by_text_is_mapped_back_to_the_integer_key(self):
+        """``Smudge.ref`` holds ``'<pk>'``: ``to_python`` is what finds the parent it belongs to."""
+        from guitars.models.soft_deletion import _cascade_closure  # noqa: PLC0415
+        from tests.testapp.models import Signboard, Smudge  # noqa: PLC0415
+
+        board, _scribble = self._board()
+        smudge = Smudge.objects.create(content_object=board)
+
+        _taken, origins = _cascade_closure(Signboard, {board.pk}, 'default')
+
+        assert origins[Smudge][smudge.pk] == {board.pk}
+
+    def test_a_plain_key_into_the_generic_child_spares_the_target(self):
+        from guitars.models.soft_deletion import _still_referenced  # noqa: PLC0415
+        from tests.testapp.models import Clipping, Signboard  # noqa: PLC0415
+
+        board, scribble = self._board()
+        Clipping.objects.create(scribble=scribble)
+
+        assert _still_referenced(Signboard, {board.pk}, {}, 'default') == {board.pk}
+
+    def test_a_child_holding_a_key_to_it_goes_with_it(self):
+        """A clipping already going discounts, as it does for a cascade child."""
+        from guitars.models.soft_deletion import _still_referenced  # noqa: PLC0415
+        from tests.testapp.models import Clipping, Signboard  # noqa: PLC0415
+
+        board, scribble = self._board()
+        clipping = Clipping.objects.create(scribble=scribble)
+
+        spared = _still_referenced(Signboard, {board.pk}, {Clipping: {clipping.pk}}, 'default')
+
+        assert spared == set()
+
+    def test_the_walk_commits_with_the_target_spared(self):
+        from tests.testapp.models import Clipping, Plinth, Signboard  # noqa: PLC0415
+
+        board, scribble = self._board()
+        Clipping.objects.create(scribble=scribble)
+        plinth = Plinth.objects.create(signboard=board)
+
+        plinth.hard_delete()
+        with connection.cursor() as cursor:
+            cursor.execute('SET CONSTRAINTS ALL IMMEDIATE')
+
+        assert not Plinth._all_objects.exists()
+        assert Signboard._all_objects.filter(pk=board.pk).exists()
+
+    def test_an_unreferenced_generic_child_does_not_hold_it_back(self):
+        from tests.testapp.models import Plinth, Scribble, Signboard  # noqa: PLC0415
+
+        board, _scribble = self._board()
+        plinth = Plinth.objects.create(signboard=board)
+
+        plinth.hard_delete()
+
+        assert not Signboard._all_objects.filter(pk=board.pk).exists()
+        assert not Scribble._all_objects.exists()
+
+
+@pytest.mark.django_db
 class TestTheOwnedFixpointReadsWhatIsNew:
     def test_a_chain_reads_each_owner_once(self):
         """Ten reads for this three-deep chain when every round rescanned every owner."""
@@ -393,6 +475,107 @@ class TestTheOwnedFixpointReadsWhatIsNew:
         residency.hard_delete()
 
         assert len(calls) == 1
+
+
+@pytest.mark.django_db
+class TestTheClosureIsReadOnce:
+    """Sparing one target shrinks the candidates and asks again; the closure of a row does not
+    change between rounds, so what was read is kept (#60)."""
+
+    @staticmethod
+    def _counted(monkeypatch):
+        from guitars.models import soft_deletion  # noqa: PLC0415
+
+        calls = []
+        real = soft_deletion._cascade_closure
+        monkeypatch.setattr(
+            soft_deletion,
+            '_cascade_closure',
+            lambda root, pks, using: calls.append(set(pks)) or real(root, pks, using),
+        )
+        return calls
+
+    @staticmethod
+    def _two_crafts():
+        from tests.testapp.models import Cue, Ledger, Stagecraft  # noqa: PLC0415
+
+        first, second = _ledger(3), _ledger(3)
+        outside = Ledger.objects.create(name='outside')
+        cue = Cue.objects.create(label='outside', ledger=outside, anchor=first[2])
+        crafts = [
+            Stagecraft.objects.create(name='a', ledger=first[0]),
+            Stagecraft.objects.create(name='b', ledger=second[0]),
+        ]
+        return first, second, cue, {Stagecraft: {craft.pk for craft in crafts}}
+
+    def test_a_shrinking_batch_reads_it_once(self, monkeypatch):
+        from guitars.models.soft_deletion import _owned_targets  # noqa: PLC0415
+        from tests.testapp.models import Ledger  # noqa: PLC0415
+
+        _first, second, _cue, claimed = self._two_crafts()
+        calls = self._counted(monkeypatch)
+
+        found = _owned_targets(claimed, 'default')
+
+        assert found == [(Ledger, {second[0].pk})]
+        assert len(calls) == 1
+
+    def test_a_spared_target_asked_again_next_round_is_not_read_again(self, monkeypatch):
+        from guitars.models.soft_deletion import _OwnedScan, _owned_targets  # noqa: PLC0415
+        from tests.testapp.models import Cue, Ledger  # noqa: PLC0415
+
+        first, second, cue, claimed = self._two_crafts()
+        scan = _OwnedScan()
+        calls = self._counted(monkeypatch)
+        _owned_targets(claimed, 'default', scan)
+
+        later = _owned_targets({**claimed, Cue: {cue.pk}}, 'default', scan)
+
+        assert later == [(Ledger, {first[0].pk})]
+        assert len(calls) == 1
+
+    def test_the_narrowed_closure_is_the_one_a_fresh_read_gives(self):
+        """A cache over a superset, narrowed to some of its roots, is what those roots alone read."""
+        from guitars.models.soft_deletion import _cascade_closure, _OwnedScan  # noqa: PLC0415
+        from tests.testapp.models import Ledger  # noqa: PLC0415
+
+        first, second, _cue, _claimed = self._two_crafts()
+        scan = _OwnedScan()
+        scan.closure(Ledger, {first[0].pk, second[0].pk}, 'default')
+        only = {second[0].pk}
+
+        def plain(closure):
+            taken, origins = closure
+            return (
+                {m: set(rows) for m, rows in taken.items() if rows},
+                {m: {pk: set(r) for pk, r in rows.items()} for m, rows in origins.items() if rows},
+            )
+
+        assert plain(scan.closure(Ledger, only, 'default')) == plain(
+            _cascade_closure(Ledger, only, 'default')
+        )
+
+    def test_a_row_two_roots_reach_keeps_each_across_reads_and_narrows_to_the_asked(self):
+        """``Merch`` goes with either band: read apart, the cache holds both; asked about one, it
+        names that one alone."""
+        from guitars.models.soft_deletion import _OwnedScan  # noqa: PLC0415
+        from tests.testapp.models import Album, Band, Merch  # noqa: PLC0415
+
+        first, second = Band.objects.create(name='a'), Band.objects.create(name='b')
+        shared = Merch.objects.create(
+            description='m',
+            album=Album.objects.create(title='a', band=first),
+            bonus_album=Album.objects.create(title='b', band=second),
+        )
+        scan = _OwnedScan()
+        scan.closure(Band, {first.pk}, 'default')
+        scan.closure(Band, {second.pk}, 'default')
+
+        _taken, both = scan.closure(Band, {first.pk, second.pk}, 'default')
+        _taken, one = scan.closure(Band, {first.pk}, 'default')
+
+        assert both[Merch][shared.pk] == {first.pk, second.pk}
+        assert one[Merch][shared.pk] == {first.pk}
 
 
 def _end_state():

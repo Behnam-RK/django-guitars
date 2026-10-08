@@ -35,6 +35,7 @@ from guitars.management.enforcement.graph import (
     dropped_tables,
     resolve_dependencies,
     resolve_object_migration,
+    vacated_tables,
 )
 from guitars.management.enforcement.headers import (
     _RE_MTI_UPDATED_AT,
@@ -1212,7 +1213,9 @@ class OperationsMixin:
             return ''
         return _soft_delete._SOFT_DELETE_REVIVE_UPDATED_AT
 
-    def _superseded_revive_reverse(self, key: tuple, slots: dict, column: str) -> str:
+    def _superseded_revive_reverse(
+        self, key: tuple, slots: dict, column: str, rule_name: str
+    ) -> str:
         """The per-key revive a 2.16.0 retirement drops, rebuilt as the per-key emitter wrote it:
         the flat or joined template, ``_updated_at`` spliced where the row it revives owns it.
         Its models off the arm sweep, which reaches a child or owner outside ``LOCAL_APPS``."""
@@ -1238,16 +1241,83 @@ class OperationsMixin:
                 else ''
             ),
         }
-        if not joined:
-            return _soft_delete._CREATE_SOFT_DELETE_REVIVE.format(**rebuilt)
-        return _soft_delete._CREATE_SOFT_DELETE_REVIVE_JOINED.format(
-            **rebuilt,
-            target_table=_identifiers._quote_table(target._meta.db_table),
-            target_pk=_identifiers._escape_ident(cast(str, target._meta.pk.column)),
-            child_pk=_identifiers._escape_ident(
-                cast(str, _parent_link(related_model, target).column)
-            ),
+        if joined:
+            rebuilt |= {
+                'target_table': _identifiers._quote_table(target._meta.db_table),
+                'target_pk': _identifiers._escape_ident(cast(str, target._meta.pk.column)),
+                'child_pk': _identifiers._escape_ident(
+                    cast(str, _parent_link(related_model, target).column)
+                ),
+            }
+        if any('$$' in str(value) for value in rebuilt.values()):
+            return self._refuse_recreating_dollar_quoted(rule_name, owner_table)
+        template = (
+            _soft_delete._CREATE_SOFT_DELETE_REVIVE_JOINED
+            if joined
+            else _soft_delete._CREATE_SOFT_DELETE_REVIVE
         )
+        return template.format(**rebuilt)
+
+    @staticmethod
+    def _refuse_recreating_dollar_quoted(rule_name: str, owner_table: str) -> str:
+        """The reverse for a revive whose names the forward path would not have spliced in."""
+        return _soft_delete._REFUSE_RECREATING_DOLLAR_QUOTED.format(
+            literal_rule_name=_identifiers._quote_literal(rule_name),
+            literal_table=_identifiers._quote_literal(owner_table),
+        )
+
+    def _retirement_reverse(  # noqa: PLR0913 - one call site, the loop's own locals
+        self,
+        family: _RetiredFamily,
+        key: tuple,
+        slots: dict,
+        rule_name: str,
+        column: str | None,
+        required: dict,
+        models_by_table: dict,
+        *,
+        deleted: bool,
+        rule_retired: bool,
+    ) -> str:
+        """What unapplying a retirement runs: the object rebuilt as it was written, or a refusal
+        where the models can no longer say how."""
+        related_table, owner_table, _via = key
+        # A key the models still cascade is a revive superseded, not one unowed: its reverse
+        # rebuilds it as it was, joined form included, so 2.16.0 unapplies.
+        if not rule_retired:
+            return self._superseded_revive_reverse(key, slots, required[key], rule_name)
+        if column is None:
+            # Passed as ``RAISE`` arguments, not interpolated into the literal: the quoted forms
+            # escape ``"`` but not ``'``, so a db_table carrying one would break it.
+            return (
+                _soft_delete._REFUSE_RECREATING_DROPPED_RULE
+                if deleted
+                else _soft_delete._REFUSE_RECREATING_JOINED_RULE
+                if self._retired_key_is_joined(related_table, models_by_table)
+                else _soft_delete._REFUSE_RECREATING_RETIRED_RULE
+            ).format(
+                literal_rule_name=_identifiers._quote_literal(rule_name),
+                literal_table=_identifiers._quote_literal(owner_table),
+            )
+        ident_owner_pk = _identifiers._escape_ident(
+            cast(str, models_by_table[owner_table]._meta.pk.column)
+        )
+        rebuilt = {
+            **slots,
+            'related_table': _identifiers._quote_table(related_table),
+            'primary_key': ident_owner_pk,
+            'foreign_key': _identifiers._escape_ident(column),
+            'referenced_key': _referenced_key(
+                models_by_table[related_table], column, ident_owner_pk
+            ),
+            'updated_at_assignment': self._revive_updated_at(related_table),
+        }
+        # Only the revive's body is dollar-quoted; the cascade rule is plain SQL.
+        if family.create_template is _soft_delete._CREATE_SOFT_DELETE_REVIVE and any(
+            '$$' in str(value) for value in rebuilt.values()
+        ):
+            return self._refuse_recreating_dollar_quoted(rule_name, owner_table)
+        return family.create_template.format(**rebuilt)
 
     def _retired_cascade_operations(self, app: AppConfig, *, adopt: bool = False) -> list[str]:
         """Drop cascade rules *app*'s tables record but the models no longer call for -- a
@@ -1324,41 +1394,16 @@ class OperationsMixin:
                         )
                     ),
                 )
-                reverse = (
-                    # A key the models still cascade is a revive superseded, not one unowed: its
-                    # reverse rebuilds it as it was, joined form included, so 2.16.0 unapplies.
-                    self._superseded_revive_reverse(key, slots, required[key])
-                    if not rule_retired
-                    else family.create_template.format(
-                        **slots,
-                        related_table=_identifiers._quote_table(related_table),
-                        primary_key=_identifiers._escape_ident(
-                            cast(str, models_by_table[owner_table]._meta.pk.column)
-                        ),
-                        foreign_key=_identifiers._escape_ident(column),
-                        referenced_key=_referenced_key(
-                            models_by_table[related_table],
-                            column,
-                            _identifiers._escape_ident(
-                                cast(str, models_by_table[owner_table]._meta.pk.column)
-                            ),
-                        ),
-                        updated_at_assignment=self._revive_updated_at(related_table),
-                    )
-                    if column is not None
-                    # Passed as ``RAISE`` arguments, not interpolated into the literal: the
-                    # quoted forms escape ``"`` but not ``'``, so a db_table carrying one
-                    # would break it.
-                    else (
-                        _soft_delete._REFUSE_RECREATING_DROPPED_RULE
-                        if deleted
-                        else _soft_delete._REFUSE_RECREATING_JOINED_RULE
-                        if self._retired_key_is_joined(related_table, models_by_table)
-                        else _soft_delete._REFUSE_RECREATING_RETIRED_RULE
-                    ).format(
-                        literal_rule_name=_identifiers._quote_literal(rule_name),
-                        literal_table=_identifiers._quote_literal(owner_table),
-                    )
+                reverse = self._retirement_reverse(
+                    family,
+                    key,
+                    slots,
+                    rule_name,
+                    column,
+                    required,
+                    models_by_table,
+                    deleted=deleted,
+                    rule_retired=rule_retired,
                 )
                 header = (
                     family.header.format(
@@ -3173,6 +3218,55 @@ class OperationsMixin:
                 f'Add to its dependencies:\n'
                 f"        ('{created[0]}', '{created[1]}'),"
             )
+        return notes
+
+    def _missing_rename_edge_notes(self, requested: set[str]) -> list[str]:
+        """Enforcement migrations naming a table that a migration of *another* app later renames
+        away or drops, with nothing ordering them before it (#61): a fresh ``migrate`` can reach
+        that migration first and fail with ``relation "<table>" does not exist``."""
+        # Reachability both ways, as the retirement check asks it: an ordering guaranteed through
+        # another path is guaranteed, and the reverse is a graph Django rejects outright.
+        loader = self._migration_loader()
+        vacated = vacated_tables(loader)
+        if not vacated:
+            return []
+        notes: list[str] = []
+        plans: dict[tuple[str, str], set[tuple[str, str]]] = {}
+        migrated = {label for label, _name in loader.graph.node_map}
+        for app in django_apps.get_app_configs():
+            # An app with no migrations in the graph has no enforcement file to order.
+            if (
+                not _generator.is_local(app)
+                or app.label not in migrated
+                or (requested and app.label not in requested)
+            ):
+                continue
+            for path, content in _generator.iter_migration_files(app):
+                node = (app.label, path.stem)
+                if not _generator.RE_DIGEST.search(content) or node not in loader.graph.node_map:
+                    continue
+                # The cheap test first, and each plan once: the graph walks are the cost.
+                named = [
+                    (mover, table)
+                    for mover, tables in vacated.items()
+                    if mover[0] != app.label
+                    if (table := next((t for t in tables if self._names_table(content, t)), None))
+                ]
+                if not named:
+                    continue
+                behind = plans.setdefault(node, set(loader.graph.forwards_plan(node)))
+                for mover, table in named:
+                    after = plans.setdefault(mover, set(loader.graph.forwards_plan(mover)))
+                    if mover in behind or node in after:
+                        continue
+                    notes.append(
+                        f"Enforcement migration '{app.label}.{path.stem}' names '{table}', "
+                        f"which '{mover[0]}.{mover[1]}' renames away or drops, but nothing "
+                        f'orders it before that migration -- a fresh `migrate` can reach it '
+                        f'first and fail with `relation "{table}" does not exist`. Add to '
+                        f"'{mover[0]}.{mover[1]}' dependencies:\n"
+                        f"        ('{app.label}', '{path.stem}'),"
+                    )
         return notes
 
     def _missing_edge_notes(self, app: AppConfig) -> list[str]:

@@ -230,6 +230,56 @@ def dropped_tables(loader: MigrationLoader) -> dict[str, tuple[str, str]]:
     return {table: node for table, node in dropped.items() if table not in held}
 
 
+def vacated_tables(loader: MigrationLoader) -> dict[tuple[str, str], list[str]]:
+    """``migration -> the tables it renames away or drops``, in any app the loader knows (#61).
+    An enforcement migration of another app may still name one, and nothing orders it before the
+    migration that moves it."""
+    # The walk of :func:`dropped_tables`, reading each operation's own table change: a rename
+    # and a retable alike, and the database half of a ``SeparateDatabaseAndState`` the state
+    # half hides. A table a later model takes again is still vacated: the older file needs it.
+    plan: dict[tuple[str, str], None] = {}
+    for leaf in loader.graph.leaf_nodes():
+        plan.update(dict.fromkeys(loader.graph.forwards_plan(leaf)))
+    state = ProjectState(real_apps=loader.unmigrated_apps)
+    vacated: dict[tuple[str, str], list[str]] = {}
+    for app_label, name in plan:
+        for operation in loader.graph.nodes[app_label, name].operations:
+            if old := vacating(operation, app_label, state):
+                vacated.setdefault((app_label, name), []).extend(old)
+            operation.state_forwards(app_label, state)
+    return vacated
+
+
+def vacating(operation, app_label: str, state: ProjectState) -> list[str]:
+    """The tables *operation* leaves behind when run on *state*, before it is applied to it."""
+    if isinstance(operation, SeparateDatabaseAndState):
+        # The database half only: the state half decides what Django believes, and for a model
+        # moved between apps it deletes the model while the database half renames the table.
+        return [
+            table
+            for inner in operation.database_operations
+            for table in vacating(inner, app_label, state)
+        ]
+    if isinstance(operation, RenameModel):
+        name = operation.old_name_lower
+    elif isinstance(operation, (DeleteModel, AlterModelTable)):
+        name = operation.name_lower
+    else:
+        return []
+    model_state = state.models.get((app_label, name))
+    if model_state is None or not _owns_a_table(model_state):
+        return []
+    before = _table_of(app_label, name, model_state)
+    # What the table is called afterwards; ``None`` for a drop. An explicit ``db_table`` survives
+    # a ``RenameModel``, and a retable to the name it has moves nothing.
+    after = None
+    if isinstance(operation, RenameModel):
+        after = _table_of(app_label, operation.new_name_lower, model_state)
+    elif isinstance(operation, AlterModelTable):
+        after = operation.table or _default_table(app_label, name)
+    return [before] if before != after else []
+
+
 def _owns_a_table(model_state) -> bool:
     """A proxy shares its concrete model's table, and Django drops no unmanaged table."""
     return model_state.options.get('managed', True) and not model_state.options.get('proxy')
@@ -241,6 +291,11 @@ def _table_of(app_label: str, model_name: str, model_state) -> str:
     explicit = model_state.options.get('db_table')
     if explicit:
         return explicit
+    return _default_table(app_label, model_name)
+
+
+def _default_table(app_label: str, model_name: str) -> str:
+    """The name Django gives a model with no ``db_table``, shortened past the backend's limit."""
     return truncate_name(f'{app_label}_{model_name}', connection.ops.max_name_length())
 
 
@@ -278,6 +333,8 @@ def renamed_tables(loader: MigrationLoader, app_label: str) -> dict[str, list[st
                     # two renames left an object named after the intermediate table, and only
                     # dropping each leaves one object behind. See ADR 0019.
                     renames[new_table] = [*renames.pop(old_table, []), old_table]
+            for old_table, new_table in _moved_out(operation, before, after):
+                renames[new_table] = [*renames.pop(old_table, []), old_table]
     return renames
 
 
@@ -307,6 +364,49 @@ def renames_by_migration(
         if moves:
             found[name] = moves
     return found
+
+
+def moves_between_apps_by_migration(
+    loader: MigrationLoader, app_label: str
+) -> dict[str, list[tuple[str, str]]]:
+    """``migration -> [(old db_table, new db_table), ...]`` for the models *app_label* hands to
+    another app (#66), apart from :func:`renames_by_migration`: a scan walks one app's files at a
+    time, so what another app filed under the new name is older or newer, never known."""
+    ordered = _app_migrations_in_order(loader, app_label)
+    found: dict[str, list[tuple[str, str]]] = {}
+    for name in ordered:
+        migration = loader.disk_migrations.get((app_label, name))
+        if migration is None or not any(
+            isinstance(operation, SeparateDatabaseAndState) for operation in migration.operations
+        ):
+            continue
+        before = _tables_by_model(loader, app_label, ordered, upto=name, inclusive=False)
+        after = _tables_by_model(loader, app_label, ordered, upto=name, inclusive=True)
+        moves = [
+            move
+            for operation in migration.operations
+            for move in _moved_out(operation, before, after)
+        ]
+        if moves:
+            found[name] = moves
+    return found
+
+
+def _moved_out(operation, before: dict[str, str], after: dict[str, str]) -> list[tuple[str, str]]:
+    """``(old table, new table)`` where the database half of a ``SeparateDatabaseAndState``
+    renames the table of a model its state half deletes -- the model moved to another app. The
+    state *after* has no such model, so the new name has to be read off the operation (#66)."""
+    if not isinstance(operation, SeparateDatabaseAndState):
+        return []
+    return [
+        (before[inner.name_lower], inner.table)
+        for inner in operation.database_operations
+        if isinstance(inner, AlterModelTable)
+        and inner.table
+        and inner.name_lower in before
+        and inner.name_lower not in after
+        and before[inner.name_lower] != inner.table
+    ]
 
 
 def _renaming(operation) -> list[tuple[str, str]]:

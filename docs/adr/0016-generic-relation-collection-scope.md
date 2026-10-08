@@ -57,11 +57,12 @@ children: the first removes them, the second leaves them live. That is deliberat
 first removes the row they point at — but it is a difference a reader will trip over, which is
 why `_collect`'s comment states the rule rather than claiming the two walks agree.
 
-`_referring_relations` is no longer the single walk `_collect` and `_still_referenced` share.
-`_cascade_closure` does not model the generic hop, so the two can disagree — only ever toward
-sparing, since a generic child holds nothing back and `taken` is only ever subtracted from the
-referrer set. An owned target can therefore be left archived rather than removed, never removed
-while something still points at it.
+`_referring_relations` is not the single walk `_collect` and `_still_referenced` share: the
+generic hop lives in `_meta.private_fields`, which `_collect` and, since 2.18.0, `_cascade_closure`
+read. Through 2.17 the closure did not, so a plain key into a generic child went unseen: the
+target was not spared and the walk aborted at `COMMIT` (#76). The closure now maps each generic
+child to its parent through the object id, converted to the parent's primary key type, in one
+read per relation.
 
 **Reversibility.** High. The walk is a dozen lines in `_collect` with no generated SQL behind it,
 so narrowing it later changes no database and no migration history.

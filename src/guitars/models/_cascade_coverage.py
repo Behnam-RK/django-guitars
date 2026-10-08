@@ -13,6 +13,7 @@ from django.db.models import CASCADE, DO_NOTHING
 from django.db.models.deletion import get_candidate_relations_to_delete
 from django.db.models.signals import class_prepared
 
+from guitars.checks import refuses_soft_delete_rule
 from guitars.introspection import (
     CascadeKind,
     classify_cascade,
@@ -83,9 +84,6 @@ def _enforcement_gaps(model: type[Model]) -> list[Gap]:
     """A reached model whose own ``DELETE`` is not rewritten: nothing archives it. Every gap is
     reported, once: a non-blocking one (the fast path declines) must not hide a blocking one
     (``soft_delete()`` would leave rows live), and the same reason from two levels is one."""
-    # Deferred: ``guitars.checks`` reaches the models package this module is part of.
-    from guitars.checks import refuses_soft_delete_rule  # noqa: PLC0415
-
     if not has_column(model, '_deleted_at'):
         return [Gap(model._meta.label, 'is not soft-deletable', True)]
     holder = column_owner(model, '_deleted_at')
@@ -129,7 +127,7 @@ def _needs_rules_from_its_app(model: type[Model]) -> bool:
     return any(
         relation.field.remote_field.on_delete is CASCADE  # ty: ignore[unresolved-attribute]
         and not relation.field.remote_field.parent_link  # ty: ignore[unresolved-attribute]
-        and (relation.model._meta.concrete_model or relation.model) is concrete  # ty: ignore[unresolved-attribute]
+        and (relation.model._meta.concrete_model or relation.model) is concrete
         and has_column(cast('type[Model]', relation.related_model), '_deleted_at')
         for relation in get_candidate_relations_to_delete(model._meta)
     )

@@ -440,6 +440,42 @@ class TestTheRetirementsRebuildWhatTheyDrop:
 
         assert 'guitars_child."catalog_id" = guitars_revived."code"' in retirement
 
+    @staticmethod
+    def _with_dollars_in_the_column(monkeypatch):
+        from guitars.management.enforcement import operations  # noqa: PLC0415
+
+        monkeypatch.setattr(operations, '_referenced_key', lambda *args: '"a$$b"')
+
+    def test_a_retired_revive_naming_dollars_is_refused_not_rebuilt(self, monkeypatch):
+        """The body is dollar-quoted, so a name holding ``$$`` closes it early: the forward path
+        skips such a key, and the reverse says so rather than run a broken function."""
+        self._with_dollars_in_the_column(monkeypatch)
+
+        retired = '\n'.join(self._retire('testapp_seat', 'testapp_ticket'))
+
+        assert 'cannot be recreated' in retired and 'dollar signs' in retired
+        assert 'CREATE OR REPLACE FUNCTION' not in retired.split('reverse_sql')[-1]
+
+    def test_the_cascade_rule_beside_it_is_still_rebuilt(self, monkeypatch):
+        """Plain SQL, not dollar-quoted: only the revive's reverse is refused."""
+        self._with_dollars_in_the_column(monkeypatch)
+
+        retired = '\n'.join(self._retire('testapp_seat', 'testapp_ticket'))
+
+        assert 'CREATE OR REPLACE RULE' in retired
+
+    def test_a_superseded_revive_naming_dollars_is_refused_not_rebuilt(self, monkeypatch):
+        from django.apps import apps  # noqa: PLC0415
+
+        self._with_dollars_in_the_column(monkeypatch)
+        command = Command()
+        clear_cascade_coverage(command)
+        command.existing.soft_delete_revive[('testapp_listing', 'testapp_catalog', None)] = 'x'
+
+        (retirement,) = command._retired_cascade_operations(apps.get_app_config('testapp'))
+
+        assert 'cannot be recreated' in retirement and 'dollar signs' in retirement
+
 
 @pytest.mark.django_db
 def test_a_statement_that_archives_and_rewrites_the_column_archives_by_the_before_image():

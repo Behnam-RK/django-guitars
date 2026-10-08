@@ -7,6 +7,9 @@ from __future__ import annotations
 from django.conf import settings
 from django.core.management import call_command
 from django.core.management.commands.makemigrations import Command as MakeMigrationsCommand
+from django.db.migrations.loader import MigrationLoader
+
+from guitars.management.enforcement.ordering import order_after_enforcement
 
 
 class Command(MakeMigrationsCommand):
@@ -15,6 +18,17 @@ class Command(MakeMigrationsCommand):
         + ' Also generates the enforcement migrations (timestamp triggers, soft-delete '
         'rules, tenant policies) unless GUITARS_AUTO_MAKE_MIGRATIONS is False.'
     )
+
+    def write_migration_files(self, changes, update_previous_migration_paths=None):
+        # Before Django serializes them: a rename or drop of a table an enforcement migration of
+        # another app names has to run after it, and the file is never rewritten later (#61).
+        # ``--update`` hands over the rewritten leaf under a new name, keyed here by its app.
+        order_after_enforcement(
+            changes,
+            MigrationLoader(None, ignore_no_migrations=True),
+            rewritten=frozenset(update_previous_migration_paths or ()),
+        )
+        super().write_migration_files(changes, update_previous_migration_paths)
 
     def handle(self, *args, **options):
         # 1. Schema migrations first, so enforcement has tables to attach to. If Django's

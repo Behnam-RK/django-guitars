@@ -10,6 +10,21 @@ Full history and diffs: [GitHub releases](https://github.com/Behnam-RK/django-gu
 
 ## [Unreleased]
 
+## [2.18.0] - 2026-10-08
+
+### Fixed
+
+- **A fresh `migrate` could run a rename or delete of a table before an older enforcement migration naming it** (#61, [ADR 0036](docs/adr/0036-order-a-rename-after-the-enforcement-it-vacates.md)). The SQL of a cascade rule or an MTI redirect rule names a table; nothing ordered it before a *later* migration of another app that renames that table away or drops it, so a fresh database failed with `relation "…" does not exist` where an incrementally migrated one never did. The `makemigrations` override now writes the dependency onto the rename or delete it has just built (not the leaf `--update` rewrites), and `makemigrations --check` names any pair already on disk with the migration to edit and the tuple to paste. Column-level changes are not read. **Upgrade step:** a history already holding such a pair turns `--check` red until the named dependency is added to the rename or delete migration.
+- **A model moved between apps** (`SeparateDatabaseAndState` renaming the table on its database side and deleting the model on its state side) is read as the rename it is (#66): its coverage follows the table, instead of the new name reading as uncovered and colliding on the plain `CREATE`. What the destination's app filed under the new name is kept whichever app is scanned first, and what another app filed under the old name is carried to the end of its chain once the scan is done, through later renames or moves, before any retirement is settled; a rename chain that began in another app is joined to this one's, so the old rule is dropped rather than left live ([ADR 0037](docs/adr/0037-a-model-moved-between-apps-is-a-rename.md)). **Known limits:** a model moved *back* keeps a stale rule name, and the migration doing the move's database half has to be ordered before the enforcement naming its table by hand.
+- **`hard_delete()` aborted at `COMMIT` for a `GenericRelation` child** (#76). Sparing now reads what points at a generic child, as it does a cascade child's, and spares the target instead.
+- **A tenant lookup spelled as the column** (`tenanted_manager(label='label_id')`) read as an ancestor's field: the policy joined the table to itself and no autofill trigger was written. It is the model's own field now. **Upgrade step:** such a project regenerates its tenant policy (`makemigrations`).
+- The retirement reverse of a revive trigger refuses, rather than rebuilds, a body naming `$$`, as the forward path has always skipped it.
+- Instance `hard_delete()` asks `guitars.E005` of every model it can seed from before Phase 1, owned targets included; it used to meet one mid-walk, after signals had fired.
+
+### Changed
+
+- **The owned fixpoint reads each cascade closure once** (#60). `_OwnedScan` keeps each root's closure and narrows it for a shrinking candidate set and for a spared target asked again next round; a single `WITH RECURSIVE` cannot express the shrinking fixpoint, PostgreSQL refusing the recursion under `NOT EXISTS`. The delta-only rounds shipped in 2.14.3.
+
 ## [2.17.0] - 2026-10-07
 
 ### Added
@@ -436,7 +451,8 @@ First stable release. **BREAKING:** the instrument ladder shifted down one rung 
 
 - Added: initial release — `SetarModel`, `GuitarModel`, `SoftDeletableModel`, `DisableSignals`, `makeguitarmigrations`.
 
-[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.17.0...HEAD
+[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.18.0...HEAD
+[2.18.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.18.0
 [2.17.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.17.0
 [2.16.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.16.0
 [2.15.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.15.0

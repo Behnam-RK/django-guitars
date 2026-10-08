@@ -234,7 +234,7 @@ def _settle_retirement_sites(
     """Match each retirement to the create it dropped and pop the key where the drop wins. The
     walk itself never pops: which of a create and its drop it sees last is registry order, not
     time, so both questions are settled here, once, by the graph. See ADR 0021."""
-    moved = {old: new for new, chain in renames.items() for old in chain}
+    moved = _latest_names(renames)
     graph = ensure_loader().graph
     by_key: dict[Any, list[CascadeRetirementSite]] = {}
     for site in sites:
@@ -360,18 +360,32 @@ def _join_chains(renames: dict[str, list[str]]) -> dict[str, list[str]]:
     }
 
 
+def _latest_names(renames: dict[str, list[str]]) -> dict[str, str]:
+    """``old -> the name it ends at``, from ``current -> every name it held``. The longest chain
+    is written last so it wins: a joined chain says where a name ended, the intermediate one
+    only where it stopped, and dict order is not time."""
+    return {
+        old: new
+        for new, chain in sorted(renames.items(), key=lambda item: (len(item[1]), item[0]))
+        for old in chain
+    }
+
+
 def _chain_ends(moves: dict[str, str], renames: dict[str, str]) -> dict[str, str]:
     """Where each name in *moves*, and each name it moved onto, ends up after every hop *moves*
-    and *renames* (old table -> new) say it made. A name that ends where it began is left out."""
-    ends: dict[str, str] = {}
+    and *renames* (old table -> new) say it made, nearest the end first, so that of two names
+    holding an entry the newer is kept. A name that ends where it began is left out."""
+    ends: dict[str, tuple[int, str]] = {}
     for start in {*moves, *moves.values()}:
         current, seen = start, {start}
         while (following := moves.get(current) or renames.get(current)) and following not in seen:
             seen.add(following)
             current = following
         if current != start:
-            ends[start] = current
-    return ends
+            ends[start] = (len(seen), current)
+    return {
+        start: end for start, (_hops, end) in sorted(ends.items(), key=lambda i: (i[1][0], i[0]))
+    }
 
 
 def _move_renamed(
@@ -765,6 +779,17 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
                 for m in _RE_TENANT_FORCE.finditer(content)
             )
 
+    # Onto the names in use first: the walk moves a key only once its rename's app is walked,
+    # so an app walked later records the old name, never moved, and retired on every run.
+    final = _latest_names(_pending_renames)
+    # What another app filed under the old name, or one the model held on the way, is walked in
+    # its own order: it cannot be moved at the move, and a second hop (a rename, another move)
+    # found nothing to carry. Followed to its end, keeping what is already there.
+    for old_table, new_table in _chain_ends(_between_apps, final).items():
+        if old_table in live_tables:
+            continue
+        for recorded in every_family:
+            _move_renamed(old_table, new_table, recorded, keep_existing=True)
     # Settled after the walk, because the walk is registry order and this question is graph
     # order: a retirement in an app scanned first pops a key its create then re-records, and
     # the retirement re-emits on every run with ``--check`` never going green.
@@ -793,17 +818,6 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
         {key: list(nodes) for key, nodes in deps.items()}
         for deps in (owned_deps, sweep_deps, self_deps, revive_owner_deps)
     )
-    # Onto the names in use first: the walk moves a key only once its rename's app is walked,
-    # so an app walked later records the old name, never moved, and retired on every run.
-    final = {old: new for new, chain in _pending_renames.items() for old in chain}
-    # What another app filed under the old name, or one the model held on the way, is walked in
-    # its own order: it cannot be moved at the move, and a second hop (a rename, another move)
-    # found nothing to carry. Followed to its end, keeping what is already there.
-    for old_table, new_table in _chain_ends(_between_apps, final).items():
-        if old_table in live_tables:
-            continue
-        for recorded in every_family:
-            _move_renamed(old_table, new_table, recorded, keep_existing=True)
     for recorded in (
         existing_soft_delete_owned,
         existing_soft_delete_owned_sweep,

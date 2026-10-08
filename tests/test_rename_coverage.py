@@ -741,3 +741,84 @@ class TestChainsJoinedAcrossApps:
             'testapp_callback',
             'testapp_callbacks',
         ]
+
+
+class TestWhichNameAChainEndsAt:
+    def test_the_longest_chain_says_where_a_name_ended(self):
+        """Dict order is not time: the intermediate chain only says where it stopped."""
+        joined = {'zed_child': ['anc_child', 'shop_child'], 'shop_child': ['anc_child']}
+
+        assert scanning._latest_names(joined)['anc_child'] == 'zed_child'
+        assert scanning._latest_names(dict(reversed(joined.items())))['anc_child'] == 'zed_child'
+
+    def test_the_name_nearest_the_end_is_carried_first(self):
+        """So where two names of one chain both hold an entry, the newer one is the one kept."""
+        ends = scanning._chain_ends({'a': 'b', 'b': 'c'}, {})
+
+        assert list(ends) == ['b', 'a']
+
+    def test_where_the_newer_entry_is_it_wins_whatever_the_hash_seed(self):
+        recorded = {'a': 'old', 'b': 'newer'}
+
+        for old, new in scanning._chain_ends({'a': 'b', 'b': 'c'}, {}).items():
+            scanning._move_renamed(old, new, recorded, keep_existing=True)
+
+        assert recorded == {'c': 'newer'}
+
+
+class TestTheWalkAloneAndTheEndAlone:
+    def test_a_move_where_it_happened_is_carried_by_the_walk_alone(self, monkeypatch):
+        """What is recorded after the move is moved there; the post-walk only sweeps the rest."""
+        baseline = scan_existing_operations()
+        TestAModelHandedToAnotherApp._as_a_move(monkeypatch)
+        monkeypatch.setattr(scanning, '_chain_ends', lambda moves, renames: {})
+
+        existing = scan_existing_operations()
+
+        assert existing.triggers == baseline.triggers
+        assert existing.soft_deletes == baseline.soft_deletes
+
+    def test_the_renames_after_a_move_carry_it_on(self, monkeypatch):
+        """Only the first hop is a move: ``testapp``'s own rename, read as no walk step, is what
+        takes the entries on to the name in use."""
+        baseline = scan_existing_operations()
+        loader = MigrationLoader(None, ignore_no_migrations=True)
+        real = graph.renames_by_migration
+        first = real(loader, 'testapp')['0051_rename_encore_to_callback']
+        monkeypatch.setattr(
+            scanning,
+            'renames_by_migration',
+            lambda loader, label: {} if label == 'testapp' else real(loader, label),
+        )
+        monkeypatch.setattr(
+            scanning,
+            'moves_between_apps_by_migration',
+            lambda loader, label: {'0001_initial': first} if label == 'testapp' else {},
+        )
+
+        existing = scan_existing_operations()
+
+        assert existing.triggers == baseline.triggers
+        assert 'testapp_encore' not in existing.triggers
+
+
+class TestSettlingAKeyAfterAChain:
+    def test_a_retirement_names_the_key_by_where_its_table_ended(self):
+        """``zed_child`` held ``shop_child`` and ``anc_child``; the shorter chain, written last,
+        would stop the key at ``shop_child``, which no model has any more."""
+        from types import SimpleNamespace  # noqa: PLC0415
+
+        site = scanning.CascadeRetirementSite('shop', '0006', ('anc_child', 'shop_parent', None), None)
+        renames = {'zed_child': ['anc_child', 'shop_child'], 'shop_child': ['anc_child']}
+
+        for ordered in (renames, dict(reversed(renames.items()))):
+            (settled,) = scanning._settle_retirement_sites(
+                [site],
+                {},
+                {},
+                ordered,
+                {'zed_child', 'shop_parent'},
+                lambda: SimpleNamespace(graph=None),
+            )
+
+            assert settled.key == ('zed_child', 'shop_parent', None)

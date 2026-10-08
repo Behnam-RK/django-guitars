@@ -46,7 +46,9 @@ def local_tenant_fields(model: type[models.Model]) -> dict[str, str]:
             # bare Exception so a genuine bug in the surrounding code still surfaces.
             continue
         if getattr(field, 'concrete', False):
-            fields[dimension] = lookup
+            # The field's own name, not the spelling: ``get_field`` accepts the attname too, and
+            # ``owns_column`` compares names.
+            fields[dimension] = field.name
     return fields
 
 

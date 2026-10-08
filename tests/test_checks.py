@@ -804,50 +804,98 @@ class TestAnInventedEdgeFromARefusedTarget:
 @pytest.mark.django_db(transaction=True)
 class TestHardDeleteRefusesAtEveryModelItWalksTo:
     """The entry model's chain is not the only one the walk seeds from: a key from a refused
-    model into the one being deleted seeds its *root* with the refused model's own keys."""
+    model into the one being deleted seeds its *root* with the refused model's own keys. Asked
+    before Phase 1, so nothing has run -- no signal fired, no row touched."""
 
-    def test_a_cascade_child_refused_by_E005_stops_the_walk(self, monkeypatch):
-        from django.core.exceptions import ImproperlyConfigured  # noqa: PLC0415
-
+    @staticmethod
+    def _refusing(monkeypatch, refused):
         from guitars.models import soft_deletion  # noqa: PLC0415
-        from tests.testapp.models import Catalog, Listing  # noqa: PLC0415
 
-        catalog = Catalog.objects.create(code='c1')
-        Listing.objects.create(catalog=catalog)
-        pk = catalog.pk  # Phase 1 clears it on the instance
         real = soft_deletion.refuses_pk_not_parent_link
         monkeypatch.setattr(
             soft_deletion,
             'refuses_pk_not_parent_link',
-            lambda model: [model] if model is Listing else real(model),
+            lambda model: [model] if model is refused else real(model),
         )
 
-        with pytest.raises(ImproperlyConfigured, match='guitars.E005'):
-            catalog.hard_delete()
+    @staticmethod
+    def _signals(model):
+        """A ``pre_delete`` receiver on *model*, and what it was called with."""
+        from django.db.models.signals import pre_delete  # noqa: PLC0415
 
+        fired = []
+        receiver = lambda sender, **kwargs: fired.append(sender)  # noqa: E731
+        pre_delete.connect(receiver, sender=model, weak=False)
+        return fired, lambda: pre_delete.disconnect(receiver, sender=model)
+
+    def test_a_cascade_child_refused_by_E005_stops_the_walk(self, monkeypatch):
+        from django.core.exceptions import ImproperlyConfigured  # noqa: PLC0415
+
+        from tests.testapp.models import Catalog, Listing  # noqa: PLC0415
+
+        catalog = Catalog.objects.create(code='c1')
+        Listing.objects.create(catalog=catalog)
+        pk = catalog.pk
+        self._refusing(monkeypatch, Listing)
+        fired, disconnect = self._signals(Catalog)
+
+        try:
+            with pytest.raises(ImproperlyConfigured, match='guitars.E005'):
+                catalog.hard_delete()
+        finally:
+            disconnect()
+
+        assert fired == []
         assert Catalog._all_objects.filter(pk=pk, _deleted_at__isnull=True).exists()
         assert Listing._all_objects.filter(catalog_id='c1', _deleted_at__isnull=True).exists()
 
     def test_a_generic_child_refused_by_E005_stops_the_walk(self, monkeypatch):
         from django.core.exceptions import ImproperlyConfigured  # noqa: PLC0415
 
-        from guitars.models import soft_deletion  # noqa: PLC0415
         from tests.testapp.models import Scribble, Signboard  # noqa: PLC0415
 
         board = Signboard.objects.create(caption='b')
         Scribble.objects.create(content_object=board, text='t')
         pk = board.pk
-        real = soft_deletion.refuses_pk_not_parent_link
-        monkeypatch.setattr(
-            soft_deletion,
-            'refuses_pk_not_parent_link',
-            lambda model: [model] if model is Scribble else real(model),
-        )
+        self._refusing(monkeypatch, Scribble)
+        fired, disconnect = self._signals(Signboard)
 
-        with pytest.raises(ImproperlyConfigured, match='guitars.E005'):
-            board.hard_delete()
+        try:
+            with pytest.raises(ImproperlyConfigured, match='guitars.E005'):
+                board.hard_delete()
+        finally:
+            disconnect()
 
+        assert fired == []
         assert Signboard._all_objects.filter(pk=pk, _deleted_at__isnull=True).exists()
+
+    def test_an_owned_target_refused_by_E005_stops_the_walk(self, monkeypatch):
+        """The hop the generator leaves a coverage gap: ``hard_delete()`` refuses it."""
+        from django.core.exceptions import ImproperlyConfigured  # noqa: PLC0415
+
+        from tests.testapp.models import Plinth, Signboard  # noqa: PLC0415
+
+        board = Signboard.objects.create(caption='b')
+        plinth = Plinth.objects.create(signboard=board)
+        pk = plinth.pk
+        self._refusing(monkeypatch, Signboard)
+        fired, disconnect = self._signals(Plinth)
+
+        try:
+            with pytest.raises(ImproperlyConfigured, match='guitars.E005'):
+                plinth.hard_delete()
+        finally:
+            disconnect()
+
+        assert fired == []
+        assert Plinth._all_objects.filter(pk=pk, _deleted_at__isnull=True).exists()
+
+    def test_a_model_reaching_nothing_refused_is_untouched(self):
+        from tests.testapp.models import Catalog  # noqa: PLC0415
+
+        Catalog.objects.create(code='c1').hard_delete()
+
+        assert not Catalog._all_objects.filter(code='c1').exists()
 
 
 class TestTheQuerysetFormGuardsTheWholeTree:

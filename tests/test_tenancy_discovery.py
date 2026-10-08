@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import pytest
 from django.apps import apps as django_apps
+from django.test.utils import isolate_apps
 
 from guitars.tenancy import tenanted_manager
 from guitars.tenancy.spec import tenant_spec
@@ -371,3 +372,40 @@ class TestAnOwnPrimaryKeyBesideTheParentLink:
 
         assert coverage is not None
         assert coverage.child_pk == 'fleet_ptr_id'
+
+
+class TestALookupSpelledAsTheAttname:
+    """``tenanted_manager(label='label_id')`` names the column, which Django's ``get_field``
+    accepts: read by name it is not this model's own field, so the policy joined the table to
+    itself and the autofill trigger was never written (found in #78's review loop)."""
+
+    @staticmethod
+    @isolate_apps('tests.testapp')
+    def _plain():
+        from django.db.models import CASCADE, ForeignKey, Model  # noqa: PLC0415
+
+        from guitars.tenancy import tenanted_manager  # noqa: PLC0415
+
+        class Plain(Model):
+            label = ForeignKey('testapp.Label', on_delete=CASCADE)
+            objects = tenanted_manager(label='label_id', autofill=True)
+
+            class Meta:
+                app_label = 'testapp'
+
+        return Plain
+
+    def test_the_local_field_is_named_by_its_field_name(self):
+        from guitars.tenancy.spec import local_tenant_fields  # noqa: PLC0415
+
+        assert local_tenant_fields(self._plain()) == {'label': 'label'}
+
+    def test_the_policy_is_on_the_own_table_with_no_owner_join(self):
+        from guitars.tenancy.discovery import _classify  # noqa: PLC0415
+
+        coverage, notes = _classify(self._plain())
+
+        assert coverage.columns == {'label': 'label_id'}
+        assert coverage.owner_table is None
+        assert coverage.autofill_columns == {'label': 'label_id'}
+        assert notes == []

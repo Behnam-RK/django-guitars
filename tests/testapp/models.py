@@ -549,6 +549,7 @@ class Signboard(SetarModel):
 
     caption = CharField(max_length=100)
     scribbles = GenericRelation('Scribble')
+    smudges = GenericRelation('Smudge', object_id_field='ref')
 
     def __str__(self) -> str:
         return self.caption
@@ -812,3 +813,27 @@ class Folio(SetarModel):
     parent = ForeignKey(
         'self', to_field='code', on_delete=CASCADE, null=True, blank=True, related_name='children'
     )
+
+
+class Smudge(SetarModel):
+    """A generic child whose object id is *text*: the sparing closure maps it back to the
+    parent's integer key through ``to_python`` (#76)."""
+
+    content_type = ForeignKey('contenttypes.ContentType', on_delete=CASCADE)
+    ref = CharField(max_length=20)
+    content_object = GenericForeignKey('content_type', 'ref')
+
+
+class Plinth(SetarModel):
+    """Owns a ``Signboard`` (#76): the owned target carries a ``GenericRelation``, so the sparing
+    closure has to reach its generic children, ``Scribble`` among them."""
+
+    signboard = OwningForeignKey(
+        Signboard, on_delete=DO_NOTHING, null=True, blank=True, related_name='plinths'
+    )
+
+
+class Clipping(SetarModel):
+    """A plain key from outside into a generic child: the row ``Signboard``'s sparing must see."""
+
+    scribble = ForeignKey(Scribble, on_delete=DO_NOTHING, related_name='clippings')

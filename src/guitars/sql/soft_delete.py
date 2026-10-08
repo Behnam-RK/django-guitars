@@ -551,6 +551,22 @@ _REFUSE_RECREATING_DROPPED_RULE = """
     $guitars_retired$;
 """
 
+# The same refusal where a name the rebuilt body would splice in holds ``$$``, which closes the
+# dollar quoting its trigger function depends on: the forward path skips such a key, so the
+# reverse cannot rebuild it either.
+_REFUSE_RECREATING_DOLLAR_QUOTED = """
+    DO $guitars_retired$
+    BEGIN
+        RAISE EXCEPTION
+            'guitars: % on % cannot be recreated -- a table or column it names contains two '
+            'dollar signs in a row, which closes the dollar quoting its trigger function depends '
+            'on. Rename it, then run makeguitarmigrations.',
+            {literal_rule_name}, {literal_table}
+            USING ERRCODE = 'feature_not_supported';
+    END;
+    $guitars_retired$;
+"""
+
 # The reverse of #66's retirements: what they dropped reads a column or table the models no
 # longer have, so nothing here can rebuild it. ``--adopt`` re-emits what the models call for.
 _REFUSE_REVERSING_RETIREMENT = """

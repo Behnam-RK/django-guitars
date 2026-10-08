@@ -1,6 +1,6 @@
 # 0036 — a rename or drop of a table is ordered after the enforcement migrations naming it
 
-- **Status:** proposed
+- **Status:** accepted
 - **Date:** 2026-10-08
 - **Affects:** `enforcement.ordering.order_after_enforcement`, `graph.vacated_tables`, `graph.vacating`, `OperationsMixin._missing_rename_edge_notes`, the `makemigrations` override's `write_migration_files`
 

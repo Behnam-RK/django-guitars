@@ -10,6 +10,12 @@ Full history and diffs: [GitHub releases](https://github.com/Behnam-RK/django-gu
 
 ## [Unreleased]
 
+## [2.18.1] - 2026-10-08
+
+### Changed
+
+- Documentation only: ADRs 0036 and 0037 are accepted, and `CLAUDE.md` describes the 2.18.0 behaviour it had gone stale on (the sparing closure reads a `GenericRelation` child; migration edges also run forward, and a model moved between apps is read as a rename).
+
 ## [2.18.0] - 2026-10-08
 
 ### Fixed
@@ -451,7 +457,8 @@ First stable release. **BREAKING:** the instrument ladder shifted down one rung 
 
 - Added: initial release — `SetarModel`, `GuitarModel`, `SoftDeletableModel`, `DisableSignals`, `makeguitarmigrations`.
 
-[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.18.0...HEAD
+[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.18.1...HEAD
+[2.18.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.18.1
 [2.18.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.18.0
 [2.17.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.17.0
 [2.16.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.16.0

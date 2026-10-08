@@ -597,13 +597,17 @@ class TestAModelHandedToAnotherApp:
             baseline.soft_delete_related_dependencies
         )
 
-    def test_a_name_another_model_holds_keeps_its_own_coverage(self, monkeypatch):
-        """A freed name a live model retook is not the moved table's to take with it."""
+    @pytest.mark.parametrize(
+        'at', ['0001_initial', '0078_retirement_host_after_catalog'], ids=['before', 'after']
+    )
+    def test_a_name_another_model_holds_keeps_its_own_coverage(self, monkeypatch, at):
+        """A freed name a live model retook is not the moved table's to take with it: neither
+        at the move, once its coverage is recorded, nor when the walk is done."""
         baseline = scan_existing_operations()
         monkeypatch.setattr(
             scanning,
             'moves_between_apps_by_migration',
-            lambda loader, label: {'0001_initial': [('testapp_catalog', 'testapp_elsewhere')]}
+            lambda loader, label: {at: [('testapp_catalog', 'testapp_elsewhere')]}
             if label == 'testapp'
             else {},
         )
@@ -636,35 +640,24 @@ class TestAModelHandedToAnotherApp:
         assert as_renames == {False}
         assert set(flags) == {True}
 
-    def test_what_another_app_filed_after_the_move_is_re_keyed_once_the_walk_is_done(
+    def test_what_another_app_filed_after_the_move_is_carried_to_the_end_of_the_chain(
         self, monkeypatch
     ):
-        """The move is read before ``testapp``'s own files, which then record the old name."""
+        """The move is read before ``testapp``'s own files, which then record the old name: the
+        cross-app hop is followed through the renames the app made after it."""
         baseline = scan_existing_operations()
         self._as_a_move(monkeypatch, at='0001_initial')
-        monkeypatch.setattr(
-            graph,
-            'renamed_tables',
-            lambda loader, label: {'testapp_callbacks': ['testapp_encore']}
-            if label == 'testapp'
-            else {},
-        )
-        monkeypatch.setattr(scanning, 'renamed_tables', graph.renamed_tables)
-        monkeypatch.setattr(
-            scanning,
-            'moves_between_apps_by_migration',
-            lambda loader, label: {'0001_initial': [('testapp_encore', 'testapp_callbacks')]}
-            if label == 'testapp'
-            else {},
-        )
 
         existing = scan_existing_operations()
 
+        assert 'testapp_callbacks' in existing.triggers
+        assert 'testapp_encore' not in existing.triggers
+        assert existing.triggers == baseline.triggers
+        assert existing.soft_deletes == baseline.soft_deletes
         key = ('testapp_callbacks', 'testapp_band', None)
         assert key in baseline.soft_delete_related_dependencies
         assert key in existing.soft_delete_related_dependencies
         assert ('testapp_encore', 'testapp_band', None) not in existing.soft_delete_related_dependencies
-
 
 class TestMovingEntriesWithoutOverwriting:
     def test_an_entry_already_under_the_new_name_is_kept(self):
@@ -695,3 +688,56 @@ class TestMovingEntriesWithoutOverwriting:
         scanning._move_renamed('old', 'new', recorded)
 
         assert recorded == {('new', 'owner', None): 'newer'}
+
+
+class TestFollowingAChainOfMoves:
+    def test_two_moves_end_at_the_last(self):
+        ends = scanning._chain_ends({'a': 'b', 'b': 'c'}, {})
+
+        assert ends == {'a': 'c', 'b': 'c'}
+
+    def test_a_move_then_a_rename_ends_at_the_rename(self):
+        ends = scanning._chain_ends({'a': 'b'}, {'b': 'c'})
+
+        assert ends == {'a': 'c', 'b': 'c'}
+
+    def test_a_cycle_ends_the_walk_rather_than_looping(self):
+        assert scanning._chain_ends({'a': 'b', 'b': 'a'}, {}) == {'a': 'b', 'b': 'a'}
+
+    def test_a_rename_alone_is_not_this_chain(self):
+        assert scanning._chain_ends({}, {'a': 'b'}) == {}
+
+
+class TestChainsJoinedAcrossApps:
+    def test_a_chain_is_extended_by_the_chains_of_the_names_in_it(self):
+        joined = scanning._join_chains({'c': ['b'], 'b': ['a']})
+
+        assert joined == {'c': ['a', 'b']}
+
+    def test_a_chain_already_whole_is_left_out(self):
+        assert scanning._join_chains({'b': ['a'], 'c': ['a', 'b']}) == {}
+
+    def test_a_cycle_does_not_loop(self):
+        assert scanning._join_chains({'a': ['b'], 'b': ['a']}) == {}
+
+    def test_the_scan_answers_with_the_whole_history(self, monkeypatch):
+        """``testapp_zzz`` was a rename of the table ``testapp_callbacks`` came to be, in
+        another app's history: its prior names include everything that table held."""
+        real = graph.renamed_tables
+        monkeypatch.setattr(
+            scanning,
+            'renamed_tables',
+            lambda loader, label: (
+                {**real(loader, label), 'testapp_zzz': ['testapp_callbacks']}
+                if label == 'testapp'
+                else real(loader, label)
+            ),
+        )
+
+        existing = scan_existing_operations()
+
+        assert existing.renamed_tables['testapp_zzz'] == [
+            'testapp_encore',
+            'testapp_callback',
+            'testapp_callbacks',
+        ]

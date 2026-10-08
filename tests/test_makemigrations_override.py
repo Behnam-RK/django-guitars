@@ -149,7 +149,7 @@ def test_the_new_migrations_are_ordered_against_enforcement_before_they_are_writ
 
     seen = []
 
-    def _record(changes, loader):
+    def _record(changes, loader, **_kwargs):
         seen.append(({label: list(found) for label, found in changes.items()}, loader))
         for found in changes.values():
             for migration in found:
@@ -165,3 +165,27 @@ def test_the_new_migrations_are_ordered_against_enforcement_before_they_are_writ
     assert loader.graph is not None
     schema = next(path for path in _generated_files(_scoped_app) if 'CreateModel' in path.read_text())
     assert "('testapp', '0001_initial')" in schema.read_text()
+
+
+def test_a_rewritten_leaf_is_named_to_the_ordering(monkeypatch):
+    """``--update`` renames the leaf before writing it, so only the paths Django passes say which
+    apps are rewrites; the name does not (#61)."""
+    from django.core.management.commands.makemigrations import Command as Base  # noqa: PLC0415
+
+    from guitars.management.commands import makemigrations  # noqa: PLC0415
+
+    seen = []
+    monkeypatch.setattr(
+        makemigrations, 'order_after_enforcement', lambda changes, loader, **kwargs: seen.append(kwargs)
+    )
+    written = []
+    monkeypatch.setattr(
+        Base, 'write_migration_files', lambda self, changes, paths=None: written.append(paths)
+    )
+    command = makemigrations.Command()
+
+    command.write_migration_files({'a': []}, {'a': '/old/0002_x.py'})
+    command.write_migration_files({'a': []})
+
+    assert seen == [{'rewritten': frozenset({'a'})}, {'rewritten': frozenset()}]
+    assert written == [{'a': '/old/0002_x.py'}, None]

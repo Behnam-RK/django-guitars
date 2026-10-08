@@ -25,7 +25,7 @@
 
 ## Consequences
 
-**Accepted costs.** A rename or delete written while the override was bypassed, or by plain Django's `makemigrations`, is covered by `--check` alone. A rename file in a package the consumer cannot edit has no remedy but the message. Column-level changes (`RenameField`, `RemoveField`, a `db_column` move) are not read: only tables. A file written *after* the rename and naming the same table, because a model took the name again, is skipped when it already depends on the rename; one that does not is named, and the edge is correct for it too.
+**Accepted costs.** A rename or delete written while the override was bypassed, or by plain Django's `makemigrations`, is covered by `--check` alone. A rename file in a package the consumer cannot edit has no remedy but the message. Column-level changes (`RenameField`, `RemoveField`, a `db_column` move) are not read: only tables. A file written *after* the rename and naming the same table, because a model took the name again, is skipped when it already depends on the rename. One that does not comes from a history whose fresh `migrate` already creates before it renames; an edge to it would order a rule for the retaking model before the rename that frees the name, so it is not the answer there.
 
 **Reversibility.** High: a dependency is graph metadata no database records, and removing the call and the check restores 2.17's behaviour.
 

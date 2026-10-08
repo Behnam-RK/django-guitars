@@ -23,16 +23,21 @@ if TYPE_CHECKING:
 __all__ = ['order_after_enforcement']
 
 
-def order_after_enforcement(changes: dict[str, list[Migration]], loader: MigrationLoader) -> None:
+def order_after_enforcement(
+    changes: dict[str, list[Migration]],
+    loader: MigrationLoader,
+    *,
+    rewritten: frozenset[str] = frozenset(),
+) -> None:
     """Add to each migration in *changes* that vacates a table a dependency on every enforcement
     migration of another app naming it, before the file is written: one on disk is never touched."""
     state = loader.project_state()
     local = [app for app in django_apps.get_app_configs() if _generator.is_local(app)]
     for app_label, migrations in changes.items():
         for migration in migrations:
-            # One already in the graph is a rewrite (``--update``): the state holds what it did,
-            # so replaying it fails, and a file on disk is not this function's to edit.
-            if (app_label, migration.name) in loader.graph.node_map:
+            # ``--update`` rewrites the leaf: the state already holds what it did, so replaying
+            # it fails, and a file on disk is not this function's to edit.
+            if app_label in rewritten:
                 continue
             tables: list[str] = []
             for operation in migration.operations:

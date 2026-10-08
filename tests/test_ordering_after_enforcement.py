@@ -185,17 +185,29 @@ def test_a_table_a_live_model_holds_is_ordered_all_the_same(enforcement_file):
     assert ENFORCEMENT in migration.dependencies
 
 
-def test_a_migration_already_in_the_graph_is_left_alone(enforcement_file):
-    """``makemigrations --update`` rewrites the leaf: the state already holds what it did, so
-    replaying its operations fails, and a file on disk is not this function's to edit."""
+def test_a_rewritten_leaf_is_left_alone(enforcement_file):
+    """``makemigrations --update`` rewrites the leaf under a *new name* and its operations carry
+    the old ones too: the state already holds what they did, so replaying them fails -- and a
+    file on disk is not this function's to edit."""
     enforcement_file('anc_root')
     loader = _Loader(('anc', [[_create()], [RenameModel('root', 'trunk')]]))
     loader._add(ENFORCEMENT, [])
-    leaf = loader.graph.nodes['anc', '0002']
+    rewritten = migrations.Migration('0002_renamed_updated', 'anc')
+    rewritten.operations = [*loader.graph.nodes['anc', '0002'].operations]
+    rewritten.dependencies = [('anc', '0001')]
 
-    order_after_enforcement({'anc': [leaf]}, loader)
+    order_after_enforcement({'anc': [rewritten]}, loader, rewritten=frozenset({'anc'}))
 
-    assert ENFORCEMENT not in leaf.dependencies
+    assert rewritten.dependencies == [('anc', '0001')]
+
+
+def test_other_apps_in_the_same_run_are_still_ordered(enforcement_file):
+    enforcement_file('anc_root')
+    fresh = _fresh(RenameModel('root', 'trunk'))
+
+    order_after_enforcement({'anc': [fresh], 'other': []}, _loader(), rewritten=frozenset({'other'}))
+
+    assert ENFORCEMENT in fresh.dependencies
 
 
 def test_an_edge_the_dependencies_already_reach_is_not_repeated(enforcement_file):

@@ -775,3 +775,40 @@ class Gear(TarModel):
 
 class Amp(Gear):
     rig = ForeignKey(Rig, on_delete=CASCADE, related_name='amps')
+
+
+class Catalog(SetarModel):
+    """The target of a ``CASCADE`` key through ``to_field`` on a *char* column (#59): the rule
+    compared ``listing.catalog_id`` (varchar) with this table's bigint pk, which PostgreSQL
+    refuses at ``CREATE RULE``."""
+
+    code = CharField(max_length=20, unique=True)
+
+    def __str__(self) -> str:
+        return self.code
+
+
+class Listing(SetarModel):
+    catalog = ForeignKey(Catalog, to_field='code', on_delete=CASCADE, related_name='listings')
+    name = CharField(max_length=50, default='')
+
+
+class Ticket(SetarModel):
+    """The same through an *integer* column, where the old rule compiled and archived the wrong
+    rows: a seat holding ``number`` 2 matched the ticket whose pk was 2."""
+
+    number = IntegerField(unique=True)
+
+
+class Seat(SetarModel):
+    ticket = ForeignKey(Ticket, to_field='number', on_delete=CASCADE, related_name='seats')
+
+
+class Folio(SetarModel):
+    """A tree whose self key goes through ``to_field``: the trigger matches children on
+    ``code`` and pairs a row across a statement on its pk."""
+
+    code = CharField(max_length=20, unique=True)
+    parent = ForeignKey(
+        'self', to_field='code', on_delete=CASCADE, null=True, blank=True, related_name='children'
+    )

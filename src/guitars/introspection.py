@@ -7,6 +7,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import TYPE_CHECKING, NamedTuple, cast
 
+from django.core.exceptions import FieldDoesNotExist
 from django.db.models import CASCADE
 
 from guitars.routing import migrates_to_postgresql
@@ -23,6 +24,7 @@ if TYPE_CHECKING:
 __all__ = [
     'CascadeKind',
     'OwnerArm',
+    'cascade_refusal',
     'classify_cascade',
     'column_owner',
     'has_column',
@@ -105,6 +107,42 @@ def is_cascade_candidate(related_model, fk_field, on_delete) -> bool:
     )
 
 
+def to_field_refusal(fk_field, owner_table: str) -> str | None:
+    """Why a key into a column other than the primary key gets no rule, or ``None`` (#59). The
+    rule fires on *owner_table*, the table holding ``_deleted_at``, and reads the column off
+    ``old.``: one declared on a descendant, below the holder, is not on that table."""
+    from django.db.models import ForeignKey  # noqa: PLC0415 - see joined_refusal
+
+    from guitars.models.fields import _targets_primary_key  # noqa: PLC0415 - see joined_refusal
+
+    # Only a real key has a ``to_field``; a relation this reads is always one, a stand-in is not.
+    if not isinstance(fk_field, ForeignKey) or _targets_primary_key(fk_field):
+        return None
+    try:
+        column = fk_field.target_field
+    except FieldDoesNotExist:
+        return f"'{fk_field.name}' declares a to_field naming no field"
+    if column.model._meta.db_table != owner_table:
+        return (
+            f"its to_field '{column.name}' is declared on '{column.model._meta.db_table}', not "
+            f"on '{owner_table}', the table the rule fires on and so the only one it can read"
+        )
+    return None
+
+
+def cascade_refusal(related_model, fk_field, owner_table: str) -> str | None:
+    """Why a key is :attr:`CascadeKind.REFUSED`, so a report names it: its target is a model
+    ``guitars.E005`` refuses (the column holds that model's own key, not the ancestor's id), else
+    :func:`joined_refusal` for a joined key and :func:`to_field_refusal` for a flat one."""
+    from guitars.checks import refuses_pk_not_parent_link  # noqa: PLC0415 - checks imports this
+
+    if refuses_pk_not_parent_link(fk_field.related_model):
+        return f"it points at '{fk_field.related_model._meta.label}', refused by guitars.E005"
+    if not owns_column(related_model, '_deleted_at'):
+        return joined_refusal(related_model, fk_field)
+    return to_field_refusal(fk_field, owner_table)
+
+
 class CascadeKind(Enum):
     """What a cascade relation earns from the generator."""
 
@@ -112,7 +150,9 @@ class CascadeKind(Enum):
     RULE = 'rule'  # the ``soft_delete_related_*`` rule, flat or joined
     SELF = 'self'  # the statement-level trigger a self-referential key takes (ADR 0018)
     CYCLE = 'cycle'  # refused: its rule would close a cycle of ON UPDATE rules
-    REFUSED = 'refused'  # a joined key no rule can read right: see :func:`joined_refusal`
+    REFUSED = (
+        'refused'  # a key no rule can read right: :func:`joined_refusal`, :func:`to_field_refusal`
+    )
 
 
 def joined_refusal(related_model, fk_field) -> str | None:
@@ -147,7 +187,11 @@ def classify_cascade(
         return CascadeKind.NONE
     # A self key takes a trigger (ADR 0018): a rule updating the table it fires on is rewritten
     # into itself. Routed before the cycle check, which still holds this edge for the owned family.
+
+    # Refused where the trigger cannot read the column: a parent keyed to its own MTI child.
     if related_model._meta.db_table == owner_table:
+        if to_field_refusal(fk_field, owner_table) is not None:
+            return CascadeKind.REFUSED
         return CascadeKind.SELF
     # The table the rule *updates*: the child's own for the flat form, the ancestor holding
     # ``_deleted_at`` for the joined one (a key declared on an MTI descendant).
@@ -162,7 +206,7 @@ def classify_cascade(
     # may not be in the registry graph.
     if (owner_table, target_table) in cycle_edges or (joined and target_table == owner_table):
         return CascadeKind.CYCLE
-    if joined and joined_refusal(related_model, fk_field) is not None:
+    if cascade_refusal(related_model, fk_field, owner_table) is not None:
         return CascadeKind.REFUSED
     return CascadeKind.RULE
 
@@ -176,6 +220,7 @@ def _rule_update_edges(candidates: Iterable[type[models.Model]]) -> set[tuple[st
     # behind it -- a cost only a caller asking about rules should pay.
     from django.db.models import CASCADE, ForeignKey  # noqa: PLC0415 - see the comment above
 
+    from guitars.checks import refuses_pk_not_parent_link  # noqa: PLC0415 - checks imports this
     from guitars.models.fields import (  # noqa: PLC0415 - see the comment above
         OwningForeignKey,
         _targets_primary_key,
@@ -221,8 +266,14 @@ def _rule_update_edges(candidates: Iterable[type[models.Model]]) -> set[tuple[st
             if (
                 field.remote_field.on_delete is CASCADE
                 and not getattr(field.remote_field, 'parent_link', False)
-                # The generator's own refusals, through the one predicate both read.
-                and (owns or joined_refusal(model, field) is None)
+                # The generator's own refusals, through the one predicate both read -- a target
+                # ``guitars.E005`` refuses included, as ``cascade_refusal`` asks it first.
+                and not refuses_pk_not_parent_link(field.related_model)
+                and (
+                    to_field_refusal(field, target_table) is None
+                    if owns
+                    else joined_refusal(model, field) is None
+                )
             ):
                 edges.add((target_table, updates_table))  # fires on the target, updates here
     return edges
@@ -304,6 +355,7 @@ def owner_arms(candidates: Iterable[type[models.Model]]) -> dict[str, list[Owner
     # Deferred for the reason ``_rule_update_edges`` gives: ``guitars.models.fields`` reaches
     # the tenancy runtime behind ``guitars.models.__init__``, a cost only a caller asking
     # about rules should pay.
+    from guitars.checks import refuses_pk_not_parent_link  # noqa: PLC0415 - checks imports this
     from guitars.models.fields import (  # noqa: PLC0415 - see the comment above
         OwningForeignKey,
         _targets_primary_key,
@@ -325,6 +377,9 @@ def owner_arms(candidates: Iterable[type[models.Model]]) -> dict[str, list[Owner
                 or not _targets_primary_key(field)
                 or not migrates_to_postgresql(model)
                 or not migrates_to_postgresql(field.related_model)
+                # An arm for an inheriting owner joins its root on its own key (#64): with a key
+                # of its own that matches another row, so it has none -- guitars.E005.
+                or (not owns_column(model, '_deleted_at') and refuses_pk_not_parent_link(model))
             ):
                 continue
             dependent_table = column_owner(field.related_model, '_deleted_at')._meta.db_table

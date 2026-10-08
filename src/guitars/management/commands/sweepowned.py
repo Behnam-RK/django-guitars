@@ -196,9 +196,9 @@ class Command(BaseCommand):
         _generator.validate_app_labels(requested)
 
         rule_owners, unresolved = self._rule_carrying_owners(using)
-        # The sparing half, deliberately wider than the stamping half above: ``owner_arms`` is
-        # the very sweep the rule's own last-owner guard is built from, so an owner the
-        # generator refused a rule still counts here -- it owns what it points at either way.
+        # The sparing half, wider than the stamping half above: ``owner_arms`` is what the rule's
+        # own last-owner guard is built from, so an owner refused a rule still counts -- bar one
+        # ``guitars.E005`` refuses, whose arm would join its root on the wrong key (#64).
         arms = owner_arms(django_apps.get_models())
 
         # ``{(label, table): (pks found, rows stamped)}`` rather than rendered lines, so a table

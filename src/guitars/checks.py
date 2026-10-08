@@ -15,8 +15,12 @@ from guitars.introspection import column_owner, has_column, owns_column
 __all__ = [
     'FAST_PATH_SETTING_ID',
     'ORPHAN_ANCESTOR_ID',
+    'PK_NOT_PARENT_LINK_ID',
     'check_delete_fast_path_setting',
+    'check_mti_children_keep_their_parent_link_as_pk',
     'check_soft_deletable_mti_children_have_a_soft_deletable_ancestor',
+    'pk_not_parent_link',
+    'refuses_pk_not_parent_link',
     'refuses_soft_delete_rule',
     'register_checks',
 ]
@@ -24,6 +28,7 @@ __all__ = [
 #: Namespaced to match the field's own ``guitars.E001``/``E002``.
 ORPHAN_ANCESTOR_ID = 'guitars.E003'
 FAST_PATH_SETTING_ID = 'guitars.E004'
+PK_NOT_PARENT_LINK_ID = 'guitars.E005'
 
 
 def _candidate_models(app_configs) -> list[type[models.Model]]:
@@ -73,6 +78,38 @@ def refuses_soft_delete_rule(
     if not has_column(model, '_deleted_at'):
         return []
     return orphaned_soft_delete_ancestors([model, *model._meta.get_parent_list()])
+
+
+def pk_not_parent_link(candidates: list[type[models.Model]]) -> list[type[models.Model]]:
+    """Every concrete MTI child a rule, trigger or policy of this kit writes for, whose primary
+    key is **its own** rather than a link to a parent -- ``code = AutoField(primary_key=True)``
+    beside ``root_link = OneToOneField(Root, parent_link=True)`` (#64)."""
+    # Gated on what the generator joins *up* for: a column or tenant dimension an ANCESTOR holds.
+    # One the child holds is read off its own table, and ``_deleted_at`` over a plain parent is
+    # ``guitars.E003``'s -- a plain Django model is none of the kit's business.
+    from guitars.tenancy.spec import local_tenant_fields  # noqa: PLC0415 - tenancy is heavy
+
+    return [
+        model
+        for model in candidates
+        if not model._meta.proxy
+        and model._meta.parents
+        and (
+            any(
+                has_column(model, column) and not owns_column(model, column)
+                for column in ('_updated_at', '_deleted_at')
+            )
+            or any(not owns_column(model, name) for name in local_tenant_fields(model).values())
+        )
+        and model._meta.pk not in model._meta.parents.values()
+    ]
+
+
+def refuses_pk_not_parent_link(model: type[models.Model]) -> list[type[models.Model]]:
+    """The models at or above *model* that :func:`pk_not_parent_link` names: the generator's
+    own question, re-asked since ``--skip-checks`` walks past ``guitars.E005``, over the whole
+    chain as :func:`refuses_soft_delete_rule` is -- a descendant joins through a refused one."""
+    return pk_not_parent_link([model, *model._meta.get_parent_list()])
 
 
 def _hint(child: type[models.Model], parent: type[models.Model]) -> str:
@@ -134,6 +171,35 @@ def check_soft_deletable_mti_children_have_a_soft_deletable_ancestor(
     ]
 
 
+def check_mti_children_keep_their_parent_link_as_pk(app_configs, **kwargs) -> list[Error]:
+    """Every join this kit writes from an MTI child to its ancestor reads the child's primary
+    key as the link; with a key of its own it archives an unrelated ancestor row or matches the
+    wrong tenant's. Refused, not fixed: see ADR 0034."""
+    # An error rather than a warning, and refused rather than fixed: eight sites would each need
+    # a join the one-hop templates cannot say, a policy among them -- see ADR 0034.
+    errors = []
+    for model in pk_not_parent_link(_candidate_models(app_configs)):
+        own = model._meta.pk
+        link = next(iter(model._meta.parents.values()))
+        link_name = link.name if link is not None else 'parent_ptr'
+        errors.append(
+            Error(
+                f"'{model._meta.label}' declares its own primary key '{own.name}' beside its "
+                f"multi-table-inheritance parent link '{link_name}', and the rules, triggers and "
+                f'policies guitars writes join its parent on the primary key: a delete would '
+                f'archive an unrelated row of the parent, an update would stamp one, and a '
+                f"tenant policy would match the wrong owner's.",
+                hint=(
+                    f"Drop '{own.name}' so the parent link is the primary key, or make "
+                    f"'{model._meta.label}' a model of its own with a foreign key to its parent."
+                ),
+                obj=model,
+                id=PK_NOT_PARENT_LINK_ID,
+            )
+        )
+    return errors
+
+
 def check_delete_fast_path_setting(app_configs, **kwargs) -> list[Error]:
     """``GUITARS_DELETE_FAST_PATH`` is read as a truth value on every ``delete()``, so a string
     such as ``'False'`` would silently leave the fast path on."""
@@ -152,4 +218,5 @@ def check_delete_fast_path_setting(app_configs, **kwargs) -> list[Error]:
 def register_checks() -> None:
     """Register the checks -- idempotent, Django's registry is a set keyed by function."""
     register(check_soft_deletable_mti_children_have_a_soft_deletable_ancestor)
+    register(check_mti_children_keep_their_parent_link_as_pk)
     register(check_delete_fast_path_setting)

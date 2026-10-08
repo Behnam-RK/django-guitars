@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, NamedTuple, TypedDict
 from django.apps import apps as django_apps
 from django.conf import settings
 
+from guitars.checks import refuses_pk_not_parent_link
 from guitars.gucs import BYPASS_GUC, guc_name
 from guitars.introspection import column_owner, owns_column
 from guitars.local_apps import is_local
@@ -188,6 +189,18 @@ def _classify(
             f'(Python scoping still applies to all of them).'
         )
 
+    # Re-asked here, as the generator re-asks ``guitars.E003``: the join below reads this table's
+    # primary key as its link to the ancestor, and for a child with a key of its own that matches
+    # another tenant's row. No policy rather than a wrong one; Python scoping still applies.
+    own_key = refuses_pk_not_parent_link(model) if by_owner else []
+    if own_key:
+        notes.append(
+            f"'{_meta(model).db_table}': no owner-join policy -- '{_meta(own_key[0]).db_table}' "
+            f'declares a primary key of its own beside its parent link, so the join would match '
+            f"another tenant's row (guitars.E005); Python scoping still applies."
+        )
+        by_owner = {}
+
     if len(by_owner) > 1:
         owners = sorted(_meta(owner).db_table for owner in by_owner)
         dropped = sorted(dim for columns in by_owner.values() for dim in columns)
@@ -210,7 +223,10 @@ def _classify(
             return None, notes
 
     if not own and not by_owner:
-        notes.append(_skip_note(model, spec))
+        # Said once: a refused owner join already named itself, and "no column on any ancestor"
+        # would be false of it.
+        if not own_key:
+            notes.append(_skip_note(model, spec))
         return None, notes
 
     owner_columns: dict[str, str] = {}

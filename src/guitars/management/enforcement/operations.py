@@ -13,19 +13,20 @@ from django.db import models
 from django.db.migrations.loader import MigrationLoader
 
 from guitars import sql
-from guitars.checks import refuses_soft_delete_rule
+from guitars.checks import refuses_pk_not_parent_link, refuses_soft_delete_rule
 from guitars.introspection import (
     CascadeKind,
     OwnerArm,
+    cascade_refusal,
     classify_cascade,
     column_owner,
     has_column,
     is_mti_child,
-    joined_refusal,
     owned_tenancy_refusals,
     owner_arms,
     owns_column,
     rule_update_cycle_edges,
+    to_field_refusal,
 )
 from guitars.management import _generator
 from guitars.management.enforcement.graph import (
@@ -201,6 +202,22 @@ def _revive_owner_name(owner_table: str) -> str:
         _sized(bare_owner),
     ]
     return _identifiers._safe_ident('_'.join(parts))
+
+
+def _referenced_key(model: type[models.Model], column: str, owner_pk: str) -> str:
+    """The owner's column a key into it matches on: its ``to_field``'s where it declares one,
+    else *owner_pk* -- already escaped, and returned untouched so every key into the primary key
+    renders exactly as before (#59). Pairing a row across a statement stays on the primary key."""
+    model = model._meta.concrete_model or model  # a proxy declares no fields of its own
+    for field in model._meta.local_fields:
+        if isinstance(field, models.ForeignKey) and field.column == column:
+            try:
+                if not _targets_primary_key(field):
+                    return _identifiers._escape_ident(cast(str, field.target_field.column))
+            except FieldDoesNotExist:  # a to_field naming nothing: refused upstream, a pk here
+                pass
+            break
+    return owner_pk
 
 
 def _owned_rule_name(dependent_table: str, foreign_key: str) -> str:
@@ -511,6 +528,20 @@ class OperationsMixin:
 
             rows: list[_OperationRow] = []
 
+            # Re-asked here rather than trusted from ``guitars.E005``, as E003 is: both MTI
+            # operations below join the ancestor on *this* table's primary key, which for a child
+            # with a key of its own is not the link -- they would touch another row of the parent.
+            own_key = refuses_pk_not_parent_link(model)
+            if own_key and (
+                is_mti_child(model, '_updated_at') or is_mti_child(model, '_deleted_at')
+            ):
+                self._skipped_rule_notes.append(
+                    f"MTI rule and parent trigger on '{table}' skipped: "
+                    f"'{own_key[0]._meta.db_table}' declares a primary key of its own beside its "
+                    f'parent link, so a join on it would match another row of the ancestor (and, '
+                    f'for a tenant policy, another owner). See guitars.E005 for the fix.'
+                )
+
             # --- updated_at trigger: own table vs. MTI parent-propagation --- `table`/
             # `child_table` are DDL positions (_quote_table); `primary_key`/`parent_pk`/
             # `child_pk` are literal trigger-function arguments (_escape_literal).
@@ -537,7 +568,7 @@ class OperationsMixin:
                         ),
                     )
                 )
-            elif is_mti_child(model, '_updated_at'):
+            elif is_mti_child(model, '_updated_at') and not own_key:
                 mti = self._mti_context(model, table, '_updated_at')
                 # _split_qualified, not the validating _bare_or_qualified: parent_schema/
                 # parent_table become escaped *literal* args, re-quoted by %I at trigger-fire
@@ -606,7 +637,7 @@ class OperationsMixin:
                         reverse=sql.DROP_SOFT_DELETE_RULE.format(table=qualified_table),
                     )
                 )
-            elif is_mti_child(model, '_deleted_at'):
+            elif is_mti_child(model, '_deleted_at') and not own_key:
                 mti = self._mti_context(model, table, '_deleted_at')
                 # The redirect rule's action names the *ancestor's* table and ``_deleted_at``,
                 # both resolved as PostgreSQL parses it, so a chain crossing apps needs the same
@@ -1078,19 +1109,24 @@ class OperationsMixin:
         # would rebuild it against a table with no ``_deleted_at``. So the reverse refuses.
         if _is_joined(related_model):
             return None
-        if key[2] is not None:
-            return key[2]
         # Not filtered to cascade candidates: the relaxed field is the one that stopped being
         # one, and is the common case. So the net is wide, and where it catches more than one
         # the reverse refuses -- guessing rebuilds the rule on a column it never read.
-        columns = sorted(
-            field.column
+        fields = {
+            field.column: field
             for field in related_model._meta.local_fields
             if isinstance(field, models.ForeignKey)
             and has_column(field.related_model, '_deleted_at')
             and column_owner(field.related_model, '_deleted_at')._meta.db_table == key[1]
+        }
+        column = (
+            key[2] if key[2] is not None else (next(iter(fields)) if len(fields) == 1 else None)
         )
-        return columns[0] if len(columns) == 1 else None
+        # A ``to_field`` column since moved below the holder is one no rule can read (#59): the
+        # reverse refuses where it would emit SQL against a column the table does not have.
+        if column in fields and to_field_refusal(fields[column], key[1]) is not None:
+            return None
+        return column
 
     def _retired_cascade_families(self, key: tuple[str, str, str | None]) -> list[_RetiredFamily]:
         """The cascade rule and its inverse, as the retirement loop needs to see them. Both or
@@ -1195,6 +1231,7 @@ class OperationsMixin:
             'related_table': _identifiers._quote_table(related_table),
             'primary_key': ident_owner_pk,
             'foreign_key': _identifiers._escape_ident(column),
+            'referenced_key': _referenced_key(related_model, column, ident_owner_pk),
             'updated_at_assignment': (
                 _soft_delete._SOFT_DELETE_REVIVE_UPDATED_AT
                 if owns_column(target, '_updated_at')
@@ -1299,6 +1336,13 @@ class OperationsMixin:
                             cast(str, models_by_table[owner_table]._meta.pk.column)
                         ),
                         foreign_key=_identifiers._escape_ident(column),
+                        referenced_key=_referenced_key(
+                            models_by_table[related_table],
+                            column,
+                            _identifiers._escape_ident(
+                                cast(str, models_by_table[owner_table]._meta.pk.column)
+                            ),
+                        ),
                         updated_at_assignment=self._revive_updated_at(related_table),
                     )
                     if column is not None
@@ -1778,7 +1822,8 @@ class OperationsMixin:
                 if report:
                     self._skipped_rule_notes.append(
                         f"Cascade '{related_table}' -> '{owner_table}' skipped: "
-                        f'{joined_refusal(related_model, fk_field)}; Django archives it in Python.'
+                        f'{cascade_refusal(related_model, fk_field, owner_table)}; Django archives it '
+                        'in Python.'
                     )
                 continue
             is_primary = related_table not in seen_related_tables
@@ -2019,6 +2064,7 @@ class OperationsMixin:
             'related_table': _identifiers._quote_table(related_table),
             'primary_key': ident_owner_pk,
             'foreign_key': _identifiers._escape_ident(column),
+            'referenced_key': _referenced_key(related_model, column, ident_owner_pk),
             # This runs at trigger depth 1, where ``updated_at_trigger``'s ``WHEN`` suppresses
             # it, so the column has to move here or it moves on neither path.
             'updated_at_assignment': (
@@ -2146,6 +2192,7 @@ class OperationsMixin:
                     related_table=ident_related_table,
                     primary_key=ident_owner_pk,
                     foreign_key=ident_foreign_key,
+                    referenced_key=_referenced_key(related_model, fk_field.column, ident_owner_pk),
                 )
             # A rule's name embeds the child's table, so a rename leaves the carried-over rule
             # live beside the new one -- both cascading, and nothing later retires either.
@@ -2215,6 +2262,7 @@ class OperationsMixin:
             'table': ident_owner_table,
             'primary_key': ident_owner_pk,
             'foreign_key': ident_foreign_key,
+            'referenced_key': _referenced_key(owner, foreign_key, ident_owner_pk),
             # The sweep's reason: this UPDATE runs at trigger depth >= 1, where
             # ``updated_at_trigger``'s ``WHEN`` suppresses it. Conditional because a model can
             # carry ``_deleted_at`` with no ``_updated_at`` -- not the MTI shape, E003 refuses it.

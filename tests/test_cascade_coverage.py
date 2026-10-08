@@ -139,33 +139,44 @@ def test_a_plan_is_computed_once_per_model():
 
 
 class TestAKeyToAColumnOtherThanThePrimaryKey:
-    """The cascade rule correlates ``fk = old.<pk>``, so a ``to_field`` key archives nothing: it
-    is a gap the walk must report, not a covered edge."""
+    """Since 2.17.0 (#59) the rule matches on the ``to_field`` column, so a key onto it is a
+    covered edge like any other -- except where the rule cannot read that column."""
 
     @staticmethod
     @isolate_apps('tests.testapp')
-    def _gaps():
+    def _gaps(*, below_the_holder: bool = False):
         class Parent(SetarModel):
             code = models.CharField(max_length=10, unique=True)
 
             class Meta:
                 app_label = 'testapp'
 
+        class Kid(Parent):
+            slug = models.CharField(max_length=10, unique=True)
+
+            class Meta:
+                app_label = 'testapp'
+
         class Child(SetarModel):
             parent = models.ForeignKey(
-                Parent, to_field='code', on_delete=models.CASCADE, related_name='children'
+                Kid if below_the_holder else Parent,
+                to_field='slug' if below_the_holder else 'code',
+                on_delete=models.CASCADE,
+                related_name='children',
             )
 
             class Meta:
                 app_label = 'testapp'
 
         clear_cascade_plan_cache()
-        return cascade_plan(Parent)[0]
+        return cascade_plan(Kid if below_the_holder else Parent)[0]
 
-    def test_it_is_a_blocking_gap(self):
-        gaps = self._gaps()
+    def test_it_is_covered(self):
+        assert [g for g in self._gaps() if g.blocking] == []
 
-        assert [g.reason for g in gaps if g.blocking and 'to_field' in g.reason]
+    def test_a_column_the_rule_cannot_read_is_a_blocking_gap(self):
+        """Declared on a descendant, below the table the rule fires on: no rule is written."""
+        assert [g for g in self._gaps(below_the_holder=True) if g.blocking]
 
 
 def _both_caches_are_warm():
@@ -459,7 +470,7 @@ class TestWhatTheModelsOwnAppHasToDoWithIt:
 
         gaps = coverage._enforcement_gaps(kid)
 
-        assert [g.reason for g in gaps] == ['its primary key is not its parent link (#64)']
+        assert [g.reason for g in gaps] == ['its primary key is not its parent link (#64, guitars.E005)']
 
     def test_every_gap_is_reported_not_the_first(self, monkeypatch):
         """An early return let a non-blocking locality gap hide a blocking one behind it."""
@@ -471,7 +482,7 @@ class TestWhatTheModelsOwnAppHasToDoWithIt:
 
         assert {g.reason for g in gaps} == {
             'is routed off PostgreSQL',
-            'its primary key is not its parent link (#64)',
+            'its primary key is not its parent link (#64, guitars.E005)',
         }
 
 

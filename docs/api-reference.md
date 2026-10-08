@@ -137,7 +137,7 @@ unguarded `DELETE` removes what that row points at. The generator re-asks the sa
 question of the whole chain above a model, so a concrete descendant is refused with
 it rather than getting the same `DO INSTEAD` one table down, and emits no rule, so
 `.delete()` then destroys the chain: the check is an `Error` for that reason. See
-[ADR 0015](adr/0015-refuse-soft-deletable-mti-orphans.md).
+[ADR 0015](adr/0015-refuse-soft-deletable-mti-orphans.md). `guitars.E005` (2.17.0) refuses an MTI child declaring a primary key of its own beside its parent link, which every join the kit writes from it to its ancestor reads as that link: [ADR 0034](adr/0034-refuse-an-own-primary-key-beside-the-parent-link.md).
 
 **`sweepowned [app_label ...]`** — repairs owned dependents left live under dead
 owners by the per-statement hole closed in 2.6.0 (see

@@ -41,3 +41,5 @@ New ADR? Start from [`template.md`](template.md).
 | [`0031`](0031-hard-delete-resolves-its-alias-as-delete-does.md) | why `hard_delete()` resolves its database as the `delete()` its Phase 1 calls does, the router first, and why Phase 1 still asks the router again (2.14.3) |
 | [`0032`](0032-hard-delete-removes-everything-it-collected.md) | why `hard_delete()` rolls back when a `DELETE` removes fewer rows than it collected, where it counts, and why the error names no cause (2.15.0) |
 | [`0033`](0033-one-revive-trigger-per-owner.md) | why every cascade key's revive is one arm of one trigger per owner table, behind one early exit, and why that quiets a dropped child's broken arm (2.16.0) |
+| [`0034`](0034-refuse-an-own-primary-key-beside-the-parent-link.md) | why an MTI child's own primary key beside its parent link is refused with `guitars.E005` rather than fixed at the eight sites that join on it, tenant policy among them (2.17.0) |
+| [`0035`](0035-cascade-keys-through-to-field.md) | why a cascade key through `to_field` matches on that column while pairing stays on the pk, and the one sub-shape refused (2.17.0) |

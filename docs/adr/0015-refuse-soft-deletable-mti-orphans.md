@@ -67,7 +67,8 @@ dropped rather than shipped.
   execute and the whole chain goes — where before 2.7.0 the statement aborted and lost nothing.
   The check is an `Error`, so `manage.py check`, `migrate` and `runserver` all refuse to start
   while such a model exists; `--skip-checks` walks past that, and so does any code path that never
-  runs checks. This is the one place in the kit where a refusal fails toward destroying data, and
+  runs checks. This is one of two places in the kit where a refusal fails toward destroying data (the
+  other is `guitars.E005`, [ADR 0034](0034-refuse-an-own-primary-key-beside-the-parent-link.md)), and
   it is accepted only because the shape cannot be *made* to work without the new operation family
   below, and because nothing that previously succeeded starts failing.
 - It destroys only where **no migration in the history ever created the rule** — a shape first

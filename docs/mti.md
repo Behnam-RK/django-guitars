@@ -50,7 +50,7 @@ The **inverse** shape — a child carrying `_deleted_at`, declared or inherited 
 parent, over a concrete parent that has none — is **refused** ([`guitars.E003`](adr/0015-refuse-soft-deletable-mti-orphans.md),
 2.7.0): the child's rule keeps its row while the ancestor's unguarded `DELETE` removes what it
 points at. No rule means `.delete()` destroys the chain rather than aborting — hence an
-`Error`, which `--skip-checks` walks past. A concrete descendant is refused with it.
+`Error`, which `--skip-checks` walks past. A concrete descendant is refused with it. A child declaring a primary key of its own beside its parent link is refused too (`guitars.E005`, 2.17.0, [ADR 0034](adr/0034-refuse-an-own-primary-key-beside-the-parent-link.md)): every join written from it to its ancestor reads its key as that link.
 
 **`_updated_at` — a parent-propagating trigger.** A child-only `QuerySet.update()` touches
 only the child table, so the owner's `_updated_at` would go stale without one:

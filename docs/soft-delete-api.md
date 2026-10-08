@@ -12,7 +12,7 @@ It reads the matching keys, then `UPDATE`s by key in batches of 10,000: `SET _de
 
 - **Returns the number of rows stamped**, not `.delete()`'s tuple. `0` for rows already archived, which keep their stamp.
 - **Skips Python.** No `on_delete` (`SET_NULL`, `PROTECT`), no `pre_delete`/`post_delete`, and plain children (no `_deleted_at`, such as an M2M through row) are left in place. Keep `.delete()` where you need those.
-- **Raises `SoftDeleteUnsupportedError`** where a rule-only archive would leave rows **live** under an archived parent: a `GenericRelation`, a cycle-refused or unenforced edge, a `to_field` key (the cascade rule compares the target's primary key, so it would match the wrong rows), a chain `guitars.E003` refuses, a model on the chain outside `LOCAL_APPS` or routed off PostgreSQL **that a `CASCADE` key points at** (its cascade rule is written from its own app), or a non-PostgreSQL connection. It names the edge or the connection. A model no rule is written from the app of (no `CASCADE` key to it from a model with `_deleted_at`, no `OwningForeignKey` it declares) only declines the fast path, since the collector would delete its row where `soft_delete()` leaves nothing live. A sliced, `values()` or `distinct(*fields)` queryset raises `TypeError`, and a combined one `NotSupportedError`, as for `.delete()`.
+- **Raises `SoftDeleteUnsupportedError`** where a rule-only archive would leave rows **live** under an archived parent: a `GenericRelation`, a cycle-refused or unenforced edge, a `to_field` key whose column the rule cannot read (declared below the table holding `_deleted_at`, so refused), a chain `guitars.E003` refuses, a model on the chain outside `LOCAL_APPS` or routed off PostgreSQL **that a `CASCADE` key points at** (its cascade rule is written from its own app), or a non-PostgreSQL connection. It names the edge or the connection. A model no rule is written from the app of (no `CASCADE` key to it from a model with `_deleted_at`, no `OwningForeignKey` it declares) only declines the fast path, since the collector would delete its row where `soft_delete()` leaves nothing live. A sliced, `values()` or `distinct(*fields)` queryset raises `TypeError`, and a combined one `NotSupportedError`, as for `.delete()`.
 - `Model.soft_delete()` keeps the pk and sets `_deleted_at`/`_updated_at` from the database (one `SELECT` after the `UPDATE`); a row hidden by row-level security, **including by an MTI child's own policy or a middle table's**, stamps 0 and leaves the instance unchanged. It asks the database policies only: a dimension kept in Python alone (`docs/tenancy.md`) and an unscoped call are the queryset form's to refuse, and the instance form stamps what the database lets it. `asoft_delete()` twins both.
 - Unreachable from a manager (`Model.objects.soft_delete()` would archive the table), and denied on an unscoped tenant queryset as `update()` is.
 
@@ -25,11 +25,11 @@ When the tree is fully covered, `.delete()` reads the keys, then issues `DELETE`
 | a `pre_delete`/`post_delete` receiver (checked per call) | it sends the signals |
 | `SET_NULL`, `PROTECT`, `RESTRICT`, `SET(…)` | it applies them |
 | a plain child or M2M through row | it removes them |
-| a `GenericRelation`, a `to_field` key, or an edge with no rule | rows would stay live |
+| a `GenericRelation`, an unreadable `to_field` key, or an edge with no rule | rows would stay live |
 | a self-referential key | `_updated_at` below level one moves only under the collector |
 | a non-PostgreSQL alias | the rules are PostgreSQL DDL |
 | a model outside `LOCAL_APPS` or routed off PostgreSQL | its own rule is missing, so the collector deletes its row |
-| an MTI model whose primary key is not its parent link (#64) | the redirect rule joins on the wrong column |
+| an MTI model whose primary key is not its parent link (`guitars.E005`, #64) | the redirect rule joins on the wrong column |
 
 ## Where the fast path and the collector part
 

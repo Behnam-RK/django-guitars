@@ -35,6 +35,7 @@ from guitars.management.enforcement.graph import (
     dropped_tables,
     resolve_dependencies,
     resolve_object_migration,
+    vacated_tables,
 )
 from guitars.management.enforcement.headers import (
     _RE_MTI_UPDATED_AT,
@@ -3217,6 +3218,49 @@ class OperationsMixin:
                 f'Add to its dependencies:\n'
                 f"        ('{created[0]}', '{created[1]}'),"
             )
+        return notes
+
+    def _missing_rename_edge_notes(self, requested: set[str]) -> list[str]:
+        """Enforcement migrations naming a table that a migration of *another* app later renames
+        away or drops, with nothing ordering them before it (#61): a fresh ``migrate`` can reach
+        that migration first and fail with ``relation "<table>" does not exist``."""
+        # Reachability both ways, as the retirement check asks it: an ordering guaranteed through
+        # another path is guaranteed, and the reverse is a graph Django rejects outright.
+        loader = self._migration_loader()
+        vacated = vacated_tables(loader)
+        if not vacated:
+            return []
+        notes: list[str] = []
+        migrated = {label for label, _name in loader.graph.node_map}
+        for app in django_apps.get_app_configs():
+            # An app with no migrations in the graph has no enforcement file to order.
+            if (
+                not _generator.is_local(app)
+                or app.label not in migrated
+                or (requested and app.label not in requested)
+            ):
+                continue
+            for path, content in _generator.iter_migration_files(app):
+                node = (app.label, path.stem)
+                if not _generator.RE_DIGEST.search(content) or node not in loader.graph.node_map:
+                    continue
+                behind = set(loader.graph.forwards_plan(node))
+                for mover, tables in vacated.items():
+                    if (
+                        mover[0] == app.label
+                        or mover in behind
+                        or node in set(loader.graph.forwards_plan(mover))
+                    ):
+                        continue
+                    if table := next((t for t in tables if self._names_table(content, t)), None):
+                        notes.append(
+                            f"Enforcement migration '{app.label}.{path.stem}' names '{table}', "
+                            f"which '{mover[0]}.{mover[1]}' renames away or drops, but nothing "
+                            f'orders it before that migration -- a fresh `migrate` can reach it '
+                            f'first and fail with `relation "{table}" does not exist`. Add to '
+                            f"'{mover[0]}.{mover[1]}' dependencies:\n"
+                            f"        ('{app.label}', '{path.stem}'),"
+                        )
         return notes
 
     def _missing_edge_notes(self, app: AppConfig) -> list[str]:

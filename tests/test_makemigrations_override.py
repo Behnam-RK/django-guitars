@@ -137,3 +137,31 @@ def test_the_xdist_group_mark_is_actually_honoured(pytestconfig):
         'pytest --dist must be loadgroup (set in pyproject.toml addopts) or the '
         'xdist_group marks pinning this module to one worker are silently ignored'
     )
+
+
+@pytest.mark.django_db
+def test_the_new_migrations_are_ordered_against_enforcement_before_they_are_written(
+    _scoped_app, monkeypatch
+):
+    """The edge has to be on the migration when Django serializes it: a file already on disk is
+    never rewritten (#61)."""
+    from guitars.management.commands import makemigrations  # noqa: PLC0415
+
+    seen = []
+
+    def _record(changes, loader):
+        seen.append(({label: list(found) for label, found in changes.items()}, loader))
+        for found in changes.values():
+            for migration in found:
+                migration.dependencies.append(('testapp', '0001_initial'))
+
+    monkeypatch.setattr(makemigrations, 'order_after_enforcement', _record)
+
+    call_command('makemigrations', APP_LABEL, stdout=StringIO())
+
+    # Twice: the schema migration, then the scaffold ``makeguitarmigrations`` asks for.
+    changes, loader = seen[0]
+    assert list(changes) == [APP_LABEL]
+    assert loader.graph is not None
+    schema = next(path for path in _generated_files(_scoped_app) if 'CreateModel' in path.read_text())
+    assert "('testapp', '0001_initial')" in schema.read_text()

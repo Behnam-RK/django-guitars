@@ -230,6 +230,58 @@ def dropped_tables(loader: MigrationLoader) -> dict[str, tuple[str, str]]:
     return {table: node for table, node in dropped.items() if table not in held}
 
 
+def vacated_tables(loader: MigrationLoader) -> dict[tuple[str, str], list[str]]:
+    """``migration -> the tables it renames away or drops``, in any app the loader knows, less
+    any table a later model holds again (#61). An enforcement migration of another app may still
+    name one, and nothing orders it before the migration that moves it."""
+    # The walk of :func:`dropped_tables`, but reading each operation's own table change: a
+    # rename and a retable alike, and the database half of a ``SeparateDatabaseAndState`` that
+    # the state half hides (a model moved between apps deletes it from the one app's state).
+    plan: dict[tuple[str, str], None] = {}
+    for leaf in loader.graph.leaf_nodes():
+        plan.update(dict.fromkeys(loader.graph.forwards_plan(leaf)))
+    state = ProjectState(real_apps=loader.unmigrated_apps)
+    vacated: dict[tuple[str, str], list[str]] = {}
+    for app_label, name in plan:
+        for operation in loader.graph.nodes[app_label, name].operations:
+            if old := vacating(operation, app_label, state):
+                vacated.setdefault((app_label, name), []).extend(old)
+            operation.state_forwards(app_label, state)
+    held = {
+        _table_of(label, model_name, model_state)
+        for (label, model_name), model_state in state.models.items()
+    }
+    return {
+        node: kept
+        for node, tables in vacated.items()
+        if (kept := [table for table in tables if table not in held])
+    }
+
+
+def vacating(operation, app_label: str, state: ProjectState) -> list[str]:
+    """The tables *operation* leaves behind when run on *state*, before it is applied to it."""
+    if isinstance(operation, SeparateDatabaseAndState):
+        # The database half only: the state half decides what Django believes, and for a model
+        # moved between apps it deletes the model while the database half renames the table.
+        return [
+            table
+            for inner in operation.database_operations
+            for table in vacating(inner, app_label, state)
+        ]
+    if isinstance(operation, RenameModel):
+        name = operation.old_name_lower
+    elif isinstance(operation, (DeleteModel, AlterModelTable)):
+        name = operation.name_lower
+    else:
+        return []
+    model_state = state.models.get((app_label, name))
+    if model_state is None or not _owns_a_table(model_state):
+        return []
+    # Read before the operation runs. A table the model keeps (an explicit ``db_table`` surviving
+    # a rename, a retable to the same name) is held again at the end, which the caller drops.
+    return [_table_of(app_label, name, model_state)]
+
+
 def _owns_a_table(model_state) -> bool:
     """A proxy shares its concrete model's table, and Django drops no unmanaged table."""
     return model_state.options.get('managed', True) and not model_state.options.get('proxy')
@@ -278,6 +330,8 @@ def renamed_tables(loader: MigrationLoader, app_label: str) -> dict[str, list[st
                     # two renames left an object named after the intermediate table, and only
                     # dropping each leaves one object behind. See ADR 0019.
                     renames[new_table] = [*renames.pop(old_table, []), old_table]
+            for old_table, new_table in _moved_out(operation, before, after):
+                renames[new_table] = [*renames.pop(old_table, []), old_table]
     return renames
 
 
@@ -304,9 +358,28 @@ def renames_by_migration(
             if before.get(old_model) and after.get(new_model)
             if before[old_model] != after[new_model]
         ]
+        for operation in migration.operations:
+            moves.extend(_moved_out(operation, before, after))
         if moves:
             found[name] = moves
     return found
+
+
+def _moved_out(operation, before: dict[str, str], after: dict[str, str]) -> list[tuple[str, str]]:
+    """``(old table, new table)`` where the database half of a ``SeparateDatabaseAndState``
+    renames the table of a model its state half deletes -- the model moved to another app. The
+    state *after* has no such model, so the new name has to be read off the operation (#66)."""
+    if not isinstance(operation, SeparateDatabaseAndState):
+        return []
+    return [
+        (before[inner.name_lower], inner.table)
+        for inner in operation.database_operations
+        if isinstance(inner, AlterModelTable)
+        and inner.table
+        and inner.name_lower in before
+        and inner.name_lower not in after
+        and before[inner.name_lower] != inner.table
+    ]
 
 
 def _renaming(operation) -> list[tuple[str, str]]:

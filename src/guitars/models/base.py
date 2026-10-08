@@ -25,7 +25,7 @@ logger = logging.getLogger('guitars.models')
 
 class DatedModel(Model):
     """Auto-managed ``_created_at`` / ``_updated_at``, both ``NOW()``-defaulted and kept
-    current by a PostgreSQL statement trigger (not Django signals) -- accurate under bulk
+    current by a PostgreSQL row trigger (not Django signals) -- accurate under bulk
     operations and raw SQL that bypass ``.save()``."""
 
     _created_at = DateTimeField(verbose_name='Created at', db_default=Now(), editable=False)
@@ -209,8 +209,8 @@ class TarModel(UpdatableModel, HasCachedPropertyModel):
 
 class DutarModel(DatedModel, TarModel):
     """``TarModel`` plus database-managed timestamps (``DatedModel``): ``_created_at`` /
-    ``_updated_at``, the latter ridden by a statement-level trigger so it stays honest
-    under ``bulk_update`` and raw SQL."""
+    ``_updated_at``, the latter assigned by a row-level ``BEFORE UPDATE`` trigger so it stays
+    honest under ``bulk_update`` and raw SQL."""
 
     class Meta:
         abstract = True

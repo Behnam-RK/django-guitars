@@ -84,6 +84,56 @@ ADOPT_UPDATED_AT_TRIGGER = (
     + CREATE_UPDATED_AT_TRIGGER
 )
 
+# ---- Private row-level ``_updated_at`` stamp (#80, ADR 0038): a ``BEFORE UPDATE ... FOR EACH ROW``
+# assigns on ``NEW`` -- no second ``UPDATE``, so no rule re-expansion -- always, at any trigger depth.
+# A new name beside the frozen ``set_updated_at``, which a migrated database keeps and nothing calls. ----
+
+_CREATE_STAMP_UPDATED_AT_FUNCTION = """
+    CREATE FUNCTION stamp_updated_at()
+       RETURNS TRIGGER
+       LANGUAGE PLPGSQL
+    AS
+    $$
+    BEGIN
+        NEW._updated_at := NOW();
+        RETURN NEW;
+    END;
+    $$
+"""
+
+_DROP_STAMP_UPDATED_AT_FUNCTION = """
+    DROP FUNCTION stamp_updated_at();
+"""
+
+# OR REPLACE for the reason REPLACE_UPDATED_AT_TRIGGER_FUNCTION gives above.
+_REPLACE_STAMP_UPDATED_AT_FUNCTION = _CREATE_STAMP_UPDATED_AT_FUNCTION.replace(
+    'CREATE FUNCTION', 'CREATE OR REPLACE FUNCTION', 1
+)
+
+_CREATE_STAMP_UPDATED_AT_TRIGGER = """
+    CREATE TRIGGER updated_at_trigger
+        BEFORE UPDATE ON {table}
+        FOR EACH ROW
+        EXECUTE FUNCTION stamp_updated_at();
+"""
+
+_DROP_STAMP_UPDATED_AT_TRIGGER = """
+    DROP TRIGGER updated_at_trigger ON {table};
+"""
+
+# Same two-form split as REPLACE_/ADOPT_UPDATED_AT_TRIGGER above. The replace is what a
+# migrated database takes: it holds the statement-level trigger under the same name.
+_REPLACE_STAMP_UPDATED_AT_TRIGGER = (
+    _DROP_STAMP_UPDATED_AT_TRIGGER + _CREATE_STAMP_UPDATED_AT_TRIGGER
+)
+
+_ADOPT_STAMP_UPDATED_AT_TRIGGER = (
+    """
+    DROP TRIGGER IF EXISTS updated_at_trigger ON {table};
+"""
+    + _CREATE_STAMP_UPDATED_AT_TRIGGER
+)
+
 # ---- Parent updated-at trigger function: updates a DIFFERENT table than TG_TABLE_NAME.
 # Branches on TG_NARGS (3 vs 4) since a trigger's arg list is frozen at CREATE time, so a
 # pre-2.0.0 trigger keeps calling the 3-arg form until recreated. ----

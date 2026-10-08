@@ -8,19 +8,18 @@ class Migration(migrations.Migration):
     dependencies = [
         ('crossapp_third', '0001_initial'),
         ('crossapp_dependent', '0001_initial'),
-        ('testapp', '0011_auto_enforcement_trigger_function'),
+        ('testapp', '0082_auto_enforcement_stamp_function'),
         ('crossapp_owner', '0001_initial'),
     ]
 
     operations = [
-        # Updated at Trigger on "crossapp_owner_owner" table! [SQL:7ac174cdac84]
+        # Updated at Trigger on "crossapp_owner_owner" table! [SQL:d043db18fb97]
         migrations.RunSQL(
             sql="""
             CREATE TRIGGER updated_at_trigger
-                AFTER UPDATE ON "crossapp_owner_owner" REFERENCING NEW TABLE AS new_table
-                FOR EACH STATEMENT
-                WHEN (pg_trigger_depth() = 0)
-                EXECUTE FUNCTION set_updated_at('id');
+                BEFORE UPDATE ON "crossapp_owner_owner"
+                FOR EACH ROW
+                EXECUTE FUNCTION stamp_updated_at();
         """,
             reverse_sql="""
             DROP TRIGGER updated_at_trigger ON "crossapp_owner_owner";

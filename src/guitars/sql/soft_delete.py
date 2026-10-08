@@ -117,8 +117,9 @@ _CREATE_SOFT_DELETE_REVIVE_FUNCTION = """
     $$;
 """
 
-#: Spliced where the child owns the column, for ``_SOFT_DELETE_OWNED_SWEEP_UPDATED_AT``'s
-#: reason: this runs at trigger depth 1, where ``updated_at_trigger``'s ``WHEN`` suppresses it.
+#: Spliced where the child owns the column, for the owned sweep's reason below. Redundant under
+#: 2.19.0's row trigger (ADR 0038); kept for tables still on the statement trigger, whose ``WHEN``
+#: suppresses it at depth 1, and so no ``[SQL:...]`` identity moves.
 _SOFT_DELETE_REVIVE_UPDATED_AT = ', _updated_at = NOW()'
 
 _DROP_SOFT_DELETE_REVIVE_FUNCTION = """
@@ -461,9 +462,9 @@ _CREATE_SOFT_DELETE_OWNED_SWEEP_FUNCTION = """
     $$;
 """
 
-#: Filled where the dependent owns the column. The rule's UPDATE runs at trigger depth 0 so
-#: ``updated_at_trigger`` fires; this runs at depth 1, where its ``WHEN`` suppresses it --
-#: without this the column moves on one path and not the other, for one logical event.
+#: Filled where the dependent owns the column: this runs at depth 1, where a pre-2.19.0 statement
+#: trigger's ``WHEN`` suppresses ``updated_at_trigger``. Redundant under the row trigger (ADR 0038),
+#: kept for tables not yet regenerated and so no ``[SQL:...]`` identity moves.
 _SOFT_DELETE_OWNED_SWEEP_UPDATED_AT = ', _updated_at = NOW()'
 
 _DROP_SOFT_DELETE_OWNED_SWEEP_FUNCTION = """
@@ -667,9 +668,8 @@ _CREATE_SOFT_DELETE_SELF_CASCADE_FUNCTION = """
     $$;
 """
 
-#: Spliced for the sweep's reason: this UPDATE runs at trigger depth >= 1, where
-#: ``updated_at_trigger``'s ``WHEN`` suppresses it, so the column would otherwise move on a
-#: top-level archive and not on the cascaded one. A slot: a model may carry no ``_updated_at``.
+#: Spliced for the sweep's reason (above). A slot: a model may carry no ``_updated_at``. Redundant
+#: under 2.19.0's row trigger (ADR 0038), kept for unregenerated tables so no identity moves.
 _SOFT_DELETE_SELF_CASCADE_UPDATED_AT = ', _updated_at = NOW()'
 
 _DROP_SOFT_DELETE_SELF_CASCADE_FUNCTION = """

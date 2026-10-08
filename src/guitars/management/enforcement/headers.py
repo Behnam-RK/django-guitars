@@ -12,6 +12,7 @@ import re
 # scanners below are describing one thing rather than two. ---
 
 HEADER_TRIGGER_FUNCTION = '# Define function for updated at triggers!'
+HEADER_STAMP_FUNCTION = '# Define function for updated at row triggers!'
 HEADER_UPDATED_AT = '# Updated at Trigger on "{table}" table!'
 HEADER_SOFT_DELETE = '# Soft Delete Rule on "{table}" table!'
 HEADER_SOFT_DELETE_RELATED = (
@@ -151,6 +152,7 @@ def _derive_scanner(header_template: str) -> re.Pattern[str]:
 # Both pre- and post-1.1.0 migrations carry the same header text (only what follows it
 # changed, from a named sql constant to inlined SQL), so one scanner recognises both.
 _RE_TRIGGER_FUNCTION = _derive_scanner(HEADER_TRIGGER_FUNCTION)
+_RE_STAMP_FUNCTION = _derive_scanner(HEADER_STAMP_FUNCTION)
 _RE_PARENT_TRIGGER_FUNCTION = _derive_scanner(HEADER_PARENT_TRIGGER_FUNCTION)
 _RE_UPDATED_AT = _derive_scanner(HEADER_UPDATED_AT)
 _RE_SOFT_DELETE = _derive_scanner(HEADER_SOFT_DELETE)

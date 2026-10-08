@@ -21,8 +21,8 @@ from guitars.management import _generator
 from guitars.management.enforcement.graph import ObjectRef
 from guitars.management.enforcement.headers import (
     HEADER_PARENT_TRIGGER_FUNCTION,
+    HEADER_STAMP_FUNCTION,
     HEADER_TENANT_AUTOFILL_FUNCTION,
-    HEADER_TRIGGER_FUNCTION,
 )
 from guitars.management.enforcement.identity import _operation
 from guitars.management.enforcement.operations import OperationsMixin, OwnerArm
@@ -54,13 +54,15 @@ class Command(OperationsMixin, BaseCommand):
         self.reverse_relations_mapping: defaultdict[type[models.Model], set] = defaultdict(set)
         self._setup_models_and_reverse_relations()
 
-        # (app_label, migration_stem) tuples or None, pointing at the singleton function
-        # migrations. Populated from self.existing on first access, not here -- see that
-        # property.
+        # (app_label, migration_stem) tuples or None, naming the singleton function migrations,
+        # filled from self.existing on first access, not here. ``trigger_function_*`` read
+        # history only since 2.19.0 (ADR 0038).
         self.trigger_function_dependency: tuple[str, str] | None = None
         self.parent_trigger_function_dependency: tuple[str, str] | None = None
+        self.stamp_function_dependency: tuple[str, str] | None = None
         self.trigger_function_sql: str | None = None
         self.parent_trigger_function_sql: str | None = None
+        self.stamp_function_sql: str | None = None
         # Keyed by function name, not singletons: autofill is one function per (column, GUC)
         # pair -- normally one, since GUITARS_TENANT_FIELD is project-wide.
         self.tenant_autofill_dependencies: dict[str, tuple[str, str]] = {}
@@ -146,8 +148,10 @@ class Command(OperationsMixin, BaseCommand):
             self.parent_trigger_function_dependency = (
                 self._existing.parent_trigger_function_dependency
             )
+            self.stamp_function_dependency = self._existing.stamp_function_dependency
             self.trigger_function_sql = self._existing.trigger_function_sql
             self.parent_trigger_function_sql = self._existing.parent_trigger_function_sql
+            self.stamp_function_sql = self._existing.stamp_function_sql
             self.tenant_autofill_dependencies = dict(
                 self._existing.tenant_autofill_function_dependencies
             )
@@ -325,25 +329,26 @@ class Command(OperationsMixin, BaseCommand):
         self.stdout.write(f'  migrations/{migration_file}')
         return (host_app.label, Path(migration_file).stem), current_digest
 
-    def _ensure_trigger_function_migration(
+    def _ensure_stamp_function_migration(
         self, *, check_only: bool = False, adopt: bool = False
     ) -> bool:
-        """Ensure a current standalone migration for the trigger function exists in the
-        host app. Sets ``self.trigger_function_dependency``; returns whether it wrote one."""
+        """Ensure a current migration for ``stamp_updated_at()`` in the host app, setting
+        ``self.stamp_function_dependency``; returns whether it wrote one. The frozen
+        ``set_updated_at()`` is not ensured: a migrated database keeps it, called by nothing."""
         written = self._ensure_function_migration(
-            recorded=self.trigger_function_dependency,
-            recorded_digest=self.trigger_function_sql,
-            header=HEADER_TRIGGER_FUNCTION,
-            create=sql.CREATE_UPDATED_AT_TRIGGER_FUNCTION,
-            replace=sql.REPLACE_UPDATED_AT_TRIGGER_FUNCTION,
-            drop=sql.DROP_UPDATED_AT_TRIGGER_FUNCTION,
-            name='auto_enforcement_trigger_function',
+            recorded=self.stamp_function_dependency,
+            recorded_digest=self.stamp_function_sql,
+            header=HEADER_STAMP_FUNCTION,
+            create=_triggers._CREATE_STAMP_UPDATED_AT_FUNCTION,
+            replace=_triggers._REPLACE_STAMP_UPDATED_AT_FUNCTION,
+            drop=_triggers._DROP_STAMP_UPDATED_AT_FUNCTION,
+            name='auto_enforcement_stamp_function',
             missing_message=(
                 '\n\tRun `manage.py makeguitarmigrations` to create '
-                'the trigger function migration!\n'
+                'the updated-at stamp function migration!\n'
             ),
             stale_message=(
-                '\n\tThe updated-at trigger function has changed since the migration that '
+                '\n\tThe updated-at stamp function has changed since the migration that '
                 'defines it was written.\n\tRun `manage.py makeguitarmigrations` to '
                 'regenerate it.\n'
             ),
@@ -352,7 +357,7 @@ class Command(OperationsMixin, BaseCommand):
         )
         if written is None:
             return False
-        self.trigger_function_dependency, self.trigger_function_sql = written
+        self.stamp_function_dependency, self.stamp_function_sql = written
         return True
 
     def _ensure_parent_trigger_function_migration(
@@ -380,9 +385,6 @@ class Command(OperationsMixin, BaseCommand):
             ),
             check_only=check_only,
             adopt=adopt,
-            dependencies=[self.trigger_function_dependency]
-            if self.trigger_function_dependency
-            else None,
         )
         if written is None:
             return False
@@ -493,7 +495,7 @@ class Command(OperationsMixin, BaseCommand):
         if force_rls:
             return self._handle_force_rls_stage(requested, check_only=check_only)
 
-        # Force self.existing's lazy scan now: Step 1 below reads trigger_function_dependency/
+        # Force self.existing's lazy scan now: Step 1 below reads stamp_function_dependency/
         # _sql directly off self, not through self.existing, since it mutates them after
         # writing a migration -- so they must already carry the scanned values by then.
         _ = self.existing
@@ -510,7 +512,7 @@ class Command(OperationsMixin, BaseCommand):
             # off PostgreSQL there is no trigger to call, so nothing to scaffold either.
             if migrates_to_postgresql(model)
         ]
-        needs_trigger_function = any(owns_column(m, '_updated_at') for m in in_scope_models)
+        needs_stamp_function = any(owns_column(m, '_updated_at') for m in in_scope_models)
         needs_parent_function = any(is_mti_child(m, '_updated_at') for m in in_scope_models)
 
         # Under --check, a stale/missing function migration raises from inside
@@ -518,9 +520,9 @@ class Command(OperationsMixin, BaseCommand):
         # instead of a project with both problems only hearing about whichever came first.
         function_check_messages: list[str] = []
         changes_made = False
-        if needs_trigger_function:
+        if needs_stamp_function:
             try:
-                changes_made = self._ensure_trigger_function_migration(
+                changes_made = self._ensure_stamp_function_migration(
                     check_only=check_only, adopt=adopt
                 )
             except CommandError as err:

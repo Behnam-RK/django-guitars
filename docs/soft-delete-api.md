@@ -26,7 +26,6 @@ When the tree is fully covered, `.delete()` reads the keys, then issues `DELETE`
 | `SET_NULL`, `PROTECT`, `RESTRICT`, `SET(…)` | it applies them |
 | a plain child or M2M through row | it removes them |
 | a `GenericRelation`, an unreadable `to_field` key, or an edge with no rule | rows would stay live |
-| a self-referential key | `_updated_at` below level one moves only under the collector |
 | a non-PostgreSQL alias | the rules are PostgreSQL DDL |
 | a model outside `LOCAL_APPS` or routed off PostgreSQL | its own rule is missing, so the collector deletes its row |
 | an MTI model whose primary key is not its parent link (`guitars.E005`, #64) | the redirect rule joins on the wrong column |

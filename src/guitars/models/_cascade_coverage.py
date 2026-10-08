@@ -203,13 +203,6 @@ def cascade_plan(model: type[Model]) -> tuple[tuple[Gap, ...], frozenset[type[Mo
                     column_owner(target, '_deleted_at')._meta.db_table,
                     set(cycle_edges),
                 )
-                if kind is CascadeKind.SELF:
-                    # Below the first level the trigger's own UPDATE runs at depth 1, where
-                    # ``updated_at_trigger`` is suppressed; the collector's single depth-0
-                    # statement stamps every child. Defined for ``soft_delete()``, not transparent.
-                    gaps.append(
-                        Gap(edge, 'self-referential: `_updated_at` below level one', False)
-                    )
                 if kind in (CascadeKind.RULE, CascadeKind.SELF):
                     stack.append(related)
                 else:

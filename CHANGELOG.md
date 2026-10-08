@@ -10,6 +10,11 @@ Full history and diffs: [GitHub releases](https://github.com/Behnam-RK/django-gu
 
 ## [Unreleased]
 
+### Changed
+
+- **`_updated_at` is a `BEFORE UPDATE … FOR EACH ROW` trigger that assigns `NEW`, not a statement trigger that issues a second `UPDATE`** (#80, [ADR 0038](docs/adr/0038-updated-at-is-a-row-trigger.md)). The old form re-`UPDATE`d every row through dynamic SQL, so each row was written twice, the plan was never cached, and the follow-up was itself rewritten by the table's `ON UPDATE` rules: on a consumer's staging database one single-row `UPDATE` of a table with six cascade rules became 35 statements over 13 tables, 466 of 576 ms spent in `updated_at_trigger`. It now assigns `NEW._updated_at := NOW()` on the row being written, so one `UPDATE` writes each row once and `RETURNING _updated_at` reads the stamped value. **Always** assigned, as before: a caller still cannot set the column. **Existing projects: the next `makeguitarmigrations` emits one function migration (`stamp_updated_at()`, in `TRIGGER_FUNCTION_APP`) and one replacement migration per app** that swaps each `updated_at_trigger`; `makemigrations --check` is red until it does. The frozen `set_updated_at()` stays in a migrated database, called by nothing, and a table not yet regenerated keeps the old trigger and works. The MTI parent trigger (`set_parent_updated_at`) is unchanged.
+- **The self-referential cascade no longer leaves `_updated_at` stale below its first level.** The new trigger carries no `WHEN (pg_trigger_depth() = 0)`, so the cascade children of every level a raw `DELETE` reaches are stamped, as the ORM collector already did; the two paths now agree. `delete()` therefore takes its fast path for a self-referential key, which it used to stand aside for on this account.
+
 ## [2.18.1] - 2026-10-08
 
 ### Changed

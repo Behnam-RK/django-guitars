@@ -8,19 +8,18 @@ class Migration(migrations.Migration):
     dependencies = [
         ('crossapp_third', '0001_initial'),
         ('crossapp_owner', '0001_initial'),
-        ('testapp', '0011_auto_enforcement_trigger_function'),
+        ('testapp', '0082_auto_enforcement_stamp_function'),
         ('crossapp_dependent', '0001_initial'),
     ]
 
     operations = [
-        # Updated at Trigger on "crossapp_dependent_shared" table! [SQL:85a1a414345e]
+        # Updated at Trigger on "crossapp_dependent_shared" table! [SQL:a9edade43cd0]
         migrations.RunSQL(
             sql="""
             CREATE TRIGGER updated_at_trigger
-                AFTER UPDATE ON "crossapp_dependent_shared" REFERENCING NEW TABLE AS new_table
-                FOR EACH STATEMENT
-                WHEN (pg_trigger_depth() = 0)
-                EXECUTE FUNCTION set_updated_at('id');
+                BEFORE UPDATE ON "crossapp_dependent_shared"
+                FOR EACH ROW
+                EXECUTE FUNCTION stamp_updated_at();
         """,
             reverse_sql="""
             DROP TRIGGER updated_at_trigger ON "crossapp_dependent_shared";
@@ -44,14 +43,13 @@ class Migration(migrations.Migration):
         """,
         ),
 
-        # Updated at Trigger on "crossapp_dependent_localowner" table! [SQL:30b39a19cbe1]
+        # Updated at Trigger on "crossapp_dependent_localowner" table! [SQL:e90fda8de86e]
         migrations.RunSQL(
             sql="""
             CREATE TRIGGER updated_at_trigger
-                AFTER UPDATE ON "crossapp_dependent_localowner" REFERENCING NEW TABLE AS new_table
-                FOR EACH STATEMENT
-                WHEN (pg_trigger_depth() = 0)
-                EXECUTE FUNCTION set_updated_at('id');
+                BEFORE UPDATE ON "crossapp_dependent_localowner"
+                FOR EACH ROW
+                EXECUTE FUNCTION stamp_updated_at();
         """,
             reverse_sql="""
             DROP TRIGGER updated_at_trigger ON "crossapp_dependent_localowner";

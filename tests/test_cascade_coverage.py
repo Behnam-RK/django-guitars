@@ -48,12 +48,11 @@ class TestACoveredTree:
         assert cascade_plan(QuantityCondition)[0] == ()
         assert cascade_plan(ChamberOrchestra)[0] == ()
 
-    def test_a_self_referential_key_is_covered_but_not_transparently(self):
-        """Its trigger archives the tree, so ``soft_delete()`` is fine; but a child below level
-        one keeps a stale ``_updated_at`` that the collector would have moved, so ``delete()``
-        must not take the shortcut."""
-        assert reasons(Setlist, blocking=True) == []
-        assert any('self-referential' in line for line in reasons(Setlist, blocking=False))
+    def test_a_self_referential_key_has_no_gap(self):
+        """Its trigger archives the tree and the row-level ``_updated_at`` trigger stamps every
+        level it reaches, trigger depth notwithstanding (ADR 0038), so ``delete()`` may take the
+        shortcut: it used to stand aside for a stale ``_updated_at`` below level one."""
+        assert reasons(Setlist) == []
 
     def test_every_model_the_collector_would_touch_is_reached(self):
         _, reached = cascade_plan(Offer)

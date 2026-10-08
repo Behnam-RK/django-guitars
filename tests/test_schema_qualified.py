@@ -35,8 +35,8 @@ def event_model():
 @pytest.fixture
 def analytics_events_table(event_model):
     """Create ``"analytics"."events"`` and its enforcement SQL in the current transaction.
-    ``SET LOCAL search_path`` matters: ``set_updated_at()`` updates the bare
-    ``TG_TABLE_NAME``, so ``search_path`` must include the table's schema -- see ``docs/mti.md``."""
+    ``SET LOCAL search_path`` is kept for the MTI parent test below; the row trigger assigns on
+    ``NEW`` and names no table, which the committed-statements test proves without it."""
     table = event_model._meta.db_table
     assert table == '"analytics"."events"'
     qualified = _identifiers._quote_table(table)
@@ -49,11 +49,7 @@ def analytics_events_table(event_model):
         schema_editor.create_model(event_model)
 
     with connection.cursor() as cursor:
-        cursor.execute(
-            sql.CREATE_UPDATED_AT_TRIGGER.format(
-                table=qualified, primary_key=_identifiers._escape_literal('id')
-            )
-        )
+        cursor.execute(_triggers._CREATE_STAMP_UPDATED_AT_TRIGGER.format(table=qualified))
         cursor.execute(
             sql.CREATE_SOFT_DELETE_RULE.format(
                 table=qualified, primary_key=_identifiers._escape_ident('id')
@@ -136,18 +132,12 @@ def test_updated_at_trigger_genuinely_advances_across_committed_statements():
         try:
             with connection.cursor() as cursor:
                 cursor.execute('CREATE SCHEMA analytics')
-                # Not LOCAL here: transaction=True means each statement below is its own,
-                # separately-committed transaction, so a transaction-scoped SET would not
-                # survive past the statement that created the schema. Reset in `finally`.
-                cursor.execute('SET search_path TO analytics, public')
+                # No ``search_path`` set: the statement trigger it replaced updated the bare
+                # ``TG_TABLE_NAME`` and needed one; the row trigger names no table (ADR 0038).
             with connection.schema_editor() as schema_editor:
                 schema_editor.create_model(Event)
             with connection.cursor() as cursor:
-                cursor.execute(
-                    sql.CREATE_UPDATED_AT_TRIGGER.format(
-                        table=qualified, primary_key=_identifiers._escape_literal('id')
-                    )
-                )
+                cursor.execute(_triggers._CREATE_STAMP_UPDATED_AT_TRIGGER.format(table=qualified))
 
             with tenancy_bypassed():
                 label = Label.objects.create(name='Analytics Co')

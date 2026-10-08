@@ -27,6 +27,7 @@ from guitars.management.enforcement import operations as operations_module
 from guitars.management.enforcement.command import Command
 from guitars.models import OwningForeignKey, SetarModel
 from guitars.sql import _identifiers
+from guitars.sql import triggers as _triggers
 from guitars.tenancy.discovery import app_coverage, autofill_function_name
 from tests.testapp.models import Album, Band, Ensemble, Foyer, Kiosk, Merch, Orchestra
 
@@ -35,10 +36,10 @@ def _pretend_function_migrations_are_current(command):
     """Mark both singleton trigger-function migrations as existing *and* up to date --
     setting only the dependency isn't enough: a singleton is skipped only when its
     migration also carries today's SQL digest, not merely on existence."""
-    command.trigger_function_dependency = ('albumb', '0001_pretend')
+    command.stamp_function_dependency = ('albumb', '0001_pretend')
     command.parent_trigger_function_dependency = ('albumb', '0001_pretend_parent')
-    command.trigger_function_sql = identity_module._sql_digest(
-        sql.CREATE_UPDATED_AT_TRIGGER_FUNCTION, sql.DROP_UPDATED_AT_TRIGGER_FUNCTION
+    command.stamp_function_sql = identity_module._sql_digest(
+        _triggers._CREATE_STAMP_UPDATED_AT_FUNCTION, _triggers._DROP_STAMP_UPDATED_AT_FUNCTION
     )
     command.parent_trigger_function_sql = identity_module._sql_digest(
         sql.CREATE_PARENT_UPDATED_AT_TRIGGER_FUNCTION,
@@ -1176,15 +1177,16 @@ def test_check_reports_both_function_and_app_level_gaps_in_one_run():
     clear_cascade_coverage(command)
     # Overridden after touching .existing above, which is what populates these from the
     # real scan -- setting them first would just be clobbered by that scan.
-    command.trigger_function_dependency = None
-    command.trigger_function_sql = None
+    command.stamp_function_dependency = None
+    command.stamp_function_sql = None
 
     with pytest.raises(CommandError, match='Run `manage.py makeguitarmigrations`'):
         command.handle('testapp', check_only=True)
 
     stderr = command.stderr.getvalue()
-    assert 'Run `manage.py makeguitarmigrations` to create the trigger function migration' in (
-        stderr
+    assert (
+        'Run `manage.py makeguitarmigrations` to create the updated-at stamp function migration'
+        in stderr
     )
     assert 'Missing or outdated enforcement migrations' in stderr
 
@@ -1272,7 +1274,10 @@ def test_function_dependencies_for_only_includes_deps_the_operations_use():
     """A per-app migration depends on a function migration only when its operations
     actually call it -- soft-delete/cascade rules call none, so those apps depend on neither."""
     command = Command()
+    # The frozen ``set_updated_at`` migration is history nothing calls (ADR 0038): seeded so an
+    # own-table trigger depending on it, rather than on the stamp function, fails the asserts.
     command.trigger_function_dependency = ('testapp', '0002_trigger_function')
+    command.stamp_function_dependency = ('testapp', '0003_stamp_function')
     command.parent_trigger_function_dependency = ('testapp', '0006_parent_trigger_function')
 
     own_only = '# Updated at Trigger on "testapp_band" table!\nmigrations.RunSQL(...)'
@@ -1285,12 +1290,12 @@ def test_function_dependencies_for_only_includes_deps_the_operations_use():
         '# MTI Soft Delete Rule on "testapp_orchestra" table (parent "testapp_ensemble")!'
     )
 
-    assert command._function_dependencies_for(own_only) == [('testapp', '0002_trigger_function')]
+    assert command._function_dependencies_for(own_only) == [('testapp', '0003_stamp_function')]
     assert command._function_dependencies_for(mti_only) == [
         ('testapp', '0006_parent_trigger_function')
     ]
     assert command._function_dependencies_for(own_only + '\n' + mti_only) == [
-        ('testapp', '0002_trigger_function'),
+        ('testapp', '0003_stamp_function'),
         ('testapp', '0006_parent_trigger_function'),
     ]
     # Only soft-delete / cascade rules -> no function migration dependency at all.
@@ -1325,21 +1330,21 @@ def _command_with_scaffold(monkeypatch, tmp_path, filename='0002_auto_enforcemen
     [
         pytest.param(
             '0002_auto_enforcement.py',
-            'trigger_function_dependency',
-            '_ensure_trigger_function_migration',
+            'stamp_function_dependency',
+            '_ensure_stamp_function_migration',
             None,
-            'CREATE FUNCTION set_updated_at()',
+            'CREATE FUNCTION stamp_updated_at()',
             None,
-            id='base_trigger_function',
+            id='stamp_function',
         ),
         pytest.param(
             '0003_auto_enforcement_parent_trigger_function.py',
             'parent_trigger_function_dependency',
             '_ensure_parent_trigger_function_migration',
-            ('trigger_function_dependency', ('testapp', '0002_auto_enforcement_trigger_function')),
+            None,
             'CREATE FUNCTION set_parent_updated_at()',
-            '0002_auto_enforcement_trigger_function',
-            id='parent_trigger_function_depends_on_the_base_one',
+            None,
+            id='parent_trigger_function',
         ),
     ],
 )
@@ -1544,10 +1549,10 @@ def test_force_rls_stage_check_only_reports_and_exits_non_zero(monkeypatch):
     ('dependency_attr', 'method_name', 'error_match'),
     [
         pytest.param(
-            'trigger_function_dependency',
-            '_ensure_trigger_function_migration',
-            'trigger function migration',
-            id='base_trigger_function',
+            'stamp_function_dependency',
+            '_ensure_stamp_function_migration',
+            'updated-at stamp function migration',
+            id='stamp_function',
         ),
         pytest.param(
             'parent_trigger_function_dependency',

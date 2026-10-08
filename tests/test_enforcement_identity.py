@@ -28,6 +28,7 @@ from .test_command import _command_with_scaffold, _unforced_policy_tables
 #: where nothing else stops emitter and scanner drifting apart.
 HEADER_SCANNERS = [
     (headers_module.HEADER_TRIGGER_FUNCTION, headers_module._RE_TRIGGER_FUNCTION, {}),
+    (headers_module.HEADER_STAMP_FUNCTION, headers_module._RE_STAMP_FUNCTION, {}),
     (
         headers_module.HEADER_PARENT_TRIGGER_FUNCTION,
         headers_module._RE_PARENT_TRIGGER_FUNCTION,
@@ -190,12 +191,19 @@ def test_the_force_header_cannot_be_read_as_a_policy_header():
     assert headers_module._RE_TENANT_FORCE.search(force) is not None
 
 
-def test_the_two_function_headers_cannot_be_read_as_each_other():
-    """Otherwise the MTI parent function migration would satisfy the base one's dependency."""
-    base = headers_module.HEADER_TRIGGER_FUNCTION
-    parent = headers_module.HEADER_PARENT_TRIGGER_FUNCTION
-    assert headers_module._RE_TRIGGER_FUNCTION.search(parent) is None
-    assert headers_module._RE_PARENT_TRIGGER_FUNCTION.search(base) is None
+def test_the_function_headers_cannot_be_read_as_each_other():
+    """Otherwise the MTI parent function migration would satisfy the base one's dependency --
+    and, worse, a project's old ``set_updated_at`` migration would read as the stamp function
+    already defined, so the replacement triggers would call a function nothing created."""
+    headers = {
+        '_RE_TRIGGER_FUNCTION': headers_module.HEADER_TRIGGER_FUNCTION,
+        '_RE_STAMP_FUNCTION': headers_module.HEADER_STAMP_FUNCTION,
+        '_RE_PARENT_TRIGGER_FUNCTION': headers_module.HEADER_PARENT_TRIGGER_FUNCTION,
+    }
+    for scanner, own in headers.items():
+        for header in headers.values():
+            found = getattr(headers_module, scanner).search(header) is not None
+            assert found is (header == own), f'{scanner} on {header!r}'
 
 
 def test_the_autofill_headers_cannot_be_read_as_any_other_trigger():
@@ -479,39 +487,39 @@ def test_a_changed_function_body_emits_a_replacement_migration(monkeypatch, tmp_
     """Singletons by *existence*, which is why an edited body once shipped nothing --
     comparing the recorded digest too is what turns an edit into a migration."""
     command, _, filename = _command_with_scaffold(monkeypatch, tmp_path)
-    command.trigger_function_dependency = ('testapp', '0001_pretend')
-    command.trigger_function_sql = 'stale0000'
+    command.stamp_function_dependency = ('testapp', '0001_pretend')
+    command.stamp_function_sql = 'stale0000'
 
-    assert command._ensure_trigger_function_migration() is True
+    assert command._ensure_stamp_function_migration() is True
 
     content = (tmp_path / 'migrations' / filename).read_text()
     # OR REPLACE rather than DROP + CREATE, and that is forced rather than defensive:
     # DROP FUNCTION refuses while any trigger depends on it, and CASCADE would take every
     # table's trigger with it.
-    assert 'CREATE OR REPLACE FUNCTION set_updated_at()' in content
+    assert 'CREATE OR REPLACE FUNCTION stamp_updated_at()' in content
 
 
 def test_check_reports_a_changed_function_body_rather_than_passing(monkeypatch, tmp_path):
     """``--check`` is the CI gate, so silence here is the whole failure mode."""
     command, _, _ = _command_with_scaffold(monkeypatch, tmp_path)
-    command.trigger_function_dependency = ('testapp', '0001_pretend')
-    command.trigger_function_sql = 'stale0000'
+    command.stamp_function_dependency = ('testapp', '0001_pretend')
+    command.stamp_function_sql = 'stale0000'
 
     with pytest.raises(CommandError, match='has changed since the migration'):
-        command._ensure_trigger_function_migration(check_only=True)
+        command._ensure_stamp_function_migration(check_only=True)
 
 
 def test_adopt_emits_or_replace_for_a_function_with_nothing_recorded(monkeypatch, tmp_path):
     """A function with nothing recorded at all is exactly what ``--adopt`` is for -- a
     plain CREATE FUNCTION there fails migrate, so OR REPLACE must be selected regardless."""
     command, _, filename = _command_with_scaffold(monkeypatch, tmp_path)
-    command.trigger_function_dependency = None
-    command.trigger_function_sql = None
+    command.stamp_function_dependency = None
+    command.stamp_function_sql = None
 
-    assert command._ensure_trigger_function_migration(adopt=True) is True
+    assert command._ensure_stamp_function_migration(adopt=True) is True
 
     content = (tmp_path / 'migrations' / filename).read_text()
-    assert 'CREATE OR REPLACE FUNCTION set_updated_at()' in content
+    assert 'CREATE OR REPLACE FUNCTION stamp_updated_at()' in content
 
 
 # ---------------------------------------------------------------------------

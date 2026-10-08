@@ -5,21 +5,20 @@ from django.db import migrations
 
 class Migration(migrations.Migration):
     dependencies = [
-        ('testapp', '0011_auto_enforcement_trigger_function'),
+        ('testapp', '0082_auto_enforcement_stamp_function'),
         ('mti_incremental', '0003_descendant'),
     ]
 
     operations = [
-        # Updated at Trigger on "mti_incremental_ancestor" table! [SQL:520e07958dcf]
+        # Updated at Trigger on "mti_incremental_ancestor" table! [SQL:6331b5096099]
         migrations.RunSQL(
             sql="""
             DROP TRIGGER updated_at_trigger ON "mti_incremental_ancestor";
 
             CREATE TRIGGER updated_at_trigger
-                AFTER UPDATE ON "mti_incremental_ancestor" REFERENCING NEW TABLE AS new_table
-                FOR EACH STATEMENT
-                WHEN (pg_trigger_depth() = 0)
-                EXECUTE FUNCTION set_updated_at('id');
+                BEFORE UPDATE ON "mti_incremental_ancestor"
+                FOR EACH ROW
+                EXECUTE FUNCTION stamp_updated_at();
         """,
             reverse_sql="""
             DROP TRIGGER updated_at_trigger ON "mti_incremental_ancestor";

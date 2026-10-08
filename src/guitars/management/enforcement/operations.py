@@ -301,6 +301,7 @@ class OperationsMixin:
         _claimed_sweep_names: dict[str, tuple]
         trigger_function_dependency: tuple[str, str] | None
         parent_trigger_function_dependency: tuple[str, str] | None
+        stamp_function_dependency: tuple[str, str] | None
         tenant_autofill_dependencies: dict[str, tuple[str, str]]
         reverse_relations_mapping: dict[type[models.Model], set]
         all_models: list[type[models.Model]]
@@ -543,12 +544,11 @@ class OperationsMixin:
                     f'for a tenant policy, another owner). See guitars.E005 for the fix.'
                 )
 
-            # --- updated_at trigger: own table vs. MTI parent-propagation --- `table`/
-            # `child_table` are DDL positions (_quote_table); `primary_key`/`parent_pk`/
-            # `child_pk` are literal trigger-function arguments (_escape_literal).
+            # --- updated_at trigger: own table vs. MTI parent-propagation --- `table`/`child_table`
+            # are DDL positions (_quote_table); `parent_pk`/`child_pk` are literal trigger-function
+            # arguments (_escape_literal). The own-table row trigger takes none (ADR 0038).
             if owns_column(model, '_updated_at'):
                 qualified_table = _identifiers._quote_table(table)
-                literal_primary_key = _identifiers._escape_literal(primary_key)
                 rows.append(
                     _OperationRow(
                         recorded=self.existing.triggers,
@@ -557,15 +557,17 @@ class OperationsMixin:
                         # `qualified_table` above (the SQL body's own DDL-ready form) --
                         # see _tenant_policy_operation's comment.
                         header=HEADER_UPDATED_AT.format(table=_identifiers._escape_ident(table)),
-                        forward=sql.CREATE_UPDATED_AT_TRIGGER.format(
-                            table=qualified_table, primary_key=literal_primary_key
+                        forward=_triggers._CREATE_STAMP_UPDATED_AT_TRIGGER.format(
+                            table=qualified_table
                         ),
-                        reverse=sql.DROP_UPDATED_AT_TRIGGER.format(table=qualified_table),
-                        replace=sql.REPLACE_UPDATED_AT_TRIGGER.format(
-                            table=qualified_table, primary_key=literal_primary_key
+                        reverse=_triggers._DROP_STAMP_UPDATED_AT_TRIGGER.format(
+                            table=qualified_table
                         ),
-                        adopt=sql.ADOPT_UPDATED_AT_TRIGGER.format(
-                            table=qualified_table, primary_key=literal_primary_key
+                        replace=_triggers._REPLACE_STAMP_UPDATED_AT_TRIGGER.format(
+                            table=qualified_table
+                        ),
+                        adopt=_triggers._ADOPT_STAMP_UPDATED_AT_TRIGGER.format(
+                            table=qualified_table
                         ),
                     )
                 )
@@ -1199,8 +1201,8 @@ class OperationsMixin:
 
     def _revive_updated_at(self, related_table: str) -> str:
         """The ``_updated_at`` splice for a revive body rebuilt by a retirement's reverse. Its
-        ``UPDATE`` runs at trigger depth 1, where ``updated_at_trigger``'s ``WHEN`` suppresses
-        that trigger -- so the column has to move here or it moves on neither path."""
+        ``UPDATE`` runs at depth 1, where a pre-2.19.0 trigger's ``WHEN`` suppresses
+        ``updated_at_trigger``; redundant under the row trigger (ADR 0038), kept for identity."""
         _required, models_by_table = self._cascade_key_maps()
         model = models_by_table.get(related_table)
         if model is None:
@@ -2110,8 +2112,9 @@ class OperationsMixin:
             'primary_key': ident_owner_pk,
             'foreign_key': _identifiers._escape_ident(column),
             'referenced_key': _referenced_key(related_model, column, ident_owner_pk),
-            # This runs at trigger depth 1, where ``updated_at_trigger``'s ``WHEN`` suppresses
-            # it, so the column has to move here or it moves on neither path.
+            # This runs at trigger depth 1, where a pre-2.19.0 ``updated_at_trigger``'s ``WHEN``
+            # suppresses it, so the column has to move here there. Redundant under the row
+            # trigger (ADR 0038), kept so the ``[SQL:...]`` identity does not move.
             'updated_at_assignment': (
                 _soft_delete._SOFT_DELETE_REVIVE_UPDATED_AT
                 if owns_column(target, '_updated_at')
@@ -2308,9 +2311,9 @@ class OperationsMixin:
             'primary_key': ident_owner_pk,
             'foreign_key': ident_foreign_key,
             'referenced_key': _referenced_key(owner, foreign_key, ident_owner_pk),
-            # The sweep's reason: this UPDATE runs at trigger depth >= 1, where
-            # ``updated_at_trigger``'s ``WHEN`` suppresses it. Conditional because a model can
-            # carry ``_deleted_at`` with no ``_updated_at`` -- not the MTI shape, E003 refuses it.
+            # The sweep's reason: this UPDATE runs at depth >= 1, where a pre-2.19.0
+            # ``updated_at_trigger`` suppresses it (redundant under ADR 0038's row trigger).
+            # Conditional: a model can carry ``_deleted_at`` with no ``_updated_at``, E003 aside.
             'updated_at_assignment': (
                 _soft_delete._SOFT_DELETE_SELF_CASCADE_UPDATED_AT
                 if owns_column(owner, '_updated_at')
@@ -2670,9 +2673,9 @@ class OperationsMixin:
             ),
             'primary_key': ident_owner_pk,
             'foreign_key': ident_foreign_key,
-            # Stamped here rather than left to the dependent's own trigger: that one carries
-            # ``WHEN (pg_trigger_depth() = 0)`` and this UPDATE runs at depth 1, so without
-            # this the column moves on the rule's path and not on this one.
+            # Stamped here rather than left to the dependent's own trigger: a pre-2.19.0 one
+            # carries ``WHEN (pg_trigger_depth() = 0)`` and this UPDATE runs at depth 1. Redundant
+            # under the row trigger (ADR 0038), kept so the sweep's identity does not move.
             'updated_at_assignment': (
                 _soft_delete._SOFT_DELETE_OWNED_SWEEP_UPDATED_AT
                 if owns_column(dependent, '_updated_at')
@@ -3373,8 +3376,8 @@ class OperationsMixin:
         the operation headers, since only ``updated_at`` and autofill triggers call a shared
         function, so an app never depends on a migration (or its ordering) it doesn't use."""
         deps: list[tuple[str, str]] = []
-        if self.trigger_function_dependency and _RE_UPDATED_AT.search(operations_blob):
-            deps.append(self.trigger_function_dependency)
+        if self.stamp_function_dependency and _RE_UPDATED_AT.search(operations_blob):
+            deps.append(self.stamp_function_dependency)
         if self.parent_trigger_function_dependency and _RE_MTI_UPDATED_AT.search(operations_blob):
             deps.append(self.parent_trigger_function_dependency)
         # Per function, not per kind: an app depends only on the autofill functions its own

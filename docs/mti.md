@@ -61,7 +61,7 @@ CREATE TRIGGER updated_at_trigger AFTER UPDATE ON <child>
     WHEN (pg_trigger_depth() = 0) EXECUTE FUNCTION set_parent_updated_at(…);
 ```
 
-`FOR EACH STATEMENT` (not per row) and `pg_trigger_depth() = 0` (no re-entry). Schema-qualified
+`FOR EACH STATEMENT` (not per row) and `pg_trigger_depth() = 0` (no re-entry). Its follow-up `UPDATE` on the ancestor also fires the ancestor's own row-level `updated_at_trigger` (2.19.0, [ADR 0038](adr/0038-updated-at-is-a-row-trigger.md)), which stamps the same `NOW()` again — harmless, and the one place the kit still writes a row twice. Schema-qualified
 `db_table` is supported: the function takes the parent's schema and table as two arguments
 (`%I` can't render a two-part name) and still understands the older three-argument form, frozen
 per-trigger at `CREATE TRIGGER` time — see `tests/test_schema_qualified.py`. The own-table

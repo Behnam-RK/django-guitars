@@ -74,11 +74,18 @@ def test_an_explicit_table_survives_a_model_rename():
     assert graph.vacated_tables(loader) == {}
 
 
-def test_a_table_something_holds_again_is_not_vacated():
-    """A new model took the old name: the enforcement migration naming it names *that* table."""
-    loader = _Loader(('anc', [[_create()], [RenameModel('root', 'trunk')], [_create('root')]]))
+def test_a_retable_to_the_name_it_has_vacates_nothing():
+    loader = _Loader(('anc', [[_create()], [AlterModelTable('root', 'anc_root')]]))
 
     assert graph.vacated_tables(loader) == {}
+
+
+def test_a_table_taken_again_later_is_still_vacated():
+    """The file naming it predates the rename and has to run before it, whoever holds the name
+    after: the edge is on the migration that frees it."""
+    loader = _Loader(('anc', [[_create()], [RenameModel('root', 'trunk')], [_create('root')]]))
+
+    assert graph.vacated_tables(loader) == {('anc', '0002'): ['anc_root']}
 
 
 def test_a_database_side_retable_that_a_state_side_move_hides_is_seen():
@@ -118,13 +125,12 @@ def test_a_database_side_rename_of_a_model_the_state_never_had_is_ignored():
     assert graph.vacated_tables(loader) == {}
 
 
-def test_a_database_side_delete_vacates_the_table_the_state_still_has():
-    """The database half is read whole: a ``DeleteModel`` there drops the table whatever the
-    state half says."""
+def test_a_database_side_delete_vacates_the_table_whatever_the_state_says():
+    """The database half is read whole: a ``DeleteModel`` there drops the table."""
     dropped = SeparateDatabaseAndState(database_operations=[DeleteModel('root')])
     loader = _Loader(('anc', [[_create()], [dropped]]))
 
-    assert graph.vacated_tables(loader) == {}
+    assert graph.vacated_tables(loader) == {('anc', '0002'): ['anc_root']}
 
     forgotten = SeparateDatabaseAndState(
         database_operations=[DeleteModel('root')], state_operations=[DeleteModel('root')]
@@ -312,9 +318,13 @@ class TestAModelMovedBetweenApps:
         assert graph.renamed_tables(_moved_between_apps(), 'anc') == {'new_root': ['anc_root']}
 
     def test_and_the_migration_that_made_it(self):
-        assert graph.renames_by_migration(_moved_between_apps(), 'anc') == {
+        assert graph.moves_between_apps_by_migration(_moved_between_apps(), 'anc') == {
             '0002': [('anc_root', 'new_root')]
         }
+
+    def test_which_is_not_a_same_app_rename(self):
+        """Kept apart: the scan must not overwrite what the destination's app filed."""
+        assert graph.renames_by_migration(_moved_between_apps(), 'anc') == {}
 
     def test_the_destination_app_records_none(self):
         assert graph.renamed_tables(_moved_between_apps(), 'new') == {}
@@ -328,8 +338,7 @@ class TestAModelMovedBetweenApps:
         loader = _StateLoader(('anc', [[_create()], [kept]]))
 
         assert graph.renamed_tables(loader, 'anc') == {'anc_trunk': ['anc_root']}
-        (moves,) = graph.renames_by_migration(loader, 'anc').values()
-        assert set(moves) == {('anc_root', 'anc_trunk')}
+        assert graph.moves_between_apps_by_migration(loader, 'anc') == {}
 
     def test_a_database_retable_to_the_default_is_not_a_move(self):
         """``table=None`` resets to the default name; nothing names where it went, and the state

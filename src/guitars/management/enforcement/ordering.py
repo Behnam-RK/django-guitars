@@ -27,12 +27,13 @@ def order_after_enforcement(changes: dict[str, list[Migration]], loader: Migrati
     """Add to each migration in *changes* that vacates a table a dependency on every enforcement
     migration of another app naming it, before the file is written: one on disk is never touched."""
     state = loader.project_state()
-    # A table a live model holds is named by what the enforcement migrations *meant*, and a model
-    # taking an old name again is not a vacated table -- as :func:`graph.vacated_tables` reads it.
-    held = {model._meta.db_table for model in django_apps.get_models()}
     local = [app for app in django_apps.get_app_configs() if _generator.is_local(app)]
     for app_label, migrations in changes.items():
         for migration in migrations:
+            # One already in the graph is a rewrite (``--update``): the state holds what it did,
+            # so replaying it fails, and a file on disk is not this function's to edit.
+            if (app_label, migration.name) in loader.graph.node_map:
+                continue
             tables: list[str] = []
             for operation in migration.operations:
                 tables.extend(vacating(operation, app_label, state))
@@ -41,7 +42,6 @@ def order_after_enforcement(changes: dict[str, list[Migration]], loader: Migrati
                 dict.fromkeys(
                     (app.label, path.stem)
                     for table in dict.fromkeys(tables)
-                    if table not in held
                     for app in local
                     if app.label != app_label
                     for path, content in _generator.iter_migration_files(app)

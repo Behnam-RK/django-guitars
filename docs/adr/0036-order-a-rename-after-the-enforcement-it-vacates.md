@@ -10,8 +10,8 @@
 
 ## Decision
 
-- **The rename or drop depends on the enforcement migration.** `graph.vacated_tables(loader)` replays the whole graph and names, per migration, each table it renames away (`RenameModel`, `AlterModelTable`) or drops (`DeleteModel`), including the database half of a `SeparateDatabaseAndState`, less any table a model holds again at the end. An enforcement migration of **another** app (the same app's chain already orders it) whose SQL names such a table is added to that migration's dependencies, less any edge the graph already implies.
-- **Fresh files only, before they are written.** The `makemigrations` override's `write_migration_files` calls `order_after_enforcement` on the migrations Django has just built, so the file carries the edge from its first save. A migration already on disk is never rewritten.
+- **The rename or drop depends on the enforcement migration.** `graph.vacated_tables(loader)` replays the whole graph and names, per migration, each table it renames away (`RenameModel`, `AlterModelTable`, a rename that moves nothing excluded) or drops (`DeleteModel`), including the database half of a `SeparateDatabaseAndState`. A table a later model takes again is still named: the older file needs the edge all the same. An enforcement migration of **another** app (the same app's chain already orders it) whose SQL names such a table is added to that migration's dependencies, less any edge the graph already implies.
+- **Fresh files only, before they are written.** The `makemigrations` override's `write_migration_files` calls `order_after_enforcement` on the migrations Django has just built, so the file carries the edge from its first save. A migration already on disk is never rewritten, which includes the leaf `--update` rewrites: it is skipped, and `--check` names it.
 - **`--check` names the rest.** `_missing_rename_edge_notes` walks the same history against the enforcement files on disk and fails with the migration to edit and the tuple to paste, by graph reachability both ways (an ordering that exists through another path is not reported, and neither is the reverse, which Django rejects).
 - Not gated on `GUITARS_AUTO_MAKE_MIGRATIONS`: the edge says nothing about generating enforcement, and a project that generates it by hand needs the order as much.
 
@@ -25,7 +25,7 @@
 
 ## Consequences
 
-**Accepted costs.** A rename or delete written while the override was bypassed, or by plain Django's `makemigrations`, is covered by `--check` alone. A rename file in a package the consumer cannot edit has no remedy but the message. Column-level changes (`RenameField`, `RemoveField`, a `db_column` move) are not read: only tables. The same table named by an enforcement migration written *after* a rename that retook the name is left alone, since the model holds it again.
+**Accepted costs.** A rename or delete written while the override was bypassed, or by plain Django's `makemigrations`, is covered by `--check` alone. A rename file in a package the consumer cannot edit has no remedy but the message. Column-level changes (`RenameField`, `RemoveField`, a `db_column` move) are not read: only tables. A file written *after* the rename and naming the same table, because a model took the name again, is skipped when it already depends on the rename; one that does not is named, and the edge is correct for it too.
 
 **Reversibility.** High: a dependency is graph metadata no database records, and removing the call and the check restores 2.17's behaviour.
 

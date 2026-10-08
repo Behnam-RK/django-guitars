@@ -173,8 +173,8 @@ def test_the_apps_own_files_are_ordered_by_its_chain(enforcement_file):
     assert migration.dependencies == [('testapp', '0001')]
 
 
-def test_a_table_a_live_model_holds_is_not_vacated(enforcement_file):
-    """The new name is one a model holds, so the file means *that* table."""
+def test_a_table_a_live_model_holds_is_ordered_all_the_same(enforcement_file):
+    """The older file names the table as it was; whoever holds the name now is the later one's."""
     enforcement_file('testapp_catalog')
     loader = _Loader(('anc', [[_create(db_table='testapp_catalog')]]))
     loader._add(ENFORCEMENT, [])
@@ -182,7 +182,20 @@ def test_a_table_a_live_model_holds_is_not_vacated(enforcement_file):
 
     order_after_enforcement({'anc': [migration]}, loader)
 
-    assert migration.dependencies == [('anc', '0001')]
+    assert ENFORCEMENT in migration.dependencies
+
+
+def test_a_migration_already_in_the_graph_is_left_alone(enforcement_file):
+    """``makemigrations --update`` rewrites the leaf: the state already holds what it did, so
+    replaying its operations fails, and a file on disk is not this function's to edit."""
+    enforcement_file('anc_root')
+    loader = _Loader(('anc', [[_create()], [RenameModel('root', 'trunk')]]))
+    loader._add(ENFORCEMENT, [])
+    leaf = loader.graph.nodes['anc', '0002']
+
+    order_after_enforcement({'anc': [leaf]}, loader)
+
+    assert ENFORCEMENT not in leaf.dependencies
 
 
 def test_an_edge_the_dependencies_already_reach_is_not_repeated(enforcement_file):

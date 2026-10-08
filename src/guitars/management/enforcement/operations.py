@@ -3231,6 +3231,7 @@ class OperationsMixin:
         if not vacated:
             return []
         notes: list[str] = []
+        plans: dict[tuple[str, str], set[tuple[str, str]]] = {}
         migrated = {label for label, _name in loader.graph.node_map}
         for app in django_apps.get_app_configs():
             # An app with no migrations in the graph has no enforcement file to order.
@@ -3244,23 +3245,28 @@ class OperationsMixin:
                 node = (app.label, path.stem)
                 if not _generator.RE_DIGEST.search(content) or node not in loader.graph.node_map:
                     continue
-                behind = set(loader.graph.forwards_plan(node))
-                for mover, tables in vacated.items():
-                    if (
-                        mover[0] == app.label
-                        or mover in behind
-                        or node in set(loader.graph.forwards_plan(mover))
-                    ):
+                # The cheap test first, and each plan once: the graph walks are the cost.
+                named = [
+                    (mover, table)
+                    for mover, tables in vacated.items()
+                    if mover[0] != app.label
+                    if (table := next((t for t in tables if self._names_table(content, t)), None))
+                ]
+                if not named:
+                    continue
+                behind = plans.setdefault(node, set(loader.graph.forwards_plan(node)))
+                for mover, table in named:
+                    after = plans.setdefault(mover, set(loader.graph.forwards_plan(mover)))
+                    if mover in behind or node in after:
                         continue
-                    if table := next((t for t in tables if self._names_table(content, t)), None):
-                        notes.append(
-                            f"Enforcement migration '{app.label}.{path.stem}' names '{table}', "
-                            f"which '{mover[0]}.{mover[1]}' renames away or drops, but nothing "
-                            f'orders it before that migration -- a fresh `migrate` can reach it '
-                            f'first and fail with `relation "{table}" does not exist`. Add to '
-                            f"'{mover[0]}.{mover[1]}' dependencies:\n"
-                            f"        ('{app.label}', '{path.stem}'),"
-                        )
+                    notes.append(
+                        f"Enforcement migration '{app.label}.{path.stem}' names '{table}', "
+                        f"which '{mover[0]}.{mover[1]}' renames away or drops, but nothing "
+                        f'orders it before that migration -- a fresh `migrate` can reach it '
+                        f'first and fail with `relation "{table}" does not exist`. Add to '
+                        f"'{mover[0]}.{mover[1]}' dependencies:\n"
+                        f"        ('{app.label}', '{path.stem}'),"
+                    )
         return notes
 
     def _missing_edge_notes(self, app: AppConfig) -> list[str]:

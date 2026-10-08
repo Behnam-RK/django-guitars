@@ -231,12 +231,12 @@ def dropped_tables(loader: MigrationLoader) -> dict[str, tuple[str, str]]:
 
 
 def vacated_tables(loader: MigrationLoader) -> dict[tuple[str, str], list[str]]:
-    """``migration -> the tables it renames away or drops``, in any app the loader knows, less
-    any table a later model holds again (#61). An enforcement migration of another app may still
-    name one, and nothing orders it before the migration that moves it."""
-    # The walk of :func:`dropped_tables`, but reading each operation's own table change: a
-    # rename and a retable alike, and the database half of a ``SeparateDatabaseAndState`` that
-    # the state half hides (a model moved between apps deletes it from the one app's state).
+    """``migration -> the tables it renames away or drops``, in any app the loader knows (#61).
+    An enforcement migration of another app may still name one, and nothing orders it before the
+    migration that moves it."""
+    # The walk of :func:`dropped_tables`, reading each operation's own table change: a rename
+    # and a retable alike, and the database half of a ``SeparateDatabaseAndState`` the state
+    # half hides. A table a later model takes again is still vacated: the older file needs it.
     plan: dict[tuple[str, str], None] = {}
     for leaf in loader.graph.leaf_nodes():
         plan.update(dict.fromkeys(loader.graph.forwards_plan(leaf)))
@@ -247,15 +247,7 @@ def vacated_tables(loader: MigrationLoader) -> dict[tuple[str, str], list[str]]:
             if old := vacating(operation, app_label, state):
                 vacated.setdefault((app_label, name), []).extend(old)
             operation.state_forwards(app_label, state)
-    held = {
-        _table_of(label, model_name, model_state)
-        for (label, model_name), model_state in state.models.items()
-    }
-    return {
-        node: kept
-        for node, tables in vacated.items()
-        if (kept := [table for table in tables if table not in held])
-    }
+    return vacated
 
 
 def vacating(operation, app_label: str, state: ProjectState) -> list[str]:
@@ -277,9 +269,15 @@ def vacating(operation, app_label: str, state: ProjectState) -> list[str]:
     model_state = state.models.get((app_label, name))
     if model_state is None or not _owns_a_table(model_state):
         return []
-    # Read before the operation runs. A table the model keeps (an explicit ``db_table`` surviving
-    # a rename, a retable to the same name) is held again at the end, which the caller drops.
-    return [_table_of(app_label, name, model_state)]
+    before = _table_of(app_label, name, model_state)
+    # What the table is called afterwards; ``None`` for a drop. An explicit ``db_table`` survives
+    # a ``RenameModel``, and a retable to the name it has moves nothing.
+    after = None
+    if isinstance(operation, RenameModel):
+        after = _table_of(app_label, operation.new_name_lower, model_state)
+    elif isinstance(operation, AlterModelTable):
+        after = operation.table or _default_table(app_label, name)
+    return [before] if before != after else []
 
 
 def _owns_a_table(model_state) -> bool:
@@ -293,6 +291,11 @@ def _table_of(app_label: str, model_name: str, model_state) -> str:
     explicit = model_state.options.get('db_table')
     if explicit:
         return explicit
+    return _default_table(app_label, model_name)
+
+
+def _default_table(app_label: str, model_name: str) -> str:
+    """The name Django gives a model with no ``db_table``, shortened past the backend's limit."""
     return truncate_name(f'{app_label}_{model_name}', connection.ops.max_name_length())
 
 
@@ -358,8 +361,32 @@ def renames_by_migration(
             if before.get(old_model) and after.get(new_model)
             if before[old_model] != after[new_model]
         ]
-        for operation in migration.operations:
-            moves.extend(_moved_out(operation, before, after))
+        if moves:
+            found[name] = moves
+    return found
+
+
+def moves_between_apps_by_migration(
+    loader: MigrationLoader, app_label: str
+) -> dict[str, list[tuple[str, str]]]:
+    """``migration -> [(old db_table, new db_table), ...]`` for the models *app_label* hands to
+    another app (#66), apart from :func:`renames_by_migration`: a scan walks one app's files at a
+    time, so what another app filed under the new name is older or newer, never known."""
+    ordered = _app_migrations_in_order(loader, app_label)
+    found: dict[str, list[tuple[str, str]]] = {}
+    for name in ordered:
+        migration = loader.disk_migrations.get((app_label, name))
+        if migration is None or not any(
+            isinstance(operation, SeparateDatabaseAndState) for operation in migration.operations
+        ):
+            continue
+        before = _tables_by_model(loader, app_label, ordered, upto=name, inclusive=False)
+        after = _tables_by_model(loader, app_label, ordered, upto=name, inclusive=True)
+        moves = [
+            move
+            for operation in migration.operations
+            for move in _moved_out(operation, before, after)
+        ]
         if moves:
             found[name] = moves
     return found

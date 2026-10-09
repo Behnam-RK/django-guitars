@@ -840,10 +840,11 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
             # Last write wins here too: a union instead would leave a table on the
             # backlog forever after one force=False write, even once superseded.
             existing_policy_force[table] = table in unforced_in_file
-        existing_tenant_forces.update(
-            _record(_identifiers._unescape_ident(m.group(1)))
-            for m in _RE_TENANT_FORCE.finditer(content)
-        )
+        for match in _RE_TENANT_FORCE.finditer(content):
+            table = _record(_identifiers._unescape_ident(match.group(1)))
+            existing_tenant_forces.add(table)
+            if record is not None:
+                record.tables.add(table)
 
     # Settled after the replay, because that is one line through nodes the graph may leave
     # unordered, and this question is the graph's: see ADR 0021.

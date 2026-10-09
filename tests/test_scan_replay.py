@@ -15,6 +15,7 @@ from guitars.management.enforcement.headers import (
     HEADER_SOFT_DELETE_RELATED,
     HEADER_SOFT_DELETE_RELATED_RETIRED,
     HEADER_TENANT_AUTOFILL,
+    HEADER_TENANT_FORCE,
     HEADER_TENANT_POLICY,
     HEADER_UPDATED_AT,
 )
@@ -155,6 +156,35 @@ class TestADrop:
 
         assert existing.existing_digests['testapp'] >= {'other00000000000000000000000000000'}
         assert 'named0000000000000000000000000000' not in existing.existing_digests['testapp']
+
+
+class TestAForceOnlyFile:
+    """The FORCE stage's file names a table and nothing else: its digest has to go with the table,
+    or a recreated one is written unforced and the identical FORCE operation is skipped."""
+
+    @staticmethod
+    def _force(table: str) -> str:
+        return '# [DIGEST:force000000000000000000000000000000]\n' + (
+            HEADER_TENANT_FORCE.format(table=table) + '\n'
+        )
+
+    def test_a_drop_stops_it_vouching(self, monkeypatch):
+        existing = _replay(monkeypatch, (self._force('shop_item'), []), ('', [_drop('shop_item')]))
+
+        assert 'shop_item' not in existing.tenant_forces
+        assert 'force000000000000000000000000000000' not in existing.existing_digests.get(
+            'testapp', ()
+        )
+
+    def test_a_rename_away_stops_it_vouching(self, monkeypatch):
+        existing = _replay(
+            monkeypatch, (self._force('shop_item'), []), ('', [_rename('shop_item', 'shop_x')])
+        )
+
+        assert 'shop_x' in existing.tenant_forces
+        assert 'force000000000000000000000000000000' not in existing.existing_digests.get(
+            'testapp', ()
+        )
 
 
 class TestARename:

@@ -411,7 +411,7 @@ _REPLACE_SOFT_DELETE_REVIVE_OWNER = (
 _ADOPT_SOFT_DELETE_REVIVE_OWNER = _REPLACE_SOFT_DELETE_REVIVE_OWNER
 
 # What 2.16.0 -- 2.18.x wrote: the revive half alone. Kept to rebuild it as the reverse of the
-# migration that replaces it, keyed on the digest it recorded (``_legacy_revive_owner_restore``).
+# migration that retires it (``_legacy_revive_owner_reverse``).
 _LEGACY_CREATE_SOFT_DELETE_REVIVE_OWNER_FUNCTION = """
     CREATE OR REPLACE FUNCTION {function}()
        RETURNS TRIGGER
@@ -434,10 +434,6 @@ _LEGACY_CREATE_SOFT_DELETE_REVIVE_OWNER_FUNCTION = """
 """
 _LEGACY_CREATE_SOFT_DELETE_REVIVE_OWNER = (
     _LEGACY_CREATE_SOFT_DELETE_REVIVE_OWNER_FUNCTION + _CREATE_SOFT_DELETE_REVIVE_TRIGGER
-)
-_LEGACY_REPLACE_SOFT_DELETE_REVIVE_OWNER = (
-    _LEGACY_CREATE_SOFT_DELETE_REVIVE_OWNER_FUNCTION
-    + _CREATE_SOFT_DELETE_REVIVE_TRIGGER.replace('CREATE TRIGGER', 'CREATE OR REPLACE TRIGGER', 1)
 )
 
 # ---- Private, non-frozen owned-rule templates: the cascade pair above with the predicate

@@ -41,7 +41,7 @@ from tests.conftest import clear_cascade_coverage, execute, scalar
 CHILD, OWNER = 'testapp_setlistentry', 'testapp_setlist'
 KEY = (CHILD, OWNER, None)
 # The owner's one revive trigger since 2.16.0 (#70), carrying the child's arm.
-REVIVE = 'soft_delete_revive_on_15_testapp_setlist'
+REVIVE = 'soft_delete_cascade_on_15_testapp_setlist'
 # The per-key trigger it superseded, which a retirement still drops ``IF EXISTS``.
 PER_KEY_REVIVE = 'soft_delete_revive_15_testapp_setlist_20_testapp_setlistentry'
 
@@ -118,7 +118,7 @@ def _command(monkeypatch, *, dropped: set[str]):
     )
     command.existing.soft_delete_related[KEY] = 'abc'
     command.existing.soft_delete_revive[KEY] = 'def'
-    command.existing.soft_delete_revive_owner[(OWNER,)] = 'ghi'
+    command.existing.soft_delete_cascade_owner[(OWNER,)] = 'ghi'
     return command
 
 
@@ -212,7 +212,7 @@ class TestADroppedChildIsRetired:
         """Before 2.11.0 there was no revive trigger, so nothing is broken to warn about."""
         command = _command(monkeypatch, dropped={CHILD})
         command.existing.soft_delete_revive.clear()
-        command.existing.soft_delete_revive_owner.clear()
+        command.existing.soft_delete_cascade_owner.clear()
 
         assert command._scoped_cascade_retirement_notes({'crossapp_owner'}) == []
 
@@ -247,7 +247,7 @@ class TestADroppedChildIsRetired:
         settings.LOCAL_APPS = [*settings.LOCAL_APPS, 'tests.crossapp_owner']
         command = _command(monkeypatch, dropped={CHILD})
         command.existing.soft_delete_revive.clear()
-        command.existing.soft_delete_revive_owner_dependencies[(OWNER,)] = [
+        command.existing.soft_delete_cascade_owner_dependencies[(OWNER,)] = [
             ('crossapp_owner', '0003_auto_enforcement')
         ]
 

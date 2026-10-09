@@ -100,7 +100,7 @@ def test_build_operations_emits_trigger_rule_and_cascade_ops():
     (band,) = [
         op
         for op in command._build_operations(apps.get_app_config('testapp'))
-        if op.startswith('# Soft Delete Revive Trigger on "testapp_band"')
+        if op.startswith('# Soft Delete Cascade Trigger on "testapp_band"')
     ]
     assert 'UPDATE "testapp_album" AS guitars_child' in band
     assert 'SET _deleted_at = guitars_archived._deleted_at' in band
@@ -126,7 +126,7 @@ def test_build_operations_emits_mti_ops_for_child_models():
     (ensemble,) = [
         op
         for op in command_ops
-        if op.startswith('# Soft Delete Revive Trigger on "testapp_ensemble"')
+        if op.startswith('# Soft Delete Cascade Trigger on "testapp_ensemble"')
     ]
     assert 'UPDATE "testapp_section" AS guitars_child' in ensemble
     assert 'Soft Delete Related Rule' not in ops
@@ -265,9 +265,9 @@ def test_cascade_operations_disambiguates_two_fks_to_the_same_related_table():
     (revive,) = [
         op
         for op in command._revive_operations(django_apps.get_app_config('testapp'))
-        if op.startswith('# Soft Delete Revive Trigger on "testapp_album" table!')
+        if op.startswith('# Soft Delete Cascade Trigger on "testapp_album" table!')
     ]
-    assert 'TRIGGER "soft_delete_revive_on_13_testapp_album"' in revive
+    assert 'TRIGGER "soft_delete_cascade_on_13_testapp_album"' in revive
     assert 'guitars_child."album_id" = guitars_revived."id"' in revive
     assert 'guitars_child."bonus_album_id" = guitars_revived."id"' in revive
     assert 'guitars_child."album_id" = guitars_archived.guitars_key' in revive
@@ -1012,9 +1012,9 @@ def _record_cascade_key(*, both: bool):
     def setup(command):
         key = (Album._meta.db_table, Band._meta.db_table, None)
         command.existing.soft_delete_related[key] = None
-        command.existing.soft_delete_revive_owner.clear()
+        command.existing.soft_delete_cascade_owner.clear()
         if both:
-            command.existing.soft_delete_revive_owner[(Band._meta.db_table,)] = None
+            command.existing.soft_delete_cascade_owner[(Band._meta.db_table,)] = None
 
     return setup
 
@@ -3057,7 +3057,7 @@ def test_upgrading_to_the_revive_family_never_drops_the_cascade_rule_first(adopt
     command = Command()
     command.existing.soft_delete_related[('testapp_album', 'testapp_band', None)] = 'stale0000000'
     command.existing.soft_delete_revive.clear()
-    command.existing.soft_delete_revive_owner.clear()
+    command.existing.soft_delete_cascade_owner.clear()
 
     built = command._build_operations(apps.get_app_config('testapp'), adopt=adopt)
     (cascade,) = [
@@ -3067,7 +3067,7 @@ def test_upgrading_to_the_revive_family_never_drops_the_cascade_rule_first(adopt
     ]
     # Since 2.16.0 the inverse is the owner's one trigger (#70), and since 2.19.0 it archives.
     (revive,) = [
-        op for op in built if op.startswith('# Soft Delete Revive Trigger on "testapp_band" table!')
+        op for op in built if op.startswith('# Soft Delete Cascade Trigger on "testapp_band" table!')
     ]
     assert built.index(revive) < built.index(cascade)
     assert 'guitars_child."band_id" = guitars_revived."id"' in revive

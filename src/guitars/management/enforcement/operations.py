@@ -45,12 +45,13 @@ from guitars.management.enforcement.headers import (
     HEADER_MTI_SOFT_DELETE,
     HEADER_MTI_UPDATED_AT,
     HEADER_SOFT_DELETE,
+    HEADER_SOFT_DELETE_CASCADE_OWNER,
+    HEADER_SOFT_DELETE_CASCADE_OWNER_RETIRED,
     HEADER_SOFT_DELETE_OWNED_RETIRED,
     HEADER_SOFT_DELETE_OWNED_SWEEP,
     HEADER_SOFT_DELETE_OWNED_SWEEP_RETIRED,
     HEADER_SOFT_DELETE_RELATED_RETIRED,
     HEADER_SOFT_DELETE_RELATED_VIA_RETIRED,
-    HEADER_SOFT_DELETE_REVIVE_OWNER,
     HEADER_SOFT_DELETE_REVIVE_OWNER_RETIRED,
     HEADER_SOFT_DELETE_REVIVE_RETIRED,
     HEADER_SOFT_DELETE_REVIVE_VIA_RETIRED,
@@ -191,17 +192,28 @@ def _revive_name(owner_table: str, related_table: str, foreign_key: str | None =
     return _identifiers._safe_ident('_'.join(parts))
 
 
-def _revive_owner_name(owner_table: str) -> str:
-    """The per-owner revive's identifier (2.16.0, #70), for its function and its trigger. The
-    literal ``on`` keeps it apart from :func:`_revive_name`, whose next segment is sized and so
-    opens with a digit; the owner spelled whole, schema included, for that function's reason."""
+def _owner_trigger_name(prefix: str, owner_table: str) -> str:
+    """An owner trigger's identifier, for its function and its trigger. The literal ``on`` keeps
+    it apart from :func:`_revive_name`, whose next segment is sized and so opens with a digit;
+    the owner spelled whole, schema included, for that function's reason."""
     owner_schema, bare_owner = _identifiers._split_qualified('table', owner_table)
     parts = [
-        'soft_delete_revive_on',
+        prefix,
         *([] if owner_schema is None else [_sized(owner_schema)]),
         _sized(bare_owner),
     ]
     return _identifiers._safe_ident('_'.join(parts))
+
+
+def _revive_owner_name(owner_table: str) -> str:
+    """The per-owner revive's identifier (2.16.0, #70), the trigger 2.19.0 superseded (#80): read
+    for the retirement that drops it, and for the prior names a rename left behind."""
+    return _owner_trigger_name('soft_delete_revive_on', owner_table)
+
+
+def _cascade_owner_name(owner_table: str) -> str:
+    """The per-owner trigger's identifier since it archives as well as revives (2.19.0, #80)."""
+    return _owner_trigger_name('soft_delete_cascade_on', owner_table)
 
 
 def _referenced_key(model: type[models.Model], column: str, owner_pk: str) -> str:
@@ -953,7 +965,7 @@ class OperationsMixin:
         return self._revive_arm_sources
 
     def _revive_host(self, owner_table: str) -> str | None:
-        """The app writing *owner_table*'s revive trigger, for life: the app whose migrations
+        """The app writing *owner_table*'s cascade trigger, for life: the app whose migrations
         created it; else the table's own host, as retirement's is; else -- an owner outside
         ``LOCAL_APPS`` -- the smallest-label app contributing an arm."""
         # Kept with its creator because any other host could move -- contributors change, the
@@ -967,7 +979,11 @@ class OperationsMixin:
         if owner is not None and not migrates_to_postgresql(owner):
             return None
         local = {app.label for app in django_apps.get_app_configs() if _generator.is_local(app)}
-        creates = self.existing.soft_delete_revive_owner_dependencies.get((owner_table,), [])
+        # The family that supersedes the revive-only trigger is hosted where that was: the app
+        # that created either, for life, so the legacy retirement lands beside the new create.
+        creates = self.existing.soft_delete_cascade_owner_dependencies.get(
+            (owner_table,), []
+        ) or self.existing.soft_delete_revive_owner_dependencies.get((owner_table,), [])
         created_in = [label for label, _migration in creates if label in local]
         if created_in:
             return created_in[-1]
@@ -1078,11 +1094,39 @@ class OperationsMixin:
                 self.existing.soft_delete_self_cascade_dependencies,
             )
             operations.append(self._retirement(app.label, header, drop, name, table))
-        # An owner whose last cascade key went: its revive has no arm left (2.16.0, #70). An
+        # An owner whose last cascade key went: its trigger has no arm left (2.16.0, #70). An
         # owner keeping any key is re-emitted with the arm gone instead, by its digest moving.
         owed = set(self._revive_arms_by_owner())
-        for (table,) in sorted(set(self.existing.soft_delete_revive_owner)):
+        for (table,) in sorted(set(self.existing.soft_delete_cascade_owner)):
             if table in owed or self._revive_host(table) != app.label:
+                continue
+            header = HEADER_SOFT_DELETE_CASCADE_OWNER_RETIRED.format(
+                table=_identifiers._escape_ident(table)
+            )
+            drop = self._drop_prior_triggers(
+                {'table': quote(table)},
+                [_cascade_owner_name(name) for name in (*self._prior_names(table), table)],
+            )
+            self._record_retirement_edge(
+                app.label, (table,), self.existing.soft_delete_cascade_owner_dependencies
+            )
+            operations.append(
+                self._retirement(app.label, header, drop, _cascade_owner_name(table), table)
+            )
+        operations += self._retired_revive_owner_operations(app, owed)
+        return operations
+
+    def _retired_revive_owner_operations(self, app: AppConfig, owed: set[str]) -> list[str]:
+        """Drop the revive-only owner trigger (2.16.0, #70) that the one archiving as well
+        supersedes (#80, ADR 0039): once the new one is written, reversing to it; or, its last key
+        gone, as any retirement does, with a reverse that refuses."""
+        operations: list[str] = []
+        quote = _identifiers._quote_table
+        for (table,) in sorted(set(self.existing.soft_delete_revive_owner)):
+            if self._revive_host(table) != app.label:
+                continue
+            carried = table in owed
+            if carried and self._revive_owner_slots(table, quiet=True) is None:
                 continue
             header = HEADER_SOFT_DELETE_REVIVE_OWNER_RETIRED.format(
                 table=_identifiers._escape_ident(table)
@@ -1094,10 +1138,26 @@ class OperationsMixin:
             self._record_retirement_edge(
                 app.label, (table,), self.existing.soft_delete_revive_owner_dependencies
             )
-            operations.append(
-                self._retirement(app.label, header, drop, _revive_owner_name(table), table)
-            )
+            if not carried:
+                operations.append(
+                    self._retirement(app.label, header, drop, _revive_owner_name(table), table)
+                )
+                continue
+            # Its operation set may recur once it is re-adopted and retired again.
+            self.existing.retirement_apps.add(app.label)
+            source, _ = _operation(header, drop, self._legacy_revive_owner_reverse(table))
+            operations.append(source)
         return operations
+
+    def _legacy_revive_owner_reverse(self, owner_table: str) -> str:
+        """The revive-only trigger a 2.19.0 retirement drops, rebuilt as 2.16.0 wrote it: its arms
+        are the owner's current ones, its name the old spelling."""
+        # The caller asked: it only retires an owner it still owes a trigger.
+        slots = cast('dict', self._revive_owner_slots(owner_table, quiet=True))
+        name = _revive_owner_name(owner_table)
+        return _soft_delete._LEGACY_CREATE_SOFT_DELETE_REVIVE_OWNER.format(
+            **{**slots, 'function': name, 'trigger': name}
+        )
 
     def _retirement(self, app_label: str, header: str, drop: str, name: str, table: str) -> str:
         """One #66 retirement: the drop, and a reverse that refuses and points at ``--adopt``."""
@@ -2053,7 +2113,7 @@ class OperationsMixin:
             )
 
     def _revive_operations(self, app: AppConfig, *, adopt: bool = False) -> list[str]:
-        """One revive trigger per owner table *app* hosts, carrying every cascade key's arm
+        """One cascade trigger per owner table *app* hosts, carrying every cascade key's arm
         (2.16.0, #70, ADR 0033): a plain ``UPDATE`` of the owner fires it once, and it leaves at
         its first test unless the statement revived a row. Hosted by :meth:`_revive_host`."""
         operations: list[str] = []
@@ -2065,19 +2125,19 @@ class OperationsMixin:
                 # Every arm, or the owner, refused: nothing is emitted and, its keys still
                 # calling for arms, nothing retires it -- so a recorded one is named for a hand
                 # drop, as the per-key trigger's refusal was, failing ``--check``.
-                if (owner_table,) in self.existing.soft_delete_revive_owner:
+                if (owner_table,) in self.existing.soft_delete_cascade_owner:
                     # Every spelling: a trigger moves with its renamed table under its old name.
                     drops = ' '.join(
                         f'DROP TRIGGER IF EXISTS {name} ON '
                         f'{_identifiers._quote_table(owner_table)}; '
                         f'DROP FUNCTION IF EXISTS {name}();'
                         for name in (
-                            _revive_owner_name(table)
+                            _cascade_owner_name(table)
                             for table in (*self._prior_names(owner_table), owner_table)
                         )
                     )
                     self._refusals_over_live_rules.append(
-                        f"Revive trigger on '{owner_table}' is refused but already exists in "
+                        f"Cascade trigger on '{owner_table}' is refused but already exists in "
                         "this project's migrations. It is still live in any migrated database. "
                         f'Drop it by hand: {drops}'
                     )
@@ -2091,14 +2151,14 @@ class OperationsMixin:
             self._record_readoption_edge(
                 app.label,
                 key,
-                self.existing.soft_delete_revive_owner,
-                self.existing.revive_owner_retirement_sites,
+                self.existing.soft_delete_cascade_owner,
+                self.existing.cascade_owner_retirement_sites,
             )
             self._append_if_stale(
                 operations,
-                self.existing.soft_delete_revive_owner,
+                self.existing.soft_delete_cascade_owner,
                 key,
-                HEADER_SOFT_DELETE_REVIVE_OWNER.format(
+                HEADER_SOFT_DELETE_CASCADE_OWNER.format(
                     table=_identifiers._escape_ident(owner_table)
                 ),
                 _soft_delete._CREATE_SOFT_DELETE_REVIVE_OWNER.format(**slots),
@@ -2110,19 +2170,18 @@ class OperationsMixin:
                     slots, owner_table, unrenamed=_soft_delete._ADOPT_SOFT_DELETE_REVIVE_OWNER
                 ),
                 is_adopt=adopt,
-                restore=self._legacy_revive_owner_restore(slots),
             )
         return operations
 
     def _revive_owner_slots(self, owner_table: str, *, quiet: bool = False) -> dict | None:
-        """Every slot of *owner_table*'s revive trigger, arms rendered, or ``None`` where every
+        """Every slot of *owner_table*'s cascade trigger, arms rendered, or ``None`` where every
         arm or the owner itself is refused. *quiet* for a caller only comparing digests, so a
         refusal is reported once, by the run that emits."""
         self._cascade_key_maps()
         owner, _contributors = self._revive_owners[owner_table]
         owner = owner._meta.concrete_model or owner
         arms = self._revive_arms_by_owner()[owner_table]
-        name = _revive_owner_name(owner_table)
+        name = _cascade_owner_name(owner_table)
         slots = {
             'function': name,
             'trigger': name,
@@ -2148,7 +2207,7 @@ class OperationsMixin:
         if any('$$' in slots[slot] for slot in ('function', 'table', 'primary_key')):
             if not quiet:
                 self._skipped_rule_notes.append(
-                    f"Revive trigger on '{owner_table}' skipped: its table or primary key "
+                    f"Cascade trigger on '{owner_table}' skipped: its table or primary key "
                     'contains "$$", which closes the dollar quoting this trigger function '
                     'depends on. Set a db_table / db_column without it.'
                 )
@@ -2257,22 +2316,13 @@ class OperationsMixin:
         )
         return template.format(**slots)
 
-    @staticmethod
-    def _legacy_revive_owner_restore(slots: dict) -> tuple[str, str]:
-        """``(digest, reverse)`` for replacing the revive-only trigger 2.16.0 -- 2.18.x wrote:
-        unapplying that migration rebuilds it, rather than leaving the owner with no revive
-        (ADR 0039). Keyed on the digest it recorded, so any other predecessor reverses to a drop."""
-        forward = _soft_delete._LEGACY_CREATE_SOFT_DELETE_REVIVE_OWNER.format(**slots)
-        digest = _sql_digest(forward, _soft_delete._DROP_SOFT_DELETE_REVIVE.format(**slots))
-        return digest, _soft_delete._LEGACY_REPLACE_SOFT_DELETE_REVIVE_OWNER.format(**slots)
-
     def _revive_owner_form(self, slots: dict, owner_table: str, *, unrenamed: str) -> str:
         """:meth:`_self_cascade_form` for the per-owner revive: the name spells the owner
         alone, so only the owner's rename leaves a prior spelling to drop."""
         if not self._renamed(owner_table):
             return unrenamed.format(**slots)
         return self._drop_prior_triggers(
-            slots, [_revive_owner_name(name) for name in self._prior_names(owner_table)]
+            slots, [_cascade_owner_name(name) for name in self._prior_names(owner_table)]
         ) + _soft_delete._ADOPT_SOFT_DELETE_REVIVE_OWNER.format(**slots)
 
     def _cascade_operations(self, model: type[models.Model], *, adopt: bool = False) -> list[str]:
@@ -3007,15 +3057,15 @@ class OperationsMixin:
         ] + self._scoped_revive_notes(requested)
 
     def _scoped_revive_notes(self, requested: set[str]) -> list[str]:
-        """An owner's revive trigger a scoped run leaves missing, stale or unretired because its
+        """An owner's cascade trigger a scoped run leaves missing, stale or unretired because its
         app is out of scope (#70): its arms can come from the apps in scope, an MTI descendant's
         key above all, and nothing else this run writes would say so."""
         notes = []
         owed = self._revive_arms_by_owner()
         for owner_table in sorted(
-            set(owed) | {key[0] for key in self.existing.soft_delete_revive_owner}
+            set(owed) | {key[0] for key in self.existing.soft_delete_cascade_owner}
         ):
-            recorded = self.existing.soft_delete_revive_owner
+            recorded = self.existing.soft_delete_cascade_owner
             if owner_table in owed:
                 host = self._revive_host(owner_table)
                 slots = self._revive_owner_slots(owner_table, quiet=True)
@@ -3036,7 +3086,7 @@ class OperationsMixin:
             if host is None or host in requested:
                 continue
             notes.append(
-                f"Revive trigger {_revive_owner_name(owner_table)} on '{owner_table}' is {state}, "
+                f"Cascade trigger {_cascade_owner_name(owner_table)} on '{owner_table}' is {state}, "
                 f"and only a run including '{host}' writes it: until then an archive or a revive "
                 'there may leave children live or archived, or fail on an arm naming a column or '
                 'table now gone.'

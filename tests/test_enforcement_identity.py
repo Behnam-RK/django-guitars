@@ -97,6 +97,16 @@ HEADER_SCANNERS = [
         {'table': 'shop_order'},
     ),
     (
+        headers_module.HEADER_SOFT_DELETE_CASCADE_OWNER,
+        headers_module._RE_SOFT_DELETE_CASCADE_OWNER,
+        {'table': 'shop_order'},
+    ),
+    (
+        headers_module.HEADER_SOFT_DELETE_CASCADE_OWNER_RETIRED,
+        headers_module._RE_SOFT_DELETE_CASCADE_OWNER_RETIRED,
+        {'table': 'shop_order'},
+    ),
+    (
         headers_module.HEADER_SOFT_DELETE_SELF_CASCADE,
         headers_module._RE_SOFT_DELETE_SELF_CASCADE,
         {'table': 'shop_order', 'foreign_key': 'parent_id'},

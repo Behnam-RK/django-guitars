@@ -89,7 +89,7 @@ class TestTheJoinedArm:
         (revive,) = [
             op
             for op in command._revive_operations(apps.get_app_config('testapp'))
-            if op.startswith('# Soft Delete Revive Trigger on "testapp_label" table!')
+            if op.startswith('# Soft Delete Cascade Trigger on "testapp_label" table!')
         ]
         # Past the archive half and the refusal, which name the same links: the revive's own.
         revive = revive[revive.index('guitars_before._deleted_at IS NOT NULL') :]

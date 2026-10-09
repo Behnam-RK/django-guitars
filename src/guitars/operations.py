@@ -129,6 +129,7 @@ BEGIN
                   OR guitars_trigger.tgname LIKE 'soft\\_delete\\_self\\_cascade%'
                   OR guitars_trigger.tgname LIKE 'soft\\_delete\\_owned\\_sweep%'
                   OR guitars_trigger.tgname LIKE 'soft\\_delete\\_revive%'
+                  OR guitars_trigger.tgname LIKE 'soft\\_delete\\_cascade\\_on%'
                   OR guitars_trigger.tgname LIKE 'guitars\\_fill%'
               )
         LOOP

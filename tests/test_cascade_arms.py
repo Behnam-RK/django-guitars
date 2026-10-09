@@ -123,7 +123,7 @@ def test_the_migrations_reverse_rebuilds_the_rules_and_the_revive_only_trigger(d
     """Unapplying 0085 leaves no gap: every rule it dropped is back, as 2.18 wrote it, and the
     owner's trigger is the revive-only one again. Run off the migration's own ``reverse_sql``."""
     module = import_module('tests.testapp.migrations.0085_auto_enforcement')
-    function = 'soft_delete_revive_on_12_testapp_band'
+    legacy, current = 'soft_delete_revive_on_12_testapp_band', 'soft_delete_cascade_on_12_testapp_band'
 
     with transaction.atomic():
         for operation in reversed(module.Migration.operations):
@@ -133,11 +133,13 @@ def test_the_migrations_reverse_rebuilds_the_rules_and_the_revive_only_trigger(d
             "SELECT count(*) FROM pg_rules WHERE tablename LIKE 'testapp\\_%' "
             "AND (rulename LIKE 'soft\\_delete\\_related%' OR rulename LIKE 'soft\\_delete\\_owned%')"
         )
-        body = scalar("SELECT prosrc FROM pg_proc WHERE proname = %s", [function])
+        body = scalar("SELECT prosrc FROM pg_proc WHERE proname = %s", [legacy])
+        gone = scalar("SELECT count(*) FROM pg_proc WHERE proname = %s", [current])
         transaction.set_rollback(True)
 
     assert rules > 0
     assert 'guitars_archived' not in body and 'guitars_revived' in body
+    assert gone == 0
 
 
 def test_archiving_a_row_while_rewriting_its_key_is_refused_over_a_live_child(two_bands):

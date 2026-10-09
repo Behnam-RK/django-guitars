@@ -128,3 +128,4 @@ def clear_cascade_coverage(command) -> None:
     command.existing.soft_delete_related.clear()
     command.existing.soft_delete_revive.clear()
     command.existing.soft_delete_revive_owner.clear()
+    command.existing.soft_delete_cascade_owner.clear()

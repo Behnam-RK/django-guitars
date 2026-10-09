@@ -53,7 +53,7 @@ def test_upgrading_an_already_migrated_legacy_project():
         # trigger, which carries the band<->album cascade as an arm and its inverse (2.11.0, and
         # no *rule* since 2.19.0, #80): a legacy project receives both on its upgrade.
         assert content.count('[SQL:') == 5, content
-        assert content.count('Soft Delete Revive Trigger') == 1, content
+        assert content.count('Soft Delete Cascade Trigger') == 1, content
         assert 'Soft Delete Related Rule' not in content, content
         # The *replace* form specifically, not a plain create: the generator knows this
         # object already exists (a header was found, just with no matching digest), and a

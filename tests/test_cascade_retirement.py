@@ -696,8 +696,8 @@ def test_the_create_path_records_that_edge_itself(command):
     which carries the cascade since 2.19.0 (#80) -- calls the recorder. Seeds a retirement for an
     owner the models still require: a re-adoption."""
     live = ('testapp_band',)
-    command.existing.soft_delete_revive_owner.pop(live, None)
-    command.existing.revive_owner_retirement_sites.append(
+    command.existing.soft_delete_cascade_owner.pop(live, None)
+    command.existing.cascade_owner_retirement_sites.append(
         _site('crossapp_owner', '0001_initial', ('crossapp_third', '0001_initial'))._replace(
             key=live
         )

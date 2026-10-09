@@ -223,7 +223,7 @@ def test_the_trigger_exists_on_the_table_and_the_rule_does_not(db):
     # The ordinary cascade to the entry table is an arm of the tree table's owner trigger since
     # 2.19.0 (#80, ADR 0039), not a rule beside it: the table holds none but its own.
     assert 'soft_delete_related_testapp_setlistentry' not in rules
-    assert 'soft_delete_revive_on_15_testapp_setlist' in triggers
+    assert 'soft_delete_cascade_on_15_testapp_setlist' in triggers
 
 
 def test_an_owned_sweep_fires_from_inside_the_self_cascade_trigger(db):

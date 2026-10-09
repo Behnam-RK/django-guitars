@@ -66,6 +66,17 @@ def test_table_mode_also_takes_the_tables_own_rules_and_triggers(db):
     assert _objects('testapp_setlist')[0] == ['soft_delete']
 
 
+def test_table_mode_takes_the_owners_cascade_trigger(db):
+    """The trigger that carries the table's cascade arms (2.19.0, #80) is one this kit mints,
+    so a whole-table retirement takes it with the rest; the self-cascade one goes too."""
+    before = _objects('testapp_setlist')[1]
+    assert 'soft_delete_cascade_on_15_testapp_setlist' in before
+
+    _apply(RetireEnforcement('testapp_setlist'))
+
+    assert _objects('testapp_setlist') == ([], [])
+
+
 def test_it_unblocks_the_drop_column_that_would_otherwise_fail(db):
     """The failure the operation exists for. Django 6.0's ``sql_delete_column`` carries no
     ``CASCADE``, so a rule naming the column makes ``RemoveField`` fail at ``migrate`` --
@@ -311,13 +322,13 @@ def test_the_scan_keeps_the_owners_revive_after_the_childs_retirement(monkeypatc
     Since 2.16.0 that trigger is the owner's one, keyed on the owner alone (#70)."""
     key = ('testapp_setlistentry', 'testapp_setlist', None)
     owner = ('testapp_setlist',)
-    assert owner in scan_existing_operations().soft_delete_revive_owner
+    assert owner in scan_existing_operations().soft_delete_cascade_owner
 
     _retire_at(monkeypatch, _stem_after_every_create(), 'testapp_setlistentry')
 
     existing = scan_existing_operations()
     assert key not in existing.soft_delete_related
-    assert owner in existing.soft_delete_revive_owner
+    assert owner in existing.soft_delete_cascade_owner
 
 
 def test_a_whole_table_retirement_of_the_owner_forgets_its_revive(monkeypatch):
@@ -327,7 +338,7 @@ def test_a_whole_table_retirement_of_the_owner_forgets_its_revive(monkeypatch):
 
     _retire_at(monkeypatch, _stem_after_every_create(), 'testapp_setlist')
 
-    assert owner not in scan_existing_operations().soft_delete_revive_owner
+    assert owner not in scan_existing_operations().soft_delete_cascade_owner
 
 
 def test_a_migration_after_the_retirement_records_the_key_again(monkeypatch):

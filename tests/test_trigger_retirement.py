@@ -35,7 +35,7 @@ def _command() -> Command:
 def _non_revive(notes: list[str]) -> list[str]:
     """*notes* less the revive family's: ``_command`` clears every recorded owner trigger, so a
     scoped run names each as missing beside the family a test is about."""
-    return [note for note in notes if not note.startswith('Revive trigger')]
+    return [note for note in notes if not note.startswith('Cascade trigger')]
 
 
 def _retired(command: Command) -> list[str]:

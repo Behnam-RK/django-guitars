@@ -233,7 +233,7 @@ def _owner_revive(command):
     (operation,) = [
         candidate
         for candidate in command._build_operations(apps.get_app_config('testapp'))
-        if candidate.startswith('# Soft Delete Revive Trigger on "testapp_band" table!')
+        if candidate.startswith('# Soft Delete Cascade Trigger on "testapp_band" table!')
     ]
     return operation.split('reverse_sql')[0]
 
@@ -243,13 +243,13 @@ def test_a_renamed_owners_revive_drops_its_old_name():
     both running the same arms on every update of that table."""
     command = Command()
     command.existing.renamed_tables['testapp_band'] = ['testapp_oldband']
-    command.existing.soft_delete_revive_owner[('testapp_band',)] = 'stale00000'
+    command.existing.soft_delete_cascade_owner[('testapp_band',)] = 'stale00000'
 
     forward = _owner_revive(command)
 
-    assert 'DROP TRIGGER IF EXISTS "soft_delete_revive_on_15_testapp_oldband"' in forward
-    assert 'DROP FUNCTION IF EXISTS "soft_delete_revive_on_15_testapp_oldband"()' in forward
-    assert 'CREATE OR REPLACE TRIGGER "soft_delete_revive_on_12_testapp_band"' in forward
+    assert 'DROP TRIGGER IF EXISTS "soft_delete_cascade_on_15_testapp_oldband"' in forward
+    assert 'DROP FUNCTION IF EXISTS "soft_delete_cascade_on_15_testapp_oldband"()' in forward
+    assert 'CREATE OR REPLACE TRIGGER "soft_delete_cascade_on_12_testapp_band"' in forward
 
 
 def test_a_rename_wrapped_in_separate_database_and_state_is_still_seen():
@@ -561,11 +561,11 @@ def test_a_revive_re_emission_replaces_its_trigger_without_dropping_it():
     EXCLUSIVE on every owner table of the app until the migration commits;
     ``CREATE OR REPLACE TRIGGER`` (PG 14) does neither (#80, ADR 0039)."""
     command = Command()
-    command.existing.soft_delete_revive_owner[('testapp_band',)] = 'stale00000'
+    command.existing.soft_delete_cascade_owner[('testapp_band',)] = 'stale00000'
 
     forward = _owner_revive(command)
 
-    assert 'CREATE OR REPLACE TRIGGER "soft_delete_revive_on_12_testapp_band"' in forward
+    assert 'CREATE OR REPLACE TRIGGER "soft_delete_cascade_on_12_testapp_band"' in forward
     assert 'DROP TRIGGER' not in forward
 
 

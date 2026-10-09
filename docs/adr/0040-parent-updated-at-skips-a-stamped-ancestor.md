@@ -20,7 +20,7 @@ Alternatives: one static function per child, which PL/pgSQL could plan once per 
 
 ## Why
 
-The guard is semantically a no-op, so it needs no opt-in and no new object to retire on a rename or drop. A per-child function would also drop the per-call planning, but a plpgsql body records no dependency, so each would need its own name, host, rename and retirement handling, for a statement of one probe and, now, usually no write. If planning proves to matter, it is a separate issue.
+The guard is semantically a no-op, so it needs no opt-in and no new object to retire on a rename or drop. A per-child function would also drop the per-call planning, but a plpgsql body records no dependency, so each would need its own name, host, rename and retirement handling, for a statement of one probe and, after a full `save()`, no write. A child-only change still pays the follow-up. If planning proves to matter, it is a separate issue.
 
 ## Consequences
 

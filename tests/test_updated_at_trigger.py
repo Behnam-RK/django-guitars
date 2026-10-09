@@ -200,15 +200,15 @@ def _create(model) -> int:
 
 
 @pytest.mark.django_db(transaction=True)
-@pytest.mark.parametrize('model', [Orchestra, ChamberOrchestra], ids=lambda m: m.__name__)
-def test_a_full_save_of_a_child_writes_its_ancestor_once(model):
+@pytest.mark.parametrize(('model', 'column', 'key'), _CHILDREN)
+def test_a_full_save_of_a_child_writes_its_ancestor_once(model, column, key):
     """Django updates the ancestor first, so its row trigger has stamped it by the time the child
     row's statement trigger runs; the follow-up then rewrote an identical value."""
     pk = _create(model)
 
     def save():
         instance = model.objects.get(pk=pk)
-        instance.name, instance.conductor = 'NYPO', 'Mahler'
+        instance.name = 'NYPO'
         instance.save()
 
     assert _ancestor_writes(save) == 1
@@ -251,7 +251,7 @@ def test_an_ancestor_already_stamped_this_transaction_is_not_rewritten():
 @pytest.mark.django_db(transaction=True)
 def test_the_three_argument_form_skips_too():
     """A trigger written before 2.0.0 passes three arguments and calls the same function: its
-    branch carries the guard as well. Put back as it was, the table is shared with later tests."""
+    branch carries the guard as well. Rolled back, so no later test meets the legacy trigger."""
     pk = _create(Orchestra)
     legacy = sql.CREATE_PARENT_UPDATED_AT_TRIGGER.format(
         child_table='testapp_orchestra',
@@ -260,24 +260,13 @@ def test_the_three_argument_form_skips_too():
         child_pk='ensemble_ptr_id',
     )
 
-    def touch():
+    with transaction.atomic():
         execute('DROP TRIGGER updated_at_trigger ON testapp_orchestra')
         execute(legacy)
-        _stamp_then_touch_child(pk)
+        writes = _ancestor_writes(lambda: _stamp_then_touch_child(pk))
+        transaction.set_rollback(True)
 
-    try:
-        assert _ancestor_writes(touch) == 1
-    finally:
-        execute('DROP TRIGGER updated_at_trigger ON testapp_orchestra')
-        execute(
-            _triggers._CREATE_PARENT_UPDATED_AT_TRIGGER.format(
-                child_table='testapp_orchestra',
-                parent_schema='',
-                parent_table='testapp_ensemble',
-                parent_pk='id',
-                child_pk='ensemble_ptr_id',
-            )
-        )
+    assert writes == 1
 
 
 def test_the_generated_reverse_puts_the_unguarded_body_back(db):

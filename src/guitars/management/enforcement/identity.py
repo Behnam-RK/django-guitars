@@ -49,16 +49,17 @@ def _operation(
     reverse: str | list[str],
     *,
     emit: str | list[str] | None = None,
+    emit_reverse: str | list[str] | None = None,
 ) -> tuple[str, str]:
-    """Render one ``RunSQL`` operation, returning ``(source, digest)``. *emit* substitutes
-    the replace/adopt form actually written, while the digest stays keyed to the canonical
-    *forward* -- digesting the emitted form instead makes successive runs disagree forever."""
+    """Render one ``RunSQL`` operation, returning ``(source, digest)``. *emit* and
+    *emit_reverse* substitute the replace/adopt forms actually written, while the digest stays
+    keyed to the canonical pair -- digesting the emitted form makes runs disagree forever."""
     digest = _sql_digest(forward, reverse)
     source = (
         f'{header} [SQL:{digest}]\n'
         f'migrations.RunSQL(\n'
         f'    sql={_sql_literal(emit if emit is not None else forward)},\n'
-        f'    reverse_sql={_sql_literal(reverse)},\n'
+        f'    reverse_sql={_sql_literal(emit_reverse if emit_reverse is not None else reverse)},\n'
         f'),\n'
     )
     return source, digest

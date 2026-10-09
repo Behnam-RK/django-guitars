@@ -3,9 +3,12 @@ each row an ``UPDATE`` touches is written once. The statement form it replaced i
 ``UPDATE``, writing every row twice, re-expanded by the table's ``ON UPDATE`` rules."""
 
 import pytest
+from django.apps import apps as django_apps
+from django.core.management import call_command
 from django.db import connection, transaction
 
-from tests.conftest import execute, rows
+from guitars.management.enforcement.command import Command
+from tests.conftest import execute, rows, scalar
 from tests.testapp.models import Album, Band, Merch
 
 
@@ -97,3 +100,52 @@ def test_the_trigger_is_a_row_trigger_before_the_update(db):
         (tgtype,) = cursor.fetchone()
     row, before = 1, 2
     assert tgtype & row and tgtype & before
+
+
+def _updated_at_op(recorded: str) -> str:
+    """The generated ``updated_at_trigger`` operation for ``Band`` against a history that
+    recorded *recorded* for its table."""
+    command = Command()
+    command.existing.triggers['testapp_band'] = recorded
+    operations = command._build_operations(django_apps.get_app_config('testapp'))
+    (operation,) = [op for op in operations if 'Updated at Trigger on "testapp_band"' in op]
+    return operation
+
+
+def test_replacing_the_statement_trigger_reverses_to_it():
+    """Unapplying the migration that swaps the trigger must not leave the table with none."""
+    legacy_digest, _ = Command._legacy_updated_at_restore('"testapp_band"', 'id')
+
+    operation = _updated_at_op(legacy_digest)
+
+    forward, reverse = operation.split('reverse_sql=')
+    assert 'CREATE OR REPLACE TRIGGER updated_at_trigger' in forward
+    assert 'AFTER UPDATE ON "testapp_band" REFERENCING NEW TABLE' in reverse
+    assert "set_updated_at('id')" in reverse
+
+
+def test_replacing_any_other_predecessor_reverses_to_a_drop():
+    """The restore is keyed on the digest the statement form recorded: a later replace of a
+    row trigger must not reverse to a trigger two shapes old."""
+    operation = _updated_at_op('stale0000000')
+
+    assert 'DROP TRIGGER updated_at_trigger ON "testapp_band"' in operation.split('reverse_sql=')[1]
+    assert 'AFTER UPDATE' not in operation
+
+
+@pytest.mark.django_db(transaction=True)
+def test_unapplying_the_replacement_puts_the_statement_trigger_back():
+    """Against real PostgreSQL: ``migrate`` back across the replacement, then forward again."""
+    sql = (
+        "SELECT tgtype FROM pg_trigger WHERE tgname = 'updated_at_trigger' "
+        "AND tgrelid = 'testapp_band'::regclass"
+    )
+    try:
+        call_command('migrate', 'testapp', '0082_auto_enforcement_stamp_function', verbosity=0)
+        statement_level = scalar(sql)
+    finally:
+        call_command('migrate', 'testapp', verbosity=0)
+
+    row, before = 1, 2
+    assert not statement_level & (row | before)
+    assert scalar(sql) & row and scalar(sql) & before

@@ -67,9 +67,9 @@ DROP_UPDATED_AT_TRIGGER = """
     DROP TRIGGER updated_at_trigger ON {table};
 """
 
-# No CREATE OR REPLACE TRIGGER before PG 14, so refreshed via drop-then-create (ACCESS
-# EXCLUSIVE, no window). IF EXISTS is a knowledge claim: REPLACE_ fails loudly on
-# divergence; ADOPT_ (--adopt only) is honest about not knowing what's there.
+# Frozen, drop-then-create: it predates PG 14's CREATE OR REPLACE TRIGGER, which the private
+# stamp form uses. IF EXISTS is a knowledge claim: REPLACE_ fails loudly on divergence;
+# ADOPT_ (--adopt only) is honest about not knowing what's there.
 REPLACE_UPDATED_AT_TRIGGER = (
     """
     DROP TRIGGER updated_at_trigger ON {table};
@@ -121,10 +121,11 @@ _DROP_STAMP_UPDATED_AT_TRIGGER = """
     DROP TRIGGER updated_at_trigger ON {table};
 """
 
-# Same two-form split as REPLACE_/ADOPT_UPDATED_AT_TRIGGER above. The replace is what a
-# migrated database takes: it holds the statement-level trigger under the same name.
-_REPLACE_STAMP_UPDATED_AT_TRIGGER = (
-    _DROP_STAMP_UPDATED_AT_TRIGGER + _CREATE_STAMP_UPDATED_AT_TRIGGER
+# The replace is what a migrated database takes (it holds the statement trigger under this
+# name): ``CREATE OR REPLACE TRIGGER`` (PG 14, the floor) swaps it without ``DROP``'s ACCESS
+# EXCLUSIVE, which one migration per app would otherwise hold on every table at once.
+_REPLACE_STAMP_UPDATED_AT_TRIGGER = _CREATE_STAMP_UPDATED_AT_TRIGGER.replace(
+    'CREATE TRIGGER', 'CREATE OR REPLACE TRIGGER', 1
 )
 
 _ADOPT_STAMP_UPDATED_AT_TRIGGER = (

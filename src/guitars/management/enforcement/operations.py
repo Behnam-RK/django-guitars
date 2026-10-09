@@ -126,6 +126,8 @@ class _OperationRow(NamedTuple):
     reverse: str | list[str]
     replace: str | list[str] | None = None
     adopt: str | list[str] | None = None
+    #: ``(recorded digest, reverse SQL)``: a replace of exactly that predecessor undoes to it.
+    restore: tuple[str, str | list[str]] | None = None
 
 
 def _rule_stem(prefix: str, table: str) -> str:
@@ -299,7 +301,6 @@ class OperationsMixin:
         #: Keyed on the name alone, unlike the above: a sweep's function is namespaced per
         #: schema, so two owner tables can collide on one where their rules cannot.
         _claimed_sweep_names: dict[str, tuple]
-        trigger_function_dependency: tuple[str, str] | None
         parent_trigger_function_dependency: tuple[str, str] | None
         stamp_function_dependency: tuple[str, str] | None
         tenant_autofill_dependencies: dict[str, tuple[str, str]]
@@ -477,10 +478,11 @@ class OperationsMixin:
         is_adopt: bool = False,
         replace: str | list[str] | None = None,
         adopt: str | list[str] | None = None,
+        restore: tuple[str, str | list[str]] | None = None,
     ) -> None:
-        """Append one operation unless already current. Which of the three forms
-        (plain/replace/adopt) is decided by what the migration history knows -- see
-        ``docs/migrations.md``'s three-forms section. *adopt* is the SQL for it."""
+        """Append one operation unless already current: plain, replace or adopt form, decided by
+        what the migration history knows (``docs/migrations.md``). *restore* is the reverse of a
+        replace whose recorded predecessor it names."""
         source, digest = _operation(header, forward, reverse)
         if is_adopt:
             source, _ = _operation(header, forward, reverse, emit=adopt or replace or forward)
@@ -489,8 +491,24 @@ class OperationsMixin:
         elif recorded[key] == digest:
             return
         else:
-            source, _ = _operation(header, forward, reverse, emit=replace or forward)
+            undo = restore[1] if restore is not None and recorded[key] == restore[0] else None
+            source, _ = _operation(
+                header, forward, reverse, emit=replace or forward, emit_reverse=undo
+            )
         operations.append(source)
+
+    @staticmethod
+    def _legacy_updated_at_restore(qualified_table: str, primary_key: str) -> tuple[str, str]:
+        """``(digest, reverse)`` for replacing the pre-2.19.0 statement trigger: unapplying that
+        migration puts it back rather than leaving the table with none (ADR 0038). Keyed on the
+        digest that form recorded, so a later replace of a row trigger reverses to a drop."""
+        literal_key = _identifiers._escape_literal(primary_key)
+        forward = sql.CREATE_UPDATED_AT_TRIGGER.format(
+            table=qualified_table, primary_key=literal_key
+        )
+        reverse = sql.DROP_UPDATED_AT_TRIGGER.format(table=qualified_table)
+        undo = forward.replace('CREATE TRIGGER', 'CREATE OR REPLACE TRIGGER', 1)
+        return _sql_digest(forward, reverse), undo
 
     @staticmethod
     def _mti_context(model: type[models.Model], table: str, column: str) -> dict[str, str]:
@@ -569,6 +587,7 @@ class OperationsMixin:
                         adopt=_triggers._ADOPT_STAMP_UPDATED_AT_TRIGGER.format(
                             table=qualified_table
                         ),
+                        restore=self._legacy_updated_at_restore(qualified_table, primary_key),
                     )
                 )
             elif is_mti_child(model, '_updated_at') and not own_key:
@@ -683,6 +702,7 @@ class OperationsMixin:
                     is_adopt=adopt,
                     replace=row.replace,
                     adopt=row.adopt,
+                    restore=row.restore,
                 )
 
             # --- cascade rules for CASCADE FKs pointing at this model (deferred so they

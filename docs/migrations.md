@@ -42,7 +42,7 @@ Each operation is emitted in one of three forms, chosen from what history record
 | a different/no `[SQL:…]` | `DROP`+`CREATE`, no `IF EXISTS` | Known to be ours; an unguarded drop reports drift instead of hiding it. |
 | `--adopt` | `DROP … IF EXISTS`+`CREATE` | The flag's premise is that nobody knows what the database holds. |
 
-Soft-delete rules and trigger functions are the two exceptions, always `CREATE OR REPLACE` — no instant without a rule, and `DROP FUNCTION` refuses while any trigger depends on it. `--adopt [app_label …]` exists because `create_tenant_policy` is a bare `CREATE POLICY` (no `IF NOT EXISTS`), so an unrecorded-but-real policy used to fail `migrate` with *already exists*. Cannot combine with `--force-rls` — run `--adopt` first.
+Soft-delete rules and trigger functions are the two exceptions, always `CREATE OR REPLACE` — no instant without a rule, and `DROP FUNCTION` refuses while any trigger depends on it. Since 2.19.0 the `_updated_at` row trigger's replace is `CREATE OR REPLACE TRIGGER` too (one migration per app would hold `ACCESS EXCLUSIVE` on every table until it commits), reversing to the statement trigger it replaced ([ADR 0038](adr/0038-updated-at-is-a-row-trigger.md)). `--adopt [app_label …]` exists because `create_tenant_policy` is a bare `CREATE POLICY` (no `IF NOT EXISTS`), so an unrecorded-but-real policy used to fail `migrate` with *already exists*. Cannot combine with `--force-rls` — run `--adopt` first.
 
 ## Rule names
 

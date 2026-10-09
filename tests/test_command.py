@@ -906,7 +906,7 @@ def test_handle_generates_only_for_named_apps(monkeypatch):
         command.existing.soft_deletes.clear()
         clear_cascade_coverage(command)
         # ...and the shared trigger-function migration is already in place.
-        command.trigger_function_dependency = ('testapp', '0001_pretend')
+        command.stamp_function_dependency = ('testapp', '0001_pretend')
         command.existing.existing_digests.clear()
         monkeypatch.setattr(command, '_write_migration_file', lambda **k: None)
         monkeypatch.setattr(
@@ -936,7 +936,7 @@ def test_handle_skips_an_in_scope_app_with_no_operations(monkeypatch):
     command.existing.triggers.clear()
     command.existing.soft_deletes.clear()
     clear_cascade_coverage(command)
-    command.trigger_function_dependency = ('testapp', '0001_pretend')
+    command.stamp_function_dependency = ('testapp', '0001_pretend')
     monkeypatch.setattr(command, '_build_operations', lambda app, **kwargs: [])
     monkeypatch.setattr(
         _generator,
@@ -1119,7 +1119,7 @@ def test_handle_skips_app_when_digest_already_exists(monkeypatch):
     command.existing.triggers.clear()
     command.existing.soft_deletes.clear()
     clear_cascade_coverage(command)
-    command.trigger_function_dependency = ('testapp', '0001_pretend')
+    command.stamp_function_dependency = ('testapp', '0001_pretend')
     # The exact digest handle() will compute for this app's operations, given the state
     # above -- recorded ahead of time rather than faked, so _sql_digest (which the
     # trigger-function-migration check also goes through) is untouched.
@@ -1147,7 +1147,7 @@ def test_handle_check_only_reports_missing_migrations_and_rule_warnings(monkeypa
     clear_cascade_coverage(command)
     command.existing.mti_triggers.clear()
     command.existing.mti_soft_deletes.clear()
-    command.trigger_function_dependency = ('testapp', '0001_pretend')
+    command.stamp_function_dependency = ('testapp', '0001_pretend')
     command.parent_trigger_function_dependency = ('testapp', '0001_pretend_parent')
     command.existing.existing_digests.clear()
     # Surfaced regardless of check_only -- seeded directly rather than relying on a real
@@ -1274,9 +1274,6 @@ def test_function_dependencies_for_only_includes_deps_the_operations_use():
     """A per-app migration depends on a function migration only when its operations
     actually call it -- soft-delete/cascade rules call none, so those apps depend on neither."""
     command = Command()
-    # The frozen ``set_updated_at`` migration is history nothing calls (ADR 0038): seeded so an
-    # own-table trigger depending on it, rather than on the stamp function, fails the asserts.
-    command.trigger_function_dependency = ('testapp', '0002_trigger_function')
     command.stamp_function_dependency = ('testapp', '0003_stamp_function')
     command.parent_trigger_function_dependency = ('testapp', '0006_parent_trigger_function')
 
@@ -1341,10 +1338,10 @@ def _command_with_scaffold(monkeypatch, tmp_path, filename='0002_auto_enforcemen
             '0003_auto_enforcement_parent_trigger_function.py',
             'parent_trigger_function_dependency',
             '_ensure_parent_trigger_function_migration',
-            None,
+            ('stamp_function_dependency', ('testapp', '0002_auto_enforcement_stamp_function')),
             'CREATE FUNCTION set_parent_updated_at()',
-            None,
-            id='parent_trigger_function',
+            '0002_auto_enforcement_stamp_function',
+            id='parent_trigger_function_depends_on_the_stamp_one',
         ),
     ],
 )
@@ -1442,7 +1439,7 @@ def test_function_dependencies_for_keys_autofill_on_the_function_the_trigger_nam
     """An app depends on the autofill functions its own triggers call and no others, which is
     why the trigger header carries the function name at all."""
     command = Command()
-    command.trigger_function_dependency = None
+    command.stamp_function_dependency = None
     command.parent_trigger_function_dependency = None
     command.tenant_autofill_dependencies = {
         'guitars_fill_5_label_label_id': ('testapp', '0019_fn'),
@@ -1459,7 +1456,7 @@ def test_function_dependencies_for_ignores_an_autofill_function_it_has_not_writt
     """A header naming a function with no recorded migration must not fabricate a dependency
     on a migration that does not exist -- Django would refuse to load the graph."""
     command = Command()
-    command.trigger_function_dependency = None
+    command.stamp_function_dependency = None
     command.parent_trigger_function_dependency = None
     command.tenant_autofill_dependencies = {}
     blob = headers_module.HEADER_TENANT_AUTOFILL.format(

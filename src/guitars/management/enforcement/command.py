@@ -55,12 +55,9 @@ class Command(OperationsMixin, BaseCommand):
         self._setup_models_and_reverse_relations()
 
         # (app_label, migration_stem) tuples or None, naming the singleton function migrations,
-        # filled from self.existing on first access, not here. ``trigger_function_*`` read
-        # history only since 2.19.0 (ADR 0038).
-        self.trigger_function_dependency: tuple[str, str] | None = None
+        # filled from self.existing on first access, not here.
         self.parent_trigger_function_dependency: tuple[str, str] | None = None
         self.stamp_function_dependency: tuple[str, str] | None = None
-        self.trigger_function_sql: str | None = None
         self.parent_trigger_function_sql: str | None = None
         self.stamp_function_sql: str | None = None
         # Keyed by function name, not singletons: autofill is one function per (column, GUC)
@@ -144,12 +141,10 @@ class Command(OperationsMixin, BaseCommand):
             # loaded operations, and building a second loader would import every migration
             # module in the project twice.
             self._existing = scan_existing_operations(self._migration_loader())
-            self.trigger_function_dependency = self._existing.trigger_function_dependency
             self.parent_trigger_function_dependency = (
                 self._existing.parent_trigger_function_dependency
             )
             self.stamp_function_dependency = self._existing.stamp_function_dependency
-            self.trigger_function_sql = self._existing.trigger_function_sql
             self.parent_trigger_function_sql = self._existing.parent_trigger_function_sql
             self.stamp_function_sql = self._existing.stamp_function_sql
             self.tenant_autofill_dependencies = dict(
@@ -385,6 +380,9 @@ class Command(OperationsMixin, BaseCommand):
             ),
             check_only=check_only,
             adopt=adopt,
+            dependencies=[self.stamp_function_dependency]
+            if self.stamp_function_dependency
+            else None,
         )
         if written is None:
             return False

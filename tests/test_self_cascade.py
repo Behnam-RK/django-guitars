@@ -12,7 +12,7 @@ from django.utils import timezone
 
 from guitars.tenancy import tenancy_bypassed, tenant
 from tests.conftest import execute, scalar
-from tests.testapp.models import Label, Rack, Riser, Setlist, SetlistEntry, Troupe
+from tests.testapp.models import Label, Rack, Riser, Setlist, SetlistEntry, Troupe, Twig
 
 
 @pytest.fixture
@@ -325,7 +325,7 @@ def test_a_key_rewrite_that_archives_nothing_is_not_refused(db):
     assert _archived(Setlist) == set()
 
 
-def test_a_key_rewrite_that_reparents_its_children_is_still_refused(db):
+def test_a_key_rewrite_that_reparents_its_children_is_still_refused_without_the_guard(db):
     """The arm that matters most, and the one a guard reading only the *old* key misses: moving
     the children onto the new key in the same statement empties the old one, so nothing looks
     orphaned there while the subtree is just as unreachable."""
@@ -335,6 +335,12 @@ def test_a_key_rewrite_that_reparents_its_children_is_still_refused(db):
 
     with pytest.raises(NotSupportedError, match='archived a row whose primary key it also'):
         with connection.cursor() as cursor:
+            # With the cascade guard on (2.22.0) the child reads the root the statement has already
+            # rewritten and is archived by it, so the guard is set aside to reach the refusal.
+            cursor.execute('SET CONSTRAINTS ALL IMMEDIATE')
+            cursor.execute(
+                'ALTER TABLE testapp_setlist DISABLE TRIGGER soft_delete_guard_on_15_testapp_setlist'
+            )
             cursor.execute('SET CONSTRAINTS ALL DEFERRED')
             cursor.execute(
                 'UPDATE testapp_setlist SET id = CASE WHEN id = %s THEN %s ELSE id END, '
@@ -343,6 +349,30 @@ def test_a_key_rewrite_that_reparents_its_children_is_still_refused(db):
                 'WHERE id IN (%s, %s)',
                 [root.pk, new_key, child.pk, new_key, root.pk, root.pk, child.pk],
             )
+
+
+def test_a_key_rewrite_that_reparents_its_children_leaves_none_live_under_the_guard(db):
+    """With the guard on, the same statement is refused or the child is archived with the root,
+    by the table's physical order: either way no live row hangs under an archived one."""
+    root = Setlist.objects.create(title='root')
+    child = Setlist.objects.create(title='child', parent=root)
+    new_key = root.pk + 1000
+
+    try:
+        with transaction.atomic(), connection.cursor() as cursor:
+            cursor.execute('SET CONSTRAINTS ALL DEFERRED')
+            cursor.execute(
+                'UPDATE testapp_setlist SET id = CASE WHEN id = %s THEN %s ELSE id END, '
+                'parent_id = CASE WHEN id = %s THEN %s ELSE parent_id END, '
+                '_deleted_at = CASE WHEN id = %s THEN NOW() ELSE _deleted_at END '
+                'WHERE id IN (%s, %s)',
+                [root.pk, new_key, child.pk, new_key, root.pk, root.pk, child.pk],
+            )
+    except NotSupportedError:
+        return
+
+    assert Setlist._all_objects.get(pk=child.pk)._deleted_at is not None
+    assert Setlist._all_objects.get(pk=child.pk).parent_id == new_key
 
 
 T_PARENT = '2021-06-15T12:30:00Z'
@@ -428,3 +458,44 @@ def test_the_self_key_is_filed_as_an_arm_of_its_owner(db):
     arms = Command()._revive_arms_by_owner()['testapp_setlist']
 
     assert ('testapp_setlist', 'testapp_setlist', 'parent_id') in arms
+
+
+class TestAModelWithNoUpdatedAt:
+    """``Twig`` is soft-deletable and nothing more: its arm has no ``_updated_at`` to stamp, so
+    ``_arm_slots`` renders the assignment empty and the ``UPDATE`` writes ``_deleted_at`` alone."""
+
+    @staticmethod
+    def _archive(pk: int) -> None:
+        with connection.cursor() as cursor:
+            cursor.execute('UPDATE testapp_twig SET _deleted_at = NOW() WHERE id = %s', [pk])
+
+    def test_the_arms_assign_no_updated_at(self):
+        from guitars.management.enforcement.command import Command  # noqa: PLC0415
+
+        slots = Command()._revive_owner_slots('testapp_twig')
+
+        assert 'SET _deleted_at = guitars_archived._deleted_at' in slots['archive_arms']
+        assert '_updated_at' not in slots['archive_arms']
+
+    def test_an_archive_takes_the_tree_with_the_parents_stamp(self, db):
+        root = Twig.objects.create()
+        child = Twig.objects.create(parent=root)
+        grandchild = Twig.objects.create(parent=child)
+
+        self._archive(root.pk)
+
+        stamps = {
+            Twig._all_objects.get(pk=twig.pk)._deleted_at for twig in (root, child, grandchild)
+        }
+        assert len(stamps) == 1
+        assert None not in stamps
+
+    def test_a_restore_revives_it(self, db):
+        root = Twig.objects.create()
+        child = Twig.objects.create(parent=root)
+        self._archive(root.pk)
+
+        with connection.cursor() as cursor:
+            cursor.execute('UPDATE testapp_twig SET _deleted_at = NULL WHERE id = %s', [root.pk])
+
+        assert Twig.objects.filter(pk__in=[root.pk, child.pk]).count() == 2

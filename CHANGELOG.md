@@ -10,6 +10,22 @@ Full history and diffs: [GitHub releases](https://github.com/Behnam-RK/django-gu
 
 ## [Unreleased]
 
+## [2.22.0] - 2026-10-09
+
+### Added
+
+- **A guard on every cascade child archives a child created or re-pointed under an archived parent** ([#91](https://github.com/Behnam-RK/django-guitars/issues/91), [ADR 0044](docs/adr/0044-a-child-arriving-under-an-archived-parent-takes-its-stamp.md)). An archive locks the parent row `FOR NO KEY UPDATE`, which the foreign-key check of an insert (`FOR KEY SHARE`) does not wait for, and the cascade only reaches rows that exist when its statement starts. So a child committed while another session archived its parent stayed live under it, in either order, at `READ COMMITTED` and `REPEATABLE READ`, and the same for a child moved onto an archived parent and a leaf added to a tree being archived. This was true of the rule the arms replaced too; it was measured with two sessions for the first time. Each cascade child table now carries `soft_delete_guard_on_<n>_<table>`, a `BEFORE INSERT OR UPDATE` row trigger that reads the parent `FOR SHARE` when the key arrives or moves, waits for an uncommitted archive, and copies the parent's `_deleted_at`; an archive in turn waits for an uncommitted insert and takes its child. A key declared on an MTI descendant archives the ancestor's row from an `AFTER` trigger. The stamp is the parent's own, so restoring the parent brings the late child back.
+- `GUITARS_CASCADE_GUARD` (default `True`): `False` retires every recorded guard.
+- `tests/test_concurrency_arms.py`: the interleavings, stepped by hand with two connections, and the limits that remain.
+
+### Changed
+
+- **A child created under an archived parent is archived with it**, where it was live. Code that relied on a live child under an archived parent needs the parent restored first.
+- **Existing projects:** `makemigrations` writes one enforcement migration per app that hosts a cascade child, creating the guards. A guard reads the parent row on every insert and on every update that moves the key, and holds `FOR SHARE` on it until commit, so an insert waits for a concurrent update of that parent and a bulk load pays a lookup per row, and two transactions that each insert a child and then update the same parent (a counter, a denormalised total) now deadlock (`40P01`) where they serialised. If that pattern is common in your code, set `GUITARS_CASCADE_GUARD = False`. It runs as the invoker: `FOR SHARE` needs `UPDATE` on the parent table, and a role without it gets a plain read, so no insert fails but the race stays open for that role. `session_replication_role = replica` skips it.
+- Not closed, and pinned by tests: an archive in a `REPEATABLE READ` transaction whose snapshot predates a child's commit still misses that child (two `SERIALIZABLE` sessions are refused with `40001`), and a child restored by hand under an archived parent stays live.
+- `RetireEnforcement` takes the guard, with a column or a whole table: its body names the key and `_deleted_at`.
+- Tests only, for corners the suite did not reach: a self key on a model with no `_updated_at` (`Twig`), an MTI child's redirect rule and parent trigger across a drop and a rename in the scan, and `--adopt` over a recorded self-cascade trigger.
+
 ## [2.21.0] - 2026-10-09
 
 ### Fixed
@@ -497,7 +513,8 @@ First stable release. **BREAKING:** the instrument ladder shifted down one rung 
 
 - Added: initial release — `SetarModel`, `GuitarModel`, `SoftDeletableModel`, `DisableSignals`, `makeguitarmigrations`.
 
-[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.21.0...HEAD
+[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.22.0...HEAD
+[2.22.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.22.0
 [2.21.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.21.0
 [2.20.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.20.1
 [2.20.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.20.0

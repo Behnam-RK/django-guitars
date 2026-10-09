@@ -170,6 +170,28 @@ class TestASelfCascadeKeyNoLongerRequired:
         assert 'CREATE OR REPLACE FUNCTION "soft_delete_self_cascade_15_testapp_setlist' in reverse
         assert 'testapp' in command.existing.retirement_apps
 
+    def test_adopt_over_a_recorded_self_trigger_replaces_the_owner_and_retires_it(self):
+        """``--adopt`` re-registers what this command did not write: the owner's trigger goes in
+        its replace form (nothing is recorded, so a plain ``CREATE`` would meet a live object), and
+        the self trigger still recorded is retired, rebuildable, in the same run."""
+        header = HEADER_SOFT_DELETE_SELF_CASCADE_RETIRED.format(
+            table='testapp_setlist', foreign_key='parent_id'
+        )
+        owner = 'CREATE {replace}TRIGGER "soft_delete_cascade_on_15_testapp_setlist"'
+        runs = {}
+        for adopt in (False, True):
+            command = _command()
+            command.existing.soft_delete_self_cascade[('testapp_setlist', 'parent_id')] = 'abc'
+            runs[adopt] = command._build_operations(apps.get_app_config('testapp'), adopt=adopt)
+
+        for adopt, replace in ((False, ''), (True, 'OR REPLACE ')):
+            assert any(owner.format(replace=replace) in operation for operation in runs[adopt])
+        retired = [operation for operation in runs[True] if operation.startswith(header)]
+        assert len(retired) == 1
+        forward, reverse = retired[0].split('reverse_sql=')
+        assert 'DROP TRIGGER IF EXISTS' in forward
+        assert 'CREATE TRIGGER "soft_delete_self_cascade_15_testapp_setlist' in reverse
+
     def test_a_key_hosted_by_another_app_is_not_this_ones_to_retire(self):
         command = _command()
         command.existing.soft_delete_self_cascade[('testapp_setlist', 'parent_id')] = 'abc'

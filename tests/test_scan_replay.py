@@ -10,7 +10,10 @@ from guitars.management import _generator
 from guitars.management.enforcement import scanning
 from guitars.management.enforcement.graph import TableEvent
 from guitars.management.enforcement.headers import (
+    HEADER_MTI_SOFT_DELETE,
+    HEADER_MTI_UPDATED_AT,
     HEADER_SOFT_DELETE,
+    HEADER_SOFT_DELETE_GUARD,
     HEADER_SOFT_DELETE_OWNED_SWEEP,
     HEADER_SOFT_DELETE_RELATED,
     HEADER_SOFT_DELETE_RELATED_RETIRED,
@@ -158,6 +161,54 @@ class TestADrop:
         assert 'named0000000000000000000000000000' not in existing.existing_digests['testapp']
 
 
+def _mti(table: str) -> str:
+    """A child's redirect rule and its parent ``_updated_at`` trigger, the two families that are
+    keyed by the child's table and that the tests above do not name."""
+    return (
+        HEADER_MTI_SOFT_DELETE.format(child_table=table, parent_table='shop_place')
+        + ' [SQL:111111111111]\n'
+        + HEADER_MTI_UPDATED_AT.format(child_table=table, parent_table='shop_place')
+        + ' [SQL:222222222222]\n'
+    )
+
+
+class TestAnMtiChild:
+    def test_a_drop_voids_its_redirect_rule_and_its_parent_trigger(self, monkeypatch):
+        existing = _replay(
+            monkeypatch,
+            (_mti('shop_hall') + _mti('shop_gallery'), []),
+            ('', [_drop('shop_hall')]),
+        )
+
+        assert 'shop_hall' not in existing.mti_soft_deletes
+        assert 'shop_hall' not in existing.mti_triggers
+        assert 'shop_gallery' in existing.mti_soft_deletes
+        assert 'shop_gallery' in existing.mti_triggers
+
+    def test_a_rename_moves_both(self, monkeypatch):
+        existing = _replay(
+            monkeypatch,
+            (_mti('shop_hall'), []),
+            ('', [_rename('shop_hall', 'shop_atrium')]),
+        )
+
+        assert 'shop_atrium' in existing.mti_soft_deletes
+        assert 'shop_atrium' in existing.mti_triggers
+        assert 'shop_hall' not in existing.mti_soft_deletes
+        assert 'shop_hall' not in existing.mti_triggers
+
+    def test_a_recreated_child_reads_as_uncovered(self, monkeypatch):
+        existing = _replay(
+            monkeypatch,
+            (_mti('shop_hall'), []),
+            ('', [_drop('shop_hall')]),
+            ('', [_create_event('shop_hall')]),
+        )
+
+        assert 'shop_hall' not in existing.mti_soft_deletes
+        assert 'shop_hall' not in existing.mti_triggers
+
+
 class TestAForceOnlyFile:
     """The FORCE stage's file names a table and nothing else: its digest has to go with the table,
     or a recreated one is written unforced and the identical FORCE operation is skipped."""
@@ -277,6 +328,18 @@ class TestARetireEvent:
         )
 
         assert not existing.soft_delete_related
+        assert 'shop_child' in existing.triggers
+
+    def test_a_column_retirement_takes_the_guard_too(self, monkeypatch):
+        """Its body names the key, so it is dropped with the column and written again after."""
+        guard = HEADER_SOFT_DELETE_GUARD.format(table='shop_child') + ' [SQL:eeeeeeeeeeee]\n'
+        existing = _replay(
+            monkeypatch,
+            (guard + _trigger('shop_child'), []),
+            ('', [TableEvent('retire', 'shop_child', column='owner_id')]),
+        )
+
+        assert ('shop_child',) not in existing.soft_delete_guard
         assert 'shop_child' in existing.triggers
 
 

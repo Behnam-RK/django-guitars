@@ -68,7 +68,9 @@ class TestTheFastPathEngages:
         counts = []
         for conditions in (1, 8):
             offer, *_ = build(conditions)
-            counts.append(statements(lambda offer=offer: Offer.objects.filter(pk=offer.pk).delete()))
+            counts.append(
+                statements(lambda offer=offer: Offer.objects.filter(pk=offer.pk).delete())
+            )
 
         assert counts == [2, 2]  # the keys, then the delete
 
@@ -81,7 +83,9 @@ class TestTheFastPathEngages:
             offer, *_ = build(conditions)
             with zeal_ignore():  # the guard flags this very read, which is what is measured
                 reads.append(
-                    single_row_reads(lambda offer=offer: Offer.objects.filter(pk=offer.pk).delete())
+                    single_row_reads(
+                        lambda offer=offer: Offer.objects.filter(pk=offer.pk).delete()
+                    )
                 )
 
         assert reads == [1, 8]
@@ -294,7 +298,11 @@ class TestSoftDelete:
             Offer.objects.filter(pk=first[0].pk).delete()
         Offer.objects.filter(pk=second[0].pk).soft_delete()
 
-        for expected, got in zip((first[0], first[1], first[2], *first[3]), (second[0], second[1], second[2], *second[3]), strict=True):
+        for expected, got in zip(
+            (first[0], first[1], first[2], *first[3]),
+            (second[0], second[1], second[2], *second[3]),
+            strict=True,
+        ):
             assert archived(expected) and archived(got)
         for rows in (first, second):
             stamp = Offer._all_objects.get(pk=rows[0].pk)._deleted_at
@@ -312,7 +320,11 @@ class TestSoftDelete:
         for conditions in (1, 8):
             _, _, _, made = build(conditions)
             pks = [condition.pk for condition in made]
-            counts.append(statements(lambda pks=pks: QuantityCondition.objects.filter(pk__in=pks).soft_delete()))
+            counts.append(
+                statements(
+                    lambda pks=pks: QuantityCondition.objects.filter(pk__in=pks).soft_delete()
+                )
+            )
 
         assert counts[0] == counts[1]
 
@@ -663,15 +675,19 @@ def test_a_hidden_row_is_not_an_error_for_the_instance_form(tenants):
 
 @pytest.mark.django_db
 class TestTheConsistentTreeAssumption:
-    """Documented, and pinned here so it stays a deliberate fact: the rules cascade only through
-    rows that *flip* to archived, so a live row under an already-archived ancestor is reached by the
-    collector and left live by the fast path. See ``docs/soft-delete-api.md``, "What both assume"."""
+    """Pinned as a deliberate fact: a cascade reaches only rows that *flip* to archived, so a live
+    row under an archived ancestor (restored alone since 2.22.0, which archives a new one) is left
+    live by the fast path. See ``docs/soft-delete-api.md``, "What both assume"."""
 
     @staticmethod
     def _live_clause_under_an_archived_tier():
         offer, tier, *_ = build(0)
         tier.soft_delete()
         clause = Clause._all_objects.create(tier=tier)
+        # The cascade guard (2.22.0) archives a child created under an archived parent, so the
+        # inconsistent tree takes a restore of the child alone, which the guard leaves be.
+        Clause._all_objects.filter(pk=clause.pk).update(_deleted_at=None)
+        clause.refresh_from_db()
         return offer, clause
 
     def test_the_collector_reaches_it(self, settings):

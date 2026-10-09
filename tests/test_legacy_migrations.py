@@ -49,10 +49,10 @@ def test_upgrading_an_already_migrated_legacy_project():
         # Modern shape: SQL inlined, nothing left referencing back into the package --
         # a migration generated today is immune to a future change in the sql.X constants.
         assert 'from guitars import sql' not in content
-        # One identity per operation: band and album trigger and rule, and the band owner's
-        # trigger, which carries the band<->album cascade as an arm and its inverse (2.11.0, and
-        # no *rule* since 2.19.0, #80): a legacy project receives both on its upgrade.
-        assert content.count('[SQL:') == 5, content
+        # One identity per operation: band and album trigger and rule, the band owner's trigger
+        # (the cascade as an arm, and its inverse) and the album's cascade guard (2.22.0).
+        assert content.count('[SQL:') == 6, content
+        assert content.count('Soft Delete Cascade Guard') == 1, content
         assert content.count('Soft Delete Cascade Trigger') == 1, content
         assert 'Soft Delete Related Rule' not in content, content
         # The *replace* form specifically, not a plain create: the generator knows this

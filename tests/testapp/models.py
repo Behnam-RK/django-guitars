@@ -17,6 +17,7 @@ from guitars.models import (
     LiveManager,
     OwningForeignKey,
     SetarModel,
+    SoftDeletableModel,
     TarModel,
 )
 from guitars.tenancy import tenanted_manager
@@ -864,3 +865,10 @@ class Offshoot(Lineage):
 
     class Meta:
         pass
+
+
+class Twig(SoftDeletableModel):
+    """A self key on a model with no ``_updated_at``: the arm has no timestamp to stamp, so its
+    ``UPDATE`` assigns only ``_deleted_at`` (``_arm_slots``' empty ``updated_at_assignment``)."""
+
+    parent = ForeignKey('self', on_delete=CASCADE, null=True, blank=True, related_name='shoots')

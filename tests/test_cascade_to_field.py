@@ -171,7 +171,7 @@ class TestWhatTheRuleCannotRead:
         assert reason is not None
         assert "'slug'" in reason
         assert (
-            classify_cascade(by_slug, field, CASCADE, owner_table, set()) is CascadeKind.REFUSED
+            classify_cascade(by_slug, field, CASCADE, owner_table) is CascadeKind.REFUSED
         )
 
     def test_a_parent_keyed_to_its_own_child_is_refused_not_routed_to_the_self_trigger(self):
@@ -180,7 +180,7 @@ class TestWhatTheRuleCannotRead:
         parent, _child = _a_parent_keyed_to_its_own_child()
         field = parent._meta.get_field('kid')
 
-        kind = classify_cascade(parent, field, CASCADE, parent._meta.db_table, set())
+        kind = classify_cascade(parent, field, CASCADE, parent._meta.db_table)
 
         assert kind is CascadeKind.REFUSED
 
@@ -199,7 +199,7 @@ class TestWhatTheRuleCannotRead:
 
         assert to_field_refusal(field, owner._meta.db_table) is None
         assert (
-            classify_cascade(by_code, field, CASCADE, owner._meta.db_table, set())
+            classify_cascade(by_code, field, CASCADE, owner._meta.db_table)
             is CascadeKind.RULE
         )
 
@@ -380,7 +380,7 @@ class TestAKeyIntoAModelGuitarsE005Refuses:
         root, _kid, pointer = self._shapes()
         field = pointer._meta.get_field('kid')
 
-        assert classify_cascade(pointer, field, CASCADE, root._meta.db_table, set()) is (
+        assert classify_cascade(pointer, field, CASCADE, root._meta.db_table) is (
             CascadeKind.REFUSED
         )
         command = _command(root, (pointer, 'kid'))

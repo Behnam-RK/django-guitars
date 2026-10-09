@@ -30,10 +30,10 @@ model — plus the [MTI](#mti) one below and the tenancy one under the guard:
 
 - **A target, or an owner, with no `_deleted_at`.** Nothing to stamp, or nothing whose transition fires
   it — an `OwningForeignKey` has no other purpose, so generating nothing is a bug.
-- **A relation closing a cycle of `ON UPDATE` rules** — owning yourself (`OwningForeignKey('self', …)`), owning
-  an MTI descendant, or a longer loop back through another model's owned or `CASCADE` rules. A rule's action
-  expands *before* the original statement, so the cycle is rewritten into itself and PostgreSQL rejects *every*
-  `UPDATE` to *every* table in it, a plain `save()` included. Every edge is refused; `hard_delete()` too.
+- **A relation closing a cycle of owned relations** — owning yourself (`OwningForeignKey('self', …)`), owning
+  an MTI descendant, or a longer loop back through another model's owned or `CASCADE` keys. `hard_delete()` and
+  `sweepowned` have no proof for a cycle, so every owned edge on one is refused, `hard_delete()` too. A loop of
+  `CASCADE` keys alone is enforced, as an arm ([ADR 0041](adr/0041-cascade-cycles-are-arms.md)).
 
 ## The last-owner guard
 

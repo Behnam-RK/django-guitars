@@ -164,9 +164,10 @@ class TestAnAncestorRoutedOffPostgresqlIsLeftAlone:
         )
 
 
-class TestASelfReferencingDescendantIsRefused:
-    """``Child`` cascades to its own ``Root``: the rule would sit on, and update, the root's
-    table -- a rule rewritten into itself, which PostgreSQL refuses on *every* UPDATE there."""
+class TestASelfReferencingDescendantIsEnforced:
+    """``Child`` cascades to its own ``Root``: the arm sits on, and updates, the root's table. A
+    rule there was rewritten into itself and refused on *every* UPDATE; an arm stops at
+    ``_deleted_at IS NULL`` (ADR 0041)."""
 
     @staticmethod
     @isolate_apps('tests.testapp')
@@ -183,12 +184,12 @@ class TestASelfReferencingDescendantIsRefused:
 
         return Root, Child
 
-    def test_the_edge_closes_a_cycle(self):
+    def test_the_edge_still_closes_a_cycle_for_the_owned_family(self):
         root, child = self._models()
 
         assert (root._meta.db_table, root._meta.db_table) in rule_update_cycle_edges([root, child])
 
-    def test_the_generator_refuses_it_and_says_why(self):
+    def test_the_generator_notes_nothing(self):
         command = Command()
         command._skipped_rule_notes.clear()
         clear_cascade_coverage(command)
@@ -197,9 +198,10 @@ class TestASelfReferencingDescendantIsRefused:
             (child, child._meta.get_field('parent'), CASCADE)
         }
 
-        assert command._cascade_operations(root) == []
-        assert len(command._skipped_rule_notes) == 1
-        assert 'infinite rule recursion' in command._skipped_rule_notes[0]
+        candidates, selfs = command._cascade_candidates(root, root._meta.db_table)
+
+        assert [(model, field.name) for model, field, _ in candidates] == [(child, 'parent')]
+        assert (selfs, command._skipped_rule_notes) == ([], [])
 
 
 @pytest.fixture
@@ -506,69 +508,6 @@ class TestAToFieldKeyIsLeftToTheCollector:
         candidates, selfs = command._cascade_candidates(owner, owner._meta.db_table, report=False)
 
         assert (candidates, selfs, command._skipped_rule_notes) == ([], [], [])
-
-
-class TestARetirementForACycleSaysSo:
-    """A key that closes a rule cycle is refused with every other edge on it, so a rule already
-    live there is dropped; the note must say so, since "skipped" reads as "left alone"."""
-
-    @staticmethod
-    def _retire(monkeypatch, edges, *, relaxed=False):
-        """*relaxed* removes the relation from the command's view, as a key made ``SET_NULL``."""
-        command = Command()
-        command._skipped_rule_notes.clear()
-        clear_cascade_coverage(command)
-        if relaxed:
-            command.reverse_relations_mapping[Label] = {
-                relation
-                for relation in command.reverse_relations_mapping[Label]
-                if relation[0] is not Festival
-            }
-        key = (Festival._meta.db_table, Label._meta.db_table, None)
-        command.existing.soft_delete_related[key] = 'abc'
-        monkeypatch.setattr(command, '_rule_cycle_edges', lambda: edges)
-        for _ in range(2):  # a check run and a generation both ask; one note, not two
-            command._retired_cascade_operations(apps.get_app_config('testapp'))
-        return command._skipped_rule_notes
-
-    def test_a_rule_dropped_because_of_a_cycle_is_named(self, monkeypatch):
-        edges = {(Label._meta.db_table, Festival._meta.db_table)}
-
-        (note,) = self._retire(monkeypatch, edges)
-
-        assert 'dropped' in note
-        assert 'testapp_festival' in note
-        assert 'testapp_label' in note
-
-    def test_a_rule_dropped_for_another_reason_adds_no_note(self, monkeypatch):
-        assert self._retire(monkeypatch, set(), relaxed=True) == []
-
-    def test_a_key_whose_on_delete_changed_on_a_shared_edge_adds_no_note(self, monkeypatch):
-        from django.db.models import SET_NULL  # noqa: PLC0415
-
-        command = Command()
-        command._skipped_rule_notes.clear()
-        clear_cascade_coverage(command)
-        command.reverse_relations_mapping[Label] = {
-            (model, field, SET_NULL if model is Festival else on_delete)
-            for model, field, on_delete in command.reverse_relations_mapping[Label]
-        }
-        command.existing.soft_delete_related[
-            (Festival._meta.db_table, Label._meta.db_table, None)
-        ] = 'abc'
-        edges = {(Label._meta.db_table, Festival._meta.db_table)}
-        monkeypatch.setattr(command, '_rule_cycle_edges', lambda: edges)
-
-        command._retired_cascade_operations(apps.get_app_config('testapp'))
-
-        assert command._skipped_rule_notes == []
-
-    def test_a_key_relaxed_on_a_shared_edge_adds_no_note(self, monkeypatch):
-        """The edge belongs to every descendant of one ancestor, so it being on a cycle says
-        nothing about a key that was relaxed: that one is retired for its own reason."""
-        edges = {(Label._meta.db_table, Festival._meta.db_table)}
-
-        assert self._retire(monkeypatch, edges, relaxed=True) == []
 
 
 class TestTheParentLinkIsTheAncestorsNotTheDescendantsPk:

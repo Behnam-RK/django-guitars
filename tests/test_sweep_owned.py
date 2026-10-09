@@ -212,7 +212,7 @@ def test_the_heading_counts_tables_where_two_models_resolve_to_one(monkeypatch):
 @pytest.mark.django_db
 def test_a_repair_that_does_not_settle_reports_rather_than_diagnosing_a_cycle(monkeypatch):
     """Exhausting the pass bound says the run did not settle, not why. Depth beyond the bound
-    needs a rule cycle; fresh orphans arriving between passes need only a concurrent writer,
+    needs a cycle of owned relations; fresh orphans arriving between passes need only a concurrent writer,
     ordinary on the busy database this command is for. Naming a cycle sends them nowhere."""
     monkeypatch.setattr(
         Command, '_sweep_pass', lambda *a, **k: ({('testapp.Rider', 'x'): ({1}, 1)}, {'x'})

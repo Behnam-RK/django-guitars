@@ -10,13 +10,13 @@ from django.apps import apps
 from django.core.management import CommandError, call_command
 from django.db import models
 from django.db.migrations.loader import MigrationLoader
-from django.db.models import CASCADE, SET_NULL
+from django.db.models import CASCADE
 from django.test import override_settings
 from django.test.utils import isolate_apps
 
 from tests.conftest import clear_cascade_coverage
 
-from guitars.models import OwningForeignKey, SetarModel
+from guitars.models import SetarModel
 
 from guitars.management import _generator
 from guitars.management.enforcement import graph, scanning
@@ -176,7 +176,7 @@ def test_the_committed_history_records_and_then_forgets_the_retired_key():
     assert 'testapp' not in existing.retirement_apps
 
 
-def test_the_silent_sweep_meets_a_cycle_and_says_nothing():
+def test_the_silent_sweep_meets_a_refusal_and_says_nothing():
     """``_cascade_key_maps`` walks every local model, including apps a scoped run was never
     asked about, so it sweeps with ``report=False``: their misconfigurations are not its to
     report, still less to fail ``--check`` over. The same shape with ``report=True`` warns."""
@@ -184,27 +184,30 @@ def test_the_silent_sweep_meets_a_cycle_and_says_nothing():
     @isolate_apps('tests.testapp')
     def _build(*, report):
         class Held(SetarModel):
+            code = models.CharField(max_length=20, unique=True)
+
             class Meta:
                 app_label = 'testapp'
 
-        class Holder(SetarModel):
-            owned = OwningForeignKey(Held, on_delete=SET_NULL, null=True, related_name='owners')
-            parent = models.ForeignKey(Held, on_delete=CASCADE, related_name='children')
+        class Root(SetarModel):
+            class Meta:
+                app_label = 'testapp'
+
+        class Kid(Root):
+            owner = models.ForeignKey(Held, to_field='code', on_delete=CASCADE)
 
             class Meta:
                 app_label = 'testapp'
 
         built = Command()
         built._skipped_rule_notes.clear()
-        built.all_models = [Held, Holder]
-        built.reverse_relations_mapping[Held] = {
-            (Holder, Holder._meta.get_field('parent'), CASCADE)
-        }
+        built.all_models = [Held, Root, Kid]
+        built.reverse_relations_mapping[Held] = {(Kid, Kid._meta.get_field('owner'), CASCADE)}
         built._cascade_candidates(Held, Held._meta.db_table, report=report)
         return built._skipped_rule_notes
 
     assert _build(report=False) == []
-    assert 'cycle' in _build(report=True)[0]
+    assert 'to_field' in _build(report=True)[0]
 
 
 def test_the_retirement_reaches_a_real_generation(command):

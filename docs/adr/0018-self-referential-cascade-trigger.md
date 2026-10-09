@@ -4,7 +4,7 @@
 - **Date:** 2026-09-08
 - **Affects:** `guitars.sql.soft_delete`, `makeguitarmigrations`
 - **Amends:** nothing. Narrows one refusal that has stood since 0.x; the cycle refusal it sits
-  beside is unchanged. Borrows its mechanism from [ADR 0014](0014-statement-level-owned-sweep.md).
+  beside was lifted by [ADR 0041](0041-cascade-cycles-are-arms.md). Borrows its mechanism from [ADR 0014](0014-statement-level-owned-sweep.md).
 
 ## Context
 

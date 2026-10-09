@@ -48,3 +48,4 @@ New ADR? Start from [`template.md`](template.md).
 | [`0038`](0038-updated-at-is-a-row-trigger.md) | why `_updated_at` is a `BEFORE ROW` trigger assigning `NEW`, with no depth guard and under a new function name, instead of a statement trigger re-`UPDATE`-ing every row (2.19.0) |
 | [`0039`](0039-cascade-arms-in-the-owner-trigger.md) | why the cascade is an arm of the owner's trigger and the owned rule is retired, what a plpgsql arm gives up that a rule recorded, and why the trigger is renamed `soft_delete_cascade_on_*` (2.19.0) |
 | [`0040`](0040-parent-updated-at-skips-a-stamped-ancestor.md) | why the MTI parent `_updated_at` follow-up skips an ancestor this transaction already stamped, replaces its function body in place, and keeps its depth guard (2.19.1) |
+| [`0041`](0041-cascade-cycles-are-arms.md) | why a cycle of cascade keys is enforced as arms, with one stamp round the loop and a revive that travels up it, while an owned cycle stays refused (2.20.0) |

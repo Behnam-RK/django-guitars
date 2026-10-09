@@ -3,6 +3,7 @@
 - **Status:** accepted
 - **Date:** 2026-10-02
 - **Affects:** `makeguitarmigrations`, `introspection.rule_update_cycle_edges`, `soft_delete_related_*`
+- **Amended by:** [ADR 0041](0041-cascade-cycles-are-arms.md): the one-node cycle is no longer refused.
 
 ## Context
 

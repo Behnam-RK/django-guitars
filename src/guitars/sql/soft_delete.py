@@ -599,7 +599,7 @@ _DROP_SOFT_DELETE_OWNED_SWEEP_FUNCTION = """
 
 # No ``WHEN (pg_trigger_depth() = 0)``, unlike the updated_at trigger: the UPDATE above
 # archives dependents that own things themselves, whose sweeps fire at depth 1. Recursion ends
-# on ``_deleted_at IS NULL``, and a cycle is refused a rule -- so a trigger -- before either.
+# on ``_deleted_at IS NULL``, and an owned cycle is refused its sweep before either.
 _CREATE_SOFT_DELETE_OWNED_SWEEP_TRIGGER = """
     CREATE TRIGGER {trigger}
         AFTER UPDATE ON {table}

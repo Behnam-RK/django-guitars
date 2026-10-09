@@ -186,6 +186,11 @@ class TestAForceOnlyFile:
             'testapp', ()
         )
 
+    def test_a_file_with_no_digest_line_still_records_the_force(self, monkeypatch):
+        existing = _replay(monkeypatch, (HEADER_TENANT_FORCE.format(table='shop_item') + '\n', []))
+
+        assert 'shop_item' in existing.tenant_forces
+
 
 class TestARename:
     def test_a_name_a_new_model_retakes_is_that_models_to_cover(self, monkeypatch):

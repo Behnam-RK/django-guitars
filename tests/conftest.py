@@ -21,7 +21,8 @@ def pytest_configure(config: pytest.Config) -> None:
     actually being passed, or a plain run leaves stray ``.coverage.<host>.pid<N>`` files."""
     if config.getoption('cov_source', default=None):
         os.environ.setdefault(
-            'COVERAGE_PROCESS_START', str(Path(__file__).resolve().parent.parent / 'pyproject.toml')
+            'COVERAGE_PROCESS_START',
+            str(Path(__file__).resolve().parent.parent / 'pyproject.toml'),
         )
 
 
@@ -129,3 +130,21 @@ def clear_cascade_coverage(command) -> None:
     command.existing.soft_delete_revive.clear()
     command.existing.soft_delete_revive_owner.clear()
     command.existing.soft_delete_cascade_owner.clear()
+
+
+def patch_replay(monkeypatch, *units) -> None:
+    """Append migrations to ``scanning.replay_plan``'s answer, each ``(app, stem, events)``, in
+    order, after the real project's. A synthetic file the scan reads is placed where a unit of its
+    name stands, so the table events a test wants *between* two files are those units'."""
+    from guitars.management.enforcement import scanning  # noqa: PLC0415
+    from guitars.management.enforcement.graph import ReplayUnit  # noqa: PLC0415
+
+    real = scanning.replay_plan
+
+    def patched(loader):
+        return [
+            *real(loader),
+            *(ReplayUnit(app, stem, (app, stem), tuple(events)) for app, stem, events in units),
+        ]
+
+    monkeypatch.setattr(scanning, 'replay_plan', patched)

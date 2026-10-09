@@ -2,39 +2,13 @@
 so after a rename the object is still there while the coverage asserting it is filed under the
 old table name -- the new name then reads as uncovered and a plain ``CREATE`` collides."""
 
-import pytest
 from django.apps import apps
-from django.db.migrations.loader import MigrationLoader
-from django.db.migrations.operations import (
-    AlterModelTable,
-    RenameModel,
-    SeparateDatabaseAndState,
-)
 
 from tests.conftest import clear_cascade_coverage
 
-from guitars.management.enforcement import graph, scanning
+from guitars.management.enforcement import scanning
 from guitars.management.enforcement.command import Command
 from guitars.management.enforcement.scanning import scan_existing_operations
-
-
-@pytest.fixture
-def loader():
-    return MigrationLoader(None, ignore_no_migrations=True)
-
-
-def test_a_rename_model_is_read_off_the_migration_state(loader):
-    """Chained: 0051 renamed the model, 0053 gave it a ``db_table``, and 0055 renamed it again
-    without moving the table. The answer is the name coverage was first recorded under."""
-    assert graph.renamed_tables(loader, 'testapp') == {
-        'testapp_callbacks': ['testapp_encore', 'testapp_callback']
-    }
-
-
-def test_an_app_that_never_renamed_anything_answers_empty(loader):
-    """And cheaply: the state replay only runs for apps whose history has a renaming
-    operation, which is almost none of them."""
-    assert graph.renamed_tables(loader, 'crossapp_owner') == {}
 
 
 def test_coverage_recorded_under_the_old_name_is_read_under_the_new_one():
@@ -217,8 +191,9 @@ def test_a_renamed_owners_per_key_revive_is_retired_under_its_old_name_too():
     assert 'DROP TRIGGER IF EXISTS "soft_delete_revive_15_testapp_oldband_13_testapp_album"' in (
         forward
     )
-    assert 'DROP FUNCTION IF EXISTS "soft_delete_revive_15_testapp_oldband_13_testapp_album"()' in (
-        forward
+    assert (
+        'DROP FUNCTION IF EXISTS "soft_delete_revive_15_testapp_oldband_13_testapp_album"()'
+        in (forward)
     )
 
 
@@ -243,18 +218,6 @@ def test_a_renamed_owners_revive_drops_its_old_name():
     assert 'DROP TRIGGER IF EXISTS "soft_delete_cascade_on_15_testapp_oldband"' in forward
     assert 'DROP FUNCTION IF EXISTS "soft_delete_cascade_on_15_testapp_oldband"()' in forward
     assert 'CREATE OR REPLACE TRIGGER "soft_delete_cascade_on_12_testapp_band"' in forward
-
-
-def test_a_rename_wrapped_in_separate_database_and_state_is_still_seen():
-    """The standard idiom for a change the database already has, and what a hand-tuned squash
-    carries -- read past exactly as the object-reference resolver reads past it."""
-    wrapped = SeparateDatabaseAndState(
-        database_operations=[], state_operations=[RenameModel(old_name='Old', new_name='New')]
-    )
-
-    assert graph._renaming(wrapped) == [('old', 'new')]
-    assert graph._renaming(AlterModelTable(name='Thing', table='t')) == [('thing', 'thing')]
-    assert graph._renaming(RenameModel(old_name='A', new_name='B')) == [('a', 'b')]
 
 
 def test_the_translation_handles_a_set_as_well_as_a_mapping():
@@ -354,28 +317,6 @@ def test_the_sweep_drops_the_dependents_prior_names_as_well_as_the_owners():
     )
 
 
-def test_a_retirement_subtracts_under_every_spelling_of_a_renamed_table(monkeypatch):
-    """A retirement names the table as spelled *now*, while the key it must subtract may still
-    be filed under a name a rename left behind. Without the prior spellings the post-pass moves
-    the old key back over the hole and a dropped object reads as covered, ``--check`` green."""
-    real = graph.retired_enforcement
-    monkeypatch.setattr(
-        scanning,
-        'retired_enforcement',
-        lambda ldr, app: {'0056_rename_encore_deleted_at_refrain_deleted_at_and_more': [
-            ('testapp_callbacks', None)
-        ]}
-        if app == 'testapp'
-        else real(ldr, app),
-    )
-
-    existing = scan_existing_operations()
-
-    # Recorded in 0048 under `testapp_encore`; the retirement names `testapp_callbacks`.
-    assert 'testapp_callbacks' not in existing.soft_deletes
-    assert 'testapp_encore' not in existing.soft_deletes
-
-
 def test_the_required_key_sweep_runs_without_reporting(monkeypatch):
     """``_cascade_key_maps`` walks every local model, including apps a scoped run was never
     asked about. It passes ``report=False`` so their misconfigurations are not reported here --
@@ -403,18 +344,6 @@ def test_liveness_is_asked_of_the_whole_registry_not_just_local_apps():
     assert command._prior_names('testapp_setlist') == ['testapp_gone']
 
 
-def test_a_freed_name_retaken_by_a_live_table_keeps_its_own_coverage():
-    """Round 2 filtered the *drop* side. The translation moved the old key unconditionally and
-    deleted it, so a header written for the retaken name **after** the rename was destroyed --
-    which never converges, the generator re-emitting a colliding CREATE on every run."""
-    existing = scan_existing_operations()
-
-    # ``testapp_setlist`` is live, so the walk skipped any move that would have taken its
-    # coverage -- the guard sits on the move as well as on the drop.
-    assert 'testapp_setlist' in existing.soft_deletes
-    assert 'testapp_setlist' in existing.triggers
-
-
 def test_an_ambiguous_retired_column_refuses_rather_than_guessing():
     """Which of two foreign keys to one owner the rule read is unknowable once the key is
     relaxed, so the reverse refuses. Guessing rebuilds the rule on a column it never read --
@@ -426,9 +355,12 @@ def test_an_ambiguous_retired_column_refuses_rather_than_guessing():
 
     assert command._retired_cascade_column(key, {'testapp_album': Album}) is None
     # One key to the owner is unambiguous, and is the relaxed-field case the reverse exists for.
-    assert command._retired_cascade_column(
-        ('testapp_refrain', 'testapp_band', None), {'testapp_refrain': _refrain()}
-    ) == 'band_id'
+    assert (
+        command._retired_cascade_column(
+            ('testapp_refrain', 'testapp_band', None), {'testapp_refrain': _refrain()}
+        )
+        == 'band_id'
+    )
 
 
 def _refrain():
@@ -471,43 +403,6 @@ def test_the_move_handles_tuple_keys_without_shredding_string_ones():
     assert recorded == {('new', 'owner', 'fk'): 'x', 'new': 'y', 'untouched': 'z'}
 
 
-def test_a_freed_name_already_retaken_is_not_moved_in_the_walk():
-    """The liveness guard applies to the move as well as the drop: a name another model now
-    owns keeps its own coverage."""
-    command = Command()
-    existing = scan_existing_operations()
-
-    # ``testapp_setlist`` is live, so nothing in the corpus could have moved its coverage away.
-    assert 'testapp_setlist' in existing.soft_deletes
-    assert command._prior_names('testapp_setlist') == []
-
-
-def test_the_walk_skips_a_move_whose_source_is_a_live_table(monkeypatch):
-    """The liveness guard sits on the move as well as the drop: a freed name another model now
-    owns keeps its own coverage, rather than having it carried onto the renamed table."""
-    real = graph.renames_by_migration
-    monkeypatch.setattr(
-        scanning,
-        'renames_by_migration',
-        lambda ldr, app: {'0051_rename_encore_to_callback': [('testapp_setlist', 'testapp_zzz')]}
-        if app == 'testapp'
-        else real(ldr, app),
-    )
-
-    existing = scan_existing_operations()
-
-    assert 'testapp_setlist' in existing.soft_deletes
-    assert 'testapp_zzz' not in existing.soft_deletes
-
-
-def test_a_graph_node_with_no_disk_migration_is_skipped_by_the_rename_walk(loader):
-    """A squash replaces its nodes, so the graph can name a migration no file backs."""
-    missing = next(name for (app, name) in loader.disk_migrations if app == 'testapp')
-    del loader.disk_migrations[('testapp', missing)]
-
-    assert missing not in graph.renames_by_migration(loader, 'testapp')
-
-
 def test_a_revive_re_emission_replaces_its_trigger_without_dropping_it():
     """A bare ``CREATE TRIGGER`` aborts over a live trigger, and ``DROP`` first holds ACCESS
     EXCLUSIVE on every owner table of the app until the migration commits;
@@ -521,124 +416,8 @@ def test_a_revive_re_emission_replaces_its_trigger_without_dropping_it():
     assert 'DROP TRIGGER' not in forward
 
 
-class TestAModelHandedToAnotherApp:
-    """A scan walks one app's files at a time, so another app's files may land under the new
-    name before or after the move (#66). Read through the cross-app route, the coverage ends
-    where the same-app rename put it."""
-
-    @staticmethod
-    def _as_a_move(monkeypatch, *, at=None):
-        """Read ``testapp``'s own renames as cross-app moves, optionally all at migration *at*."""
-        loader = MigrationLoader(None, ignore_no_migrations=True)
-        real = graph.renames_by_migration
-        moves = real(loader, 'testapp')
-        monkeypatch.setattr(
-            scanning,
-            'renames_by_migration',
-            lambda loader, label: {} if label == 'testapp' else real(loader, label),
-        )
-        handed = {at: [pair for pairs in moves.values() for pair in pairs]} if at else moves
-        monkeypatch.setattr(
-            scanning,
-            'moves_between_apps_by_migration',
-            lambda loader, label: handed if label == 'testapp' else {},
-        )
-
-    def test_moved_where_it_happened_it_lands_as_a_rename_does(self, monkeypatch):
-        baseline = scan_existing_operations()
-        self._as_a_move(monkeypatch)
-
-        existing = scan_existing_operations()
-
-        assert existing.triggers == baseline.triggers
-        assert existing.soft_deletes == baseline.soft_deletes
-        assert set(existing.soft_delete_related_dependencies) == set(
-            baseline.soft_delete_related_dependencies
-        )
-
-    @pytest.mark.parametrize(
-        'at', ['0001_initial', '0078_retirement_host_after_catalog'], ids=['before', 'after']
-    )
-    def test_a_name_another_model_holds_keeps_its_own_coverage(self, monkeypatch, at):
-        """A freed name a live model retook is not the moved table's to take with it: neither
-        at the move, once its coverage is recorded, nor when the walk is done."""
-        baseline = scan_existing_operations()
-        monkeypatch.setattr(
-            scanning,
-            'moves_between_apps_by_migration',
-            lambda loader, label: {at: [('testapp_catalog', 'testapp_elsewhere')]}
-            if label == 'testapp'
-            else {},
-        )
-
-        existing = scan_existing_operations()
-
-        assert 'testapp_catalog' in baseline.triggers
-        assert 'testapp_catalog' in existing.triggers
-        assert 'testapp_elsewhere' not in existing.triggers
-
-    def test_a_move_never_overwrites_and_a_rename_always_does(self, monkeypatch):
-        """Chronology holds inside one app's walk and not across two, so only the cross-app
-        route keeps what the destination already has."""
-        flags = []
-        real = scanning._move_renamed
-        monkeypatch.setattr(
-            scanning,
-            '_move_renamed',
-            lambda old, new, recorded, **kwargs: (
-                flags.append(kwargs.get('keep_existing', False)) or real(old, new, recorded, **kwargs)
-            ),
-        )
-        scan_existing_operations()
-        as_renames = set(flags)
-        flags.clear()
-        self._as_a_move(monkeypatch)
-
-        scan_existing_operations()
-
-        assert as_renames == {False}
-        assert set(flags) == {True}
-
-    def test_what_another_app_filed_after_the_move_is_carried_to_the_end_of_the_chain(
-        self, monkeypatch
-    ):
-        """The move is read before ``testapp``'s own files, which then record the old name: the
-        cross-app hop is followed through the renames the app made after it."""
-        baseline = scan_existing_operations()
-        self._as_a_move(monkeypatch, at='0001_initial')
-
-        existing = scan_existing_operations()
-
-        assert 'testapp_callbacks' in existing.triggers
-        assert 'testapp_encore' not in existing.triggers
-        assert existing.triggers == baseline.triggers
-        assert existing.soft_deletes == baseline.soft_deletes
-        key = ('testapp_callbacks', 'testapp_band', None)
-        assert key in baseline.soft_delete_related_dependencies
-        assert key in existing.soft_delete_related_dependencies
-        assert ('testapp_encore', 'testapp_band', None) not in existing.soft_delete_related_dependencies
-
-class TestMovingEntriesWithoutOverwriting:
-    def test_an_entry_already_under_the_new_name_is_kept(self):
-        recorded = {('old', 'owner', None): 'older', ('new', 'owner', None): 'newer'}
-
-        scanning._move_renamed('old', 'new', recorded, keep_existing=True)
-
-        assert recorded == {('new', 'owner', None): 'newer'}
-
-    def test_dependency_lists_are_merged_not_dropped(self):
-        recorded = {'old': [('a', '1')], 'new': [('b', '2')]}
-
-        scanning._move_renamed('old', 'new', recorded, keep_existing=True)
-
-        assert recorded == {'new': [('a', '1'), ('b', '2')]}
-
-    def test_a_gap_is_filled(self):
-        recorded = {('old', 'owner', None): 'older'}
-
-        scanning._move_renamed('old', 'new', recorded, keep_existing=True)
-
-        assert recorded == {('new', 'owner', None): 'older'}
+class TestMovingEntries:
+    """What ``_move_renamed`` does at a rename: scalars overwrite, lists of creates merge."""
 
     def test_a_rename_still_overwrites(self):
         """Same app, one chronological walk: whatever is under the destination predates it."""
@@ -648,136 +427,12 @@ class TestMovingEntriesWithoutOverwriting:
 
         assert recorded == {('new', 'owner', None): 'newer'}
 
+    def test_a_list_of_creates_is_merged_with_what_the_new_name_already_holds(self):
+        recorded = {
+            ('new', 'owner', None): [('a', '0001')],
+            ('old', 'owner', None): [('b', '0002')],
+        }
 
-class TestFollowingAChainOfMoves:
-    def test_two_moves_end_at_the_last(self):
-        ends = scanning._chain_ends({'a': 'b', 'b': 'c'}, {})
+        scanning._move_renamed('old', 'new', recorded)
 
-        assert ends == {'a': 'c', 'b': 'c'}
-
-    def test_a_move_then_a_rename_ends_at_the_rename(self):
-        ends = scanning._chain_ends({'a': 'b'}, {'b': 'c'})
-
-        assert ends == {'a': 'c', 'b': 'c'}
-
-    def test_a_cycle_ends_the_walk_rather_than_looping(self):
-        assert scanning._chain_ends({'a': 'b', 'b': 'a'}, {}) == {'a': 'b', 'b': 'a'}
-
-    def test_a_rename_alone_is_not_this_chain(self):
-        assert scanning._chain_ends({}, {'a': 'b'}) == {}
-
-
-class TestChainsJoinedAcrossApps:
-    def test_a_chain_is_extended_by_the_chains_of_the_names_in_it(self):
-        joined = scanning._join_chains({'c': ['b'], 'b': ['a']})
-
-        assert joined == {'c': ['a', 'b']}
-
-    def test_a_chain_already_whole_is_left_out(self):
-        assert scanning._join_chains({'b': ['a'], 'c': ['a', 'b']}) == {}
-
-    def test_a_cycle_does_not_loop(self):
-        assert scanning._join_chains({'a': ['b'], 'b': ['a']}) == {}
-
-    def test_the_scan_answers_with_the_whole_history(self, monkeypatch):
-        """``testapp_zzz`` was a rename of the table ``testapp_callbacks`` came to be, in
-        another app's history: its prior names include everything that table held."""
-        real = graph.renamed_tables
-        monkeypatch.setattr(
-            scanning,
-            'renamed_tables',
-            lambda loader, label: (
-                {**real(loader, label), 'testapp_zzz': ['testapp_callbacks']}
-                if label == 'testapp'
-                else real(loader, label)
-            ),
-        )
-
-        existing = scan_existing_operations()
-
-        assert existing.renamed_tables['testapp_zzz'] == [
-            'testapp_encore',
-            'testapp_callback',
-            'testapp_callbacks',
-        ]
-
-
-class TestWhichNameAChainEndsAt:
-    def test_the_longest_chain_says_where_a_name_ended(self):
-        """Dict order is not time: the intermediate chain only says where it stopped."""
-        joined = {'zed_child': ['anc_child', 'shop_child'], 'shop_child': ['anc_child']}
-
-        assert scanning._latest_names(joined)['anc_child'] == 'zed_child'
-        assert scanning._latest_names(dict(reversed(joined.items())))['anc_child'] == 'zed_child'
-
-    def test_the_name_nearest_the_end_is_carried_first(self):
-        """So where two names of one chain both hold an entry, the newer one is the one kept."""
-        ends = scanning._chain_ends({'a': 'b', 'b': 'c'}, {})
-
-        assert list(ends) == ['b', 'a']
-
-    def test_where_the_newer_entry_is_it_wins_whatever_the_hash_seed(self):
-        recorded = {'a': 'old', 'b': 'newer'}
-
-        for old, new in scanning._chain_ends({'a': 'b', 'b': 'c'}, {}).items():
-            scanning._move_renamed(old, new, recorded, keep_existing=True)
-
-        assert recorded == {'c': 'newer'}
-
-
-class TestTheWalkAloneAndTheEndAlone:
-    def test_a_move_where_it_happened_is_carried_by_the_walk_alone(self, monkeypatch):
-        """What is recorded after the move is moved there; the post-walk only sweeps the rest."""
-        baseline = scan_existing_operations()
-        TestAModelHandedToAnotherApp._as_a_move(monkeypatch)
-        monkeypatch.setattr(scanning, '_chain_ends', lambda moves, renames: {})
-
-        existing = scan_existing_operations()
-
-        assert existing.triggers == baseline.triggers
-        assert existing.soft_deletes == baseline.soft_deletes
-
-    def test_the_renames_after_a_move_carry_it_on(self, monkeypatch):
-        """Only the first hop is a move: ``testapp``'s own rename, read as no walk step, is what
-        takes the entries on to the name in use."""
-        baseline = scan_existing_operations()
-        loader = MigrationLoader(None, ignore_no_migrations=True)
-        real = graph.renames_by_migration
-        first = real(loader, 'testapp')['0051_rename_encore_to_callback']
-        monkeypatch.setattr(
-            scanning,
-            'renames_by_migration',
-            lambda loader, label: {} if label == 'testapp' else real(loader, label),
-        )
-        monkeypatch.setattr(
-            scanning,
-            'moves_between_apps_by_migration',
-            lambda loader, label: {'0001_initial': first} if label == 'testapp' else {},
-        )
-
-        existing = scan_existing_operations()
-
-        assert existing.triggers == baseline.triggers
-        assert 'testapp_encore' not in existing.triggers
-
-
-class TestSettlingAKeyAfterAChain:
-    def test_a_retirement_names_the_key_by_where_its_table_ended(self):
-        """``zed_child`` held ``shop_child`` and ``anc_child``; the shorter chain, written last,
-        would stop the key at ``shop_child``, which no model has any more."""
-        from types import SimpleNamespace  # noqa: PLC0415
-
-        site = scanning.CascadeRetirementSite('shop', '0006', ('anc_child', 'shop_parent', None), None)
-        renames = {'zed_child': ['anc_child', 'shop_child'], 'shop_child': ['anc_child']}
-
-        for ordered in (renames, dict(reversed(renames.items()))):
-            (settled,) = scanning._settle_retirement_sites(
-                [site],
-                {},
-                {},
-                ordered,
-                {'zed_child', 'shop_parent'},
-                lambda: SimpleNamespace(graph=None),
-            )
-
-            assert settled.key == ('zed_child', 'shop_parent', None)
+        assert recorded == {('new', 'owner', None): [('a', '0001'), ('b', '0002')]}

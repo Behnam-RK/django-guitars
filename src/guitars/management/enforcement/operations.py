@@ -1553,10 +1553,6 @@ class OperationsMixin:
         # the child still requires, so the difference is empty. That one is read off the file
         # instead, by ``_duplicated_mti_notes``, which needs no difference to see it.
         hosting = self._table_app_labels()
-        # A name a rename freed and a later model retook. The scan leaves the record under the
-        # freed name while that name is live, and the object went with the table -- so it is
-        # the rename's, not an orphan, and naming it sends a consumer to a live operation.
-        carried = {old for chain in self.existing.renamed_tables.values() for old in chain}
         required_triggers = set()
         required_soft_deletes = set()
         for app in django_apps.get_app_configs():
@@ -1593,7 +1589,7 @@ class OperationsMixin:
                 # Positive evidence, 2.9.0's rule: a table mapping to nothing is a deleted
                 # model on one reading and a scoped run on another, and stays silent. A hosted
                 # table whose model does not call for the operation is the shape below.
-                if table not in hosting or table in carried:
+                if table not in hosting:
                     continue
                 notes.append(
                     f"{kind} on '{table}' is recorded, but no local model reaches {column} "

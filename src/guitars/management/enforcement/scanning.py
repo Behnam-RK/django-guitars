@@ -6,17 +6,12 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from django.apps import apps as django_apps
 
 from guitars.management import _generator
-from guitars.management.enforcement.graph import (
-    moves_between_apps_by_migration,
-    renamed_tables,
-    renames_by_migration,
-    retired_enforcement,
-)
+from guitars.management.enforcement.graph import ReplayUnit, replay_plan
 from guitars.management.enforcement.headers import (
     _RE_MTI_SOFT_DELETE,
     _RE_MTI_UPDATED_AT,
@@ -196,61 +191,42 @@ def _cascade_key(match: re.Match) -> tuple[str, str, str | None]:
     )
 
 
-def _rekey(recorded: dict, moved: dict[str, str], live: set[str]) -> None:
-    """Move *recorded*'s keys onto the table names in use, in place. A key already filed under
-    the new name keeps its value -- written after the rename, it is the newer -- and creates merge."""
-    for key in list(recorded):
-        now = _current_key(key, moved, live)
-        if now == key:
-            continue
-        value = recorded.pop(key)
-        if isinstance(value, list):
-            merged = recorded.setdefault(now, [])
-            merged[:0] = [node for node in value if node not in merged]
-        else:
-            recorded.setdefault(now, value)
-
-
 def _unescaped_groups(match: re.Match) -> tuple:
     """A header's key, every group unescaped: the three #66 families' scanners capture exactly
     their key, in order."""
     return tuple(_identifiers._unescape_ident(group) for group in match.groups())
 
 
-def _current_key(key: tuple, moved: dict[str, str], live: set[str]) -> tuple:
-    """*key* under the spelling a rename moved its coverage onto. Both tables, ``_move_renamed``
-    rewriting every position -- and only where that walk moved it: a freed name another model
-    retook keeps its own coverage there, so translating anyway looks up the wrong model's."""
-
-    def _now(table: str) -> str:
-        return table if table in live else moved.get(table, table)
-
-    # A per-owner revive key spells its table alone, a self-cascade key one table and its
-    # column; every other key two tables first.
+def _respell(key, forward: dict[str, str]):
+    """*key* under the name its table now has, where a rename moved it on and nothing has taken
+    the old name since (*forward*, kept by the replay). A cascade or owned key names two tables,
+    a self-cascade or autofill key one and then a column or function, a per-owner trigger one."""
+    if isinstance(key, str):
+        return forward.get(key, key)
     if len(key) == 1:
-        return (_now(key[0]),)
+        return (forward.get(key[0], key[0]),)
     if len(key) == 2:
-        return (_now(key[0]), key[1])
+        return (forward.get(key[0], key[0]), key[1])
     related, owner, via = key
-    return (_now(related), _now(owner), via)
+    return (forward.get(related, related), forward.get(owner, owner), via)
+
+
+Aliases = dict[tuple[str, str], tuple[tuple[str, str], int]]
 
 
 def _settle_retirement_sites(
     sites: list[CascadeRetirementSite],
     recorded: dict[Any, str | None],
     provenance: dict[Any, list[tuple[str, str]]],
-    renames: dict[str, list[str]],
-    live_tables: set[str],
-    ensure_loader: Callable[[], MigrationLoader],
+    graph,
+    aliases: Aliases | None = None,
 ) -> list[CascadeRetirementSite]:
     """Match each retirement to the create it dropped and pop the key where the drop wins. The
-    walk itself never pops: which of a create and its drop it sees last is registry order, not
-    time, so both questions are settled here, once, by the graph. See ADR 0021."""
-    moved = _latest_names(renames)
-    graph = ensure_loader().graph
+    replay never pops: a line through nodes the graph leaves unordered must not read "unordered"
+    as "later", so both questions are settled here, once, by the graph. See ADR 0021, 0043."""
     by_key: dict[Any, list[CascadeRetirementSite]] = {}
     for site in sites:
-        by_key.setdefault(_current_key(site.key, moved, live_tables), []).append(site)
+        by_key.setdefault(site.key, []).append(site)
     settled = []
     for key, drops in by_key.items():
         drops.sort(key=_position)
@@ -263,16 +239,20 @@ def _settle_retirement_sites(
             node = (site.app_label, site.migration)
             settled.append(
                 site._replace(
-                    key=key, created=_create_this_drop_dropped(node, creates, graph, rank)
+                    key=key,
+                    created=_create_this_drop_dropped(node, creates, graph, rank, aliases),
                 )
             )
-        if _retirement_is_the_last_word(drops, creates, graph):
+        if _retirement_is_the_last_word(drops, creates, graph, aliases):
             recorded.pop(key, None)
     return settled
 
 
 def _retirement_is_the_last_word(
-    drops: list[CascadeRetirementSite], creates: list[tuple[str, str]], graph
+    drops: list[CascadeRetirementSite],
+    creates: list[tuple[str, str]],
+    graph,
+    aliases: Aliases | None = None,
 ) -> bool:
     """Whether the newest drop of a key comes after its newest create. Per key, not per site:
     an older drop is ordered before the create that revived the rule, and settling on that one
@@ -280,10 +260,10 @@ def _retirement_is_the_last_word(
     if not creates:
         return False
     node = (drops[-1].app_label, drops[-1].migration)
-    if _orders(creates[-1], node, graph):
+    if _orders(creates[-1], node, graph, aliases):
         return True
     # A create the graph puts *after* this drop is a re-adoption, and the rule is live again.
-    if any(_orders(node, create, graph) for create in creates):
+    if any(_orders(node, create, graph, aliases) for create in creates):
         return False
     # Nothing orders them either way, which is the pre-2.10.0 history this release exists for.
     # Counting is the only signal left, and the two alternate: relax, restore, relax.
@@ -297,22 +277,33 @@ def _position(site: CascadeRetirementSite) -> tuple[str, str]:
     return (site.app_label, site.migration)
 
 
-def _orders(earlier: tuple[str, str], later: tuple[str, str], graph) -> bool:
-    """Whether the graph puts *earlier* before *later*. Unordered is not "earlier": nothing
-    orders a re-adopted create against the retirement it revives, and reading that as ordered
-    would pop a live rule's coverage."""
-    if earlier not in graph.node_map or later not in graph.node_map:
+def _orders(
+    earlier: tuple[str, str], later: tuple[str, str], graph, aliases: Aliases | None = None
+) -> bool:
+    """Whether the graph puts *earlier* before *later*. Unordered is not "earlier": reading a
+    re-adopted create as ordered would pop a live rule's coverage. A file a squash replaced is
+    its squash, and two of one squash's files are ordered by the squash's ``replaces``."""
+    aliases = aliases or {}
+    first, first_rank = aliases.get(earlier, (earlier, 0))
+    second, second_rank = aliases.get(later, (later, 0))
+    if first == second and (earlier in aliases or later in aliases):
+        return first_rank < second_rank
+    if first not in graph.node_map or second not in graph.node_map:
         return False
-    return earlier in set(graph.forwards_plan(later))
+    return first in set(graph.forwards_plan(second))
 
 
 def _create_this_drop_dropped(
-    node: tuple[str, str], creates: list[tuple[str, str]], graph, rank: int
+    node: tuple[str, str],
+    creates: list[tuple[str, str]],
+    graph,
+    rank: int,
+    aliases: Aliases | None = None,
 ) -> tuple[str, str] | None:
     """The newest create *node*'s drop can have dropped -- the last one the graph puts before
     it. Not simply the newest: after a re-adoption that one is the create the drop *precedes*,
     and naming it would order the drop after the rule it revives, for good."""
-    ordered = [create for create in creates if _orders(create, node, graph)]
+    ordered = [create for create in creates if _orders(create, node, graph, aliases)]
     if ordered:
         return ordered[-1]
     # Nothing orders them at all -- the pre-2.10.0 history this release exists for. Paired by
@@ -354,61 +345,10 @@ def _subtract_retired(
         recorded.pop(table, None)
 
 
-def _join_chains(renames: dict[str, list[str]]) -> dict[str, list[str]]:
-    """*renames* (``current -> every name it held, oldest first``) with each chain extended by the
-    chains of the names in it: ``{'c': ['b'], 'b': ['a']}`` says ``c`` held ``a`` and ``b``."""
-
-    def _held(name: str, seen: frozenset[str]) -> list[str]:
-        names: list[str] = []
-        for old in renames.get(name, []):
-            if old not in seen:
-                names += [*_held(old, seen | {old}), old]
-        return names
-
-    return {
-        new: list(dict.fromkeys(_held(new, frozenset({new}))))
-        for new in renames
-        if len(set(_held(new, frozenset({new})))) > len(renames[new])
-    }
-
-
-def _latest_names(renames: dict[str, list[str]]) -> dict[str, str]:
-    """``old -> the name it ends at``, from ``current -> every name it held``. The longest chain
-    is written last so it wins: a joined chain says where a name ended, the intermediate one
-    only where it stopped, and dict order is not time."""
-    return {
-        old: new
-        for new, chain in sorted(renames.items(), key=lambda item: (len(item[1]), item[0]))
-        for old in chain
-    }
-
-
-def _chain_ends(moves: dict[str, str], renames: dict[str, str]) -> dict[str, str]:
-    """Where each name in *moves*, and each name it moved onto, ends up after every hop *moves*
-    and *renames* (old table -> new) say it made, nearest the end first, so that of two names
-    holding an entry the newer is kept. A name that ends where it began is left out."""
-    ends: dict[str, tuple[int, str]] = {}
-    for start in {*moves, *moves.values()}:
-        current, seen = start, {start}
-        while (following := moves.get(current) or renames.get(current)) and following not in seen:
-            seen.add(following)
-            current = following
-        if current != start:
-            ends[start] = (len(seen), current)
-    return {
-        start: end for start, (_hops, end) in sorted(ends.items(), key=lambda i: (i[1][0], i[0]))
-    }
-
-
-def _move_renamed(
-    old: str, new: str, recorded: dict | set, *, keep_existing: bool = False
-) -> None:
-    """Move *recorded*'s entries from table *old* onto *new*, in place. A model moved between
-    apps (*keep_existing*) lands on a name another app's files may already have filed, older or
-    newer than the move, so what is there stays and the moving entry only fills a gap (#66)."""
-    # Called as the scan crosses the renaming migration, not over the finished scan: order is
-    # what makes a **cycle** right. ``A -> B`` and back leaves two entries under ``A`` and only
-    # the walk knows which is newer -- a post-pass guessed, and the pre-cycle one won.
+def _move_renamed(old: str, new: str, recorded: dict | set) -> None:
+    """Move *recorded*'s entries from table *old* onto *new*, in place, at the migration that
+    renames it. Anything already filed under *new* predates the rename, so a scalar is
+    overwritten and a list of creates is merged, the older first (ADR 0043)."""
     if isinstance(recorded, set):
         if old in recorded:
             recorded.discard(old)
@@ -422,27 +362,88 @@ def _move_renamed(
             if isinstance(key, str)
             else tuple(new if part == old else part for part in key)
         )
-        if moved != key:
-            if keep_existing and moved in recorded:
-                value = recorded.pop(key)
-                if isinstance(value, list):
-                    kept = recorded[moved]
-                    kept[:0] = [node for node in value if node not in kept]
-                continue
-            # Overwrite, never ``setdefault``: this runs at the rename, so anything already
-            # filed under the destination predates it and the moving entry is the newer.
-            recorded[moved] = recorded.pop(key)
+        if moved == key:
+            continue
+        value = recorded.pop(key)
+        if isinstance(value, list) and isinstance(recorded.get(moved), list):
+            kept = recorded[moved]
+            kept.extend(node for node in value if node not in kept)
+        else:
+            recorded[moved] = value
+
+
+class _FileRecord:
+    """One migration file's claim on a ``[DIGEST:...]``: it vouches for its operation set only
+    while the tables it named still carry what it wrote (ADR 0043)."""
+
+    __slots__ = ('app_label', 'digest', 'tables', 'void')
+
+    def __init__(self, app_label: str, digest: str) -> None:
+        self.app_label = app_label
+        self.digest = digest
+        self.tables: set[str] = set()
+        self.void = False
+
+
+def _tables_named(key) -> tuple[str, ...]:
+    """The tables a recorded key names: the whole of a string, the first of a one- or two-part
+    tuple, the first two of a cascade or owned key."""
+    if isinstance(key, str):
+        return (key,)
+    return tuple(key[:2]) if len(key) == 3 else (key[0],)
+
+
+def _replay_units(
+    loader: MigrationLoader, files: dict[tuple[str, str], str]
+) -> tuple[list[ReplayUnit], Aliases]:
+    """The migrations in the order ``migrate`` runs them, then any file on disk the graph does
+    not know, which has no events. A file a squash replaced that survives beside a squash that
+    was not expanded is read just before that squash: its headers are older than anything after."""
+    units = replay_plan(loader)
+    placed = {(unit.app_label, unit.name) for unit in units}
+    replaced_by: dict[tuple[str, str], tuple[str, str]] = {}
+    for node, migration in loader.graph.nodes.items():
+        for each in getattr(migration, 'replaces', None) or ():
+            replaced_by[each] = node
+    before_squash: dict[tuple[str, str], list[ReplayUnit]] = {}
+    stray: list[ReplayUnit] = []
+    for key in files:
+        if key in placed:
+            continue
+        unit = ReplayUnit(key[0], key[1], key, ())
+        if key in replaced_by:
+            before_squash.setdefault(replaced_by[key], []).append(unit)
+        else:
+            stray.append(unit)
+    ordered: list[ReplayUnit] = []
+    for unit in units:
+        ordered.extend(before_squash.pop((unit.app_label, unit.name), ()))
+        ordered.append(unit)
+    # Every graph node is in some leaf's plan, so a squash unit always came by above and nothing
+    # is left in ``before_squash``: the stray files are the whole remainder.
+    ordered.extend(stray)
+    # A squash is its replaced files' graph node: ordered against another file by the node, and
+    # against its own replaced files by their place in the replay.
+    aliases: Aliases = {}
+    by_node: dict[tuple[str, str], list[ReplayUnit]] = defaultdict(list)
+    for unit in ordered:
+        by_node[unit.graph_node].append(unit)
+    for node, members in by_node.items():
+        if len(members) > 1:
+            for rank, unit in enumerate(members):
+                aliases[unit.app_label, unit.name] = (node, rank)
+    return ordered, aliases
 
 
 def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingOperations:
     """Scan every local app's migration files for enforcement operations already written, by
-    comment header, so a partially covered app receives exactly what it lacks."""
-    # *loader* is the caller's cached one. A retirement is read off loaded operations, so one
-    # is built here when none is given, and at most once for the whole scan.
+    comment header. Replayed in ``migrate``'s order, each file's table events before its headers,
+    so a later file wins by being later (ADR 0043)."""
+    # *loader* is the caller's cached one. Events are read off loaded operations, so one is
+    # built here when none is given, and at most once for the whole scan.
 
     # Table (or table pair) -> the [SQL:...] digest of its most recent operation.
-    # Last write wins throughout, which is only the currently-applied answer because
-    # _generator.iter_migration_files yields in filename order -- see its docstring.
+    # Last write wins throughout: the replay is in graph order, which is time.
     existing_triggers: dict[str, str | None] = {}
     existing_soft_deletes: dict[str, str | None] = {}
     existing_soft_delete_related: dict[tuple[str, str, str | None], str | None] = {}
@@ -541,7 +542,7 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
     #: FORCE backlog; see where it is filled.
     existing_policy_force: dict[str, bool] = {}
     existing_tenant_forces: set[str] = set()
-    existing_digests: defaultdict[str, set[str]] = defaultdict(set)
+    file_records: list[_FileRecord] = []
     trigger_function_dep: tuple[str, str] | None = None
     parent_trigger_function_dep: tuple[str, str] | None = None
     stamp_function_dep: tuple[str, str] | None = None
@@ -551,12 +552,11 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
     autofill_function_deps: dict[str, tuple[str, str]] = {}
     autofill_function_sql: dict[str, str | None] = {}
     built_loader = loader
-    _pending_renames: dict[str, list[str]] = {}
-    # Old table -> new, for the models an app handed to another (#66).
-    _between_apps: dict[str, str] = {}
-    live_tables = {
-        model._meta.db_table for app in django_apps.get_app_configs() for model in app.get_models()
-    }
+    # Emptied name -> the name its objects moved on to, for a header that still names the old
+    # one (a later file of an app the rename did not reach). Cleared where a model takes the
+    # name again or the table is dropped. And ``current db_table -> every name it held``.
+    forward: dict[str, str] = {}
+    held: dict[str, list[str]] = {}
 
     def _ensure_loader() -> MigrationLoader:
         """The caller's loader, or one built once here. Building imports every migration module
@@ -591,18 +591,27 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
         'mti_triggers': existing_mti_triggers,
         'mti_soft_deletes': existing_mti_soft_deletes,
     }
-
+    # What a rename carries to its new name: every family and every provenance list. A site
+    # list is re-keyed beside them, below.
     every_family = (
         existing_triggers,
         existing_soft_deletes,
         existing_soft_delete_related,
+        cascade_deps,
         existing_soft_delete_revive,
         revive_deps,
-        # Not #66's three: moved once, after the walk, by ``_rekey``, which keeps an entry
-        # another app filed under the new name -- this move would overwrite it with an older.
+        existing_soft_delete_owned,
+        owned_deps,
+        existing_soft_delete_owned_sweep,
+        sweep_deps,
+        existing_soft_delete_self_cascade,
+        self_deps,
+        existing_soft_delete_revive_owner,
+        revive_owner_deps,
+        existing_soft_delete_cascade_owner,
+        cascade_owner_deps,
         existing_mti_triggers,
         existing_mti_soft_deletes,
-        cascade_deps,
         existing_tenant_autofill,
         existing_tenant_policies,
         existing_policy_identities,
@@ -610,265 +619,252 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
         existing_policy_force,
         existing_tenant_forces,
     )
+
+    def _forget_policy_and_autofill(table: str, *, whole_table: bool) -> None:
+        # A tenant policy is dropped on **either** path -- it is filed against the column it
+        # reads, so a column form takes it too. Forgetting it only on the whole-table path
+        # leaves tenancy off with ``--check`` green.
+        existing_tenant_policies.discard(table)
+        existing_policy_identities.pop(table, None)
+        existing_policy_sql.pop(table, None)
+        existing_policy_force.pop(table, None)
+        existing_tenant_forces.discard(table)
+        if whole_table:
+            # The trigger loop really is whole-table-only, so autofill is too.
+            for key in [k for k in existing_tenant_autofill if k[0] == table]:
+                del existing_tenant_autofill[key]
+
+    def _void_digests_naming(table: str) -> None:
+        for record in file_records:
+            if table in record.tables:
+                record.void = True
+
+    def _rekey_sites(old: str, new: str) -> None:
+        def _moved(site: CascadeRetirementSite) -> CascadeRetirementSite:
+            key = tuple(new if part == old else part for part in site.key)
+            return site._replace(key=cast('tuple[str, str, str | None]', key))
+
+        retirement_sites[:] = [_moved(site) for site in retirement_sites]
+        revive_retirement_sites[:] = [_moved(site) for site in revive_retirement_sites]
+        for sites in trigger_retirement_sites.values():
+            sites[:] = [_moved(site) for site in sites]
+
+    def _apply(event) -> None:
+        if event.kind == 'create':
+            # A model takes the name: whatever forwarded from it is somebody else's now.
+            forward.pop(event.table, None)
+        elif event.kind == 'rename':
+            old, new_name = event.table, str(event.new_table)
+            for recorded in every_family:
+                _move_renamed(old, new_name, recorded)
+            _rekey_sites(old, new_name)
+            held[new_name] = [
+                name
+                for name in dict.fromkeys([*held.get(new_name, []), *held.pop(old, []), old])
+                if name != new_name
+            ]
+            _void_digests_naming(old)
+            for emptied, target in list(forward.items()):
+                if target == old:
+                    forward[emptied] = new_name
+            forward[old] = new_name
+            forward.pop(new_name, None)
+        elif event.kind == 'drop':
+            # What lived on the table went with it; the rule families keyed on it as a related
+            # table stay, for the dropped-child retirement (ADR 0029), as do ``held`` and the
+            # provenance. A trigger elsewhere whose body names the table survives it.
+            _subtract_retired(event.table, None, {}, whole_table_families, trigger_families)
+            _forget_policy_and_autofill(event.table, whole_table=True)
+            _void_digests_naming(event.table)
+            for emptied in [k for k, v in forward.items() if v == event.table or k == event.table]:
+                del forward[emptied]
+        else:  # 'retire'
+            _subtract_retired(
+                event.table, event.column, keyed_families, whole_table_families, trigger_families
+            )
+            _forget_policy_and_autofill(event.table, whole_table=event.column is None)
+
+    def _record(key):
+        return _respell(key, forward)
+
+    files: dict[tuple[str, str], str] = {}
     for app in django_apps.get_app_configs():
         if _generator.is_local(app):
-            _pending_renames.update(renamed_tables(_ensure_loader(), app.label))
-            for pairs in moves_between_apps_by_migration(_ensure_loader(), app.label).values():
-                _between_apps.update(pairs)
-    # Each app's chain ends where its own history does: a model moved to another app and renamed
-    # there has the first hop in one and the second in the other.
-    _pending_renames.update(_join_chains(_pending_renames))
+            for path, content in _generator.iter_migration_files(app):
+                files[app.label, path.stem] = content
+    units, aliases = _replay_units(_ensure_loader(), files)
 
-    for app in django_apps.get_app_configs():
-        if not _generator.is_local(app):
+    for unit in units:
+        for event in unit.events:
+            _apply(event)
+        content = files.get((unit.app_label, unit.name))
+        if content is None:
             continue
-        retired = retired_enforcement(_ensure_loader(), app.label)
-        moves = renames_by_migration(_ensure_loader(), app.label)
-        handed_over = moves_between_apps_by_migration(_ensure_loader(), app.label)
-        # A retirement names the table as spelled *now*, while the keys it must subtract may
-        # still be filed under a name a rename left behind -- the post-pass would then move the
-        # old key back over the hole and a dropped object would read as covered.
-        spellings = {
-            table: [table, *_pending_renames.get(table, [])]
-            for table, _ in [pair for pairs in retired.values() for pair in pairs]
-        }
-        for path, content in _generator.iter_migration_files(app):
-            # Before this file's headers, not after: an operation retiring a key and a header
-            # re-asserting it in the same migration means the migration re-asserts it.
-            # Before this file's own headers and its retirements: the rename happened first.
-            for old_table, new_table in moves.get(path.stem, ()):
-                # A freed name already retaken by another model keeps its own coverage.
-                if old_table in live_tables:
-                    continue
-                for recorded in every_family:
-                    _move_renamed(old_table, new_table, recorded)
-            for old_table, new_table in handed_over.get(path.stem, ()):
-                if old_table in live_tables:
-                    continue
-                for recorded in every_family:
-                    _move_renamed(old_table, new_table, recorded, keep_existing=True)
+        app_label, stem = unit.app_label, unit.name
+        record: _FileRecord | None = None
+        digest_match = _generator.RE_DIGEST.search(content.split('\n', 1)[0])
+        if digest_match:
+            record = _FileRecord(app_label, digest_match.group('digest'))
+            file_records.append(record)
 
-            for table, column in retired.get(path.stem, ()):
-                for spelling in spellings[table]:
-                    _subtract_retired(
-                        spelling, column, keyed_families, whole_table_families, trigger_families
-                    )
-                    # A tenant policy is dropped on **either** path -- it is filed against the
-                    # column it reads, so a column form takes it too. Forgetting it only on the
-                    # whole-table path leaves tenancy off with ``--check`` green.
-                    existing_tenant_policies.discard(spelling)
-                    existing_policy_identities.pop(spelling, None)
-                    existing_policy_sql.pop(spelling, None)
-                    existing_policy_force.pop(spelling, None)
-                    existing_tenant_forces.discard(spelling)
-                    if column is None:
-                        # The trigger loop really is whole-table-only, so autofill is too.
-                        for key in [k for k in existing_tenant_autofill if k[0] == spelling]:
-                            del existing_tenant_autofill[key]
+        function_match = _RE_TRIGGER_FUNCTION.search(content)
+        if function_match:
+            trigger_function_dep = (app_label, stem)
+            trigger_function_sql = _recorded_sql_identity(content, function_match)
+        stamp_match = _RE_STAMP_FUNCTION.search(content)
+        if stamp_match:
+            stamp_function_dep = (app_label, stem)
+            stamp_function_sql = _recorded_sql_identity(content, stamp_match)
+        parent_match = _RE_PARENT_TRIGGER_FUNCTION.search(content)
+        if parent_match:
+            parent_trigger_function_dep = (app_label, stem)
+            parent_trigger_function_sql = _recorded_sql_identity(content, parent_match)
 
-            digest_match = _generator.RE_DIGEST.search(content.split('\n', 1)[0])
-            if digest_match:
-                existing_digests[app.label].add(digest_match.group('digest'))
+        # finditer, not search: unlike the two singletons above, one migration may define
+        # several autofill functions, and each is recorded under its own name.
+        for autofill_match in _RE_TENANT_AUTOFILL_FUNCTION.finditer(content):
+            function = _identifiers._unescape_ident(autofill_match.group(1))
+            autofill_function_deps[function] = (app_label, stem)
+            autofill_function_sql[function] = _recorded_sql_identity(content, autofill_match)
 
-            function_match = _RE_TRIGGER_FUNCTION.search(content)
-            if function_match:
-                trigger_function_dep = (app.label, path.stem)
-                trigger_function_sql = _recorded_sql_identity(content, function_match)
-            stamp_match = _RE_STAMP_FUNCTION.search(content)
-            if stamp_match:
-                stamp_function_dep = (app.label, path.stem)
-                stamp_function_sql = _recorded_sql_identity(content, stamp_match)
-            parent_match = _RE_PARENT_TRIGGER_FUNCTION.search(content)
-            if parent_match:
-                parent_trigger_function_dep = (app.label, path.stem)
-                parent_trigger_function_sql = _recorded_sql_identity(content, parent_match)
+        for pattern, target, key_fn in scan_table:
+            for match in pattern.finditer(content):
+                key = _record(key_fn(match))
+                target[key] = _recorded_sql_identity(content, match)
+                if record is not None:
+                    record.tables.update(_tables_named(key))
 
-            # finditer, not search: unlike the two singletons above, one migration may define
-            # several autofill functions, and each is recorded under its own name.
-            for autofill_match in _RE_TENANT_AUTOFILL_FUNCTION.finditer(content):
-                function = _identifiers._unescape_ident(autofill_match.group(1))
-                autofill_function_deps[function] = (app.label, path.stem)
-                autofill_function_sql[function] = _recorded_sql_identity(content, autofill_match)
+        # Bespoke, one family asking this: the only one whose drop is hosted by a different
+        # app than its create. A list, not last-write-wins -- a key created, retired and
+        # created again has two, and which of them a drop dropped is what orders it.
+        for match in _RE_SOFT_DELETE_RELATED.finditer(content):
+            creates = cascade_deps.setdefault(_record(_cascade_key(match)), [])
+            # One entry per migration: the plain and ``_via`` forms of one pair share a
+            # key when the column is dropped, so a file can name it more than once.
+            if (app_label, stem) not in creates:
+                creates.append((app_label, stem))
 
-            for pattern, target, key_fn in scan_table:
-                for match in pattern.finditer(content):
-                    target[key_fn(match)] = _recorded_sql_identity(content, match)
+        # The same, for the inverse family: its drop is ordered against the migration that
+        # created *it*, which the cascade's own creates cannot answer -- the two land
+        # together today, but nothing enforces that, and a mis-ordered DROP is silent.
+        for match in _RE_SOFT_DELETE_REVIVE.finditer(content):
+            creates = revive_deps.setdefault(_record(_cascade_key(match)), [])
+            if (app_label, stem) not in creates:
+                creates.append((app_label, stem))
 
-            # Bespoke, one family asking this: the only one whose drop is hosted by a different
-            # app than its create. A list, not last-write-wins -- a key created, retired and
-            # created again has two, and which of them a drop dropped is what orders it.
-            for match in _RE_SOFT_DELETE_RELATED.finditer(content):
-                creates = cascade_deps.setdefault(_cascade_key(match), [])
-                # One entry per migration: the plain and ``_via`` forms of one pair share a
-                # key when the column is dropped, so a file can name it more than once.
-                if (app.label, path.stem) not in creates:
-                    creates.append((app.label, path.stem))
+        # #66's families record their creates too, and their retirements are settled by the
+        # graph rather than popped here: a trigger can be written by an MTI descendant's app.
+        for pattern, deps in (
+            (_RE_SOFT_DELETE_OWNED, owned_deps),
+            (_RE_SOFT_DELETE_OWNED_SWEEP, sweep_deps),
+            (_RE_SOFT_DELETE_SELF_CASCADE, self_deps),
+            (_RE_SOFT_DELETE_REVIVE_OWNER, revive_owner_deps),
+            (_RE_SOFT_DELETE_CASCADE_OWNER, cascade_owner_deps),
+        ):
+            for match in pattern.finditer(content):
+                creates = deps.setdefault(_record(_unescaped_groups(match)), [])
+                if (app_label, stem) not in creates:
+                    creates.append((app_label, stem))
 
-            # The same, for the inverse family: its drop is ordered against the migration that
-            # created *it*, which the cascade's own creates cannot answer -- the two land
-            # together today, but nothing enforces that, and a mis-ordered DROP is silent.
-            for match in _RE_SOFT_DELETE_REVIVE.finditer(content):
-                creates = revive_deps.setdefault(_cascade_key(match), [])
-                if (app.label, path.stem) not in creates:
-                    creates.append((app.label, path.stem))
-
-            # #66's three record their creates too, and their retirements below are settled
-            # by the graph rather than popped here: a trigger can be written by an MTI
-            # descendant's app, and a rename in another app re-keys after a pop.
-            for pattern, deps in (
-                (_RE_SOFT_DELETE_OWNED, owned_deps),
-                (_RE_SOFT_DELETE_OWNED_SWEEP, sweep_deps),
-                (_RE_SOFT_DELETE_SELF_CASCADE, self_deps),
-                (_RE_SOFT_DELETE_REVIVE_OWNER, revive_owner_deps),
-                (_RE_SOFT_DELETE_CASCADE_OWNER, cascade_owner_deps),
-            ):
-                for match in pattern.finditer(content):
-                    # A dict as an ordered set: one entry per migration, in walk order.
-                    deps.setdefault(_unescaped_groups(match), {})[app.label, path.stem] = None
-
-            # Recorded per file, not per family: a repeat is only visible while the file is
-            # open, and the key it writes is the one a real MTI child writes too.
-            for pattern, kind in (
-                (_RE_MTI_UPDATED_AT, 'MTI Updated at Trigger'),
-                (_RE_MTI_SOFT_DELETE, 'MTI Soft Delete Rule'),
-            ):
-                seen_mti: set[str] = set()
-                for match in pattern.finditer(content):
-                    table = _identifiers._unescape_ident(match.group(1))
-                    # Recorded on the *second* copy only: a third would otherwise print the
-                    # same sentence again, and the reader has one file to open either way.
-                    if table in seen_mti:
-                        entry = (app.label, path.stem, kind, table)
-                        if entry not in duplicate_mti:
-                            duplicate_mti.append(entry)
-                    seen_mti.add(table)
-
-            # Bespoke rather than a scan_table row, because these two headers partition one
-            # key space and retirement *subtracts* -- the only place this scan does. A pop,
-            # not a sentinel: a re-adopted column must read as uncovered and plainly CREATE.
-            for match in _RE_TENANT_AUTOFILL.finditer(content):
-                existing_tenant_autofill[_autofill_key(match)] = _recorded_sql_identity(
-                    content, match
-                )
-            # Not popped here: two apps scan in a fixed registry order, so which of a create
-            # and its drop is seen *last* in this walk is an accident of INSTALLED_APPS, not
-            # of time. Left for the settle post-pass, which asks the graph instead. See ADR 0021.
-            cascade_retirements = list(_RE_SOFT_DELETE_RELATED_RETIRED.finditer(content))
-            for match in cascade_retirements:
-                retirement_sites.append(
-                    CascadeRetirementSite(app.label, path.stem, _cascade_key(match), None)
-                )
-            for match in _RE_SOFT_DELETE_REVIVE_RETIRED.finditer(content):
-                revive_retirement_sites.append(
-                    CascadeRetirementSite(app.label, path.stem, _cascade_key(match), None)
-                )
-            for pattern, recorded in (
-                (_RE_SOFT_DELETE_OWNED_RETIRED, existing_soft_delete_owned),
-                (_RE_SOFT_DELETE_OWNED_SWEEP_RETIRED, existing_soft_delete_owned_sweep),
-                (_RE_SOFT_DELETE_SELF_CASCADE_RETIRED, existing_soft_delete_self_cascade),
-                (_RE_SOFT_DELETE_REVIVE_OWNER_RETIRED, existing_soft_delete_revive_owner),
-                (_RE_SOFT_DELETE_CASCADE_OWNER_RETIRED, existing_soft_delete_cascade_owner),
-            ):
-                for match in pattern.finditer(content):
-                    trigger_retirement_sites.setdefault(id(recorded), []).append(
-                        CascadeRetirementSite(app.label, path.stem, _unescaped_groups(match), None)
-                    )
-                    # Not ``retirement_apps``: ADR 0021 waives the digest guard where a create or
-                    # drop recurs *this run*, at the point it is written. A scan-time flag made the
-                    # one-time retirement of every owned rule (#80, ADR 0039) permanent for the app.
-            retirements = list(_RE_TENANT_AUTOFILL_RETIRED.finditer(content))
-            for match in retirements:
-                existing_tenant_autofill.pop(_autofill_key(match), None)
-            if retirements:
-                # Recorded per app, not per key: this is what tells `_generate_stage` its
-                # file-level digest guard can no longer assume operation sets never recur.
-                retirement_apps.add(app.label)
-
-            policy_matches = list(_RE_TENANT_POLICY.finditer(content))
-            unforced_in_file = unforced_policy_tables(content, policy_matches)
-            for match in policy_matches:
+        # Recorded per file, not per family: a repeat is only visible while the file is
+        # open, and the key it writes is the one a real MTI child writes too.
+        for pattern, kind in (
+            (_RE_MTI_UPDATED_AT, 'MTI Updated at Trigger'),
+            (_RE_MTI_SOFT_DELETE, 'MTI Soft Delete Rule'),
+        ):
+            seen_mti: set[str] = set()
+            for match in pattern.finditer(content):
                 table = _identifiers._unescape_ident(match.group(1))
-                existing_tenant_policies.add(table)
-                # Last write wins, within a file and across them (filename order is
-                # application order). Unlike [SQL:...], [POLICY:...] is never optional.
-                policy_identity = _recorded_policy_identity(content, match)
-                if policy_identity is None:  # pragma: no cover - unreachable
-                    # HEADER_TENANT_POLICY always writes [POLICY:...] inline, so this guards
-                    # the invariant rather than a real code path.
-                    raise RuntimeError(
-                        f'Tenant RLS header for "{table}" matched but carried no '
-                        f'[POLICY:...] identity -- HEADER_TENANT_POLICY always writes one.'
-                    )
-                existing_policy_identities[table] = policy_identity
-                existing_policy_sql[table] = _recorded_sql_identity(content, match)
-                # Last write wins here too: a union instead would leave a table on the
-                # backlog forever after one force=False write, even once superseded.
-                existing_policy_force[table] = table in unforced_in_file
-            existing_tenant_forces.update(
-                _identifiers._unescape_ident(m.group(1))
-                for m in _RE_TENANT_FORCE.finditer(content)
-            )
+                # Recorded on the *second* copy only: a third would otherwise print the
+                # same sentence again, and the reader has one file to open either way.
+                if table in seen_mti:
+                    entry = (app_label, stem, kind, table)
+                    if entry not in duplicate_mti:
+                        duplicate_mti.append(entry)
+                seen_mti.add(table)
 
-    # Onto the names in use first: the walk moves a key only once its rename's app is walked,
-    # so an app walked later records the old name, never moved, and retired on every run.
-    final = _latest_names(_pending_renames)
-    # What another app filed under the old name, or one the model held on the way, is walked in
-    # its own order: it cannot be moved at the move, and a second hop (a rename, another move)
-    # found nothing to carry. Followed to its end, keeping what is already there.
-    for old_table, new_table in _chain_ends(_between_apps, final).items():
-        if old_table in live_tables:
-            continue
-        for recorded in every_family:
-            _move_renamed(old_table, new_table, recorded, keep_existing=True)
-    # Settled after the walk, because the walk is registry order and this question is graph
-    # order: a retirement in an app scanned first pops a key its create then re-records, and
-    # the retirement re-emits on every run with ``--check`` never going green.
+        # Bespoke rather than a scan_table row, because these two headers partition one
+        # key space and retirement *subtracts*. A pop, not a sentinel: a re-adopted column
+        # must read as uncovered and plainly CREATE.
+        for match in _RE_TENANT_AUTOFILL.finditer(content):
+            key = _record(_autofill_key(match))
+            existing_tenant_autofill[key] = _recorded_sql_identity(content, match)
+            if record is not None:
+                record.tables.add(key[0])
+        # Not popped here: a line of nodes the graph leaves unordered must not read "unordered"
+        # as "later". Left for the settle pass, which asks the graph. See ADR 0021.
+        for match in _RE_SOFT_DELETE_RELATED_RETIRED.finditer(content):
+            retirement_sites.append(
+                CascadeRetirementSite(app_label, stem, _record(_cascade_key(match)), None)
+            )
+        for match in _RE_SOFT_DELETE_REVIVE_RETIRED.finditer(content):
+            revive_retirement_sites.append(
+                CascadeRetirementSite(app_label, stem, _record(_cascade_key(match)), None)
+            )
+        for pattern, recorded in (
+            (_RE_SOFT_DELETE_OWNED_RETIRED, existing_soft_delete_owned),
+            (_RE_SOFT_DELETE_OWNED_SWEEP_RETIRED, existing_soft_delete_owned_sweep),
+            (_RE_SOFT_DELETE_SELF_CASCADE_RETIRED, existing_soft_delete_self_cascade),
+            (_RE_SOFT_DELETE_REVIVE_OWNER_RETIRED, existing_soft_delete_revive_owner),
+            (_RE_SOFT_DELETE_CASCADE_OWNER_RETIRED, existing_soft_delete_cascade_owner),
+        ):
+            for match in pattern.finditer(content):
+                trigger_retirement_sites.setdefault(id(recorded), []).append(
+                    CascadeRetirementSite(app_label, stem, _record(_unescaped_groups(match)), None)
+                )
+                # Not ``retirement_apps``: ADR 0021 waives the digest guard where a create or
+                # drop recurs *this run*, at the point it is written. A scan-time flag made the
+                # one-time retirement of every owned rule (#80, ADR 0039) permanent for the app.
+        retirements = list(_RE_TENANT_AUTOFILL_RETIRED.finditer(content))
+        for match in retirements:
+            existing_tenant_autofill.pop(_record(_autofill_key(match)), None)
+        if retirements:
+            # Recorded per app, not per key: this is what tells `_generate_stage` its
+            # file-level digest guard can no longer assume operation sets never recur.
+            retirement_apps.add(app_label)
+
+        policy_matches = list(_RE_TENANT_POLICY.finditer(content))
+        unforced_in_file = unforced_policy_tables(content, policy_matches)
+        for match in policy_matches:
+            table = _record(_identifiers._unescape_ident(match.group(1)))
+            existing_tenant_policies.add(table)
+            if record is not None:
+                record.tables.add(table)
+            # Last write wins, within a file and across them (replay order is time). Unlike
+            # [SQL:...], [POLICY:...] is never optional.
+            policy_identity = _recorded_policy_identity(content, match)
+            if policy_identity is None:  # pragma: no cover - unreachable
+                # HEADER_TENANT_POLICY always writes [POLICY:...] inline, so this guards
+                # the invariant rather than a real code path.
+                raise RuntimeError(
+                    f'Tenant RLS header for "{table}" matched but carried no '
+                    f'[POLICY:...] identity -- HEADER_TENANT_POLICY always writes one.'
+                )
+            existing_policy_identities[table] = policy_identity
+            existing_policy_sql[table] = _recorded_sql_identity(content, match)
+            # Last write wins here too: a union instead would leave a table on the
+            # backlog forever after one force=False write, even once superseded.
+            existing_policy_force[table] = table in unforced_in_file
+        existing_tenant_forces.update(
+            _record(_identifiers._unescape_ident(m.group(1)))
+            for m in _RE_TENANT_FORCE.finditer(content)
+        )
+
+    # Settled after the replay, because that is one line through nodes the graph may leave
+    # unordered, and this question is the graph's: see ADR 0021.
+    graph = _ensure_loader().graph
     retirement_sites = _settle_retirement_sites(
-        retirement_sites,
-        existing_soft_delete_related,
-        cascade_deps,
-        _pending_renames,
-        live_tables,
-        _ensure_loader,
+        retirement_sites, existing_soft_delete_related, cascade_deps, graph, aliases
     )
-    # Twice, once per family: the helper is already generic over its six arguments, and the
+    # Twice, once per family: the helper is already generic over its arguments, and the
     # two answers are independent -- a key retired before 2.11.0 has a drop for the cascade
     # and no revive to pair with, so sharing one settle would read that as a missing create.
     revive_retirement_sites = _settle_retirement_sites(
-        revive_retirement_sites,
-        existing_soft_delete_revive,
-        revive_deps,
-        _pending_renames,
-        live_tables,
-        _ensure_loader,
+        revive_retirement_sites, existing_soft_delete_revive, revive_deps, graph, aliases
     )
-
-    # #66's three, settled the same way and for the same reason.
-    owned_deps, sweep_deps, self_deps, revive_owner_deps, cascade_owner_deps = (
-        {key: list(nodes) for key, nodes in deps.items()}
-        for deps in (owned_deps, sweep_deps, self_deps, revive_owner_deps, cascade_owner_deps)
-    )
-    for recorded in (
-        existing_soft_delete_owned,
-        existing_soft_delete_owned_sweep,
-        existing_soft_delete_self_cascade,
-        existing_soft_delete_revive_owner,
-        existing_soft_delete_cascade_owner,
-        owned_deps,
-        sweep_deps,
-        self_deps,
-        revive_owner_deps,
-        cascade_owner_deps,
-    ):
-        _rekey(recorded, final, live_tables)
     owned_sites, sweep_sites, _self_sites, revive_owner_sites, cascade_owner_sites = (
         _settle_retirement_sites(
-            trigger_retirement_sites.get(id(recorded), []),
-            recorded,
-            deps,
-            _pending_renames,
-            live_tables,
-            _ensure_loader,
+            trigger_retirement_sites.get(id(recorded), []), recorded, deps, graph, aliases
         )
         for recorded, deps in (
             (existing_soft_delete_owned, owned_deps),
@@ -879,9 +875,10 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
         )
     )
 
-    # One map across every local app: a cascade rule's key names two tables, and they can
-    # belong to different apps, so translating per app would leave half a key behind.
-    renames = _pending_renames
+    existing_digests: defaultdict[str, set[str]] = defaultdict(set)
+    for file_record in file_records:
+        if not file_record.void:
+            existing_digests[file_record.app_label].add(file_record.digest)
 
     return ExistingOperations(
         triggers=existing_triggers,
@@ -916,7 +913,7 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
         tenant_forces=existing_tenant_forces,
         tenant_autofill=existing_tenant_autofill,
         retirement_apps=retirement_apps,
-        renamed_tables=renames,
+        renamed_tables=held,
         tenant_autofill_function_dependencies=autofill_function_deps,
         tenant_autofill_function_sql=autofill_function_sql,
         existing_digests=dict(existing_digests),

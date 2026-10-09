@@ -9,10 +9,10 @@ from django.db import connection, transaction
 from django.db.migrations import Migration
 from django.db.migrations.exceptions import IrreversibleError
 from django.db.migrations.loader import MigrationLoader
-from django.db.migrations.operations import SeparateDatabaseAndState
 from django.db.migrations.writer import OperationWriter
 
-from guitars.management.enforcement import graph, scanning
+from guitars.management.enforcement import scanning
+from guitars.management.enforcement.graph import TableEvent
 from guitars.management.enforcement.scanning import scan_existing_operations
 from guitars.operations import RetireEnforcement
 
@@ -174,33 +174,6 @@ def _loader_with(app_label: str, migrations_by_name: dict) -> MigrationLoader:
     return loader
 
 
-def test_a_retirement_is_read_off_the_loaded_operations():
-    """Not by matching the call in the file's text: a regex over Python call syntax misses
-    keyword and quoting variants, and says nothing about ordering against the headers."""
-    stem = '0042_auto_enforcement'
-    loader = _loader_with('testapp', {stem: [RetireEnforcement('shop_order', column='label_id')]})
-
-    assert graph.retired_enforcement(loader, 'testapp')[stem] == [('shop_order', 'label_id')]
-
-
-def test_a_retirement_wrapped_in_separate_database_and_state_is_still_seen():
-    """The standard idiom for a change the database already has, and what a hand-tuned squash
-    carries -- read past exactly as :func:`_establishes` reads past it."""
-    stem = '0042_auto_enforcement'
-    wrapped = SeparateDatabaseAndState(
-        database_operations=[RetireEnforcement('shop_order')], state_operations=[]
-    )
-    loader = _loader_with('testapp', {stem: [wrapped]})
-
-    assert graph.retired_enforcement(loader, 'testapp')[stem] == [('shop_order', None)]
-
-
-def test_a_migration_with_no_retirement_is_absent_from_the_walk():
-    loader = _loader_with('testapp', {'0042_auto_enforcement': []})
-
-    assert '0042_auto_enforcement' not in graph.retired_enforcement(loader, 'testapp')
-
-
 def test_a_column_retirement_subtracts_only_the_keys_naming_that_column():
     """A column form matches the families whose dedupe key spells a column, and leaves the
     table-keyed ones: dropping `_deleted_at` retires more than a key can name."""
@@ -290,12 +263,17 @@ def _stem_after_every_create() -> str:
 def _retire_at(monkeypatch, stem: str, table: str, column: str | None = None) -> None:
     """Pretend *stem* carried a ``RetireEnforcement``, so the wiring can be exercised against
     the real testapp migrations without a migration that would really drop those objects."""
-    real = graph.retired_enforcement
-    monkeypatch.setattr(
-        scanning,
-        'retired_enforcement',
-        lambda loader, app: {stem: [(table, column)]} if app == 'testapp' else real(loader, app),
-    )
+    real = scanning.replay_plan
+
+    def patched(loader):
+        return [
+            unit._replace(events=(*unit.events, TableEvent('retire', table, column=column)))
+            if (unit.app_label, unit.name) == ('testapp', stem)
+            else unit
+            for unit in real(loader)
+        ]
+
+    monkeypatch.setattr(scanning, 'replay_plan', patched)
 
 
 def test_the_scan_forgets_what_a_retirement_dropped(monkeypatch):
@@ -362,16 +340,6 @@ def test_a_column_retirement_leaves_the_tables_own_coverage(monkeypatch):
     assert ('testapp_setlistentry', 'testapp_setlist', None) not in existing.soft_delete_related
     assert 'testapp_setlistentry' in existing.soft_deletes
     assert 'testapp_setlistentry' in existing.triggers
-
-
-def test_a_graph_node_with_no_disk_migration_is_skipped():
-    """A squash replaces its nodes, so the graph can name a migration no file backs. Reading
-    past it is the same call ``resolve_object_migration`` makes."""
-    loader = MigrationLoader(None, ignore_no_migrations=True)
-    missing = next(name for (app, name) in loader.disk_migrations if app == 'testapp')
-    del loader.disk_migrations[('testapp', missing)]
-
-    assert missing not in graph.retired_enforcement(loader, 'testapp')
 
 
 def test_retiring_a_tenanted_table_forgets_its_policy_and_autofill(monkeypatch):

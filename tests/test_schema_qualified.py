@@ -153,11 +153,10 @@ def test_updated_at_trigger_genuinely_advances_across_committed_statements():
                 cursor.execute('DROP SCHEMA IF EXISTS analytics CASCADE')
 
 
-def test_mti_parent_trigger_fires_the_schema_qualified_branch(analytics_events_table):
-    """The one runtime path nothing else fires: ``set_parent_updated_at()``'s 4-arg,
-    non-empty-``parent_schema`` branch. Not a real MTI subclass: that would permanently
-    register a parent-link on ``Event._meta``, breaking other tests' cascade deletes."""
-    table = analytics_events_table._meta.db_table
+def _mti_probe(model) -> tuple[int, object]:
+    """A row in ``"analytics"."events"`` (dated 2000) with a child table and parent trigger
+    firing the schema-qualified branch, as ``(event id, its _updated_at before)``."""
+    table = model._meta.db_table
     # The fixture also enables RLS on this table; bypassed since a raw cursor INSERT is
     # not exempted by tenant() the way an ORM call is, but label_id is still NOT NULL.
     with tenancy_bypassed():
@@ -185,7 +184,16 @@ def test_mti_parent_trigger_fires_the_schema_qualified_branch(analytics_events_t
                 child_pk=_identifiers._escape_literal('id'),
             )
         )
+    return event_id, before
 
+
+def test_mti_parent_trigger_fires_the_schema_qualified_branch(analytics_events_table):
+    """The one runtime path nothing else fires: ``set_parent_updated_at()``'s 4-arg,
+    non-empty-``parent_schema`` branch. Not a real MTI subclass: that would permanently
+    register a parent-link on ``Event._meta``, breaking other tests' cascade deletes."""
+    event_id, before = _mti_probe(analytics_events_table)
+
+    with tenancy_bypassed(), connection.cursor() as cursor:
         # Child-only write: only mti_child_probe is touched, never "analytics"."events" --
         # exactly the write set_parent_updated_at() exists to propagate.
         cursor.execute(
@@ -197,3 +205,25 @@ def test_mti_parent_trigger_fires_the_schema_qualified_branch(analytics_events_t
 
     assert after is not None
     assert after != before
+
+
+def test_the_schema_qualified_branch_skips_an_ancestor_already_stamped(analytics_events_table):
+    """ADR 0040: that branch carries the guard too. The test's one transaction shares a ``NOW()``,
+    so stamping the ancestor first leaves the follow-up nothing to write."""
+    event_id, _ = _mti_probe(analytics_events_table)
+    writes = (
+        "SELECT n_tup_upd FROM pg_stat_xact_user_tables WHERE schemaname = 'analytics' "
+        "AND relname = 'events'"
+    )
+
+    with tenancy_bypassed(), connection.cursor() as cursor:
+        cursor.execute('UPDATE "analytics"."events" SET name = name WHERE id = %s', [event_id])
+        cursor.execute(writes)
+        (stamped,) = cursor.fetchone()
+        cursor.execute(
+            'UPDATE mti_child_probe SET venue = %s WHERE id = %s', ['loud hall', event_id]
+        )
+        cursor.execute(writes)
+        (after,) = cursor.fetchone()
+
+    assert (stamped, after) == (1, 1)

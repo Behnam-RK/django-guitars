@@ -197,6 +197,44 @@ REPLACE_PARENT_UPDATED_AT_TRIGGER_FUNCTION = """
     $$
 """
 
+# The body ADR 0040 swaps in (#84): the follow-up skips an ancestor row this transaction already
+# stamped, which Django's own parent ``UPDATE`` has done by the time a full ``save()`` reaches
+# the child. Private: the public forms above are read by name by pre-1.1.0 migrations.
+_CREATE_PARENT_UPDATED_AT_TRIGGER_FUNCTION = """
+    CREATE FUNCTION set_parent_updated_at()
+       RETURNS TRIGGER
+       LANGUAGE PLPGSQL
+    AS
+    $$
+    BEGIN
+        IF TG_NARGS = 3 THEN
+            EXECUTE format(
+                'UPDATE %I SET _updated_at = NOW() WHERE %I IN (SELECT %I FROM new_table) '
+                'AND _updated_at IS DISTINCT FROM NOW();',
+                TG_ARGV[0], TG_ARGV[1], TG_ARGV[2]
+            );
+        ELSIF TG_ARGV[0] = '' THEN
+            EXECUTE format(
+                'UPDATE %I SET _updated_at = NOW() WHERE %I IN (SELECT %I FROM new_table) '
+                'AND _updated_at IS DISTINCT FROM NOW();',
+                TG_ARGV[1], TG_ARGV[2], TG_ARGV[3]
+            );
+        ELSE
+            EXECUTE format(
+                'UPDATE %I.%I SET _updated_at = NOW() WHERE %I IN (SELECT %I FROM new_table) '
+                'AND _updated_at IS DISTINCT FROM NOW();',
+                TG_ARGV[0], TG_ARGV[1], TG_ARGV[2], TG_ARGV[3]
+            );
+        END IF;
+        RETURN NULL;
+    END;
+    $$
+"""
+
+_REPLACE_PARENT_UPDATED_AT_TRIGGER_FUNCTION = _CREATE_PARENT_UPDATED_AT_TRIGGER_FUNCTION.replace(
+    'CREATE FUNCTION', 'CREATE OR REPLACE FUNCTION', 1
+)
+
 # ---- Parent updated-at trigger (on the child table, bumps the owner's _updated_at) ----
 
 CREATE_PARENT_UPDATED_AT_TRIGGER = """

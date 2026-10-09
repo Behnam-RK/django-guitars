@@ -532,6 +532,35 @@ def test_adopt_emits_or_replace_for_a_function_with_nothing_recorded(monkeypatch
     assert 'CREATE OR REPLACE FUNCTION stamp_updated_at()' in content
 
 
+def test_a_changed_parent_function_reverses_to_the_old_body(monkeypatch, tmp_path):
+    """ADR 0040: ``DROP FUNCTION`` as a reverse fails under the MTI triggers calling it, so the
+    replace of a recorded function reverses to the body it replaced."""
+    command, _, filename = _command_with_scaffold(monkeypatch, tmp_path)
+    command.parent_trigger_function_dependency = ('testapp', '0001_pretend')
+    command.parent_trigger_function_sql = 'stale0000'
+
+    assert command._ensure_parent_trigger_function_migration() is True
+
+    forward, reverse = (tmp_path / 'migrations' / filename).read_text().split('reverse_sql=')
+    assert 'IS DISTINCT FROM NOW()' in forward
+    assert 'CREATE OR REPLACE FUNCTION set_parent_updated_at()' in reverse
+    assert 'IS DISTINCT FROM NOW()' not in reverse
+
+
+def test_adopting_a_parent_function_with_nothing_recorded_reverses_to_a_drop(
+    monkeypatch, tmp_path
+):
+    """Nothing recorded means no earlier body to put back: the reverse is the plain drop."""
+    command, _, filename = _command_with_scaffold(monkeypatch, tmp_path)
+    command.parent_trigger_function_dependency = None
+    command.parent_trigger_function_sql = None
+
+    assert command._ensure_parent_trigger_function_migration(adopt=True) is True
+
+    reverse = (tmp_path / 'migrations' / filename).read_text().split('reverse_sql=')[1]
+    assert 'DROP FUNCTION set_parent_updated_at()' in reverse
+
+
 # ---------------------------------------------------------------------------
 # Flag combinations
 # ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
-"""Strict-xfail repros of the shapes #66 still has open on 2.20.0 (the issue's re-scope comment).
-A fix flips the ``--check`` tests first, on this unregenerated history: delete them then, regenerate
-the fixture app, and drop the marker from the database tests, which stay as the pins."""
+"""Strict-xfail repros of the shapes #66 still has open on 2.20.0. A fix flips the ``--check``
+tests first: delete them, regenerate the fixture app, run with ``--create-db`` (a reused database
+keeps old objects), and drop the marker from the database tests, which stay as the pins."""
 
 from io import StringIO
 
@@ -13,12 +13,14 @@ from tests.conftest import execute, scalar
 
 
 def _check_report(*app_labels) -> str:
-    """``makeguitarmigrations --check``'s report, failing an assertion if it passes. The error says
-    only "create missing migrations"; what is missing is named on stdout and stderr."""
+    """``makeguitarmigrations --check``'s report, failing an assertion if it passes. Its missing-
+    coverage error names nothing; the report on stdout does. Any other refusal is a real failure."""
     out, err = StringIO(), StringIO()
     try:
         call_command('makeguitarmigrations', *app_labels, '--check', stdout=out, stderr=err)
-    except CommandError:
+    except CommandError as error:
+        if 'to create missing migrations' not in str(error):
+            pytest.fail(f'--check refused before reporting: {error}', pytrace=False)
         return out.getvalue() + err.getvalue()
     raise AssertionError('--check passed over this history')
 
@@ -127,7 +129,7 @@ def test_a_model_moved_back_is_named_as_stale():
 
 @pytest.mark.xfail(
     strict=True,
-    raises=ProgrammingError,
+    raises=AssertionError,
     reason='#66 (c): the sweep body names issue66_shop_hub, which the move back renamed away, so '
     'every UPDATE of the keeper table fails',
 )
@@ -142,7 +144,13 @@ def test_updating_and_archiving_an_owner_of_a_model_moved_back_works(db):
         params=[hub],
     )
 
-    execute('UPDATE issue66_shop_keeper SET hub_id = hub_id')
+    try:
+        execute('UPDATE issue66_shop_keeper SET hub_id = hub_id')
+    except ProgrammingError as error:
+        # Only the failure this pins counts; any other is the fixture breaking, not #66.
+        if 'issue66_shop_hub' not in str(error):
+            pytest.fail(f'UPDATE failed for another reason: {error}', pytrace=False)
+        raise AssertionError('the sweep still names issue66_shop_hub') from error
     execute('UPDATE issue66_shop_keeper SET _deleted_at = now()')
 
     assert scalar('SELECT count(*) FROM issue66_anc_hub WHERE _deleted_at IS NOT NULL') == 1

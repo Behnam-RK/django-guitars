@@ -300,20 +300,16 @@ _SOFT_DELETE_ARCHIVE_ARM_JOINED = """
               AND guitars_child._deleted_at IS NULL;"""
 
 # A statement that archives a row *and* rewrites its primary key leaves the arms nothing to pair
-# it by, where the rule read ``old.`` per row: its children would stay live under an archived
-# parent. Refused when one is left holding a vanished key, as the self cascade is (ADR 0018).
+# it by, where the rule read ``old.`` per row. Refused once a live child holds a key of any live
+# before-row, not only a vanished one: a pk reused inside the statement vanishes from no one.
 _SOFT_DELETE_LEAK_CHECK = """
                 EXISTS (
                     SELECT 1 FROM {related_table} AS guitars_child
                     WHERE guitars_child._deleted_at IS NULL
                       AND guitars_child."{foreign_key}" IN (
-                          SELECT guitars_vanished."{referenced_key}"
-                          FROM guitars_revive_before AS guitars_vanished
-                          WHERE guitars_vanished._deleted_at IS NULL
-                            AND NOT EXISTS (
-                                SELECT 1 FROM guitars_revive_after AS guitars_kept
-                                WHERE guitars_kept."{primary_key}" = guitars_vanished."{primary_key}"
-                            )
+                          SELECT guitars_held."{referenced_key}"
+                          FROM guitars_revive_before AS guitars_held
+                          WHERE guitars_held._deleted_at IS NULL
                       )
                 )"""
 
@@ -324,14 +320,9 @@ _SOFT_DELETE_LEAK_CHECK_JOINED = """
                       AND guitars_child."{target_pk}" IN (
                           SELECT guitars_link."{child_pk}" FROM {related_table} AS guitars_link
                           WHERE guitars_link."{foreign_key}" IN (
-                              SELECT guitars_vanished."{primary_key}"
-                              FROM guitars_revive_before AS guitars_vanished
-                              WHERE guitars_vanished._deleted_at IS NULL
-                                AND NOT EXISTS (
-                                    SELECT 1 FROM guitars_revive_after AS guitars_kept
-                                    WHERE guitars_kept."{primary_key}"
-                                        = guitars_vanished."{primary_key}"
-                                )
+                              SELECT guitars_held."{primary_key}"
+                              FROM guitars_revive_before AS guitars_held
+                              WHERE guitars_held._deleted_at IS NULL
                           )
                       )
                 )"""
@@ -367,7 +358,7 @@ _CREATE_SOFT_DELETE_REVIVE_OWNER_FUNCTION = """
             ) THEN
                 RAISE EXCEPTION
                     'guitars: a statement on % archived a row whose primary key it also '
-                    'rewrote, and a live child is left holding the old key. The cascade pairs '
+                    'rewrote, and a live child is left holding a key it read. The cascade pairs '
                     'a row across the statement on its primary key, so it cannot tell which '
                     'before-row that archived row was, and would leave the child live under an '
                     'archived parent. Rewrite the key and archive the row in separate '
@@ -417,7 +408,7 @@ _LEGACY_CREATE_SOFT_DELETE_REVIVE_OWNER_FUNCTION = """
        RETURNS TRIGGER
        LANGUAGE PLPGSQL
     AS
-    $$
+    {dollar}
     BEGIN
         IF COALESCE(current_setting('rules.hard_deletion', true), '') <> 'on' AND EXISTS (
             SELECT 1
@@ -430,7 +421,7 @@ _LEGACY_CREATE_SOFT_DELETE_REVIVE_OWNER_FUNCTION = """
         END IF;
         RETURN NULL;
     END;
-    $$;
+    {dollar};
 """
 _LEGACY_CREATE_SOFT_DELETE_REVIVE_OWNER = (
     _LEGACY_CREATE_SOFT_DELETE_REVIVE_OWNER_FUNCTION + _CREATE_SOFT_DELETE_REVIVE_TRIGGER

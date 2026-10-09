@@ -165,8 +165,8 @@ def test_archiving_a_row_while_rewriting_its_key_is_refused_over_a_live_child(tw
 
 
 def test_a_key_rewrite_archiving_a_row_nothing_holds_is_allowed(db):
-    """Nothing is left live, so there is nothing to refuse: only a live child holding a vanished
-    key is a leak."""
+    """Nothing is left live, so there is nothing to refuse: only a live child holding a key is a
+    leak."""
     band = Band.objects.create(name='Childless')
 
     execute('UPDATE testapp_band SET id = id + 1000, _deleted_at = NOW() WHERE id = %s', params=[band.pk])
@@ -318,3 +318,19 @@ def test_an_owned_sweep_whose_name_holds_it_is_written_and_runs(db, monkeypatch)
             execute(sql)
         assert scalar("SELECT count(*) FROM pg_proc WHERE proname LIKE 's$$%'") == 2
         transaction.set_rollback(True)
+
+
+def test_a_key_reused_inside_the_statement_does_not_hide_the_refusal(two_bands):
+    """Rush's id moves and is archived while Yes takes Rush's old id: no key vanishes from the
+    after image, yet Rush's live album would be left holding what is now Yes."""
+    rush, yes = two_bands
+
+    with pytest.raises(NotSupportedError, match='primary key it also rewrote'):
+        with transaction.atomic():
+            execute(
+                'UPDATE testapp_band SET id = CASE WHEN id = %s THEN %s ELSE %s END, '
+                '_deleted_at = CASE WHEN id = %s THEN NOW() END WHERE id IN (%s, %s)',
+                params=[rush.pk, rush.pk + 1000, rush.pk, rush.pk, rush.pk, yes.pk],
+            )
+
+    assert Album.objects.filter(band=rush).count() == 1

@@ -1459,12 +1459,6 @@ class OperationsMixin:
             # the owner's one trigger carries its arm (#70). So is the rule, since 2.19.0: its
             # key is an archive arm there (#80, ADR 0039). Unowed, either goes on evidence.
             rule_retired = key not in required
-            if (
-                not rule_retired
-                and key not in self.existing.soft_delete_revive
-                and key not in self.existing.soft_delete_related
-            ):
-                continue
             related_table, owner_table, via = key
             # A superseded object needs no evidence: the models still call for its key, and the
             # owner's trigger carries its arm. It goes where that trigger is written, then.

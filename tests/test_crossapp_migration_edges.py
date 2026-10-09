@@ -387,6 +387,20 @@ def test_the_note_names_only_a_migration_carrying_the_column_the_reference_resol
         assert len(named._missing_edge_notes(app)) == 1
 
 
+def test_two_references_into_one_migration_are_reported_once():
+    """A table and a column on it resolve to the one migration creating both: the note names the
+    file and the edge, so a second would only repeat it."""
+    app = apps.get_app_config('crossapp_third')
+
+    with _without_dependency('crossapp_third', 'crossapp_owner'):
+        command = _command_over(
+            'crossapp_third',
+            [ObjectRef('crossapp_owner', 'Owner', None), ObjectRef('crossapp_owner', 'Owner', 'target')],
+        )
+
+        assert len(command._missing_edge_notes(app)) == 1
+
+
 def test_a_resolved_reference_becomes_an_edge_with_nothing_warned():
     """The whole of the emitting path: a ref resolves, the edge comes back, and no warning is
     raised. Every other outcome here is a warning with no edge, so this is the one that pairs."""

@@ -136,10 +136,8 @@ def dollar_refusal(related_model, fk_field, owner_table: str) -> str | None:
     and :func:`classify_cascade`, the rule it replaced having needed none -- one alone leaves rows live."""
     owner = column_owner(fk_field.related_model, '_deleted_at')
     names = [owner_table, owner._meta.pk.column, related_model._meta.db_table, fk_field.column]
-    try:
-        names.append(fk_field.target_field.column)
-    except FieldDoesNotExist:
-        pass
+    # Asked after ``to_field_refusal``, which answers a ``to_field`` naming no field.
+    names.append(fk_field.target_field.column)
     if not owns_column(related_model, '_deleted_at'):
         target = column_owner(related_model, '_deleted_at')
         link = related_model._meta.get_ancestor_link(target)

@@ -177,6 +177,7 @@ class TestWhereTheTriggerIsWritten:
         clear_cascade_coverage(command)
         # A first create: no app has written it yet, so none keeps it.
         command.existing.soft_delete_cascade_owner_dependencies.pop(('testapp_band',), None)
+        command.existing.soft_delete_revive_owner_dependencies.pop(('testapp_band',), None)
 
         assert command._revive_host('testapp_band') == 'testapp'
         assert any(
@@ -206,6 +207,19 @@ class TestWhereTheTriggerIsWritten:
         settings.LOCAL_APPS = [*settings.LOCAL_APPS, 'tests.crossapp_owner']
         command = self._without_band(Command(), monkeypatch)
         command.existing.soft_delete_cascade_owner_dependencies[('testapp_band',)] = [
+            ('crossapp_owner', '0003_auto_enforcement')
+        ]
+
+        assert command._revive_host('testapp_band') == 'crossapp_owner'
+
+    def test_the_revive_only_trigger_it_supersedes_names_the_host_when_it_is_the_only_creator(
+        self, monkeypatch, settings
+    ):
+        """An upgrading project has recorded the old trigger and not yet the new one."""
+        settings.LOCAL_APPS = [*settings.LOCAL_APPS, 'tests.crossapp_owner']
+        command = self._without_band(Command(), monkeypatch)
+        command.existing.soft_delete_cascade_owner_dependencies.pop(('testapp_band',), None)
+        command.existing.soft_delete_revive_owner_dependencies[('testapp_band',)] = [
             ('crossapp_owner', '0003_auto_enforcement')
         ]
 
@@ -491,3 +505,26 @@ class TestTheReviveOnlyTriggerIsSuperseded:
         retirement = self._retirement(command._build_operations(_app()), 'testapp_riff')
 
         assert 'RAISE' in _forward(retirement).reverse_sql
+
+    def test_it_is_not_retired_by_an_app_that_does_not_host_the_owner(self):
+        command = self._command()
+        other = apps.get_app_config('crossapp_owner')
+
+        assert command._retired_revive_owner_operations(other, set(command._revive_arms_by_owner())) == []
+
+
+def test_the_carried_arms_of_an_owner_are_worked_out_once():
+    """Each retired key asks, and the answer renders every arm its owner has."""
+    command = Command()
+    clear_cascade_coverage(command)
+    calls = []
+    real = command._revive_owner_slots
+    command._revive_owner_slots = lambda *args, **kwargs: calls.append(args) or real(*args, **kwargs)
+
+    first = command._owner_trigger_carries(('testapp_merch', 'testapp_album', None), 'album_id')
+    second = command._owner_trigger_carries(
+        ('testapp_merch', 'testapp_album', 'bonus_album_id'), 'bonus_album_id'
+    )
+
+    assert first and second
+    assert len(calls) == 1

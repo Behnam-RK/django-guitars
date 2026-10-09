@@ -148,7 +148,7 @@ class CascadeKind(Enum):
 
     NONE = 'none'  # no object is written: not a candidate, or a table this DDL cannot name
     RULE = 'rule'  # the ``soft_delete_related_*`` rule, flat or joined
-    SELF = 'self'  # the statement-level trigger a self-referential key takes (ADR 0018)
+    SELF = 'self'  # a key onto the owner's own table: an arm like any other (ADR 0042)
     REFUSED = (
         'refused'  # a key no rule can read right: :func:`joined_refusal`, :func:`to_field_refusal`
     )

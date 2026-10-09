@@ -83,41 +83,34 @@ def test_a_second_run_emits_nothing_for_the_renamed_table():
 # --- The families whose object name embeds a table ------------------------------------------
 
 
-def _self_cascade_for(renamed_from: list[str] | None) -> str:
-    """The self-cascade operation for ``testapp_setlist``, optionally pretending its table was
-    renamed and its coverage translated -- which is what the scan leaves behind."""
+def _self_cascade_retirement_for(renamed_from: list[str] | None) -> str:
+    """The retirement of ``testapp_setlist``'s self-cascade trigger (superseded by an arm of the
+    owner's, ADR 0042), optionally pretending its table was renamed and its coverage translated
+    -- which is what the scan leaves behind."""
     command = Command()
     if renamed_from is not None:
         command.existing.renamed_tables['testapp_setlist'] = renamed_from
     command.existing.soft_delete_self_cascade[('testapp_setlist', 'parent_id')] = 'stale00000000'
     (operation,) = [
         candidate
-        for candidate in command._build_operations(apps.get_app_config('testapp'))
-        if candidate.startswith('# Soft Delete Self Cascade Trigger on "testapp_setlist"')
+        for candidate in command._retired_trigger_operations(apps.get_app_config('testapp'))
+        if candidate.startswith('# Soft Delete Self Cascade Trigger retired on "testapp_setlist"')
     ]
     return operation
 
 
-def test_a_renamed_table_drops_the_trigger_under_its_old_name():
+def test_a_renamed_table_retires_the_trigger_under_its_old_name():
     """The name folds the table in, so the carried-over trigger answers to the *old* one.
-    Dropping the new name would fail on a name nothing has, which is a broken ``migrate``."""
-    operation = _self_cascade_for(['testapp_oldtree'])
+    Dropping the new name alone would leave it live beside the arm that supersedes it."""
+    operation = _self_cascade_retirement_for(['testapp_oldtree'])
 
     old = 'soft_delete_self_cascade_15_testapp_oldtree_9_parent_id'
     assert f'DROP TRIGGER IF EXISTS "{old}"' in operation
     assert f'DROP FUNCTION IF EXISTS "{old}"' in operation
     # And the current name too: which spelling is live depends on when a generation last ran.
     assert 'DROP TRIGGER IF EXISTS "soft_delete_self_cascade_15_testapp_setlist' in operation
+    # Its reverse rebuilds it under the current name, as the owner's arm is what supersedes it.
     assert 'CREATE TRIGGER "soft_delete_self_cascade_15_testapp_setlist_9_parent_id"' in operation
-
-
-def test_an_unrenamed_table_keeps_the_plain_replace_form():
-    """The other side of the branch: no rename, no ``IF EXISTS``, and the drop names the
-    object this run is about to replace."""
-    operation = _self_cascade_for(None)
-
-    assert 'DROP TRIGGER IF EXISTS' not in operation
-    assert 'DROP TRIGGER "soft_delete_self_cascade_15_testapp_setlist_9_parent_id"' in operation
 
 
 def test_a_renamed_owned_sweep_drops_both_of_its_tables_old_names():
@@ -311,28 +304,6 @@ def test_retiring_a_rule_on_a_renamed_table_drops_both_names():
     assert command._unmapped_cascade_notes() == []
 
 
-def test_adopt_after_a_rename_drops_the_old_name_too():
-    """``--adopt`` is the path where the database's state is unknown, so it drops the current
-    name ``IF EXISTS``. After a rename the object may equally be under the old one, and
-    dropping only the new leaves the carried-over trigger live beside the new one."""
-    command = Command()
-    command.existing.renamed_tables['testapp_setlist'] = ['testapp_oldtree']
-    command.existing.soft_delete_self_cascade[('testapp_setlist', 'parent_id')] = 'stale00000000'
-
-    (operation,) = [
-        candidate
-        for candidate in command._build_operations(apps.get_app_config('testapp'), adopt=True)
-        if candidate.startswith('# Soft Delete Self Cascade Trigger on "testapp_setlist"')
-    ]
-
-    assert 'DROP TRIGGER IF EXISTS "soft_delete_self_cascade_15_testapp_oldtree_9_parent_id"' in (
-        operation
-    )
-    assert 'DROP TRIGGER IF EXISTS "soft_delete_self_cascade_15_testapp_setlist_9_parent_id"' in (
-        operation
-    )
-
-
 def test_a_prior_name_back_in_use_as_a_live_table_is_never_dropped():
     """A freed name retaken by a later ``CreateModel`` must not be dropped -- but the chain
     keeps it, because the scan needs every spelling to translate. Filter the chain instead and
@@ -421,25 +392,6 @@ def test_the_required_key_sweep_runs_without_reporting(monkeypatch):
     command._cascade_key_maps()
 
     assert seen and not any(seen)
-
-
-def test_a_chain_with_nothing_left_to_drop_keeps_the_strict_form():
-    """A chain whose every prior name has been retaken by a live table leaves nothing to drop,
-    so the plain path must stay strict. ``IF EXISTS`` where the answer is known would hide a
-    diverged database, which is the rule `CLAUDE.md` states about the adopt forms."""
-    command = Command()
-    command.existing.renamed_tables['testapp_setlist'] = ['testapp_genre']
-    command.existing.soft_delete_self_cascade[('testapp_setlist', 'parent_id')] = 'stale0000'
-
-    assert command._prior_names('testapp_setlist') == []
-    assert command._renamed('testapp_setlist') is False
-
-    (operation,) = [
-        candidate
-        for candidate in command._build_operations(apps.get_app_config('testapp'))
-        if candidate.startswith('# Soft Delete Self Cascade Trigger on "testapp_setlist"')
-    ]
-    assert 'DROP TRIGGER IF EXISTS' not in operation
 
 
 def test_liveness_is_asked_of_the_whole_registry_not_just_local_apps():

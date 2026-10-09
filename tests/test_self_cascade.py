@@ -2,13 +2,16 @@
 ``AFTER UPDATE`` a ``ForeignKey('self', CASCADE)`` takes in place of a rule. A rule updating the
 table it fires on is rejected at rewrite time, taking *every* ``UPDATE`` to that table with it."""
 
+from importlib import import_module
+
 import pytest
-from django.db import connection
+from django.db import connection, transaction
 from django.db.models import F
 from django.db.utils import NotSupportedError
 from django.utils import timezone
 
 from guitars.tenancy import tenancy_bypassed, tenant
+from tests.conftest import execute, scalar
 from tests.testapp.models import Label, Rack, Riser, Setlist, SetlistEntry, Troupe
 
 
@@ -139,8 +142,7 @@ def test_the_orm_path_stamps_the_same_rows_the_raw_path_does(transactional_db):
     Setlist.objects.filter(pk=root.pk).delete()
 
     moved = {
-        row.song: row._updated_at > before[row.song]
-        for row in SetlistEntry._all_objects.all()
+        row.song: row._updated_at > before[row.song] for row in SetlistEntry._all_objects.all()
     }
     assert moved == {'root-song': True, 'middle-song': True, 'leaf-song': True}
 
@@ -206,9 +208,9 @@ def test_hard_delete_on_the_root_really_removes_the_tree(tree):
     assert SetlistEntry._all_objects.count() == 0
 
 
-def test_the_trigger_exists_on_the_table_and_the_rule_does_not(db):
-    """The two families are mutually exclusive for this relation: a trigger named after the
-    self key, and no ``soft_delete_related`` rule pointing the tree table at itself."""
+def test_the_owners_trigger_carries_the_self_key_and_no_trigger_of_its_own(db):
+    """The self key is an arm of the tree table's owner trigger (ADR 0042); the trigger named
+    after it (ADR 0018) is retired, and no ``soft_delete_related`` rule points the table at itself."""
     with connection.cursor() as cursor:
         cursor.execute(
             'SELECT tgname FROM pg_trigger '
@@ -218,7 +220,7 @@ def test_the_trigger_exists_on_the_table_and_the_rule_does_not(db):
         cursor.execute("SELECT rulename FROM pg_rules WHERE tablename = 'testapp_setlist'")
         rules = {row[0] for row in cursor.fetchall()}
 
-    assert 'soft_delete_self_cascade_15_testapp_setlist_9_parent_id' in triggers
+    assert not [name for name in triggers if name.startswith('soft_delete_self_cascade')]
     assert 'soft_delete_related_testapp_setlist' not in rules
     # The ordinary cascade to the entry table is an arm of the tree table's owner trigger since
     # 2.19.0 (#80, ADR 0039), not a rule beside it: the table holds none but its own.
@@ -337,3 +339,78 @@ def test_a_key_rewrite_that_reparents_its_children_is_still_refused(db):
                 'WHERE id IN (%s, %s)',
                 [root.pk, new_key, child.pk, new_key, root.pk, root.pk, child.pk],
             )
+
+
+T_PARENT = '2021-06-15T12:30:00Z'
+
+
+def _stamp(pk: int):
+    return Setlist._all_objects.get(pk=pk)._deleted_at
+
+
+def test_every_level_carries_the_parents_own_stamp(tree):
+    """An arm of the owner's trigger (ADR 0042) copies the parent's ``_deleted_at``. The trigger
+    it replaced wrote ``NOW()``, which no provenance test could match. An explicit stamp, since
+    this test's one transaction shares a ``NOW()`` with everything in it."""
+    root, middle, leaf = tree
+
+    execute(
+        'UPDATE testapp_setlist SET _deleted_at = %s WHERE id = %s', params=[T_PARENT, root.pk]
+    )
+
+    assert str(_stamp(middle.pk)) == str(_stamp(leaf.pk)) == str(_stamp(root.pk))
+    assert _stamp(root.pk).isoformat().startswith('2021-06-15T12:30:00')
+
+
+def test_a_child_archived_earlier_keeps_its_own_stamp(tree):
+    root, middle, _leaf = tree
+    execute(
+        "UPDATE testapp_setlist SET _deleted_at = '2000-01-01T00:00:00Z' WHERE id = %s",
+        params=[middle.pk],
+    )
+
+    execute(
+        'UPDATE testapp_setlist SET _deleted_at = %s WHERE id = %s', params=[T_PARENT, root.pk]
+    )
+
+    assert _stamp(middle.pk).isoformat().startswith('2000-01-01')
+
+
+def test_restoring_a_parent_restores_the_subtree_archived_with_it_and_no_other(tree):
+    root, middle, leaf = tree
+    execute(
+        "UPDATE testapp_setlist SET _deleted_at = '2000-01-01T00:00:00Z' WHERE id = %s",
+        params=[leaf.pk],
+    )
+    execute(
+        'UPDATE testapp_setlist SET _deleted_at = %s WHERE id = %s', params=[T_PARENT, root.pk]
+    )
+
+    execute('UPDATE testapp_setlist SET _deleted_at = NULL WHERE id = %s', params=[root.pk])
+
+    assert _stamp(middle.pk) is None
+    assert _stamp(leaf.pk).isoformat().startswith('2000-01-01')
+
+
+def test_unapplying_the_retirement_puts_the_self_trigger_back(db):
+    """Off the committed migration itself: the key still cascades, so the retirement is a
+    supersession and its reverse rebuilds the trigger, where one for a key gone refuses."""
+    module = import_module('tests.testapp.migrations.0093_auto_enforcement')
+    (reverse,) = [
+        op.reverse_sql
+        for op in module.Migration.operations
+        if 'DROP TRIGGER IF EXISTS "soft_delete_self_cascade_15_testapp_setlist_9_parent_id"'
+        in op.sql
+    ]
+    catalogue = (
+        'SELECT count(*) FROM pg_trigger WHERE tgname = '
+        "'soft_delete_self_cascade_15_testapp_setlist_9_parent_id'"
+    )
+
+    with transaction.atomic():
+        assert scalar(catalogue) == 0
+        execute(reverse)
+        rebuilt = scalar(catalogue)
+        transaction.set_rollback(True)
+
+    assert rebuilt == 1

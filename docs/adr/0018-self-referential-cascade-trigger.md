@@ -1,6 +1,6 @@
 # 0018 — a self-referential cascade is a statement-level trigger, not a rule
 
-- **Status:** accepted — implemented in 2.8.0
+- **Status:** accepted — implemented in 2.8.0; its trigger retired by [ADR 0042](0042-the-self-key-is-an-arm-of-the-owner-trigger.md)
 - **Date:** 2026-09-08
 - **Affects:** `guitars.sql.soft_delete`, `makeguitarmigrations`
 - **Amends:** nothing. Narrows one refusal that has stood since 0.x; the cycle refusal it sits

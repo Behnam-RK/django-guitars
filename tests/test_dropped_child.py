@@ -107,7 +107,15 @@ def _command(monkeypatch, *, dropped: set[str]):
         return {
             owner: kept
             for owner, keyed in arms.items()
-            if (kept := {key: arm for key, arm in keyed.items() if key[0] != CHILD})
+            # The owner's self key is no arm of this scenario either: the child was its only one,
+            # and a self key is an arm of the owner's trigger since 2.20.0 (ADR 0042).
+            if (
+                kept := {
+                    key: arm
+                    for key, arm in keyed.items()
+                    if key[0] != CHILD and not key[0] == key[1] == OWNER
+                }
+            )
         }
 
     monkeypatch.setattr(command, '_table_app_labels', without_child)

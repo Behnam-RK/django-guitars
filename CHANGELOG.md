@@ -10,9 +10,12 @@ Full history and diffs: [GitHub releases](https://github.com/Behnam-RK/django-gu
 
 ## [Unreleased]
 
+## [2.20.0] - 2026-10-09
+
 ### Changed
 
 - **A cycle of `CASCADE` keys through several tables is enforced** (#85, [ADR 0041](docs/adr/0041-cascade-cycles-are-arms.md)). It was refused while the cascade was an `ON UPDATE` rule, which PostgreSQL rewrites into itself; since 2.19.0 it is an arm of the owner's trigger, and an arm stops at `_deleted_at IS NULL`. Every project that declared one gets the arms: one archive stamps the whole loop it reaches, and a restore matches that stamp, so it travels **up** the loop too. A joined key into its own MTI root is enforced as well. `soft_delete()` and the `.delete()` fast path no longer decline a cycle edge. A cycle holding an **owned** key is still refused, with a note that no longer cites rule recursion. `CascadeKind.CYCLE` is gone and `classify_cascade` takes no `cycle_edges`. **Existing projects:** `makemigrations` (or `makeguitarmigrations`) writes a migration for each app hosting a cycle key, which replaces the owner's `soft_delete_cascade_on_*` trigger with one carrying the arms.
+- **A self-referential `CASCADE` key is an arm of the owner's trigger** (#85, [ADR 0042](docs/adr/0042-the-self-key-is-an-arm-of-the-owner-trigger.md)). It took a trigger of its own since 2.8.0, which stamped `NOW()` and never revived. It now carries the parent's `_deleted_at` and a restore revives the subtree archived with it; a child archived earlier keeps its own stamp. The primary-key-rewrite refusal is the union of the two, and a `$$` in a name no longer refuses the key. `makemigrations` writes, for each app hosting a self key, a migration that replaces the owner's trigger and retires the self one, whose reverse rebuilds it. **Existing projects:** `DROP TRIGGER` takes ACCESS EXCLUSIVE on those tables until the migration commits, so set `lock_timeout`. Dropping a self key's column now fails an archive of the table until re-generated, not every `UPDATE`.
 
 ## [2.19.1] - 2026-10-09
 
@@ -482,7 +485,8 @@ First stable release. **BREAKING:** the instrument ladder shifted down one rung 
 
 - Added: initial release — `SetarModel`, `GuitarModel`, `SoftDeletableModel`, `DisableSignals`, `makeguitarmigrations`.
 
-[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.19.1...HEAD
+[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.20.0...HEAD
+[2.20.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.20.0
 [2.19.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.19.1
 [2.19.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.19.0
 [2.18.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.18.1

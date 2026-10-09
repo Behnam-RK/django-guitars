@@ -250,14 +250,17 @@ def test_a_cascade_key_aimed_at_a_proxy_still_gets_its_arm(fk_to_proxy):
     assert [related._meta.db_table for related, _field, _primary in candidates] == ['testapp_held']
 
 
-def test_a_self_referential_cascade_key_aimed_at_a_proxy_still_gets_its_trigger(fk_to_proxy):
-    """The same loss in the family that takes a trigger instead of a rule (ADR 0018). Its key
-    names the proxy, so it too was filed under the model no walk reaches."""
+def test_a_self_referential_cascade_key_aimed_at_a_proxy_still_gets_its_arm(fk_to_proxy):
+    """The same loss for the key onto the owner's own table, an arm of its owner's trigger
+    since 2.20.0 (ADR 0042). Its key names the proxy, so it too was filed under the model no
+    walk reaches."""
     owner, proxy, held = fk_to_proxy
+    command = Command()
+    command._index_reverse_relations([owner, proxy, held])
 
-    headers = _headers(owner, proxy, held)
+    _candidates, selfs = command._cascade_candidates(owner, owner._meta.db_table, report=False)
 
-    assert [header for header in headers if 'Self Cascade' in header and 'testapp_owner' in header]
+    assert [field.column for field in selfs] == ['parent_id']
 
 
 def test_a_proxy_of_the_child_does_not_double_the_arm(plain_proxy):

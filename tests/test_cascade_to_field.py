@@ -91,25 +91,28 @@ def _command(owner, *relations) -> Command:
     return command
 
 
-class TestTheFlatRule:
+class TestTheArchiveArm:
+    """The flat cascade, an arm of the owner's trigger since 2.19.0 (#80, ADR 0039); it was a rule."""
+
     def test_a_to_field_key_matches_on_the_column_it_holds(self):
         owner, by_code, by_pk, *_ = _shapes()
         command = _command(owner, (by_code, 'owner'), (by_pk, 'owner'))
 
-        rules = '\n'.join(command._cascade_operations(owner))
+        by_column = command._archive_arm(('t', 'o', None), by_code, 'owner_id', 'id')
+        by_key = command._archive_arm(('t', 'o', None), by_pk, 'owner_id', 'id')
 
-        assert 'WHERE "owner_id" = old."code"' in rules
-        # The pk-targeting sibling reads the pk, as it always has -- the same text, so its
-        # recorded ``[SQL:]`` digest does not move and nothing is re-emitted for it.
-        assert 'WHERE "owner_id" = old."id"' in rules
+        assert 'SELECT guitars_before."code" AS guitars_key' in by_column
+        assert 'guitars_child."owner_id" = guitars_archived.guitars_key' in by_column
+        # The pk-targeting sibling reads the pk, as the rule always did.
+        assert 'SELECT guitars_before."id" AS guitars_key' in by_key
 
     def test_a_to_field_column_is_not_read_through_the_primary_key(self):
         owner, by_code, *_ = _shapes()
         command = _command(owner, (by_code, 'owner'))
 
-        (rule, *_rest) = command._cascade_operations(owner)
+        arm = command._archive_arm(('t', 'o', None), by_code, 'owner_id', 'id')
 
-        assert 'old."id"' not in rule
+        assert 'guitars_before."id" AS guitars_key' not in arm
 
 
 class TestTheRevivePairsOnThePrimaryKeyAndMatchesOnTheColumn:

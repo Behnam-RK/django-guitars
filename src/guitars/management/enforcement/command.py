@@ -69,9 +69,9 @@ class Command(OperationsMixin, BaseCommand):
         # shapes the generator refuses, either kind on an ON UPDATE cycle. Not the cross-app
         # gap a scoped run leaves: `_scoped_cascade_gap_notes` reports that one, on stdout.
         self._skipped_rule_notes: list[str] = []
-        # Two relations whose rules would share one name on one table. Emitted anyway -- the
-        # cascade spelling is frozen -- so the report is the only thing standing between a
-        # silent replacement and the operator. See ``_claim_rule_name``.
+        # Two relations whose sweep or trigger functions would share one name, a function being
+        # namespaced per schema. Emitted anyway, so the report is the only thing standing between
+        # a silent replacement and the operator. See ``_claim_sweep_function_name``.
         self._rule_name_clashes: list[str] = []
         # Owned rules refused this run that the project *already* recorded, so the stale one is
         # live in every migrated database. Errors, and they fail ``--check``: refusing emits
@@ -85,8 +85,8 @@ class Command(OperationsMixin, BaseCommand):
         # nothing in the app creates the object at all, so there was no edge. Not an error and
         # no ``--check`` failure -- an app with no migrations of its own is legitimate.
         self._unresolved_reference_notes: list[str] = []
-        self._claimed_rule_names: dict[tuple[str, str], tuple] = {}
         self._claimed_sweep_names: dict[str, tuple] = {}
+        self._carried_arms_cache: dict[str, set[tuple]] = {}
         # Tables tenancy discovery could not cover, with the reason. Also surfaced.
         self._tenancy_notes: list[str] = []
         # Models the project's router migrates off PostgreSQL. ``vendor_skip_note`` renders one

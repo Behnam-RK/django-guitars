@@ -36,19 +36,20 @@ def _apply(operation: RetireEnforcement) -> None:
 
 
 def test_column_mode_drops_only_what_depends_on_that_column(db):
-    """The narrow form, and the one an author reaches for: it takes the cascade rule that
-    names the column -- which lives on the *other* table -- and nothing else."""
-    _apply(RetireEnforcement('testapp_setlistentry', column='setlist_id'))
+    """The narrow form: it takes the rule that names the column, nothing else. A cascade arm
+    names its foreign key in a plpgsql body, which records no dependency (ADR 0039), so the column
+    is ``_deleted_at``, the one the table's own ``soft_delete`` rule reads."""
+    _apply(RetireEnforcement('testapp_setlistentry', column='_deleted_at'))
 
     assert _objects('testapp_setlist')[0] == ['soft_delete']
-    # The child's own rule and trigger are untouched: the column is going, not the table.
-    assert _objects('testapp_setlistentry') == (['soft_delete'], ['updated_at_trigger'])
+    # The rule goes; the trigger is untouched: the column is going, not the table.
+    assert _objects('testapp_setlistentry') == ([], ['updated_at_trigger'])
 
 
 def test_column_mode_leaves_the_self_cascade_trigger_alone(db):
     """A trigger is not a column dependency. Retiring a column must not take the tree's
     trigger with it, which a table-wide sweep would."""
-    _apply(RetireEnforcement('testapp_setlistentry', column='setlist_id'))
+    _apply(RetireEnforcement('testapp_setlist', column='_deleted_at'))
 
     assert (
         'soft_delete_self_cascade_15_testapp_setlist_9_parent_id' in _objects('testapp_setlist')[1]
@@ -65,25 +66,36 @@ def test_table_mode_also_takes_the_tables_own_rules_and_triggers(db):
     assert _objects('testapp_setlist')[0] == ['soft_delete']
 
 
+def test_table_mode_takes_the_owners_cascade_trigger(db):
+    """The trigger that carries the table's cascade arms (2.19.0, #80) is one this kit mints,
+    so a whole-table retirement takes it with the rest; the self-cascade one goes too."""
+    before = _objects('testapp_setlist')[1]
+    assert 'soft_delete_cascade_on_15_testapp_setlist' in before
+
+    _apply(RetireEnforcement('testapp_setlist'))
+
+    assert _objects('testapp_setlist') == ([], [])
+
+
 def test_it_unblocks_the_drop_column_that_would_otherwise_fail(db):
     """The failure the operation exists for. Django 6.0's ``sql_delete_column`` carries no
     ``CASCADE``, so a rule naming the column makes ``RemoveField`` fail at ``migrate`` --
     spelled here as the bare ``ALTER TABLE`` so the test says the same thing on 5.2."""
     with pytest.raises(Exception, match='depends on column'), connection.cursor() as cursor:
-        cursor.execute('ALTER TABLE testapp_setlistentry DROP COLUMN setlist_id')
+        cursor.execute('ALTER TABLE testapp_setlistentry DROP COLUMN _deleted_at')
 
 
 def test_the_drop_column_succeeds_once_the_enforcement_is_retired(db):
     """The other half: same statement, after the operation."""
-    _apply(RetireEnforcement('testapp_setlistentry', column='setlist_id'))
+    _apply(RetireEnforcement('testapp_setlistentry', column='_deleted_at'))
 
     with connection.cursor() as cursor:
-        cursor.execute('ALTER TABLE testapp_setlistentry DROP COLUMN setlist_id')
+        cursor.execute('ALTER TABLE testapp_setlistentry DROP COLUMN _deleted_at')
 
     with connection.cursor() as cursor:
         cursor.execute(
             'SELECT count(*) FROM information_schema.columns '
-            "WHERE table_name = 'testapp_setlistentry' AND column_name = 'setlist_id'"
+            "WHERE table_name = 'testapp_setlistentry' AND column_name = '_deleted_at'"
         )
         assert cursor.fetchone()[0] == 0
 
@@ -310,13 +322,13 @@ def test_the_scan_keeps_the_owners_revive_after_the_childs_retirement(monkeypatc
     Since 2.16.0 that trigger is the owner's one, keyed on the owner alone (#70)."""
     key = ('testapp_setlistentry', 'testapp_setlist', None)
     owner = ('testapp_setlist',)
-    assert owner in scan_existing_operations().soft_delete_revive_owner
+    assert owner in scan_existing_operations().soft_delete_cascade_owner
 
     _retire_at(monkeypatch, _stem_after_every_create(), 'testapp_setlistentry')
 
     existing = scan_existing_operations()
     assert key not in existing.soft_delete_related
-    assert owner in existing.soft_delete_revive_owner
+    assert owner in existing.soft_delete_cascade_owner
 
 
 def test_a_whole_table_retirement_of_the_owner_forgets_its_revive(monkeypatch):
@@ -326,7 +338,7 @@ def test_a_whole_table_retirement_of_the_owner_forgets_its_revive(monkeypatch):
 
     _retire_at(monkeypatch, _stem_after_every_create(), 'testapp_setlist')
 
-    assert owner not in scan_existing_operations().soft_delete_revive_owner
+    assert owner not in scan_existing_operations().soft_delete_cascade_owner
 
 
 def test_a_migration_after_the_retirement_records_the_key_again(monkeypatch):

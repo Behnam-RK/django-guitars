@@ -235,20 +235,19 @@ def _headers(*emitted: type[models.Model]) -> list[str]:
     ]
 
 
-def test_a_cascade_key_aimed_at_a_proxy_still_gets_its_rule(fk_to_proxy):
-    """The regression the proxy skip opened. ``related_model`` is the proxy, so the arm was
-    filed under it, and skipping proxies then left no model reaching it: the rule vanished with
-    ``--check`` green, and a raw ``DELETE`` on the owner archived it and left the child live."""
+def test_a_cascade_key_aimed_at_a_proxy_still_gets_its_arm(fk_to_proxy):
+    """The regression the proxy skip opened: ``related_model`` is the proxy, so the arm was filed
+    under it, and skipping proxies left no model reaching it -- the cascade vanished with
+    ``--check`` green. An arm of the owner's trigger since 2.19.0 (#80, ADR 0039)."""
     owner, proxy, held = fk_to_proxy
+    command = Command()
+    command.all_models = [owner, proxy, held]
+    command._index_reverse_relations(command.all_models)
 
-    headers = _headers(owner, proxy, held)
+    # The candidates are what every arm -- archive and revive alike -- is rendered from.
+    candidates, _selfs = command._cascade_candidates(owner, owner._meta.db_table, report=False)
 
-    assert [
-        header
-        for header in headers
-        if 'Soft Delete Related Rule on "testapp_held" that is related to "testapp_owner"'
-        in header
-    ]
+    assert [related._meta.db_table for related, _field, _primary in candidates] == ['testapp_held']
 
 
 def test_a_self_referential_cascade_key_aimed_at_a_proxy_still_gets_its_trigger(fk_to_proxy):

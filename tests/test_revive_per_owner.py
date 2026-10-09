@@ -24,18 +24,24 @@ def _forward(operation: str):
 
 @pytest.mark.django_db
 class TestTheDatabase:
-    def test_each_owner_table_carries_one_revive_trigger(self):
+    def test_each_owner_table_carries_one_cascade_trigger(self):
         """The label table owns eleven cascade keys, flat and joined: one trigger, not eleven."""
         counts = dict(
             (table, count)
             for table, count in _rows(
                 "SELECT tgrelid::regclass::text, count(*) FROM pg_trigger "
-                "WHERE tgname LIKE 'soft\\_delete\\_revive%%' AND NOT tgisinternal "
+                "WHERE tgname LIKE 'soft\\_delete\\_cascade\\_on%%' AND NOT tgisinternal "
                 'GROUP BY 1'
             )
         )
         assert counts['testapp_label'] == 1
         assert set(counts.values()) == {1}
+
+    def test_the_revive_only_owner_trigger_is_retired(self):
+        """What 2.16.0 -- 2.18.x wrote, superseded by the one that archives as well (#80)."""
+        assert not scalar(
+            "SELECT count(*) FROM pg_trigger WHERE tgname LIKE 'soft\\_delete\\_revive\\_on%%'"
+        )
 
     def test_no_per_key_revive_is_left(self):
         assert not scalar(
@@ -59,36 +65,16 @@ class TestTheOwnersOperation:
         (revive,) = [
             op
             for op in command._revive_operations(_app())
-            if op.startswith('# Soft Delete Revive Trigger on "testapp_album" table!')
+            if op.startswith('# Soft Delete Cascade Trigger on "testapp_album" table!')
         ]
         body = _forward(revive).sql
 
-        assert body.count('UPDATE "testapp_merch" AS guitars_child') == 2
+        # Two keys to merch, each an archive arm and a revive arm (#80, ADR 0039).
+        assert body.count('UPDATE "testapp_merch" AS guitars_child') == 4
+        assert body.count('SET _deleted_at = guitars_archived._deleted_at') == 2
+        assert body.count('SET _deleted_at = NULL') == 2
         assert body.index('AND EXISTS (') < body.index('UPDATE "testapp_merch"')
         assert body.count('CREATE TRIGGER') == 1
-
-    def test_an_owner_whose_every_arm_is_refused_gets_no_trigger(self, monkeypatch):
-        command = Command()
-        clear_cascade_coverage(command)
-        monkeypatch.setattr(command, '_revive_arm', lambda *args, **kwargs: None)
-
-        assert command._revive_operations(_app()) == []
-
-    def test_an_owner_named_with_dollar_quoting_is_refused_and_named(self, monkeypatch):
-        command = Command()
-        command._skipped_rule_notes.clear()
-        clear_cascade_coverage(command)
-        monkeypatch.setattr(operations_module, '_revive_owner_name', lambda table: 'x$$y')
-
-        assert command._revive_operations(_app()) == []
-        assert any(
-            "Revive trigger on 'testapp_album' skipped" in note
-            for note in command._skipped_rule_notes
-        )
-
-
-class TestTheTransition:
-    """Every per-key revive a project recorded is retired, its key still cascading or not."""
 
     @staticmethod
     def _retirements(key):
@@ -98,21 +84,39 @@ class TestTheTransition:
         command.existing.soft_delete_revive[key] = 'def'
         return command._retired_cascade_operations(_app())
 
-    def test_a_key_still_cascading_keeps_its_rule_and_loses_its_trigger(self):
-        (retirement,) = self._retirements(('testapp_album', 'testapp_band', None))
+    def test_a_key_still_cascading_loses_its_rule_and_its_trigger(self):
+        rule, revive = self._retirements(('testapp_album', 'testapp_band', None))
 
-        assert retirement.startswith('# Soft Delete Revive Trigger retired on "testapp_album"')
-        assert 'DROP TRIGGER IF EXISTS' in _forward(retirement).sql
+        assert rule.startswith('# Soft Delete Related Rule retired on "testapp_album"')
+        assert 'DROP RULE IF EXISTS "soft_delete_related_testapp_album"' in _forward(rule).sql
+        assert revive.startswith('# Soft Delete Revive Trigger retired on "testapp_album"')
+        assert 'DROP TRIGGER IF EXISTS' in _forward(revive).sql
+
+    def test_the_rules_reverse_rebuilds_it_as_it_was_written(self):
+        rule, _revive = self._retirements(('testapp_album', 'testapp_band', None))
+
+        reverse = _forward(rule).reverse_sql
+        assert 'CREATE OR REPLACE RULE "soft_delete_related_testapp_album"' in reverse
+        assert 'AS ON UPDATE TO "testapp_band"' in reverse
+        assert 'WHERE "band_id" = old."id"' in reverse
+
+    def test_a_joined_rules_reverse_rebuilds_the_joined_rule(self):
+        rule, _revive = self._retirements(('testapp_touringfestival', 'testapp_label', None))
+
+        reverse = _forward(rule).reverse_sql
+        assert 'AS ON UPDATE TO "testapp_label"' in reverse
+        assert 'UPDATE "testapp_festival"' in reverse
+        assert 'RAISE' not in reverse
 
     def test_its_reverse_rebuilds_the_flat_trigger(self):
-        (retirement,) = self._retirements(('testapp_album', 'testapp_band', None))
+        _rule, retirement = self._retirements(('testapp_album', 'testapp_band', None))
 
         reverse = _forward(retirement).reverse_sql
         assert 'CREATE TRIGGER "soft_delete_revive_12_testapp_band_13_testapp_album"' in reverse
         assert 'guitars_child."band_id" = guitars_revived."id"' in reverse
 
     def test_a_joined_keys_reverse_rebuilds_the_joined_trigger(self):
-        (retirement,) = self._retirements(('testapp_touringfestival', 'testapp_label', None))
+        _rule, retirement = self._retirements(('testapp_touringfestival', 'testapp_label', None))
 
         reverse = _forward(retirement).reverse_sql
         assert 'UPDATE "testapp_festival" AS guitars_child' in reverse
@@ -138,11 +142,12 @@ class TestWhereTheTriggerIsWritten:
         command = self._without_band(Command(), monkeypatch)
         clear_cascade_coverage(command)
         # A first create: no app has written it yet, so none keeps it.
+        command.existing.soft_delete_cascade_owner_dependencies.pop(('testapp_band',), None)
         command.existing.soft_delete_revive_owner_dependencies.pop(('testapp_band',), None)
 
         assert command._revive_host('testapp_band') == 'testapp'
         assert any(
-            op.startswith('# Soft Delete Revive Trigger on "testapp_band" table!')
+            op.startswith('# Soft Delete Cascade Trigger on "testapp_band" table!')
             for op in command._revive_operations(_app())
         )
 
@@ -167,6 +172,19 @@ class TestWhereTheTriggerIsWritten:
         would run before the old one's ``CREATE`` on a fresh ``migrate``: one host for life."""
         settings.LOCAL_APPS = [*settings.LOCAL_APPS, 'tests.crossapp_owner']
         command = self._without_band(Command(), monkeypatch)
+        command.existing.soft_delete_cascade_owner_dependencies[('testapp_band',)] = [
+            ('crossapp_owner', '0003_auto_enforcement')
+        ]
+
+        assert command._revive_host('testapp_band') == 'crossapp_owner'
+
+    def test_the_revive_only_trigger_it_supersedes_names_the_host_when_it_is_the_only_creator(
+        self, monkeypatch, settings
+    ):
+        """An upgrading project has recorded the old trigger and not yet the new one."""
+        settings.LOCAL_APPS = [*settings.LOCAL_APPS, 'tests.crossapp_owner']
+        command = self._without_band(Command(), monkeypatch)
+        command.existing.soft_delete_cascade_owner_dependencies.pop(('testapp_band',), None)
         command.existing.soft_delete_revive_owner_dependencies[('testapp_band',)] = [
             ('crossapp_owner', '0003_auto_enforcement')
         ]
@@ -177,7 +195,7 @@ class TestWhereTheTriggerIsWritten:
         """The owner's own app joining ``LOCAL_APPS`` does not move it either."""
         settings.LOCAL_APPS = [*settings.LOCAL_APPS, 'tests.crossapp_owner']
         command = Command()
-        command.existing.soft_delete_revive_owner_dependencies[('testapp_band',)] = [
+        command.existing.soft_delete_cascade_owner_dependencies[('testapp_band',)] = [
             ('crossapp_owner', '0003_auto_enforcement')
         ]
 
@@ -191,8 +209,8 @@ class TestWhereTheTriggerIsWritten:
             '_revive_arms_by_owner',
             lambda: {owner: kept for owner, kept in arms.items() if owner != 'testapp_band'},
         )
-        command.existing.soft_delete_revive_owner[('testapp_band',)] = 'abc'
-        command.existing.soft_delete_revive_owner_dependencies[('testapp_band',)] = [
+        command.existing.soft_delete_cascade_owner[('testapp_band',)] = 'abc'
+        command.existing.soft_delete_cascade_owner_dependencies[('testapp_band',)] = [
             ('testapp', '0074_auto_enforcement')
         ]
 
@@ -273,18 +291,18 @@ class TestAScopedRunNamesTheOwnersTrigger:
 
     def test_an_out_of_date_trigger_is_named(self):
         command = Command()
-        command.existing.soft_delete_revive_owner[('testapp_band',)] = 'stale0000000'
+        command.existing.soft_delete_cascade_owner[('testapp_band',)] = 'stale0000000'
 
         notes = command._scoped_trigger_retirement_notes({'crossapp_owner'})
 
         assert any(
-            '"soft_delete_revive_on_12_testapp_band" on \'testapp_band\' is out of date' in note
+            '"soft_delete_cascade_on_12_testapp_band" on \'testapp_band\' is out of date' in note
             for note in notes
         )
 
     def test_a_missing_trigger_is_named(self):
         command = Command()
-        del command.existing.soft_delete_revive_owner[('testapp_band',)]
+        del command.existing.soft_delete_cascade_owner[('testapp_band',)]
 
         notes = command._scoped_trigger_retirement_notes({'crossapp_owner'})
 
@@ -305,12 +323,12 @@ class TestAScopedRunNamesTheOwnersTrigger:
 
     def test_nothing_is_named_when_the_owners_app_is_in_scope(self):
         command = Command()
-        command.existing.soft_delete_revive_owner[('testapp_band',)] = 'stale0000000'
+        command.existing.soft_delete_cascade_owner[('testapp_band',)] = 'stale0000000'
 
         assert not [
             note
             for note in command._scoped_trigger_retirement_notes({'testapp'})
-            if note.startswith('Revive trigger')
+            if note.startswith('Cascade trigger')
         ]
 
     def test_an_up_to_date_project_names_nothing(self):
@@ -324,45 +342,6 @@ def test_a_superseded_revive_is_retired_only_by_its_host():
     command.existing.soft_delete_revive[('testapp_album', 'testapp_band', None)] = 'def'
 
     assert command._retired_cascade_operations(apps.get_app_config('crossapp_owner')) == []
-
-
-class TestAQuietReadReportsNothing:
-    """A scoped run compares digests through the same builder; a refusal is reported once, by
-    the run that emits it, not again by every run that only asks."""
-
-    def test_a_refused_owner(self, monkeypatch):
-        command = Command()
-        command._skipped_rule_notes.clear()
-        monkeypatch.setattr(operations_module, '_revive_owner_name', lambda table: 'x$$y')
-
-        assert command._revive_owner_slots('testapp_album', quiet=True) is None
-        assert command._skipped_rule_notes == []
-
-    def test_a_refused_arm(self):
-        from tests.test_command import _revive_dollar_models  # noqa: PLC0415
-
-        _owner, child = _revive_dollar_models()
-        command = Command()
-        command._skipped_rule_notes.clear()
-        key = ('testapp_dollar$$child', 'testapp_dollar_owner', None)
-
-        assert command._revive_arm(key, child, 'owner_id', 'id', quiet=True) is None
-        assert command._skipped_rule_notes == []
-
-
-def test_a_recorded_trigger_whose_every_arm_is_refused_fails_check(monkeypatch):
-    """Not emitted, not retired -- its key still calls for an arm -- and so live in every
-    migrated database with nothing to say so: named for a hand drop, as the per-key one was."""
-    command = Command()
-    command._refusals_over_live_rules.clear()
-    monkeypatch.setattr(command, '_revive_arm', lambda *args, **kwargs: None)
-
-    command._revive_operations(_app())
-
-    assert any(
-        "Revive trigger on 'testapp_album'" in refusal and 'DROP TRIGGER' in refusal
-        for refusal in command._refusals_over_live_rules
-    )
 
 
 def test_a_trigger_already_rid_of_a_deleted_childs_arm_is_not_named(monkeypatch):
@@ -380,16 +359,59 @@ def test_a_trigger_already_rid_of_a_deleted_childs_arm_is_not_named(monkeypatch)
     assert not [note for note in notes if 'soft_delete_revive_on' in note]
 
 
-def test_a_refused_renamed_owners_hand_drop_names_every_spelling(monkeypatch):
-    """PostgreSQL keeps a trigger with its table, so after a rename the live one carries the
-    old name: a hand drop of the current spelling alone would leave it."""
-    command = Command()
-    command._refusals_over_live_rules.clear()
-    command.existing.renamed_tables['testapp_album'] = ['testapp_oldalbum']
-    monkeypatch.setattr(command, '_revive_arm', lambda *args, **kwargs: None)
+class TestTheReviveOnlyTriggerIsSuperseded:
+    """2.16.0 -- 2.18.x wrote ``soft_delete_revive_on_*``; the trigger that archives too is
+    ``soft_delete_cascade_on_*`` (#80, ADR 0039), so the first is retired where the second is
+    written. A rename needs ``DROP TRIGGER``, which is why a rename cost what it cost."""
 
-    command._revive_operations(_app())
+    @staticmethod
+    def _command(table='testapp_band'):
+        command = Command()
+        clear_cascade_coverage(command)
+        command.existing.soft_delete_revive_owner[(table,)] = 'abc'
+        return command
 
-    (refusal,) = [r for r in command._refusals_over_live_rules if "'testapp_album'" in r]
-    assert 'soft_delete_revive_on_16_testapp_oldalbum' in refusal
-    assert 'soft_delete_revive_on_13_testapp_album' in refusal
+    @staticmethod
+    def _retirement(built, table='testapp_band'):
+        (retirement,) = [
+            op
+            for op in built
+            if op.startswith(f'# Soft Delete Revive Trigger retired on "{table}" table!')
+        ]
+        return retirement
+
+    def test_it_is_dropped_after_the_trigger_that_supersedes_it(self):
+        built = self._command()._build_operations(_app())
+
+        new = next(
+            i for i, op in enumerate(built) if op.startswith('# Soft Delete Cascade Trigger on "testapp_band"')
+        )
+        assert new < built.index(self._retirement(built))
+
+    def test_the_drop_covers_both_the_trigger_and_its_function(self):
+        forward = _forward(self._retirement(self._command()._build_operations(_app()))).sql
+
+        assert 'DROP TRIGGER IF EXISTS "soft_delete_revive_on_12_testapp_band"' in forward
+        assert 'DROP FUNCTION IF EXISTS "soft_delete_revive_on_12_testapp_band"()' in forward
+
+    def test_its_reverse_rebuilds_the_revive_only_trigger_under_its_old_name(self):
+        reverse = _forward(self._retirement(self._command()._build_operations(_app()))).reverse_sql
+
+        assert 'CREATE TRIGGER "soft_delete_revive_on_12_testapp_band"' in reverse
+        assert 'guitars_revived' in reverse
+        assert 'guitars_archived' not in reverse
+        assert 'RAISE' not in reverse
+
+    def test_one_whose_owner_has_no_cascade_key_left_goes_with_a_refusing_reverse(self):
+        """A table nothing cascades from: no arm to rebuild it from, as any retirement."""
+        command = self._command('testapp_riff')
+
+        retirement = self._retirement(command._build_operations(_app()), 'testapp_riff')
+
+        assert 'RAISE' in _forward(retirement).reverse_sql
+
+    def test_it_is_not_retired_by_an_app_that_does_not_host_the_owner(self):
+        command = self._command()
+        other = apps.get_app_config('crossapp_owner')
+
+        assert command._retired_revive_owner_operations(other, set(command._revive_arms_by_owner())) == []

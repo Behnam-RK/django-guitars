@@ -88,6 +88,13 @@ HEADER_SOFT_DELETE_REVIVE_OWNER = '# Soft Delete Revive Trigger on "{table}" tab
 HEADER_SOFT_DELETE_REVIVE_OWNER_RETIRED = (
     '# Soft Delete Revive Trigger retired on "{table}" table!'
 )
+# The same trigger once it archives too (2.19.0, #80, ADR 0039): a new family and name, the revive
+# one above kept to read history and retired where this supersedes it. Disjoint from every header
+# above and below on the literal token before "Trigger" -- "Revive", "Self Cascade".
+HEADER_SOFT_DELETE_CASCADE_OWNER = '# Soft Delete Cascade Trigger on "{table}" table!'
+HEADER_SOFT_DELETE_CASCADE_OWNER_RETIRED = (
+    '# Soft Delete Cascade Trigger retired on "{table}" table!'
+)
 
 # A self-referential CASCADE FK, taking a trigger where every other cascade takes a rule
 # (ADR 0018). "Self Cascade Trigger" shares no token with the three above, so no scanner
@@ -169,6 +176,8 @@ _RE_SOFT_DELETE_SELF_CASCADE = _derive_scanner(HEADER_SOFT_DELETE_SELF_CASCADE)
 # owner, where theirs say "that is related to", and from each other on "retired".
 _RE_SOFT_DELETE_REVIVE_OWNER = _derive_scanner(HEADER_SOFT_DELETE_REVIVE_OWNER)
 _RE_SOFT_DELETE_REVIVE_OWNER_RETIRED = _derive_scanner(HEADER_SOFT_DELETE_REVIVE_OWNER_RETIRED)
+_RE_SOFT_DELETE_CASCADE_OWNER = _derive_scanner(HEADER_SOFT_DELETE_CASCADE_OWNER)
+_RE_SOFT_DELETE_CASCADE_OWNER_RETIRED = _derive_scanner(HEADER_SOFT_DELETE_CASCADE_OWNER_RETIRED)
 # The three retirements of #66, each disjoint from its create on "retired".
 _RE_SOFT_DELETE_OWNED_RETIRED = _derive_scanner(HEADER_SOFT_DELETE_OWNED_RETIRED)
 _RE_SOFT_DELETE_OWNED_SWEEP_RETIRED = _derive_scanner(HEADER_SOFT_DELETE_OWNED_SWEEP_RETIRED)

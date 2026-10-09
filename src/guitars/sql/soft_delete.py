@@ -710,7 +710,7 @@ _REFUSE_REVERSING_RETIREMENT = """
 
 # ---- Self-referential cascade: a trigger where the family above is a rule. A rule updating the
 # table it fires on is rewritten into itself and PostgreSQL rejects **every** ``UPDATE`` there.
-# Self keys only -- a multi-table cycle has no stable choice of edge. See ADR 0018. ----
+# Self keys only; a multi-table cycle takes arms (ADR 0041). See ADR 0018. ----
 
 
 # Guard one refuses what guard two cannot see: a row archived under a key this statement also

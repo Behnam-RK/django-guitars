@@ -1894,11 +1894,11 @@ class OperationsMixin:
 
     @staticmethod
     def _cycle_warning(subject: str, fires_on: str, updates: str) -> str:
-        """The refusal text for an owned relation closing a cycle of owned relations. The two
-        tables are spelled out, not joined by an arrow."""
+        """The refusal text for an owned relation closing a cycle, which may run through CASCADE
+        keys too. The two tables are spelled out, not joined by an arrow."""
         return (
             f'Owned rule for {subject} skipped: it fires on '
-            f"'{fires_on}' and updates '{updates}', closing a cycle of owned relations. "
+            f"'{fires_on}' and updates '{updates}', closing a cycle through owned relations (CASCADE keys may be part of it). "
             'hard_delete() and sweepowned read the same refusal and follow none on a cycle, so '
             'the database enforces none either. Handle one of its steps in Python.'
         )

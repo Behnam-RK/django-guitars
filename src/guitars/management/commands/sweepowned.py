@@ -242,7 +242,7 @@ class Command(BaseCommand):
                     break
             else:
                 # Exhausting the bound says the run did not settle, not why: depth beyond it
-                # needs a cycle of owned relations, while fresh orphans arriving between passes
+                # needs a cycle through owned relations, while fresh orphans arriving between passes
                 # need only a concurrent writer -- ordinary on a busy database.
 
                 # Reported, not raised as a diagnosis: every pass committed real repairs, and
@@ -301,7 +301,7 @@ class Command(BaseCommand):
             raise CommandError(
                 f'The owned sweep{scope} stamped {repaired} row(s) but did not settle after '
                 f'{passes} passes. Re-run --repair; if it never settles, check the database '
-                f'for a cycle of owned relations, which the generator refuses but a database '
+                f'for a cycle through owned relations, which the generator refuses but a database '
                 f'migrated before that refusal may still hold{leaving_scope}.'
             )
         if findings and not repair:

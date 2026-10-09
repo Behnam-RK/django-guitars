@@ -1867,7 +1867,7 @@ def test_owned_operation_warns_when_two_models_own_each_other():
     assert ops == []
     assert len(command._skipped_rule_notes) == 2
     for warning in command._skipped_rule_notes:
-        assert 'closing a cycle of owned relations' in warning
+        assert 'closing a cycle through owned relations' in warning
 
 
 def test_owned_operation_still_emits_when_ownership_is_one_way():
@@ -1935,9 +1935,12 @@ def test_cascade_operation_warns_when_an_owned_rule_closes_the_cycle():
     command, ops = _build()
 
     assert ops == []
+    held, holder = command.all_models
+    candidates, _ = command._cascade_candidates(held, held._meta.db_table)
+    assert [(model, field.name) for model, field, _ in candidates] == [(holder, 'parent')]
     (warning,) = command._skipped_rule_notes
     assert warning.startswith('Owned rule for ')
-    assert 'closing a cycle of owned relations' in warning
+    assert 'closing a cycle through owned relations' in warning
 
 
 def test_a_rule_name_clash_fails_a_check_run_but_only_reports_on_a_generating_one():

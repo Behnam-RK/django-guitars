@@ -414,3 +414,13 @@ def test_unapplying_the_retirement_puts_the_self_trigger_back(db):
         transaction.set_rollback(True)
 
     assert rebuilt == 1
+
+
+def test_the_self_key_is_filed_as_an_arm_of_its_owner(db):
+    """Off the registry-wide sweep the owner trigger is rendered from: without the self loop in
+    ``_cascade_key_maps`` the key is silently left without its cascade, ``--check`` green."""
+    from guitars.management.enforcement.command import Command  # noqa: PLC0415
+
+    arms = Command()._revive_arms_by_owner()['testapp_setlist']
+
+    assert ('testapp_setlist', 'testapp_setlist', 'parent_id') in arms

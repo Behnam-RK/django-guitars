@@ -183,8 +183,8 @@ def classify_cascade(related_model, fk_field, on_delete, owner_table: str) -> Ca
     at ``_deleted_at IS NULL``, so only the owned family still reads the cycle graph."""
     if not is_cascade_candidate(related_model, fk_field, on_delete):
         return CascadeKind.NONE
-    # A self key takes a trigger of its own (ADR 0018). Refused where the trigger cannot read
-    # the column: a parent keyed to its own MTI child.
+    # A self key is an arm like any other (ADR 0042). Refused where the arm cannot read the
+    # column: a parent keyed to its own MTI child.
     if related_model._meta.db_table == owner_table:
         if to_field_refusal(fk_field, owner_table) is not None:
             return CascadeKind.REFUSED

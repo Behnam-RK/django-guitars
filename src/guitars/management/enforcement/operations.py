@@ -1013,8 +1013,8 @@ class OperationsMixin:
         return min(contributors, default=None)
 
     def _required_self_cascades(self) -> set[tuple[str, str]]:
-        """``(table, foreign_key)`` of every self-cascade trigger the models call for, off the
-        same sweep as :meth:`_cascade_key_maps`."""
+        """``(table, foreign_key)`` of every self key the models still cascade, whose arm is owed,
+        off the same sweep as :meth:`_cascade_key_maps`."""
         self._cascade_key_maps()
         return self._required_self_cascade_keys
 
@@ -1037,9 +1037,9 @@ class OperationsMixin:
         }
 
     def _retired_trigger_operations(self, app: AppConfig) -> list[str]:
-        """Retire the owned rule, its sweep and the self-cascade trigger whose key the models no
-        longer call for (#66): their plpgsql bodies name the column, so after ``DROP COLUMN ...
-        CASCADE`` each failed every UPDATE on its table. ``IF EXISTS`` and every spelling."""
+        """Retire the owned rule, its sweep and the self-cascade trigger: where the models no
+        longer call for the key (#66) because a plpgsql body naming a dropped column failed every
+        UPDATE, and where an arm supersedes it (2.20.0). ``IF EXISTS`` and every spelling."""
         hosting = self._table_app_labels()
         declared = self._declared_owned_keys()
         required_selfs = self._required_self_cascades()

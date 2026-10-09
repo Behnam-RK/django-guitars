@@ -13,7 +13,7 @@ A key onto the owner's own table took a trigger of its own (ADR 0018), because a
 
 - **A self key is an arm**, archive and revive, of `soft_delete_cascade_on_<table>`, rendered from the same templates; the arm's `UPDATE` fires the trigger again, one level further down. `CascadeKind.SELF` stays a classification, as the model it names is the owner.
 - **Its children carry the parent's `_deleted_at`, and a restore finds them**: archive a tree and restore its root, and the subtree archived with it comes back. A child archived earlier keeps its own stamp and stays archived.
-- **The refusal is the union of the two.** The owner's leak check already refuses a live child holding a key of a live before-row; the self trigger also refused one holding the archived row's **new** key, which a deferred foreign key permits ahead of its row. That second disjunct is a template of its own, `_SOFT_DELETE_LEAK_CHECK_SELF`, used only for a self key, so no other owner's function changes.
+- **The refusal is the union of the two.** The owner's leak check already refuses a live child holding a key of any live before-row; the self trigger also refused one holding the archived row's **new** key, which a deferred foreign key permits ahead of its row. The union is **wider** than the old trigger on one statement: a re-keying archive that also touches a live sibling with children, which the old guard accepted, is refused. That second disjunct is a template of its own, `_SOFT_DELETE_LEAK_CHECK_SELF`, used only for a self key, so no other owner's function changes.
 - **The self trigger is retired where the owner's is written**, after it, `IF EXISTS` over every name the table held; unapplying rebuilds it as 2.8.0 wrote it (`_superseded_self_cascade_reverse`). A key the models no longer call for is retired as before, by the table's own host, with a reverse that refuses. Its header, scanner and SQL stay to read history and build that reverse.
 - A name carrying `$$` is no longer refused for a self key: the owner's function takes another dollar-quote tag (ADR 0039).
 
@@ -27,7 +27,7 @@ One family means one set of rules for the stamp, the revive and the refusal, and
 
 **Gained.** The arm names the key column only inside a branch: dropping it fails an archive of the table, not every `UPDATE` as the self trigger did, until `makeguitarmigrations` re-emits the trigger (ADR 0039).
 
-**Reversibility.** Unapplying the migration rebuilds the self trigger and replaces the owner's trigger without the arm. Going back in code needs the self-key branch of `_cascade_key_maps` removed and the retirement reversed.
+**Reversibility.** Unapplying the migration rebuilds the self trigger, but the reverse of a re-emitted owner trigger is a plain `DROP`, as for every one since 2.16.0 (the earlier body is not recorded): the table's other cascade arms are off until the migration is applied again. Going back in code needs the self-key branch of `_cascade_key_maps` removed and the retirement reversed.
 
 ## Related
 

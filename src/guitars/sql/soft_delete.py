@@ -313,6 +313,31 @@ _SOFT_DELETE_LEAK_CHECK = """
                       )
                 )"""
 
+# A key onto the owner's own table, which the self-cascade trigger refused beyond the check above
+# (ADR 0018): also a live child holding the *new* key of an archived row whose pk the statement
+# rewrote. Reachable through a deferred foreign key, which lets a child name a key before its row.
+_SOFT_DELETE_LEAK_CHECK_SELF = """
+                EXISTS (
+                    SELECT 1 FROM {related_table} AS guitars_child
+                    WHERE guitars_child._deleted_at IS NULL
+                      AND (
+                          guitars_child."{foreign_key}" IN (
+                              SELECT guitars_held."{referenced_key}"
+                              FROM guitars_revive_before AS guitars_held
+                              WHERE guitars_held._deleted_at IS NULL
+                          )
+                          OR guitars_child."{foreign_key}" IN (
+                              SELECT guitars_new."{referenced_key}"
+                              FROM guitars_revive_after AS guitars_new
+                              WHERE guitars_new._deleted_at IS NOT NULL
+                                AND NOT EXISTS (
+                                    SELECT 1 FROM guitars_revive_before AS guitars_old
+                                    WHERE guitars_old."{primary_key}" = guitars_new."{primary_key}"
+                                )
+                          )
+                      )
+                )"""
+
 _SOFT_DELETE_LEAK_CHECK_JOINED = """
                 EXISTS (
                     SELECT 1 FROM {target_table} AS guitars_child
@@ -708,9 +733,9 @@ _REFUSE_REVERSING_RETIREMENT = """
     $guitars_retired$;
 """
 
-# ---- Self-referential cascade: a trigger where the family above is a rule. A rule updating the
-# table it fires on is rewritten into itself and PostgreSQL rejects **every** ``UPDATE`` there.
-# Self keys only; a multi-table cycle takes arms (ADR 0041). See ADR 0018. ----
+# ---- Self-referential cascade: the trigger a key onto the owner's own table took from 2.8.0
+# (ADR 0018) to 2.19.x, where the family above was a rule. An arm of the owner's trigger since
+# 2.20.0 (ADR 0042); what follows is read only to rebuild it in a reverse. ----
 
 
 # Guard one refuses what guard two cannot see: a row archived under a key this statement also
@@ -798,10 +823,6 @@ _CREATE_SOFT_DELETE_SELF_CASCADE_FUNCTION = """
 #: under 2.19.0's row trigger (ADR 0038), kept for unregenerated tables so no identity moves.
 _SOFT_DELETE_SELF_CASCADE_UPDATED_AT = ', _updated_at = NOW()'
 
-_DROP_SOFT_DELETE_SELF_CASCADE_FUNCTION = """
-    DROP FUNCTION {function}();
-"""
-
 # No ``WHEN (pg_trigger_depth() = 0)``: here the trigger re-fires *itself*, its own UPDATE being
 # another statement on this table, which is how the next level down is reached. Recursion ends
 # where a level archives nothing. Depth is bounded by ``max_stack_depth``, one frame per level.
@@ -813,30 +834,10 @@ _CREATE_SOFT_DELETE_SELF_CASCADE_TRIGGER = """
         EXECUTE FUNCTION {function}();
 """
 
-_DROP_SOFT_DELETE_SELF_CASCADE_TRIGGER = """
-    DROP TRIGGER {trigger} ON {table};
-"""
-
-# The owned sweep's four forms, for its reasons: IF EXISTS is a knowledge claim, so only --adopt
-# says it, and the function stays CREATE OR REPLACE everywhere -- DROP FUNCTION refuses while a
-# trigger depends on it, and CASCADE would take that trigger with it.
+# Kept byte for byte to rebuild the trigger as the reverse of the migration that retires it
+# (ADR 0042, ``operations._superseded_self_cascade_reverse``); nothing creates it forward any more.
 _CREATE_SOFT_DELETE_SELF_CASCADE = (
     _CREATE_SOFT_DELETE_SELF_CASCADE_FUNCTION + _CREATE_SOFT_DELETE_SELF_CASCADE_TRIGGER
-)
-
-_DROP_SOFT_DELETE_SELF_CASCADE = (
-    _DROP_SOFT_DELETE_SELF_CASCADE_TRIGGER + _DROP_SOFT_DELETE_SELF_CASCADE_FUNCTION
-)
-
-_REPLACE_SOFT_DELETE_SELF_CASCADE = (
-    _DROP_SOFT_DELETE_SELF_CASCADE_TRIGGER + _CREATE_SOFT_DELETE_SELF_CASCADE
-)
-
-_ADOPT_SOFT_DELETE_SELF_CASCADE = (
-    """
-    DROP TRIGGER IF EXISTS {trigger} ON {table};
-"""
-    + _CREATE_SOFT_DELETE_SELF_CASCADE
 )
 
 # ---- MTI soft-delete rule: preserves the child row, marks the owning ancestor instead.

@@ -46,14 +46,12 @@ def test_column_mode_drops_only_what_depends_on_that_column(db):
     assert _objects('testapp_setlistentry') == ([], ['updated_at_trigger'])
 
 
-def test_column_mode_leaves_the_self_cascade_trigger_alone(db):
+def test_column_mode_leaves_the_owners_cascade_trigger_alone(db):
     """A trigger is not a column dependency. Retiring a column must not take the tree's
     trigger with it, which a table-wide sweep would."""
     _apply(RetireEnforcement('testapp_setlist', column='_deleted_at'))
 
-    assert (
-        'soft_delete_self_cascade_15_testapp_setlist_9_parent_id' in _objects('testapp_setlist')[1]
-    )
+    assert 'soft_delete_cascade_on_15_testapp_setlist' in _objects('testapp_setlist')[1]
 
 
 def test_table_mode_also_takes_the_tables_own_rules_and_triggers(db):
@@ -68,7 +66,7 @@ def test_table_mode_also_takes_the_tables_own_rules_and_triggers(db):
 
 def test_table_mode_takes_the_owners_cascade_trigger(db):
     """The trigger that carries the table's cascade arms (2.19.0, #80) is one this kit mints,
-    so a whole-table retirement takes it with the rest; the self-cascade one goes too."""
+    so a whole-table retirement takes it with the rest."""
     before = _objects('testapp_setlist')[1]
     assert 'soft_delete_cascade_on_15_testapp_setlist' in before
 
@@ -343,13 +341,13 @@ def test_a_whole_table_retirement_of_the_owner_forgets_its_revive(monkeypatch):
 
 def test_a_migration_after_the_retirement_records_the_key_again(monkeypatch):
     """The ordering rule, and why the subtraction happens inside the file walk. Retired at
-    0043: 0045 and 0046 re-assert the self-cascade trigger afterwards and undo that half, while
+    0043: the later migrations that write the owner's cascade trigger undo that half, while
     the plain rule -- written once, at 0042 -- stays forgotten."""
     _retire_at(monkeypatch, '0043_riser_rack_troupe', 'testapp_setlist')
 
     existing = scan_existing_operations()
 
-    assert ('testapp_setlist', 'parent_id') in existing.soft_delete_self_cascade
+    assert ('testapp_setlist',) in existing.soft_delete_cascade_owner
     assert 'testapp_setlist' not in existing.soft_deletes
 
 

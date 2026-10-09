@@ -86,8 +86,10 @@ class TestTheLeak:
             transaction.set_rollback(True)
 
 
-def _command(monkeypatch, *, dropped: set[str]):
-    """The child's model deleted: its table maps to nothing and no key calls for it."""
+def _command(monkeypatch, *, dropped: set[str], keep_self_arm: bool = False):
+    """The child's model deleted: its table maps to nothing and no key calls for it. The owner's
+    own self key is dropped too unless *keep_self_arm*: the scenario is the child being its only
+    arm, which the real registry no longer shows for ``Setlist`` (ADR 0042)."""
     command = Command()
     clear_cascade_coverage(command)
     hosting, key_maps = command._table_app_labels, command._cascade_key_maps
@@ -107,7 +109,15 @@ def _command(monkeypatch, *, dropped: set[str]):
         return {
             owner: kept
             for owner, keyed in arms.items()
-            if (kept := {key: arm for key, arm in keyed.items() if key[0] != CHILD})
+            # The owner's self key is no arm of this scenario either: the child was its only one,
+            # and a self key is an arm of the owner's trigger since 2.20.0 (ADR 0042).
+            if (
+                kept := {
+                    key: arm
+                    for key, arm in keyed.items()
+                    if key[0] != CHILD and (keep_self_arm or not key[0] == key[1] == OWNER)
+                }
+            )
         }
 
     monkeypatch.setattr(command, '_table_app_labels', without_child)
@@ -284,6 +294,19 @@ class TestADroppedChildIsRetired:
 
         assert _retirements(command) == []
         assert len(command._unmapped_cascade_notes()) == 1
+
+    def test_an_owner_keeping_its_self_arm_is_re_emitted_not_retired(self, monkeypatch):
+        """The real registry's shape: the dropped child was one arm of two, so the owner's trigger
+        stays and is re-emitted without it, by its digest moving, rather than retired."""
+        command = _command(monkeypatch, dropped={CHILD}, keep_self_arm=True)
+
+        retired = [
+            op
+            for op in command._retired_trigger_operations(apps.get_app_config('testapp'))
+            if f'Cascade Trigger retired on "{OWNER}"' in op
+        ]
+
+        assert retired == []
 
     @pytest.mark.django_db
     def test_running_it_repairs_the_owner(self, monkeypatch):

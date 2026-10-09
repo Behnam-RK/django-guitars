@@ -123,15 +123,14 @@ class ExistingOperations(NamedTuple):
     #: firing on the table it points at. Its own dict for the sweep's reason: a cascade *rule*
     #: already recorded must not read as a trigger recorded. See ADR 0018.
     soft_delete_self_cascade: dict[tuple[str, str], str | None]
-    #: The migrations that created each of the three above, for a retirement to depend on:
-    #: an MTI descendant's pass writes a self-cascade trigger into *its* app (#66).
+    #: The migrations that created each of the three above, for a retirement to depend on: a
+    #: self-cascade trigger could be written by an MTI descendant's app (#66, before 2.20.0).
     soft_delete_owned_dependencies: dict[tuple[str, str, str], list[tuple[str, str]]]
     soft_delete_owned_sweep_dependencies: dict[tuple[str, str, str], list[tuple[str, str]]]
     soft_delete_self_cascade_dependencies: dict[tuple[str, str], list[tuple[str, str]]]
     #: Their settled retirements, for a re-adopted create to depend on (ADR 0021).
     owned_retirement_sites: list[CascadeRetirementSite]
     owned_sweep_retirement_sites: list[CascadeRetirementSite]
-    self_cascade_retirement_sites: list[CascadeRetirementSite]
     mti_triggers: dict[str, str | None]
     mti_soft_deletes: dict[str, str | None]
     #: ``(app_label, migration, kind, table)`` for an MTI header a single migration carries
@@ -714,8 +713,8 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
                     creates.append((app.label, path.stem))
 
             # #66's three record their creates too, and their retirements below are settled
-            # by the graph rather than popped here: a self-cascade trigger can be written by
-            # an MTI descendant's app, and a rename in another app re-keys after a pop.
+            # by the graph rather than popped here: a trigger can be written by an MTI
+            # descendant's app, and a rename in another app re-keys after a pop.
             for pattern, deps in (
                 (_RE_SOFT_DELETE_OWNED, owned_deps),
                 (_RE_SOFT_DELETE_OWNED_SWEEP, sweep_deps),
@@ -862,7 +861,7 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
         cascade_owner_deps,
     ):
         _rekey(recorded, final, live_tables)
-    owned_sites, sweep_sites, self_sites, revive_owner_sites, cascade_owner_sites = (
+    owned_sites, sweep_sites, _self_sites, revive_owner_sites, cascade_owner_sites = (
         _settle_retirement_sites(
             trigger_retirement_sites.get(id(recorded), []),
             recorded,
@@ -907,7 +906,6 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
         soft_delete_self_cascade_dependencies=self_deps,
         owned_retirement_sites=owned_sites,
         owned_sweep_retirement_sites=sweep_sites,
-        self_cascade_retirement_sites=self_sites,
         mti_triggers=existing_mti_triggers,
         mti_soft_deletes=existing_mti_soft_deletes,
         duplicate_mti_operations=duplicate_mti,

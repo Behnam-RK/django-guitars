@@ -624,9 +624,9 @@ class Rack(SetarModel):
 
 
 class Troupe(GuitarModel):
-    """A tenanted tree. ADR 0018 claims the trigger's child ``UPDATE`` runs under the invoker's
-    row-level security and so fails safe, leaking a live row rather than archiving a hidden
-    one. Transition tables are not RLS-filtered, so that claim is worth measuring."""
+    """A tenanted tree. ADR 0018 claims, and ADR 0042 keeps for the arm, that the child ``UPDATE``
+    runs under the invoker's row-level security and so fails safe, leaking a live row rather
+    than archiving a hidden one. Transition tables are not RLS-filtered, so that claim is worth measuring."""
 
     name = CharField(max_length=100)
     parent = ForeignKey('self', on_delete=CASCADE, null=True, blank=True, related_name='children')

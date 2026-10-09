@@ -148,19 +148,60 @@ class TestASelfCascadeKeyNoLongerRequired:
         assert 'DROP FUNCTION IF EXISTS' in _forward_sql(operation)
         assert 'RAISE EXCEPTION' in operation
 
-    def test_the_live_one_is_left_alone(self):
+    def test_a_key_still_cascading_is_retired_as_superseded_and_reverses_to_it(self):
+        """The arm of the owner's trigger replaces it (ADR 0042): the drop is the same, but
+        unapplying rebuilds the trigger rather than refusing."""
         command = _command()
         command.existing.soft_delete_self_cascade[('testapp_setlist', 'parent_id')] = 'abc'
 
-        assert _retired(command) == []
+        (operation,) = _retired(command)
+
+        assert operation.startswith(
+            HEADER_SOFT_DELETE_SELF_CASCADE_RETIRED.format(
+                table='testapp_setlist', foreign_key='parent_id'
+            )
+        )
+        forward, reverse = operation.split('reverse_sql=')
+        assert 'DROP TRIGGER IF EXISTS' in forward
+        assert 'CREATE TRIGGER "soft_delete_self_cascade_15_testapp_setlist_9_parent_id"' in reverse
+        assert 'CREATE OR REPLACE FUNCTION "soft_delete_self_cascade_15_testapp_setlist' in reverse
+        assert 'testapp' in command.existing.retirement_apps
+
+
+    def test_a_key_hosted_by_another_app_is_not_this_ones_to_retire(self):
+        command = _command()
+        command.existing.soft_delete_self_cascade[('testapp_setlist', 'parent_id')] = 'abc'
+        command.existing.soft_delete_self_cascade[SELF] = 'def'
+
+        assert command._retired_trigger_operations(apps.get_app_config('contenttypes')) == []
+
+    def test_a_name_holding_dollar_quoting_reverses_to_a_refusal(self, monkeypatch):
+        """The rebuilt trigger is spliced into ``$$``, which such a name would close: unapplying
+        refuses, as the rule and the revive do, where the forward drop is unaffected."""
+        from guitars.management.enforcement import operations  # noqa: PLC0415
+
+        command = _command()
+        command._cascade_key_maps()
+        monkeypatch.setattr(operations, '_self_cascade_name', lambda table, key: f'c$${table}')
+
+        reverse = command._superseded_self_cascade_reverse('testapp_setlist', 'parent_id')
+
+        assert 'RAISE EXCEPTION' in reverse and 'CREATE TRIGGER' not in reverse
 
 
 @pytest.mark.django_db
 class TestTheLeakAndTheRepair:
-    """Against the database: the self-cascade trigger names its key column, so dropping that
-    column with ``CASCADE`` leaves a trigger failing every UPDATE, and the retirement repairs it."""
+    """Against the database: a pre-2.20.0 self-cascade trigger names its key column, so dropping
+    that column with ``CASCADE`` leaves a trigger failing every UPDATE, and the retirement
+    repairs it. The migrated test database holds none (ADR 0042), so each test builds it."""
 
     TABLE, COLUMN = 'testapp_setlist', 'parent_id'
+
+    def _legacy_trigger(self) -> str:
+        """The trigger as 2.8.0 -- 2.19.x wrote it, off the superseded retirement's own reverse."""
+        command = _command()
+        command._cascade_key_maps()
+        return command._superseded_self_cascade_reverse(self.TABLE, self.COLUMN)
 
     def _retirement(self):
         command = _command()
@@ -174,12 +215,14 @@ class TestTheLeakAndTheRepair:
     def test_dropping_the_column_breaks_every_update(self):
         with pytest.raises(ProgrammingError, match='parent_id'):
             with transaction.atomic():
+                execute(self._legacy_trigger())
                 execute(f'ALTER TABLE {self.TABLE} DROP COLUMN {self.COLUMN} CASCADE')
                 execute(f'UPDATE {self.TABLE} SET title = title')
 
     def test_the_retirement_repairs_it(self):
         drop = self._retirement()
         with transaction.atomic():
+            execute(self._legacy_trigger())
             execute(f'ALTER TABLE {self.TABLE} DROP COLUMN {self.COLUMN} CASCADE')
             execute(drop)
             execute(f'UPDATE {self.TABLE} SET title = title')
@@ -514,18 +557,6 @@ class TestARedeclaredKeyIsOrderedAfterItsRetirement:
     def _edges(command) -> list:
         command._build_operations(apps.get_app_config('testapp'))
         return command._retirement_edges.get('testapp', [])
-
-    def test_a_self_cascade(self):
-        from guitars.management.enforcement.scanning import CascadeRetirementSite  # noqa: PLC0415
-
-        command = _command()
-        key = ('testapp_setlist', 'parent_id')
-        command.existing.soft_delete_self_cascade.pop(key)
-        command.existing.self_cascade_retirement_sites.append(
-            CascadeRetirementSite('otherapp', '0007_x', key, None)
-        )
-
-        assert ('otherapp', '0007_x') in self._edges(command)
 
     def test_an_owned_sweep(self):
         """The rule no longer has a create to order (#80, ADR 0039): only the sweep does."""

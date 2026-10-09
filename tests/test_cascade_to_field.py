@@ -129,33 +129,26 @@ class TestTheRevivePairsOnThePrimaryKeyAndMatchesOnTheColumn:
         assert 'guitars_child."owner_id" = guitars_revived."id"' in flat
 
 
-class TestTheSelfCascadeTrigger:
+class TestTheSelfKeysArm:
     def test_it_matches_children_on_the_column_and_pairs_on_the_primary_key(self):
         folder = _shapes()[3]
+        table = folder._meta.db_table
         command = Command()
         command._skipped_rule_notes.clear()
         clear_cascade_coverage(command)
-        ops: list[str] = []
+        key = (table, table, 'parent_id')
 
-        command._self_cascade_operation(
-            ops,
-            owner=folder,
-            owner_table='testapp_folder',
-            header_owner_table='testapp_folder',
-            ident_owner_table='"testapp_folder"',
-            ident_owner_pk='id',
-            foreign_key='parent_id',
-            adopt=False,
-            app_label='testapp',
-        )
+        archive = command._archive_arm(key, folder, 'parent_id', 'id')
+        leak = command._leak_check(key, folder, 'parent_id', 'id')
 
-        (trigger,) = ops
-        assert 'guitars_child."parent_id" = guitars_after."code"' in trigger
-        assert 'SELECT guitars_before."code" AS guitars_key' in trigger
-        assert 'guitars_vanished."code"' in trigger
+        assert 'guitars_child."parent_id" = guitars_archived.guitars_key' in archive
+        assert 'SELECT guitars_before."code" AS guitars_key' in archive
         # Pairing one row across the two images is by identity, whatever the child holds.
-        assert 'ON guitars_after."id" = guitars_before."id"' in trigger
-        assert 'guitars_after."code" = guitars_before."code"' not in trigger
+        assert 'ON guitars_after."id" = guitars_before."id"' in archive
+        assert 'guitars_after."code" = guitars_before."code"' not in archive
+        # The refusal covers the key a before-row held and the new key of a rewritten one.
+        assert 'guitars_held."code"' in leak
+        assert 'guitars_new."code"' in leak
 
 
 class TestWhatTheRuleCannotRead:

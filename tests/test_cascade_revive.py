@@ -173,20 +173,22 @@ def test_a_re_stamped_parent_can_no_longer_revive_its_children():
 
 
 @pytest.mark.django_db(transaction=True)
-def test_the_self_referential_family_stays_archive_only():
-    """A self-referential CASCADE key takes a trigger (ADR 0018) and gains no inverse, while
-    its ordinary CASCADE children do revive -- the split. The descendant does not even carry the
-    root's timestamp: that trigger still writes ``NOW()``, so no provenance test could match."""
+def test_a_self_referential_key_is_archived_and_revived_like_any_other():
+    """It was a trigger of its own (ADR 0018), archive-only and stamping ``NOW()``, so no
+    provenance test could match a descendant. An arm of the owner's trigger since 2.20.0 (ADR
+    0042), it carries the parent's stamp and the restore finds it."""
     root = Setlist.objects.create(title='root')
     child = Setlist.objects.create(title='child', parent=root)
+    grandchild = Setlist.objects.create(title='grandchild', parent=child)
     entry = SetlistEntry.objects.create(song='entry', setlist=root)
     _archive(Setlist, root.pk, T_PARENT)
-    assert _stamp(Setlist, child.pk) != T_PARENT
+    assert _stamp(Setlist, child.pk) == _stamp(Setlist, grandchild.pk) == T_PARENT
 
     _revive(Setlist, root.pk)
 
     assert _stamp(SetlistEntry, entry.pk) is None
-    assert _stamp(Setlist, child.pk) is not None
+    assert _stamp(Setlist, child.pk) is None
+    assert _stamp(Setlist, grandchild.pk) is None
 
 
 @pytest.mark.django_db(transaction=True)

@@ -60,13 +60,16 @@ def test_a_child_carries_its_parents_own_stamp_down_every_level(two_bands):
 
 def test_a_child_archived_earlier_keeps_its_own_stamp(two_bands):
     album = Album._all_objects.get(band=two_bands[0])
-    execute("UPDATE testapp_album SET _deleted_at = '2019-05-05 00:00:00+00' WHERE id = %s", params=[album.pk])
+    execute(
+        "UPDATE testapp_album SET _deleted_at = '2019-05-05 00:00:00+00' WHERE id = %s",
+        params=[album.pk],
+    )
 
     execute('UPDATE testapp_band SET _deleted_at = NOW() WHERE id = %s', params=[two_bands[0].pk])
 
-    assert str(scalar('SELECT _deleted_at FROM testapp_album WHERE id = %s', [album.pk])).startswith(
-        '2019-05-05'
-    )
+    assert str(
+        scalar('SELECT _deleted_at FROM testapp_album WHERE id = %s', [album.pk])
+    ).startswith('2019-05-05')
 
 
 def test_an_update_that_moves_no_deleted_at_cascades_nothing(two_bands):
@@ -79,7 +82,9 @@ def test_the_hard_deletion_switch_stops_the_arms(two_bands):
     """The same switch every rule reads: while it is on, nothing cascades."""
     with transaction.atomic():
         execute("SELECT set_config('rules.hard_deletion', 'on', TRUE)")
-        execute('UPDATE testapp_band SET _deleted_at = NOW() WHERE id = %s', params=[two_bands[0].pk])
+        execute(
+            'UPDATE testapp_band SET _deleted_at = NOW() WHERE id = %s', params=[two_bands[0].pk]
+        )
 
     assert (_live(Band), _live(Album), _live(Merch)) == (1, 2, 2)
 
@@ -90,7 +95,10 @@ def test_a_key_moving_in_the_same_statement_still_finds_its_children(db):
     catalog = Catalog.objects.create(code='A')
     Listing.objects.create(catalog=catalog, name='one')
 
-    execute("UPDATE testapp_catalog SET code = 'B', _deleted_at = NOW() WHERE id = %s", params=[catalog.pk])
+    execute(
+        "UPDATE testapp_catalog SET code = 'B', _deleted_at = NOW() WHERE id = %s",
+        params=[catalog.pk],
+    )
 
     assert Listing.objects.count() == 0
     # The deferred foreign key is left dangling by the move; settled so teardown can check it.
@@ -131,7 +139,10 @@ def test_the_migrations_reverse_rebuilds_the_rules_and_the_revive_only_trigger(d
     """Unapplying 0085 leaves no gap: every rule it dropped is back, as 2.18 wrote it, and the
     owner's trigger is the revive-only one again. Run off the migration's own ``reverse_sql``."""
     module = import_module('tests.testapp.migrations.0085_auto_enforcement')
-    legacy, current = 'soft_delete_revive_on_12_testapp_band', 'soft_delete_cascade_on_12_testapp_band'
+    legacy, current = (
+        'soft_delete_revive_on_12_testapp_band',
+        'soft_delete_cascade_on_12_testapp_band',
+    )
 
     with transaction.atomic():
         for operation in reversed(module.Migration.operations):
@@ -141,8 +152,8 @@ def test_the_migrations_reverse_rebuilds_the_rules_and_the_revive_only_trigger(d
             "SELECT count(*) FROM pg_rules WHERE tablename LIKE 'testapp\\_%' "
             "AND (rulename LIKE 'soft\\_delete\\_related%' OR rulename LIKE 'soft\\_delete\\_owned%')"
         )
-        body = scalar("SELECT prosrc FROM pg_proc WHERE proname = %s", [legacy])
-        gone = scalar("SELECT count(*) FROM pg_proc WHERE proname = %s", [current])
+        body = scalar('SELECT prosrc FROM pg_proc WHERE proname = %s', [legacy])
+        gone = scalar('SELECT count(*) FROM pg_proc WHERE proname = %s', [current])
         transaction.set_rollback(True)
 
     assert rules > 0
@@ -152,7 +163,7 @@ def test_the_migrations_reverse_rebuilds_the_rules_and_the_revive_only_trigger(d
 
 def test_archiving_a_row_while_rewriting_its_key_is_refused_over_a_live_child(two_bands):
     """The rule read ``old.`` per row; the arm pairs a row across the statement on its primary
-    key, which this statement moves. Refused, as the self cascade refuses it (ADR 0018), rather
+    key, which this statement moves. Refused, as a self key is (ADR 0042), rather
     than leaving the album live under an archived band."""
     with pytest.raises(NotSupportedError, match='primary key it also rewrote'):
         with transaction.atomic():
@@ -169,7 +180,10 @@ def test_a_key_rewrite_archiving_a_row_nothing_holds_is_allowed(db):
     leak."""
     band = Band.objects.create(name='Childless')
 
-    execute('UPDATE testapp_band SET id = id + 1000, _deleted_at = NOW() WHERE id = %s', params=[band.pk])
+    execute(
+        'UPDATE testapp_band SET id = id + 1000, _deleted_at = NOW() WHERE id = %s',
+        params=[band.pk],
+    )
 
     assert Band.objects.filter(pk=band.pk + 1000).count() == 0
 
@@ -189,7 +203,10 @@ def test_rewriting_the_key_of_an_already_archived_row_is_not_refused(two_bands):
     with transaction.atomic():
         execute('SET CONSTRAINTS ALL DEFERRED')
         execute('UPDATE testapp_band SET id = id + 1000 WHERE id = %s', params=[two_bands[0].pk])
-        execute('UPDATE testapp_album SET band_id = band_id + 1000 WHERE band_id = %s', params=[two_bands[0].pk])
+        execute(
+            'UPDATE testapp_album SET band_id = band_id + 1000 WHERE band_id = %s',
+            params=[two_bands[0].pk],
+        )
 
 
 def test_the_refusal_reads_a_joined_key_too(db):
@@ -277,7 +294,9 @@ def test_an_arm_naming_dollar_quoting_makes_a_function_the_database_accepts(db):
 
 def test_a_cascade_trigger_whose_own_name_holds_it_is_written_and_runs(db, monkeypatch):
     monkeypatch.setattr(
-        operations_module, '_cascade_owner_name', lambda table: _identifiers._safe_ident('c$$' + table)
+        operations_module,
+        '_cascade_owner_name',
+        lambda table: _identifiers._safe_ident('c$$' + table),
     )
     command = Command()
     command.existing.soft_delete_cascade_owner.clear()
@@ -332,3 +351,45 @@ def test_a_key_reused_inside_the_statement_does_not_hide_the_refusal(two_bands):
             )
 
     assert Album.objects.filter(band=rush).count() == 1
+
+
+@isolate_apps('tests.testapp')
+def _dollar_tree():
+    class DollarTree(SetarModel):
+        parent = models.ForeignKey('self', on_delete=CASCADE, null=True, related_name='+')
+
+        class Meta:
+            app_label = 'testapp'
+            db_table = 'testapp_dollar$$tree'
+
+    return DollarTree
+
+
+def test_a_self_key_naming_dollar_quoting_is_an_arm_the_database_accepts(db):
+    """The self trigger refused such a name (ADR 0018); its arm takes another dollar-quote tag
+    like any other (ADR 0042), so a key onto the owner's own table is never left without one."""
+    tree = _dollar_tree()
+    command = Command()
+    table = tree._meta.db_table
+    key = (table, table, 'parent_id')
+    arms = {
+        'arms': command._revive_arm(key, tree, 'parent_id', 'id'),
+        'archive_arms': command._archive_arm(key, tree, 'parent_id', 'id'),
+        'leak_checks': command._leak_check(key, tree, 'parent_id', 'id'),
+    }
+    slots = {'function': '"dol$$self"', 'primary_key': 'id', **arms}
+    slots['dollar'] = operations_module._dollar_quote(*slots.values())
+
+    sql = operations_module._soft_delete._CREATE_SOFT_DELETE_REVIVE_OWNER_FUNCTION.format(**slots)
+
+    assert slots['dollar'] == '$guitars$' and 'guitars_new."id"' in sql
+    with transaction.atomic():
+        execute(sql)
+        assert scalar("SELECT count(*) FROM pg_proc WHERE proname = 'dol$$self'") == 1
+        transaction.set_rollback(True)
+
+
+def test_a_column_the_model_declares_no_key_on_falls_back_to_the_owners_primary_key():
+    """``_referenced_key`` reads the key's own ``to_field``; with no such key it answers as
+    every key into the primary key does, untouched."""
+    assert operations_module._referenced_key(Band, 'no_such_id', '"id"') == '"id"'

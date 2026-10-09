@@ -13,7 +13,7 @@ A cascade was an `ON UPDATE` rule, and a cycle of those is rewritten into itself
 
 - `classify_cascade` no longer refuses a cascade key for lying on a cycle, nor a joined key into its own root (the one-node case of [ADR 0025](0025-joined-cascade-rule.md)). It takes an archive arm and a revive arm like any other. `CascadeKind.CYCLE` and the parameter that fed it are gone; `cascade_plan` reports no gap for one.
 - **Owned edges keep the refusal**, read from the same graph over the whole registry, so an owned edge on a mixed cycle stays refused while the cascade edges on it are written. `hard_delete()` re-implements the owned last-owner predicate in Python and `sweepowned` follows it; neither is proven on a cycle. `rule_update_cycle_edges` keeps its name and its answer for that family.
-- The self-referential trigger is unchanged by this decision.
+- The self-referential trigger is unchanged by this decision; [ADR 0042](0042-the-self-key-is-an-arm-of-the-owner-trigger.md) folds it in.
 
 ## Why
 

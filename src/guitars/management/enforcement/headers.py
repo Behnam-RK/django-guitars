@@ -96,8 +96,8 @@ HEADER_SOFT_DELETE_CASCADE_OWNER_RETIRED = (
     '# Soft Delete Cascade Trigger retired on "{table}" table!'
 )
 
-# A self-referential CASCADE FK, taking a trigger where every other cascade takes a rule
-# (ADR 0018). "Self Cascade Trigger" shares no token with the three above, so no scanner
+# A self-referential CASCADE FK's trigger (ADR 0018), read for history and its retirement since
+# 2.20.0 (ADR 0042). "Self Cascade Trigger" shares no token with the three above, so no scanner
 # reads one as another's. One table slot: the trigger fires on the table its key points at.
 HEADER_SOFT_DELETE_SELF_CASCADE = (
     '# Soft Delete Self Cascade Trigger on "{table}" via "{foreign_key}"!'

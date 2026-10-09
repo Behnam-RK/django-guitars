@@ -572,9 +572,9 @@ _PK_BATCH = 10_000
 
 
 def _now() -> Func:
-    """``NOW()``, the transaction's start, which every rule and trigger writes. Django's ``Now()``
-    renders ``STATEMENT_TIMESTAMP()`` on PostgreSQL, so a descendant stamped by a rule would not
-    carry the parent's value, and a revive keys on exactly that equality."""
+    """``NOW()``, the transaction's start, which a rule writes and a cascade arm copies from its
+    parent (ADR 0023). Django's ``Now()`` renders ``STATEMENT_TIMESTAMP()`` on PostgreSQL, so a
+    descendant stamped by a rule would not carry the parent's value, which a revive keys on."""
     return Func(function='NOW', output_field=DateTimeField())
 
 

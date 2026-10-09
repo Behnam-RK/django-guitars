@@ -4,7 +4,7 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-    dependencies = [('issue66_anc', '0005_auto_enforcement'), ('issue66_shop', '0006_retable_hub')]
+    dependencies = [('issue66_anc', '0005_auto_enforcement'), ('issue66_shop', '0007_retable_hub')]
 
     operations = [migrations.SeparateDatabaseAndState(state_operations=[
         migrations.CreateModel(

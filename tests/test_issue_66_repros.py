@@ -12,10 +12,13 @@ from django.test import override_settings
 from tests.conftest import execute, scalar
 
 
-def _check(*app_labels) -> None:
-    call_command(
-        'makeguitarmigrations', *app_labels, '--check', stdout=StringIO(), stderr=StringIO()
-    )
+def _check_report(*app_labels) -> str:
+    """``makeguitarmigrations --check``'s report, raising if it passes. The ``CommandError`` says
+    only "create missing migrations"; what is missing is named on stdout and stderr."""
+    out, err = StringIO(), StringIO()
+    with pytest.raises(CommandError):
+        call_command('makeguitarmigrations', *app_labels, '--check', stdout=out, stderr=err)
+    return out.getvalue() + err.getvalue()
 
 
 # ---- (a) a model deleted, then recreated on the same table, generating at every step --------
@@ -28,8 +31,7 @@ def _check(*app_labels) -> None:
 )
 @override_settings(LOCAL_APPS=['tests.testapp', 'tests.issue66_recreated'])
 def test_a_recreated_model_is_named_as_uncovered():
-    with pytest.raises(CommandError, match='issue66_recreated_part'):
-        _check('issue66_recreated')
+    assert 'issue66_recreated_part' in _check_report('issue66_recreated')
 
 
 @pytest.mark.xfail(strict=True, reason='#66 (a): no soft-delete rule, so DELETE removes the row')
@@ -59,8 +61,7 @@ def test_a_recreated_models_delete_keeps_the_row(db):
 )
 @override_settings(LOCAL_APPS=['tests.testapp', 'tests.issue66_retaken'])
 def test_a_model_retaking_a_renamed_tables_name_is_named_as_uncovered():
-    with pytest.raises(CommandError, match='issue66_retaken_crew'):
-        _check('issue66_retaken')
+    assert 'issue66_retaken_crew' in _check_report('issue66_retaken')
 
 
 @pytest.mark.xfail(strict=True, reason='#66 (b): no soft-delete rule, so DELETE removes the row')
@@ -90,8 +91,7 @@ def test_a_retaking_models_delete_keeps_the_row(db):
 )
 @override_settings(LOCAL_APPS=['tests.testapp', 'tests.issue66_anc', 'tests.issue66_shop'])
 def test_a_model_moved_back_is_named_as_stale():
-    with pytest.raises(CommandError, match='issue66_shop_keeper'):
-        _check('issue66_anc', 'issue66_shop')
+    assert 'issue66_shop_keeper' in _check_report('issue66_anc', 'issue66_shop')
 
 
 @pytest.mark.xfail(

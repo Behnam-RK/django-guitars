@@ -400,9 +400,9 @@ def test_a_retirement_leaves_the_provenance_it_popped(monkeypatch):
 
 
 def test_a_create_scanned_after_the_retirement_is_still_attributed_to_it(monkeypatch):
-    """Apps walk in registry order, which is not chronological, so the create can be read after
-    the retirement that dropped it. Nothing is in scope at the pop, so the site is filled from
-    the finished map afterwards -- the shape #49 is made of, and why the snapshot alone fails."""
+    """Files the graph does not know are read in registry order, which is not chronological, so
+    the create can be read after the retirement that dropped it. The site is filled from the
+    finished map afterwards -- the shape #49 is made of, and why the snapshot alone fails."""
     with override_settings(LOCAL_APPS=['tests.testapp', 'tests.crossapp_owner']):
         existing = _scan_with(monkeypatch, testapp=(_retired(),), crossapp_owner=(_created(),))
 
@@ -583,9 +583,9 @@ def test_a_note_is_confined_to_the_apps_a_scoped_run_asked_about(command):
 
 
 def test_a_retirement_scanned_before_its_create_still_reads_as_retired():
-    """Apps walk in registry order and this question is graph order. The owner app is scanned
-    first, so its retirement popped a key the child app then re-recorded -- leaving the rule
-    reading as live and the retirement re-emitted on every run, ``--check`` never green."""
+    """The owner app's retirement is in the graph after the child app's create it drops, which a
+    walk in registry order read the other way round: the key popped, then re-recorded, reading
+    as live and the retirement re-emitted on every run, ``--check`` never green."""
     with override_settings(
         LOCAL_APPS=['tests.crossapp_retire_owner', 'tests.crossapp_retire_child']
     ):

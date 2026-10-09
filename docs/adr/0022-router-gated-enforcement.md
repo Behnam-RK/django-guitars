@@ -18,7 +18,7 @@ A leaf module `guitars.routing`, beside `guitars.local_apps` and for its reason 
 
 Every walk that decides whether to *emit* asks it: `_build_operations`' model loop, `_table_app_labels`, `_cascade_key_maps`, `_is_cascade_candidate` and `_is_owned_candidate` (both ends of each relation, not just the owner), `command.py`'s singleton-function scan, and `tenancy.discovery`'s `app_coverage`, `owner_autofill_notes` and `_dimensions`. It is also asked by `introspection.owner_arms`, `introspection.owned_tenancy_refusals` and `models.soft_deletion._declared_owning_fields`, so the generator and `hard_delete()` cannot disagree. `audittenancy` and `sweepowned` raise `CommandError` on a non-PostgreSQL connection; `RetireEnforcement.database_forwards` returns without executing.
 
-Walks that answer "does any model still hold this table name" are deliberately **not** gated: `scanning.live_tables`, `operations._live_names`, `command._index_reverse_relations` and `tenancy.discovery._owner_column_claims`. `guitars.E003` is not gated either. `introspection._rule_update_edges` **is** gated, at both ends of every edge.
+Walks that answer "does any model still hold this table name" are deliberately **not** gated: `operations._live_names`, `command._index_reverse_relations` and `tenancy.discovery._owner_column_claims`. `guitars.E003` is not gated either. `introspection._rule_update_edges` **is** gated, at both ends of every edge.
 
 ## Why
 

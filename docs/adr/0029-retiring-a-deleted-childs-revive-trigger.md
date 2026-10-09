@@ -29,7 +29,7 @@ A plpgsql trigger body records no `pg_depend` dependency on the tables and colum
 
 ## Consequences
 
-**Accepted costs.** A table deleted and recreated on its old `db_table` keeps headers for objects it no longer has, and nothing re-creates them; detecting that needs every object that *references* the table, not only those on it, and is deferred to #66. An unscoped `--check` turns red for every project carrying such a leak until the retirements are generated; that is the point. A deletion the loader cannot see, because the deleting app was later removed with its migrations, is still only named. One pass over the migration state per run, a few milliseconds on the test project. A fresh `migrate` can still order a deleted child's `DeleteModel` before the owner's older enforcement migration (#61).
+**Accepted costs.** A table deleted and recreated on its old `db_table` kept headers for objects it no longer had; since 2.21.0 a drop voids what lived on the table ([ADR 0043](0043-the-scan-replays-the-migration-graph.md)). What *references* it from other tables is still the retirements' own. An unscoped `--check` turns red for every project carrying such a leak until the retirements are generated; that is the point. A deletion the loader cannot see, because the deleting app was later removed with its migrations, is still only named. One pass over the migration state per run, a few milliseconds on the test project. A fresh `migrate` can still order a deleted child's `DeleteModel` before the owner's older enforcement migration (#61).
 
 **Reversibility.** Restoring strict drops would break `migrate` for every project that followed the hand-drop advice or ran `RemoveField` on Django 5.x. The retirement migrations already written stay valid either way.
 

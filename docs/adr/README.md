@@ -50,3 +50,4 @@ New ADR? Start from [`template.md`](template.md).
 | [`0040`](0040-parent-updated-at-skips-a-stamped-ancestor.md) | why the MTI parent `_updated_at` follow-up skips an ancestor this transaction already stamped, replaces its function body in place, and keeps its depth guard (2.19.1) |
 | [`0041`](0041-cascade-cycles-are-arms.md) | why a cycle of cascade keys is enforced as arms, with one stamp round the loop and a revive that travels up it, while an owned cycle stays refused (2.20.0) |
 | [`0042`](0042-the-self-key-is-an-arm-of-the-owner-trigger.md) | why a self-referential key is an arm of the owner's trigger, with the parent's stamp and a revive, its own trigger retired and the primary-key-rewrite refusal merged (2.20.0) |
+| [`0043`](0043-the-scan-replays-the-migration-graph.md) | why the scan replays migrations in `migrate`'s order with their table events, so a drop, a rename and a model moved back are read as they ran, and the `live_tables` guard goes (2.21.0) |

@@ -29,8 +29,9 @@ one, and only dropping each leaves a single object behind.
 be retaken by a later `CreateModel`. Dropping that table's objects would be wrong, but its
 coverage must still translate — filtering the chain instead leaves the renamed table reading as
 uncovered, and the plain `CREATE` that follows collides with what the rename carried over. The
-question is asked of the whole model registry, not `LOCAL_APPS`: a name retaken by a model this
-generator never writes for is no less live.
+question is asked of the whole model registry, not `LOCAL_APPS`. Since 2.21.0 the scan no longer
+asks it: the translation happens at the rename, in order, and a retaker is a new table
+([ADR 0043](0043-the-scan-replays-the-migration-graph.md)); the drop side keeps it.
 
 **Retirement requires positive evidence.** A cascade rule is dropped only where its key is
 recorded, the models no longer require it, and **both** its tables still map. A table mapping to

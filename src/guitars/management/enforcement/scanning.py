@@ -229,7 +229,7 @@ def _settle_retirement_sites(
         by_key.setdefault(site.key, []).append(site)
     settled = []
     for key, drops in by_key.items():
-        drops.sort(key=_position)
+        # In the order they were recorded, which is the replay's.
         drop_nodes = {(site.app_label, site.migration) for site in drops}
         # A migration cannot create what it also retires: a create sharing a file with a drop
         # for the same key is a hand-edited, self-contradicting migration, and is not evidence
@@ -268,13 +268,6 @@ def _retirement_is_the_last_word(
     # Nothing orders them either way, which is the pre-2.10.0 history this release exists for.
     # Counting is the only signal left, and the two alternate: relax, restore, relax.
     return len(drops) >= len(creates)
-
-
-def _position(site: CascadeRetirementSite) -> tuple[str, str]:
-    """Sort key for "the last retirement of this key". Filename order within an app, which is
-    application order; across apps the graph would be the honest answer, but two apps retiring
-    one key means two drops of one rule, which is unsound before this question is reached."""
-    return (site.app_label, site.migration)
 
 
 def _orders(
@@ -357,11 +350,8 @@ def _move_renamed(old: str, new: str, recorded: dict | set) -> None:
     for key in list(recorded):
         # ``isinstance`` first: a string is iterable, so the tuple branch would shred a
         # table-keyed entry into a tuple of characters.
-        moved = (
-            (new if key == old else key)
-            if isinstance(key, str)
-            else tuple(new if part == old else part for part in key)
-        )
+        # Table positions only: a column or function segment named like the table is not it.
+        moved = _respell(key, {old: new})
         if moved == key:
             continue
         value = recorded.pop(key)
@@ -410,11 +400,11 @@ def _replay_units(
     for key in files:
         if key in placed:
             continue
-        unit = ReplayUnit(key[0], key[1], key, ())
         if key in replaced_by:
+            unit = ReplayUnit(key[0], key[1], replaced_by[key], ())
             before_squash.setdefault(replaced_by[key], []).append(unit)
         else:
-            stray.append(unit)
+            stray.append(ReplayUnit(key[0], key[1], key, ()))
     ordered: list[ReplayUnit] = []
     for unit in units:
         ordered.extend(before_squash.pop((unit.app_label, unit.name), ()))
@@ -552,9 +542,9 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
     autofill_function_deps: dict[str, tuple[str, str]] = {}
     autofill_function_sql: dict[str, str | None] = {}
     built_loader = loader
-    # Emptied name -> the name its objects moved on to, for a header that still names the old
-    # one (a later file of an app the rename did not reach). Cleared where a model takes the
-    # name again or the table is dropped. And ``current db_table -> every name it held``.
+    # Emptied name -> where its objects went, for a header still naming the old one; cleared
+    # where a model takes the name or the table is dropped. ``held`` is ``db_table -> every name
+    # it held``, kept whole: ``_prior_names`` filters it against the live registry.
     forward: dict[str, str] = {}
     held: dict[str, list[str]] = {}
 
@@ -641,7 +631,7 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
 
     def _rekey_sites(old: str, new: str) -> None:
         def _moved(site: CascadeRetirementSite) -> CascadeRetirementSite:
-            key = tuple(new if part == old else part for part in site.key)
+            key = _respell(site.key, {old: new})
             return site._replace(key=cast('tuple[str, str, str | None]', key))
 
         retirement_sites[:] = [_moved(site) for site in retirement_sites]

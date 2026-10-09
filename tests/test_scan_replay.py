@@ -299,3 +299,53 @@ class TestAReplayOrder:
         units, _aliases = scanning._replay_units(loader, files)
 
         assert [unit.name for unit in units] == ['0001', '0001_squashed_0002', '0003', 'extra']
+
+
+class TestKeysNamingATableAndAColumn:
+    def test_a_column_named_like_the_renamed_table_is_not_renamed_with_it(self, monkeypatch):
+        """``_respell`` renames the table positions of a key; the third element of an owned key is
+        a column, and a column that spells the table's old name is still that column."""
+        existing = _replay(
+            monkeypatch,
+            (_sweep('shop_riff', 'shop_band', 'shop_band'), []),
+            ('', [_rename('shop_band', 'shop_band2')]),
+        )
+
+        assert list(existing.soft_delete_owned_sweep) == [('shop_riff', 'shop_band2', 'shop_band')]
+
+
+class TestAReplacedFileBesideAnUnexpandedSquash:
+    def test_is_its_squashs_node_and_ordered_before_it(self):
+        loader = _Loader(
+            ('anc', [[_create()], [_create('other')], [_create('third')]]),
+            squash=('anc', ['0001', '0002'], [_create(), _create('other')]),
+        )
+        del loader.disk_migrations['anc', '0002']
+
+        units, aliases = scanning._replay_units(loader, {('anc', '0001'): ''})
+
+        assert units[0].graph_node == ('anc', '0001_squashed_0002')
+        assert scanning._orders(
+            ('anc', '0001'), ('anc', '0001_squashed_0002'), loader.graph, aliases
+        )
+
+
+def test_retirements_of_one_key_are_settled_in_the_order_they_were_recorded(monkeypatch):
+    """The replay's order, not the filename's: a later migration of the same app can sort first."""
+    from guitars.management.enforcement.headers import HEADER_SOFT_DELETE_RELATED_RETIRED  # noqa: PLC0415
+
+    retired = (
+        HEADER_SOFT_DELETE_RELATED_RETIRED.format(related_table='shop_a', table='shop_owner')
+        + ' [SQL:dddd]\n'
+    )
+    existing = _replay(
+        monkeypatch,
+        (_related('shop_a', 'shop_owner'), []),
+        (retired, []),
+        (retired, []),
+    )
+
+    assert [site.migration for site in existing.cascade_retirement_sites] == [
+        '0001_auto_enforcement',
+        '0002_auto_enforcement',
+    ]

@@ -289,11 +289,16 @@ def table_changes(
         # The database half only: the state half decides what Django believes, and for a model
         # moved between apps it deletes the model while the database half renames the table. A
         # state-only create or delete therefore reads as nothing, as it is.
-        return [
-            pair
-            for inner in operation.database_operations
-            for pair in table_changes(inner, app_label, state)
-        ]
+        inner_operations = operation.database_operations
+        if len(inner_operations) > 1:
+            # Run one after another on a copy, as ``database_forwards`` runs them.
+            state = state.clone()
+        pairs: list[tuple[str | None, str | None]] = []
+        for inner in inner_operations:
+            pairs.extend(table_changes(inner, app_label, state))
+            if len(inner_operations) > 1:
+                inner.state_forwards(app_label, state)
+        return pairs
     if isinstance(operation, CreateModel):
         if not _owns_options(operation.options):
             return []

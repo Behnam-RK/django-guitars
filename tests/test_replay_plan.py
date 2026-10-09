@@ -174,6 +174,18 @@ class TestSeparateDatabaseAndState:
         )
 
 
+def test_a_database_half_of_two_operations_reads_the_second_on_the_state_the_first_left():
+    both = SeparateDatabaseAndState(
+        database_operations=[RenameModel('root', 'trunk'), AlterModelTable('trunk', 'anc_stump')]
+    )
+    loader = _Loader(('anc', [[_create()], [both]]))
+
+    assert _events(loader)[('anc', '0002')] == (
+        TableEvent('rename', 'anc_root', 'anc_trunk'),
+        TableEvent('rename', 'anc_trunk', 'anc_stump'),
+    )
+
+
 def test_a_cross_app_dependency_orders_the_other_apps_migration_after_it():
     loader = _Loader(
         ('anc', [[_create()], [RenameModel('root', 'trunk')]]), ('shop', [[_create('kid')]])

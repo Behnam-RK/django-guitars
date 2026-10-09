@@ -6,9 +6,11 @@ from importlib import import_module
 
 import pytest
 from django.db import connection, transaction
+from django.db.utils import NotSupportedError
 
 from tests.conftest import execute, rows, scalar
-from tests.testapp.models import Album, Band, Catalog, Listing, Merch
+from guitars.tenancy import tenancy_bypassed
+from tests.testapp.models import Album, Band, Catalog, Label, Listing, Merch, TouringFestival
 
 
 @pytest.fixture
@@ -136,3 +138,60 @@ def test_the_migrations_reverse_rebuilds_the_rules_and_the_revive_only_trigger(d
 
     assert rules > 0
     assert 'guitars_archived' not in body and 'guitars_revived' in body
+
+
+def test_archiving_a_row_while_rewriting_its_key_is_refused_over_a_live_child(two_bands):
+    """The rule read ``old.`` per row; the arm pairs a row across the statement on its primary
+    key, which this statement moves. Refused, as the self cascade refuses it (ADR 0018), rather
+    than leaving the album live under an archived band."""
+    with pytest.raises(NotSupportedError, match='primary key it also rewrote'):
+        with transaction.atomic():
+            execute(
+                'UPDATE testapp_band SET id = id + 1000, _deleted_at = NOW() WHERE id = %s',
+                params=[two_bands[0].pk],
+            )
+
+    assert Album.objects.filter(band=two_bands[0]).count() == 1
+
+
+def test_a_key_rewrite_archiving_a_row_nothing_holds_is_allowed(db):
+    """Nothing is left live, so there is nothing to refuse: only a live child holding a vanished
+    key is a leak."""
+    band = Band.objects.create(name='Childless')
+
+    execute('UPDATE testapp_band SET id = id + 1000, _deleted_at = NOW() WHERE id = %s', params=[band.pk])
+
+    assert Band.objects.filter(pk=band.pk + 1000).count() == 0
+
+
+def test_a_key_rewrite_that_archives_nothing_is_not_refused(db):
+    band = Band.objects.create(name='Childless')
+
+    execute('UPDATE testapp_band SET id = id + 1000 WHERE id = %s', params=[band.pk])
+
+    assert Band.objects.filter(pk=band.pk + 1000).count() == 1
+
+
+def test_rewriting_the_key_of_an_already_archived_row_is_not_refused(two_bands):
+    """No live child holds its key: archived with it, the children are not a leak."""
+    execute('UPDATE testapp_band SET _deleted_at = NOW() WHERE id = %s', params=[two_bands[0].pk])
+
+    with transaction.atomic():
+        execute('SET CONSTRAINTS ALL DEFERRED')
+        execute('UPDATE testapp_band SET id = id + 1000 WHERE id = %s', params=[two_bands[0].pk])
+        execute('UPDATE testapp_album SET band_id = band_id + 1000 WHERE band_id = %s', params=[two_bands[0].pk])
+
+
+def test_the_refusal_reads_a_joined_key_too(db):
+    """``TouringFestival.promoter`` keeps its ``_deleted_at`` one table up, on ``Festival``: the
+    joined form of the check finds the live descendant through its parent link."""
+    with tenancy_bypassed():
+        label = Label.objects.create(name='Roadshow')
+        TouringFestival.objects.create(name='Tour', market=label, promoter=label)
+
+        with pytest.raises(NotSupportedError, match='primary key it also rewrote'):
+            with transaction.atomic():
+                execute(
+                    'UPDATE testapp_label SET id = id + 1000, _deleted_at = NOW() WHERE id = %s',
+                    params=[label.pk],
+                )

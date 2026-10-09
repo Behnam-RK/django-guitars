@@ -299,9 +299,46 @@ _SOFT_DELETE_ARCHIVE_ARM_JOINED = """
                 )
               AND guitars_child._deleted_at IS NULL;"""
 
-# The first ``EXISTS`` is the whole point: a ``save()`` that moves no ``_deleted_at`` pays one
-# probe of the transition tables, the archive and the revive each behind their own once it does
-# (the revive half is ADR 0033's, unchanged).
+# A statement that archives a row *and* rewrites its primary key leaves the arms nothing to pair
+# it by, where the rule read ``old.`` per row: its children would stay live under an archived
+# parent. Refused when one is left holding a vanished key, as the self cascade is (ADR 0018).
+_SOFT_DELETE_LEAK_CHECK = """
+                EXISTS (
+                    SELECT 1 FROM {related_table} AS guitars_child
+                    WHERE guitars_child._deleted_at IS NULL
+                      AND guitars_child."{foreign_key}" IN (
+                          SELECT guitars_vanished."{referenced_key}"
+                          FROM guitars_revive_before AS guitars_vanished
+                          WHERE guitars_vanished._deleted_at IS NULL
+                            AND NOT EXISTS (
+                                SELECT 1 FROM guitars_revive_after AS guitars_kept
+                                WHERE guitars_kept."{primary_key}" = guitars_vanished."{primary_key}"
+                            )
+                      )
+                )"""
+
+_SOFT_DELETE_LEAK_CHECK_JOINED = """
+                EXISTS (
+                    SELECT 1 FROM {target_table} AS guitars_child
+                    WHERE guitars_child._deleted_at IS NULL
+                      AND guitars_child."{target_pk}" IN (
+                          SELECT guitars_link."{child_pk}" FROM {related_table} AS guitars_link
+                          WHERE guitars_link."{foreign_key}" IN (
+                              SELECT guitars_vanished."{primary_key}"
+                              FROM guitars_revive_before AS guitars_vanished
+                              WHERE guitars_vanished._deleted_at IS NULL
+                                AND NOT EXISTS (
+                                    SELECT 1 FROM guitars_revive_after AS guitars_kept
+                                    WHERE guitars_kept."{primary_key}"
+                                        = guitars_vanished."{primary_key}"
+                                )
+                          )
+                      )
+                )"""
+
+# The first ``EXISTS`` is the whole point: one left join of the transition tables, which a plain
+# ``save()`` stops at. It finds a row whose ``_deleted_at`` flipped, or one archived whose key
+# moved; the archive and the revive sit behind their own once it does (the revive is ADR 0033's).
 _CREATE_SOFT_DELETE_REVIVE_OWNER_FUNCTION = """
     CREATE OR REPLACE FUNCTION {function}()
        RETURNS TRIGGER
@@ -311,11 +348,32 @@ _CREATE_SOFT_DELETE_REVIVE_OWNER_FUNCTION = """
     BEGIN
         IF COALESCE(current_setting('rules.hard_deletion', true), '') <> 'on' AND EXISTS (
             SELECT 1
-            FROM guitars_revive_before AS guitars_before
-            JOIN guitars_revive_after AS guitars_after
-                ON guitars_after."{primary_key}" = guitars_before."{primary_key}"
-            WHERE (guitars_before._deleted_at IS NULL) <> (guitars_after._deleted_at IS NULL)
+            FROM guitars_revive_after AS guitars_after
+            LEFT JOIN guitars_revive_before AS guitars_before
+                ON guitars_before."{primary_key}" = guitars_after."{primary_key}"
+            WHERE (guitars_before."{primary_key}" IS NULL AND guitars_after._deleted_at IS NOT NULL)
+               OR (guitars_before."{primary_key}" IS NOT NULL
+                   AND (guitars_before._deleted_at IS NULL) <> (guitars_after._deleted_at IS NULL))
         ) THEN
+            IF EXISTS (
+                SELECT 1
+                FROM guitars_revive_after AS guitars_after
+                WHERE guitars_after._deleted_at IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM guitars_revive_before AS guitars_before
+                      WHERE guitars_before."{primary_key}" = guitars_after."{primary_key}"
+                  )
+            ) AND ({leak_checks}
+            ) THEN
+                RAISE EXCEPTION
+                    'guitars: a statement on % archived a row whose primary key it also '
+                    'rewrote, and a live child is left holding the old key. The cascade pairs '
+                    'a row across the statement on its primary key, so it cannot tell which '
+                    'before-row that archived row was, and would leave the child live under an '
+                    'archived parent. Rewrite the key and archive the row in separate '
+                    'statements.', TG_TABLE_NAME
+                    USING ERRCODE = 'feature_not_supported';
+            END IF;
             IF EXISTS (
                 SELECT 1
                 FROM guitars_revive_before AS guitars_before

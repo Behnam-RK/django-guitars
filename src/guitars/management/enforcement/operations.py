@@ -297,6 +297,7 @@ class OperationsMixin:
         #: Keyed on the name alone, unlike the above: a sweep's function is namespaced per
         #: schema, so two owner tables can collide on one where their rules cannot.
         _claimed_sweep_names: dict[str, tuple]
+        _carried_arms_cache: dict[str, set[tuple]]
         parent_trigger_function_dependency: tuple[str, str] | None
         stamp_function_dependency: tuple[str, str] | None
         tenant_autofill_dependencies: dict[str, tuple[str, str]]
@@ -1278,16 +1279,23 @@ class OperationsMixin:
         """Whether the owner's trigger, as this run would write it, carries *key*'s archive arm:
         the owner has a trigger and the arm is not refused (a name closing the dollar quoting)."""
         related_table, owner_table, _via = key
-        if self._revive_owner_slots(owner_table, quiet=True) is None:
-            return False
-        arms = self._revive_arms_by_owner()[owner_table]
-        arm_key = (related_table, owner_table, column)
-        if arm_key not in arms:
-            return False
-        owner = self._revive_owners[owner_table][0]
-        owner = owner._meta.concrete_model or owner
-        ident_owner_pk = _identifiers._escape_ident(cast(str, owner._meta.pk.column))
-        return self._revive_arm(arm_key, *arms[arm_key], ident_owner_pk, quiet=True) is not None
+        carried = self._carried_arms_cache.get(owner_table)
+        if carried is None:
+            # Once per owner: each retired key asks, and the answer renders every arm it has.
+            carried = set()
+            if self._revive_owner_slots(owner_table, quiet=True) is not None:
+                owner = self._revive_owners[owner_table][0]
+                owner = owner._meta.concrete_model or owner
+                ident_owner_pk = _identifiers._escape_ident(cast(str, owner._meta.pk.column))
+                arms = self._revive_arms_by_owner()[owner_table]
+                carried = {
+                    arm_key
+                    for arm_key in arms
+                    if self._revive_arm(arm_key, *arms[arm_key], ident_owner_pk, quiet=True)
+                    is not None
+                }
+            self._carried_arms_cache[owner_table] = carried
+        return (related_table, owner_table, column) in carried
 
     def _superseded_rule_reverse(self, key: tuple, slots: dict, column: str) -> str:
         """The cascade rule a 2.19.0 retirement drops, rebuilt as 2.18.x wrote it: the flat or
@@ -2123,14 +2131,16 @@ class OperationsMixin:
         }
         rendered: list[str] = []
         archived: list[str] = []
+        leaks: list[str] = []
         for key in sorted(arms, key=lambda k: (k[0], k[2] or '')):
-            # One refusal for both halves: they splice the same names into the same body.
+            # One refusal for every half: they splice the same names into the same body.
             if (
                 arm := self._revive_arm(key, *arms[key], slots['primary_key'], quiet=quiet)
             ) is None:
                 continue
             rendered.append(arm)
             archived.append(self._archive_arm(key, *arms[key], slots['primary_key']))
+            leaks.append(self._leak_check(key, *arms[key], slots['primary_key']))
         if not rendered:
             return None
         # Refused rather than escaped, as each arm's own slots are: the function name and
@@ -2143,7 +2153,11 @@ class OperationsMixin:
                     'depends on. Set a db_table / db_column without it.'
                 )
             return None
-        return slots | {'arms': ''.join(rendered), 'archive_arms': ''.join(archived)}
+        return slots | {
+            'arms': ''.join(rendered),
+            'archive_arms': ''.join(archived),
+            'leak_checks': ' OR'.join(leaks),
+        }
 
     def _arm_slots(
         self,
@@ -2223,6 +2237,23 @@ class OperationsMixin:
             _soft_delete._SOFT_DELETE_ARCHIVE_ARM_JOINED
             if not owns_column(related_model, '_deleted_at')
             else _soft_delete._SOFT_DELETE_ARCHIVE_ARM
+        )
+        return template.format(**slots)
+
+    def _leak_check(
+        self,
+        key: tuple,
+        related_model: type[models.Model],
+        column: str,
+        ident_owner_pk: str,
+    ) -> str:
+        """The same key's test for a live child left holding a key the statement rewrote away
+        with its archived owner, which the owner's trigger refuses (ADR 0039, after ADR 0018)."""
+        slots = self._arm_slots(related_model, column, ident_owner_pk)
+        template = (
+            _soft_delete._SOFT_DELETE_LEAK_CHECK_JOINED
+            if not owns_column(related_model, '_deleted_at')
+            else _soft_delete._SOFT_DELETE_LEAK_CHECK
         )
         return template.format(**slots)
 

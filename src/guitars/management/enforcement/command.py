@@ -86,6 +86,7 @@ class Command(OperationsMixin, BaseCommand):
         # no ``--check`` failure -- an app with no migrations of its own is legitimate.
         self._unresolved_reference_notes: list[str] = []
         self._claimed_sweep_names: dict[str, tuple] = {}
+        self._carried_arms_cache: dict[str, set[tuple]] = {}
         # Tables tenancy discovery could not cover, with the reason. Also surfaced.
         self._tenancy_notes: list[str] = []
         # Models the project's router migrates off PostgreSQL. ``vendor_skip_note`` renders one

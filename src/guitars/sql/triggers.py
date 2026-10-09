@@ -128,12 +128,9 @@ _REPLACE_STAMP_UPDATED_AT_TRIGGER = _CREATE_STAMP_UPDATED_AT_TRIGGER.replace(
     'CREATE TRIGGER', 'CREATE OR REPLACE TRIGGER', 1
 )
 
-_ADOPT_STAMP_UPDATED_AT_TRIGGER = (
-    """
-    DROP TRIGGER IF EXISTS updated_at_trigger ON {table};
-"""
-    + _CREATE_STAMP_UPDATED_AT_TRIGGER
-)
+# Adopt is the same statement: it is right whether or not the trigger exists, and holds no
+# ACCESS EXCLUSIVE, so there is no ``DROP ... IF EXISTS`` form to keep beside it.
+_ADOPT_STAMP_UPDATED_AT_TRIGGER = _REPLACE_STAMP_UPDATED_AT_TRIGGER
 
 # ---- Parent updated-at trigger function: updates a DIFFERENT table than TG_TABLE_NAME.
 # Branches on TG_NARGS (3 vs 4) since a trigger's arg list is frozen at CREATE time, so a

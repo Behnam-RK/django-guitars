@@ -78,13 +78,15 @@ def migrations_dir(app: AppConfig) -> Path:
 
 
 def iter_migration_files(app: AppConfig) -> Iterator[tuple[Path, str]]:
-    """Yield ``(path, content)`` for every migration file in *app*, in filename order --
-    sorted, not raw ``glob`` order (filesystem-dependent), since Django's ``NNNN_name.py``
-    numbering is application order and a "last write wins" scanner depends on it."""
+    """Yield ``(path, content)`` for every migration file in *app*, in filename order -- sorted,
+    not raw ``glob`` order (filesystem-dependent). A name starting ``_`` or ``~`` is no migration
+    to Django's loader, so it is none here: ``migrate`` never ran it."""
     app_migrations_dir = migrations_dir(app)
     if not app_migrations_dir.is_dir():
         return
     for path in sorted(app_migrations_dir.glob('*.py')):
+        if path.name.startswith(('_', '~')):
+            continue
         yield path, path.read_text(encoding=_ENCODING)
 
 

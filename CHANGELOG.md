@@ -10,6 +10,12 @@ Full history and diffs: [GitHub releases](https://github.com/Behnam-RK/django-gu
 
 ## [Unreleased]
 
+## [2.21.0] - 2026-10-09
+
+### Fixed
+
+- **A model deleted and later recreated on the same table, a renamed model's old table retaken by a new model, and a model moved to another app and back are no longer read as covered** ([#66](https://github.com/Behnam-RK/django-guitars/issues/66), [ADR 0043](docs/adr/0043-the-scan-replays-the-migration-graph.md)). The scan read every app's files in registry order and never reacted to a `DeleteModel`, so a recreated or retaking table got no soft-delete rule, no `_updated_at` trigger and, tenanted, no policy (its rows deleted outright by a raw `DELETE`), and a moved-back model's owned sweep kept naming the intermediate table, failing every `UPDATE` of its owner, all with `makeguitarmigrations --check` green. It now replays the migrations in the order `migrate` runs them, each file's table events (create, rename, drop) before its headers: a drop voids what lived on the table, a rename moves every family with it and forwards a later header that still names the old name, and a name a new model takes is a new table. A file whose tables were since renamed away or dropped no longer vouches for its `[DIGEST]`, so an identical operation set is written again. `live_tables`, `_rekey`, `_chain_ends` and `keep_existing` go, and so do `graph.renamed_tables`, `renames_by_migration`, `moves_between_apps_by_migration` and `retired_enforcement`. **Existing projects:** `makemigrations` (or `makeguitarmigrations`) writes the missing coverage for a history of any of the three shapes: a plain `CREATE` for the table, a re-emitted sweep and owner trigger for a model moved back. Two migrations the graph leaves unordered are replayed in `migrate`'s order; `--check` names the missing edge ([ADR 0036](docs/adr/0036-order-a-rename-after-the-enforcement-it-vacates.md)).
+
 ## [2.20.1] - 2026-10-09
 
 ### Changed
@@ -491,7 +497,8 @@ First stable release. **BREAKING:** the instrument ladder shifted down one rung 
 
 - Added: initial release — `SetarModel`, `GuitarModel`, `SoftDeletableModel`, `DisableSignals`, `makeguitarmigrations`.
 
-[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.20.1...HEAD
+[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.21.0...HEAD
+[2.21.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.21.0
 [2.20.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.20.1
 [2.20.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.20.0
 [2.19.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.19.1

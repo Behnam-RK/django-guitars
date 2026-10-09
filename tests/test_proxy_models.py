@@ -159,18 +159,17 @@ def test_each_family_says_what_its_own_shape_did_to_the_migration():
     assert '_updated_at' in trigger
 
 
-def test_a_name_a_rename_freed_and_another_model_retook_stays_silent():
-    """The third shape, and the one where both repairs are wrong. The scan declines to re-key
-    coverage onto the new spelling while the old name is live, so the record stays under the
-    freed name -- while the object itself went with the table under its new one."""
+def test_a_record_under_a_name_a_model_retook_is_that_models_to_be_named():
+    """A rename moves its records with it (ADR 0043), so what is still filed under a name that a
+    live model holds was written for that model: one calling for no MTI operation is named, not
+    excused as the rename's -- the scan used to leave the rename's record there."""
     command = Command()
-    # ``testapp_callbacks`` was really renamed from ``testapp_encore`` (0051, 0053), so the
-    # chain is the corpus's own rather than a fixture's.
     command.existing.mti_triggers['testapp_encore'] = 'abc'
-    # And the freed name is live again, which is the whole condition.
     command._table_app_labels_cache = {**command._table_app_labels(), 'testapp_encore': 'testapp'}
 
-    assert command._orphaned_mti_notes() == []
+    (note,) = command._orphaned_mti_notes()
+
+    assert "MTI Updated at Trigger on 'testapp_encore'" in note
 
 
 def test_a_recorded_mti_key_on_an_unmapped_table_stays_silent():

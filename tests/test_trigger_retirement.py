@@ -18,8 +18,9 @@ from guitars.management.enforcement.headers import (
     HEADER_SOFT_DELETE_SELF_CASCADE,
     HEADER_SOFT_DELETE_SELF_CASCADE_RETIRED,
 )
+from guitars.management.enforcement.graph import TableEvent
 from guitars.management.enforcement.scanning import scan_existing_operations
-from tests.conftest import clear_cascade_coverage, execute, scalar
+from tests.conftest import clear_cascade_coverage, execute, patch_replay, scalar
 
 
 OWNED = ('testapp_gone_target', 'testapp_setlist', 'gone_id')
@@ -163,10 +164,11 @@ class TestASelfCascadeKeyNoLongerRequired:
         )
         forward, reverse = operation.split('reverse_sql=')
         assert 'DROP TRIGGER IF EXISTS' in forward
-        assert 'CREATE TRIGGER "soft_delete_self_cascade_15_testapp_setlist_9_parent_id"' in reverse
+        assert (
+            'CREATE TRIGGER "soft_delete_self_cascade_15_testapp_setlist_9_parent_id"' in reverse
+        )
         assert 'CREATE OR REPLACE FUNCTION "soft_delete_self_cascade_15_testapp_setlist' in reverse
         assert 'testapp' in command.existing.retirement_apps
-
 
     def test_a_key_hosted_by_another_app_is_not_this_ones_to_retire(self):
         command = _command()
@@ -341,6 +343,7 @@ def _without(command: Command, method: str, drop):
     if method == '_cascade_key_maps':
         # The key's revive arm goes with it: the owner's one trigger is built off the same sweep.
         dropped_arm = (drop[0], drop[1], original()[0][drop])
+
         def arms():
             narrowed()
             return {
@@ -501,17 +504,23 @@ class TestAScopedRunNamesWhatItLeaves:
 
 
 class TestARenameInAnotherAppReachesTheseKeys:
-    """An app walked after the one that renamed a table records its keys under the old name and
-    the walk never moves them, so the owned key read as undeclared and was retired on every run."""
+    """A file written after the rename that names the old table -- an app the rename did not
+    reach -- is filed under the new one, as the rename's own app files it (ADR 0043)."""
 
     @staticmethod
     def _scan(monkeypatch, *contents):
-        from guitars.management.enforcement import scanning  # noqa: PLC0415
-
-        monkeypatch.setattr(
-            scanning, 'renamed_tables', lambda loader, label: {'tgt_prize': ['tgt_target']}
+        patch_replay(
+            monkeypatch,
+            (
+                'testapp',
+                '0000_auto_enforcement',
+                [TableEvent('rename', 'tgt_target', 'tgt_prize')],
+            ),
+            *(
+                ('testapp', f'{index:04d}_auto_enforcement', [])
+                for index in range(1, len(contents))
+            ),
         )
-        monkeypatch.setattr(scanning, 'renames_by_migration', lambda loader, label: {})
         return _scan_with(monkeypatch, *contents)
 
     @staticmethod
@@ -572,19 +581,13 @@ class TestARedeclaredKeyIsOrderedAfterItsRetirement:
         assert ('otherapp', '0009_z') in self._edges(command)
 
 
-def test_a_rename_walked_late_does_not_overwrite_a_newer_record(monkeypatch):
-    """Across apps the walk is registry order, not time: an app walked first can have filed a
-    key under the new name *after* the rename happened, and moving the old entry onto it then
-    replaced the newer record with the older one -- the owned rule re-emitted every run."""
-    from guitars.management.enforcement import scanning  # noqa: PLC0415
-
-    monkeypatch.setattr(
-        scanning, 'renamed_tables', lambda loader, label: {'tgt_prize': ['tgt_target']}
-    )
-    monkeypatch.setattr(
-        scanning,
-        'renames_by_migration',
-        lambda loader, label: {'0001_auto_enforcement': [('tgt_target', 'tgt_prize')]},
+def test_a_record_filed_after_a_rename_is_not_overwritten_by_it(monkeypatch):
+    """The rename moves what was filed before it; a header written after it, under the new name,
+    is the newer -- the owned rule re-emitted every run when the older won."""
+    patch_replay(
+        monkeypatch,
+        ('testapp', '0000_auto_enforcement', []),
+        ('testapp', '0001_auto_enforcement', [TableEvent('rename', 'tgt_target', 'tgt_prize')]),
     )
 
     def header(table, digest):
@@ -596,7 +599,7 @@ def test_a_rename_walked_late_does_not_overwrite_a_newer_record(monkeypatch):
         )
 
     existing = _scan_with(
-        monkeypatch, header('tgt_target', 'old000000000') + header('tgt_prize', 'new000000000'), ''
+        monkeypatch, header('tgt_target', 'old000000000'), header('tgt_prize', 'new000000000')
     )
 
     assert existing.soft_delete_owned[('tgt_prize', 'own_owner', 'target_id')] == 'new000000000'

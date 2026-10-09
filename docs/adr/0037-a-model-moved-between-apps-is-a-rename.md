@@ -1,8 +1,8 @@
 # 0037 — a model moved between apps is read as a rename, and its coverage followed to the end of its chain
 
-- **Status:** accepted
+- **Status:** accepted; superseded in part by [ADR 0043](0043-the-scan-replays-the-migration-graph.md), which replays the graph and removes `_chain_ends` and `keep_existing`
 - **Date:** 2026-10-08
-- **Affects:** `graph.moves_between_apps_by_migration`, `graph._moved_out`, `scanning._move_renamed(keep_existing=)`, `scanning._chain_ends`, `scanning._join_chains`, `scanning._latest_names`
+- **Affects:** `graph.table_changes` (the database half of a move); `moves_between_apps_by_migration`, `_chain_ends`, `keep_existing` are gone (ADR 0043)
 
 ## Context
 

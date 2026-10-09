@@ -14,12 +14,13 @@ from django.db.models import CASCADE
 from django.test import override_settings
 from django.test.utils import isolate_apps
 
-from tests.conftest import clear_cascade_coverage
+from tests.conftest import clear_cascade_coverage, patch_replay
 
 from guitars.models import SetarModel
 
 from guitars.management import _generator
-from guitars.management.enforcement import graph, scanning
+from guitars.management.enforcement import scanning
+from guitars.management.enforcement.graph import TableEvent
 from guitars.management.enforcement.command import Command
 from guitars.management.enforcement.headers import (
     HEADER_SOFT_DELETE_RELATED,
@@ -342,20 +343,18 @@ def test_every_recorded_cascade_key_carries_the_migration_that_created_it():
 
 def test_a_rename_carries_provenance_with_the_coverage_it_mirrors(monkeypatch):
     """Provenance is keyed on the table, so it has to move when the table does. Left out of the
-    walk's family list it stays under the freed name, the coverage moves without it, and the
+    replay's families it stays under the freed name, the coverage moves without it, and the
     retirement that follows loses its edge -- the original bug with the warning suppressed."""
-    real = graph.renames_by_migration
-    monkeypatch.setattr(
-        scanning,
-        'renames_by_migration',
-        lambda ldr, app: (
-            {'0001_auto_enforcement': [('testapp_gone', 'testapp_renamed')]}
-            if app == 'testapp'
-            else real(ldr, app)
+    patch_replay(
+        monkeypatch,
+        ('testapp', '0000_auto_enforcement', []),
+        (
+            'testapp',
+            '0001_auto_enforcement',
+            [TableEvent('rename', 'testapp_gone', 'testapp_renamed')],
         ),
     )
 
-    # A source no model owns: ``_move_renamed`` declines to carry coverage off a live name.
     existing = _scan_with(monkeypatch, testapp=(_created(table='testapp_gone'), ''))
 
     moved = ('testapp_renamed', 'testapp_genre', None)
@@ -401,9 +400,9 @@ def test_a_retirement_leaves_the_provenance_it_popped(monkeypatch):
 
 
 def test_a_create_scanned_after_the_retirement_is_still_attributed_to_it(monkeypatch):
-    """Apps walk in registry order, which is not chronological, so the create can be read after
-    the retirement that dropped it. Nothing is in scope at the pop, so the site is filled from
-    the finished map afterwards -- the shape #49 is made of, and why the snapshot alone fails."""
+    """Files the graph does not know are read in registry order, which is not chronological, so
+    the create can be read after the retirement that dropped it. The site is filled from the
+    finished map afterwards -- the shape #49 is made of, and why the snapshot alone fails."""
     with override_settings(LOCAL_APPS=['tests.testapp', 'tests.crossapp_owner']):
         existing = _scan_with(monkeypatch, testapp=(_retired(),), crossapp_owner=(_created(),))
 
@@ -584,9 +583,9 @@ def test_a_note_is_confined_to_the_apps_a_scoped_run_asked_about(command):
 
 
 def test_a_retirement_scanned_before_its_create_still_reads_as_retired():
-    """Apps walk in registry order and this question is graph order. The owner app is scanned
-    first, so its retirement popped a key the child app then re-recorded -- leaving the rule
-    reading as live and the retirement re-emitted on every run, ``--check`` never green."""
+    """The owner app's retirement is in the graph after the child app's create it drops, which a
+    walk in registry order read the other way round: the key popped, then re-recorded, reading
+    as live and the retirement re-emitted on every run, ``--check`` never green."""
     with override_settings(
         LOCAL_APPS=['tests.crossapp_retire_owner', 'tests.crossapp_retire_child']
     ):
@@ -617,9 +616,7 @@ def _settled(retirement, creates):
         [CascadeRetirementSite('testapp', retirement, _KEY, None)],
         recorded,
         {_KEY: creates},
-        {},
-        set(),
-        lambda: MigrationLoader(None, ignore_no_migrations=True),
+        _loader().graph,
     )
     return _KEY in recorded, site.created
 
@@ -647,9 +644,7 @@ def test_an_unordered_create_is_not_read_as_older_than_the_retirement():
         [CascadeRetirementSite('crossapp_owner', '0001_initial', _KEY, None)],
         recorded,
         {_KEY: [('crossapp_third', '0001_initial'), ('crossapp_owner', '0002_auto_enforcement')]},
-        {},
-        set(),
-        lambda: MigrationLoader(None, ignore_no_migrations=True),
+        _loader().graph,
     )
 
     assert _KEY in recorded
@@ -735,7 +730,7 @@ def test_a_legacy_history_with_two_unordered_cycles_is_still_named(command):
         _site('crossapp_owner', '0001_initial', None),
         _site('crossapp_owner', '0003_auto_enforcement', None),
     ]
-    settled = scanning._settle_retirement_sites(drops, {}, {_KEY: creates}, {}, set(), _loader)
+    settled = scanning._settle_retirement_sites(drops, {}, {_KEY: creates}, _loader().graph)
 
     # Paired by rank, the two alternating: the nth drop dropped the nth create.
     assert [site.created for site in settled] == creates
@@ -754,9 +749,7 @@ def test_an_unordered_history_ending_in_a_drop_reads_as_retired(command):
         [_site('stock', '0003_auto_enforcement', None)],
         recorded,
         {_KEY: creates},
-        {},
-        set(),
-        _loader,
+        _loader().graph,
     )
 
     assert _KEY not in recorded
@@ -769,7 +762,7 @@ def test_a_retirement_whose_create_was_never_scanned_leaves_the_key_alone():
     recorded = {_KEY: 'abc'}
 
     (site,) = scanning._settle_retirement_sites(
-        [_site('crossapp_owner', '0001_initial', None)], recorded, {}, {}, set(), _loader
+        [_site('crossapp_owner', '0001_initial', None)], recorded, {}, _loader().graph
     )
 
     assert site.created is None
@@ -824,28 +817,6 @@ def test_a_renamed_owner_table_alone_still_promises_the_abort(command):
 
     assert 'does not exist' in note
     assert 'silently does nothing' not in note
-
-
-def test_a_freed_name_retaken_by_a_live_model_is_not_translated():
-    """The mirror of ``_move_renamed``'s own guard: a freed name another model retook keeps
-    its own coverage under that name, so the site's key must stay untranslated too, or the
-    lookup misses the provenance the walk deliberately left where it was."""
-    key = ('shop_old_child', 'testapp_genre', None)
-    create = ('crossapp_third', '0001_initial')
-    drop = _site('crossapp_owner', '0001_initial', None)._replace(key=key)
-
-    settled = scanning._settle_retirement_sites(
-        [drop],
-        {},
-        {key: [create]},
-        {'shop_new_child': ['shop_old_child']},
-        {'shop_old_child'},
-        _loader,
-    )
-
-    (site,) = settled
-    assert site.key == key
-    assert site.created == create
 
 
 def test_a_genuinely_retired_key_taints_only_when_its_own_drop_is_written(command):

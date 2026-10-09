@@ -45,8 +45,8 @@ against that node.**
    path only -- `--check` reaches the note below instead.
 6. **Which of a retirement and a create wins is settled by graph order**, after the walk, since
    registry order is not chronological. Per *key*, newest against newest — settling per site
-   reads a re-adopted rule as retired. The walk itself never pops a key's coverage, or the same
-   scan-order accident this point exists to fix would silently override its own verdict.
+   reads a re-adopted rule as retired. The walk itself never pops a key's coverage. Since 2.21.0
+   it is in plan order and the settle stays for what the graph leaves unordered ([ADR 0043](0043-the-scan-replays-the-migration-graph.md)).
 7. **Each drop is matched to the create it dropped**: the newest the graph puts *before* it, not
    the newest of the key, which after a re-adoption is the create that drop *precedes*.
 8. **`--check` names a retirement already written that nothing orders**, by reachability, joining

@@ -325,7 +325,7 @@ def test_a_key_rewrite_that_archives_nothing_is_not_refused(db):
     assert _archived(Setlist) == set()
 
 
-def test_a_key_rewrite_that_reparents_its_children_is_still_refused(db):
+def test_a_key_rewrite_that_reparents_its_children_is_still_refused_without_the_guard(db):
     """The arm that matters most, and the one a guard reading only the *old* key misses: moving
     the children onto the new key in the same statement empties the old one, so nothing looks
     orphaned there while the subtree is just as unreachable."""
@@ -335,9 +335,8 @@ def test_a_key_rewrite_that_reparents_its_children_is_still_refused(db):
 
     with pytest.raises(NotSupportedError, match='archived a row whose primary key it also'):
         with connection.cursor() as cursor:
-            # The cascade guard (2.22.0) reads the parent a statement has already rewritten, so
-            # with the root updated first it would archive the child itself and leave nothing to
-            # refuse; which row goes first is the table's physical order, so it is set aside.
+            # With the cascade guard on (2.22.0) the child reads the root the statement has already
+            # rewritten and is archived by it, so the guard is set aside to reach the refusal.
             cursor.execute('SET CONSTRAINTS ALL IMMEDIATE')
             cursor.execute(
                 'ALTER TABLE testapp_setlist DISABLE TRIGGER soft_delete_guard_on_15_testapp_setlist'
@@ -350,6 +349,30 @@ def test_a_key_rewrite_that_reparents_its_children_is_still_refused(db):
                 'WHERE id IN (%s, %s)',
                 [root.pk, new_key, child.pk, new_key, root.pk, root.pk, child.pk],
             )
+
+
+def test_a_key_rewrite_that_reparents_its_children_leaves_none_live_under_the_guard(db):
+    """With the guard on, the same statement is refused or the child is archived with the root,
+    by the table's physical order: either way no live row hangs under an archived one."""
+    root = Setlist.objects.create(title='root')
+    child = Setlist.objects.create(title='child', parent=root)
+    new_key = root.pk + 1000
+
+    try:
+        with transaction.atomic(), connection.cursor() as cursor:
+            cursor.execute('SET CONSTRAINTS ALL DEFERRED')
+            cursor.execute(
+                'UPDATE testapp_setlist SET id = CASE WHEN id = %s THEN %s ELSE id END, '
+                'parent_id = CASE WHEN id = %s THEN %s ELSE parent_id END, '
+                '_deleted_at = CASE WHEN id = %s THEN NOW() ELSE _deleted_at END '
+                'WHERE id IN (%s, %s)',
+                [root.pk, new_key, child.pk, new_key, root.pk, root.pk, child.pk],
+            )
+    except NotSupportedError:
+        return
+
+    assert Setlist._all_objects.get(pk=child.pk)._deleted_at is not None
+    assert Setlist._all_objects.get(pk=child.pk).parent_id == new_key
 
 
 T_PARENT = '2021-06-15T12:30:00Z'

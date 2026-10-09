@@ -7,7 +7,7 @@ import time
 
 import psycopg
 import pytest
-from django.db import connection
+from django.db import OperationalError, connection, transaction
 
 from tests.testapp.models import Offer, Setlist, Tier
 
@@ -256,6 +256,34 @@ class TestTheCostOfTheGuard:
         losers = [each for each in (a, b) if each.error is not None]
         assert len(losers) == 1
         assert losers[0].error.sqlstate == '40P01'
+
+    def test_a_role_that_may_not_update_the_parent_reads_it_without_waiting(self, session):
+        """The fallback branch, taken: another session's uncommitted update of the parent would
+        block a ``FOR SHARE``, and the privilege check is shadowed to read ``false``."""
+        offer = Offer.objects.create(name='p')
+        a = session()
+        a.run('SELECT 1 FROM testapp_offer WHERE id = %s FOR NO KEY UPDATE', offer.pk)
+
+        with transaction.atomic(), connection.cursor() as cursor:
+            cursor.execute(
+                'CREATE FUNCTION public.has_any_column_privilege(text, text) '
+                'RETURNS boolean LANGUAGE sql AS $$ SELECT false $$'
+            )
+            cursor.execute(
+                "SET LOCAL search_path = public, pg_catalog; SET LOCAL lock_timeout = '1s'"
+            )
+            cursor.execute(INSERT_TIER, [offer.pk])
+            transaction.set_rollback(True)
+
+    def test_without_the_shadow_the_same_insert_waits(self, session):
+        offer = Offer.objects.create(name='p')
+        a = session()
+        a.run('SELECT 1 FROM testapp_offer WHERE id = %s FOR NO KEY UPDATE', offer.pk)
+
+        with pytest.raises(OperationalError, match='lock timeout'), transaction.atomic():
+            with connection.cursor() as cursor:
+                cursor.execute("SET LOCAL lock_timeout = '300ms'")
+                cursor.execute(INSERT_TIER, [offer.pk])
 
 
 class TestWhatIsolationChanges:

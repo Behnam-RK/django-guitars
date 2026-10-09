@@ -92,6 +92,35 @@ class TestAChildArrivingUnderAnArchivedParent:
 
 
 @pytest.mark.django_db
+class TestAnInvokerWhoMayNotUpdateTheParent:
+    """Without ``UPDATE`` on the parent the guard reads it plainly and no insert fails. The test
+    role cannot create another, so the check is shadowed by a function ahead of ``pg_catalog``;
+    that no lock is taken is pinned in ``tests/test_concurrency_arms.py``."""
+
+    @pytest.fixture(autouse=True)
+    def _cannot_update(self, db):
+        with connection.cursor() as cursor:
+            cursor.execute(
+                'CREATE FUNCTION public.has_any_column_privilege(text, text) '
+                'RETURNS boolean LANGUAGE sql AS $$ SELECT false $$'
+            )
+            cursor.execute('SET LOCAL search_path = public, pg_catalog')
+
+    def test_an_insert_under_a_live_parent_still_works(self):
+        tier = Tier._all_objects.create(offer=Offer.objects.create(name='live'))
+
+        assert _stamp(tier) is None
+
+    def test_an_insert_under_an_archived_parent_still_takes_its_stamp(self):
+        offer = Offer.objects.create(name='gone')
+        offer.soft_delete()
+
+        tier = Tier._all_objects.create(offer=offer)
+
+        assert _stamp(tier) == _stamp(offer) is not None
+
+
+@pytest.mark.django_db
 class TestASelfKeyAndAJoinedKey:
     def test_a_self_key(self, db):
         root = Setlist.objects.create(title='root')

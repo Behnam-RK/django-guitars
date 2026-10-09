@@ -2184,6 +2184,7 @@ class OperationsMixin:
             owner_pk = _identifiers._escape_ident(cast(str, owner._meta.pk.column))
             arm = self._arm_slots(related_model, column, owner_pk)
             arm['owner_table'] = _identifiers._quote_table(owner_table)
+            arm['owner_literal'] = _identifiers._quote_literal(arm['owner_table'])
             if joined:
                 stamp_table = arm['target_table']
             blocks.append(

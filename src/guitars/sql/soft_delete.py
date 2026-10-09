@@ -427,15 +427,21 @@ _REPLACE_SOFT_DELETE_REVIVE_OWNER = (
 _ADOPT_SOFT_DELETE_REVIVE_OWNER = _REPLACE_SOFT_DELETE_REVIVE_OWNER
 
 # ---- The insert-side guard of a cascade child (2.22.0, #91, ADR 0044): ``FOR SHARE`` on the parent
-# waits for an archive and copies its stamp. ``{blocks}`` is one per key, and no ``UPDATE OF``
-# list: it would record a dependency that fails ``DROP COLUMN`` of a key.
+# waits for an archive and copies its stamp, a plain read where the invoker may not update the
+# parent. ``{blocks}`` is one per key; no ``UPDATE OF`` list, which would record a dependency.
 _SOFT_DELETE_GUARD_BLOCK = """
         IF NEW."{foreign_key}" IS NOT NULL AND NEW._deleted_at IS NULL
            AND (TG_OP = 'INSERT' OR NEW."{foreign_key}" IS DISTINCT FROM OLD."{foreign_key}") THEN
-            SELECT guitars_parent._deleted_at INTO guitars_stamp
-            FROM {owner_table} AS guitars_parent
-            WHERE guitars_parent."{referenced_key}" = NEW."{foreign_key}"
-            FOR SHARE OF guitars_parent;
+            IF has_any_column_privilege({owner_literal}, 'UPDATE') THEN
+                SELECT guitars_parent._deleted_at INTO guitars_stamp
+                FROM {owner_table} AS guitars_parent
+                WHERE guitars_parent."{referenced_key}" = NEW."{foreign_key}"
+                FOR SHARE OF guitars_parent;
+            ELSE
+                SELECT guitars_parent._deleted_at INTO guitars_stamp
+                FROM {owner_table} AS guitars_parent
+                WHERE guitars_parent."{referenced_key}" = NEW."{foreign_key}";
+            END IF;
             IF guitars_stamp IS NOT NULL THEN
                 NEW._deleted_at := guitars_stamp;
             END IF;
@@ -447,10 +453,16 @@ _SOFT_DELETE_GUARD_BLOCK = """
 _SOFT_DELETE_GUARD_BLOCK_JOINED = """
         IF NEW."{foreign_key}" IS NOT NULL
            AND (TG_OP = 'INSERT' OR NEW."{foreign_key}" IS DISTINCT FROM OLD."{foreign_key}") THEN
-            SELECT guitars_parent._deleted_at INTO guitars_stamp
-            FROM {owner_table} AS guitars_parent
-            WHERE guitars_parent."{referenced_key}" = NEW."{foreign_key}"
-            FOR SHARE OF guitars_parent;
+            IF has_any_column_privilege({owner_literal}, 'UPDATE') THEN
+                SELECT guitars_parent._deleted_at INTO guitars_stamp
+                FROM {owner_table} AS guitars_parent
+                WHERE guitars_parent."{referenced_key}" = NEW."{foreign_key}"
+                FOR SHARE OF guitars_parent;
+            ELSE
+                SELECT guitars_parent._deleted_at INTO guitars_stamp
+                FROM {owner_table} AS guitars_parent
+                WHERE guitars_parent."{referenced_key}" = NEW."{foreign_key}";
+            END IF;
             IF guitars_stamp IS NOT NULL THEN
                 UPDATE {target_table} SET _deleted_at = guitars_stamp
                 WHERE "{target_pk}" = NEW."{child_pk}" AND _deleted_at IS NULL;

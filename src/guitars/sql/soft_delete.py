@@ -336,15 +336,15 @@ _SOFT_DELETE_LEAK_CHECK_JOINED = """
                       )
                 )"""
 
-# The first ``EXISTS`` is the whole point: one left join of the transition tables, which a plain
-# ``save()`` stops at. It finds a row whose ``_deleted_at`` flipped, or one archived whose key
-# moved; the archive and the revive sit behind their own once it does (the revive is ADR 0033's).
+# ``{dollar}`` is ``$$`` unless a name in the body holds one (``operations._dollar_quote``, #80). The
+# first ``EXISTS`` is one left join of the transition tables, which a plain ``save()`` stops at: a
+# row whose ``_deleted_at`` flipped, or one archived whose key moved; the arms sit behind their own.
 _CREATE_SOFT_DELETE_REVIVE_OWNER_FUNCTION = """
     CREATE OR REPLACE FUNCTION {function}()
        RETURNS TRIGGER
        LANGUAGE PLPGSQL
     AS
-    $$
+    {dollar}
     BEGIN
         IF COALESCE(current_setting('rules.hard_deletion', true), '') <> 'on' AND EXISTS (
             SELECT 1
@@ -395,7 +395,7 @@ _CREATE_SOFT_DELETE_REVIVE_OWNER_FUNCTION = """
         END IF;
         RETURN NULL;
     END;
-    $$;
+    {dollar};
 """
 
 # ``CREATE OR REPLACE TRIGGER`` (PG 14, the floor) for the re-emission of a trigger that exists:
@@ -535,7 +535,7 @@ _DROP_SOFT_DELETE_OWNED_OBJECT_RULE = """
 # every before-key present in the after image, so the guard sees no vanished row and the join
 # below pairs each before-row with another's after-image. There is no second row identity to ask.
 
-# Terminated ``$$;`` unlike the autofill template it mirrors: that is an operation by itself,
+# Terminated ``{dollar};`` unlike the autofill template it mirrors: that is an operation by itself,
 # this is concatenated before its CREATE TRIGGER and an unterminated body swallows it. The
 # indentation lands the spliced arms at the depth they are written with.
 _CREATE_SOFT_DELETE_OWNED_SWEEP_FUNCTION = """
@@ -543,7 +543,7 @@ _CREATE_SOFT_DELETE_OWNED_SWEEP_FUNCTION = """
        RETURNS TRIGGER
        LANGUAGE PLPGSQL
     AS
-    $$
+    {dollar}
     BEGIN
         IF COALESCE(current_setting('rules.hard_deletion', true), '') <> 'on' THEN
             IF EXISTS (
@@ -594,7 +594,7 @@ _CREATE_SOFT_DELETE_OWNED_SWEEP_FUNCTION = """
         END IF;
         RETURN NULL;
     END;
-    $$;
+    {dollar};
 """
 
 #: Filled where the dependent owns the column: this runs at depth 1, where a pre-2.19.0 statement

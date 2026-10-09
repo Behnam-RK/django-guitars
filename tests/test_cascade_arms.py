@@ -5,10 +5,18 @@ passes with the arms dropped."""
 from importlib import import_module
 
 import pytest
-from django.db import connection, transaction
+from django.db.models import CASCADE
+from django.test.utils import isolate_apps
+from django.apps import apps as django_apps
+from django.db import connection, models, transaction
 from django.db.utils import NotSupportedError
 
 from tests.conftest import execute, rows, scalar
+from guitars.introspection import CascadeKind, classify_cascade
+from guitars.management.enforcement import operations as operations_module
+from guitars.management.enforcement.command import Command
+from guitars.models import SetarModel
+from guitars.sql import _identifiers
 from guitars.tenancy import tenancy_bypassed
 from tests.testapp.models import Album, Band, Catalog, Label, Listing, Merch, TouringFestival
 
@@ -197,3 +205,116 @@ def test_the_refusal_reads_a_joined_key_too(db):
                     'UPDATE testapp_label SET id = id + 1000, _deleted_at = NOW() WHERE id = %s',
                     params=[label.pk],
                 )
+
+
+# ---- A name holding ``$$`` (#80): the arm is spliced into a dollar-quoted body, which it would close.
+
+
+def _forward(operation: str):
+    from django.db import migrations  # noqa: PLC0415
+
+    source = operation[operation.index('migrations.RunSQL') :].rstrip().rstrip(',')
+    return eval(source, {'migrations': migrations})  # noqa: S307 - our own output
+
+
+@isolate_apps('tests.testapp')
+def _dollar_models():
+    class DollarOwner(SetarModel):
+        class Meta:
+            app_label = 'testapp'
+            db_table = 'testapp_dollar$$owner'
+
+    class DollarChild(SetarModel):
+        owner = models.ForeignKey(DollarOwner, on_delete=CASCADE, related_name='+')
+
+        class Meta:
+            app_label = 'testapp'
+            db_table = 'testapp_dollar$$child'
+
+    return DollarOwner, DollarChild
+
+
+def test_the_tag_is_dollar_dollar_unless_a_name_holds_it():
+    quote = operations_module._dollar_quote
+
+    assert quote('"a"', '"b"') == '$$'
+    assert quote('"a$$b"') == '$guitars$'
+    assert quote('"a$$b"', '"$guitars$"') == '$guitars1$'
+
+
+def test_a_key_naming_dollar_quoting_is_still_a_cascade_not_a_refusal():
+    """The rule needed no quoting and the arm gets another tag, so no key is left without its
+    cascade -- a refusal here retired a recorded rule that still worked."""
+    owner, child = _dollar_models()
+
+    kind = classify_cascade(
+        child, child._meta.get_field('owner'), CASCADE, owner._meta.db_table, set()
+    )
+
+    assert kind is CascadeKind.RULE
+
+
+def test_an_arm_naming_dollar_quoting_makes_a_function_the_database_accepts(db):
+    """Rendered into the real template and executed: with ``$$`` this is a syntax error, and the
+    body names the child both in an arm and in the leak check."""
+    owner, child = _dollar_models()
+    command = Command()
+    key = (child._meta.db_table, owner._meta.db_table, 'owner_id')
+    arms = {
+        'arms': command._revive_arm(key, child, 'owner_id', 'id'),
+        'archive_arms': command._archive_arm(key, child, 'owner_id', 'id'),
+        'leak_checks': command._leak_check(key, child, 'owner_id', 'id'),
+    }
+    slots = {'function': '"dol$$fn"', 'primary_key': 'id', **arms}
+    slots['dollar'] = operations_module._dollar_quote(*slots.values())
+
+    sql = operations_module._soft_delete._CREATE_SOFT_DELETE_REVIVE_OWNER_FUNCTION.format(**slots)
+
+    assert slots['dollar'] == '$guitars$' and 'dollar$$child' in sql
+    with transaction.atomic():
+        execute(sql)
+        assert scalar("SELECT count(*) FROM pg_proc WHERE proname = 'dol$$fn'") == 1
+        transaction.set_rollback(True)
+
+
+def test_a_cascade_trigger_whose_own_name_holds_it_is_written_and_runs(db, monkeypatch):
+    monkeypatch.setattr(
+        operations_module, '_cascade_owner_name', lambda table: _identifiers._safe_ident('c$$' + table)
+    )
+    command = Command()
+    command.existing.soft_delete_cascade_owner.clear()
+    (operation,) = [
+        op
+        for op in command._revive_operations(django_apps.get_app_config('testapp'))
+        if op.startswith('# Soft Delete Cascade Trigger on "testapp_band"')
+    ]
+    sql = _forward(operation).sql
+
+    assert '$guitars$' in sql
+    with transaction.atomic():
+        execute(sql)
+        assert scalar("SELECT count(*) FROM pg_proc WHERE proname = 'c$$testapp_band'") == 1
+        transaction.set_rollback(True)
+
+
+def test_an_owned_sweep_whose_name_holds_it_is_written_and_runs(db, monkeypatch):
+    monkeypatch.setattr(
+        operations_module,
+        '_owned_sweep_name',
+        lambda owner, dependent, fk: _identifiers._safe_ident(f's$${fk}'),
+    )
+    command = Command()
+    command.existing.soft_delete_owned.clear()
+    command.existing.soft_delete_owned_sweep.clear()
+    sweeps = [
+        _forward(op).sql
+        for op in command._owned_operations(Album)
+        if op.startswith('# Soft Delete Owned Sweep')
+    ]
+
+    assert len(sweeps) == 2 and all('$guitars$' in sql for sql in sweeps)
+    with transaction.atomic():
+        for sql in sweeps:
+            execute(sql)
+        assert scalar("SELECT count(*) FROM pg_proc WHERE proname LIKE 's$$%'") == 2
+        transaction.set_rollback(True)

@@ -76,30 +76,6 @@ class TestTheOwnersOperation:
         assert body.index('AND EXISTS (') < body.index('UPDATE "testapp_merch"')
         assert body.count('CREATE TRIGGER') == 1
 
-    def test_an_owner_whose_every_arm_is_refused_gets_no_trigger(self, monkeypatch):
-        command = Command()
-        clear_cascade_coverage(command)
-        monkeypatch.setattr(command, '_revive_arm', lambda *args, **kwargs: None)
-
-        assert command._revive_operations(_app()) == []
-
-    def test_an_owner_named_with_dollar_quoting_is_refused_and_named(self, monkeypatch):
-        command = Command()
-        command._skipped_rule_notes.clear()
-        clear_cascade_coverage(command)
-        monkeypatch.setattr(operations_module, '_cascade_owner_name', lambda table: 'x$$y')
-
-        assert command._revive_operations(_app()) == []
-        assert any(
-            "Cascade trigger on 'testapp_album' skipped" in note
-            for note in command._skipped_rule_notes
-        )
-
-
-class TestTheTransition:
-    """Every per-key revive and cascade rule a project recorded is retired, its key still
-    cascading or not: the owner's trigger carries both (2.16.0, and 2.19.0 for the rule)."""
-
     @staticmethod
     def _retirements(key):
         command = Command()
@@ -131,16 +107,6 @@ class TestTheTransition:
         assert 'AS ON UPDATE TO "testapp_label"' in reverse
         assert 'UPDATE "testapp_festival"' in reverse
         assert 'RAISE' not in reverse
-
-    def test_a_rule_whose_arm_is_refused_is_not_dropped(self, monkeypatch):
-        """Dropping it would end the cascade: its arm is not written."""
-        key = ('testapp_album', 'testapp_band', None)
-        command = Command()
-        clear_cascade_coverage(command)
-        command.existing.soft_delete_related[key] = 'abc'
-        monkeypatch.setattr(command, '_revive_arm', lambda *args, **kwargs: None)
-
-        assert command._retired_cascade_operations(_app()) == []
 
     def test_its_reverse_rebuilds_the_flat_trigger(self):
         _rule, retirement = self._retirements(('testapp_album', 'testapp_band', None))
@@ -378,45 +344,6 @@ def test_a_superseded_revive_is_retired_only_by_its_host():
     assert command._retired_cascade_operations(apps.get_app_config('crossapp_owner')) == []
 
 
-class TestAQuietReadReportsNothing:
-    """A scoped run compares digests through the same builder; a refusal is reported once, by
-    the run that emits it, not again by every run that only asks."""
-
-    def test_a_refused_owner(self, monkeypatch):
-        command = Command()
-        command._skipped_rule_notes.clear()
-        monkeypatch.setattr(operations_module, '_cascade_owner_name', lambda table: 'x$$y')
-
-        assert command._revive_owner_slots('testapp_album', quiet=True) is None
-        assert command._skipped_rule_notes == []
-
-    def test_a_refused_arm(self):
-        from tests.test_command import _revive_dollar_models  # noqa: PLC0415
-
-        _owner, child = _revive_dollar_models()
-        command = Command()
-        command._skipped_rule_notes.clear()
-        key = ('testapp_dollar$$child', 'testapp_dollar_owner', None)
-
-        assert command._revive_arm(key, child, 'owner_id', 'id', quiet=True) is None
-        assert command._skipped_rule_notes == []
-
-
-def test_a_recorded_trigger_whose_every_arm_is_refused_fails_check(monkeypatch):
-    """Not emitted, not retired -- its key still calls for an arm -- and so live in every
-    migrated database with nothing to say so: named for a hand drop, as the per-key one was."""
-    command = Command()
-    command._refusals_over_live_rules.clear()
-    monkeypatch.setattr(command, '_revive_arm', lambda *args, **kwargs: None)
-
-    command._revive_operations(_app())
-
-    assert any(
-        "Cascade trigger on 'testapp_album'" in refusal and 'DROP TRIGGER' in refusal
-        for refusal in command._refusals_over_live_rules
-    )
-
-
 def test_a_trigger_already_rid_of_a_deleted_childs_arm_is_not_named(monkeypatch):
     """The owner's trigger re-emitted without the arm is current; a note reading only "is it
     recorded" went on telling every scoped run it was broken, for good."""
@@ -430,21 +357,6 @@ def test_a_trigger_already_rid_of_a_deleted_childs_arm_is_not_named(monkeypatch)
     ]
 
     assert not [note for note in notes if 'soft_delete_revive_on' in note]
-
-
-def test_a_refused_renamed_owners_hand_drop_names_every_spelling(monkeypatch):
-    """PostgreSQL keeps a trigger with its table, so after a rename the live one carries the
-    old name: a hand drop of the current spelling alone would leave it."""
-    command = Command()
-    command._refusals_over_live_rules.clear()
-    command.existing.renamed_tables['testapp_album'] = ['testapp_oldalbum']
-    monkeypatch.setattr(command, '_revive_arm', lambda *args, **kwargs: None)
-
-    command._revive_operations(_app())
-
-    (refusal,) = [r for r in command._refusals_over_live_rules if "'testapp_album'" in r]
-    assert 'soft_delete_cascade_on_16_testapp_oldalbum' in refusal
-    assert 'soft_delete_cascade_on_13_testapp_album' in refusal
 
 
 class TestTheReviveOnlyTriggerIsSuperseded:
@@ -490,14 +402,6 @@ class TestTheReviveOnlyTriggerIsSuperseded:
         assert 'guitars_archived' not in reverse
         assert 'RAISE' not in reverse
 
-    def test_it_is_kept_where_the_trigger_that_supersedes_it_is_not_written(self, monkeypatch):
-        command = self._command()
-        monkeypatch.setattr(command, '_revive_arm', lambda *args, **kwargs: None)
-
-        built = command._build_operations(_app())
-
-        assert not [op for op in built if 'Revive Trigger retired on "testapp_band"' in op]
-
     def test_one_whose_owner_has_no_cascade_key_left_goes_with_a_refusing_reverse(self):
         """A table nothing cascades from: no arm to rebuild it from, as any retirement."""
         command = self._command('testapp_riff')
@@ -511,20 +415,3 @@ class TestTheReviveOnlyTriggerIsSuperseded:
         other = apps.get_app_config('crossapp_owner')
 
         assert command._retired_revive_owner_operations(other, set(command._revive_arms_by_owner())) == []
-
-
-def test_the_carried_arms_of_an_owner_are_worked_out_once():
-    """Each retired key asks, and the answer renders every arm its owner has."""
-    command = Command()
-    clear_cascade_coverage(command)
-    calls = []
-    real = command._revive_owner_slots
-    command._revive_owner_slots = lambda *args, **kwargs: calls.append(args) or real(*args, **kwargs)
-
-    first = command._owner_trigger_carries(('testapp_merch', 'testapp_album', None), 'album_id')
-    second = command._owner_trigger_carries(
-        ('testapp_merch', 'testapp_album', 'bonus_album_id'), 'bonus_album_id'
-    )
-
-    assert first and second
-    assert len(calls) == 1

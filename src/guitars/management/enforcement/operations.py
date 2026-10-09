@@ -192,6 +192,19 @@ def _revive_name(owner_table: str, related_table: str, foreign_key: str | None =
     return _identifiers._safe_ident('_'.join(parts))
 
 
+def _dollar_quote(*texts: str) -> str:
+    """The delimiter of a dollar-quoted function body: ``$$``, which every migration written so
+    far carries, so no ``[SQL:...]`` identity moves -- unless a name spliced into it holds ``$$``,
+    which would close it early, and then the first ``$guitars<n>$`` none of them holds (#80)."""
+    blob = '\n'.join(texts)
+    if '$$' not in blob:
+        return '$$'
+    n = 0
+    while (tag := f'$guitars{n or ""}$') in blob:
+        n += 1
+    return tag
+
+
 def _owner_trigger_name(prefix: str, owner_table: str) -> str:
     """An owner trigger's identifier, for its function and its trigger. The literal ``on`` keeps
     it apart from :func:`_revive_name`, whose next segment is sized and so opens with a digit;
@@ -309,7 +322,6 @@ class OperationsMixin:
         #: Keyed on the name alone, unlike the above: a sweep's function is namespaced per
         #: schema, so two owner tables can collide on one where their rules cannot.
         _claimed_sweep_names: dict[str, tuple]
-        _carried_arms_cache: dict[str, set[tuple]]
         parent_trigger_function_dependency: tuple[str, str] | None
         stamp_function_dependency: tuple[str, str] | None
         tenant_autofill_dependencies: dict[str, tuple[str, str]]
@@ -1126,8 +1138,6 @@ class OperationsMixin:
             if self._revive_host(table) != app.label:
                 continue
             carried = table in owed
-            if carried and self._revive_owner_slots(table, quiet=True) is None:
-                continue
             header = HEADER_SOFT_DELETE_REVIVE_OWNER_RETIRED.format(
                 table=_identifiers._escape_ident(table)
             )
@@ -1152,8 +1162,7 @@ class OperationsMixin:
     def _legacy_revive_owner_reverse(self, owner_table: str) -> str:
         """The revive-only trigger a 2.19.0 retirement drops, rebuilt as 2.16.0 wrote it: its arms
         are the owner's current ones, its name the old spelling."""
-        # The caller asked: it only retires an owner it still owes a trigger.
-        slots = cast('dict', self._revive_owner_slots(owner_table, quiet=True))
+        slots = self._revive_owner_slots(owner_table)
         name = _revive_owner_name(owner_table)
         return _soft_delete._LEGACY_CREATE_SOFT_DELETE_REVIVE_OWNER.format(
             **{**slots, 'function': name, 'trigger': name}
@@ -1335,28 +1344,6 @@ class OperationsMixin:
         )
         return template.format(**rebuilt)
 
-    def _owner_trigger_carries(self, key: tuple, column: str) -> bool:
-        """Whether the owner's trigger, as this run would write it, carries *key*'s archive arm:
-        the owner has a trigger and the arm is not refused (a name closing the dollar quoting)."""
-        related_table, owner_table, _via = key
-        carried = self._carried_arms_cache.get(owner_table)
-        if carried is None:
-            # Once per owner: each retired key asks, and the answer renders every arm it has.
-            carried = set()
-            if self._revive_owner_slots(owner_table, quiet=True) is not None:
-                owner = self._revive_owners[owner_table][0]
-                owner = owner._meta.concrete_model or owner
-                ident_owner_pk = _identifiers._escape_ident(cast(str, owner._meta.pk.column))
-                arms = self._revive_arms_by_owner()[owner_table]
-                carried = {
-                    arm_key
-                    for arm_key in arms
-                    if self._revive_arm(arm_key, *arms[arm_key], ident_owner_pk, quiet=True)
-                    is not None
-                }
-            self._carried_arms_cache[owner_table] = carried
-        return (related_table, owner_table, column) in carried
-
     def _superseded_rule_reverse(self, key: tuple, slots: dict, column: str) -> str:
         """The cascade rule a 2.19.0 retirement drops, rebuilt as 2.18.x wrote it: the flat or
         the joined template. Its models off the arm sweep, as :meth:`_superseded_revive_reverse`."""
@@ -1489,14 +1476,6 @@ class OperationsMixin:
             ident_owner_table = _identifiers._quote_table(owner_table)
             for family in self._retired_cascade_families(key):
                 if key not in family.recorded:
-                    continue
-                # A rule is dropped only for a trigger that carries its arm: where the arm is
-                # refused or the owner's trigger is not written, dropping it ends the cascade.
-                if (
-                    not rule_retired
-                    and family.recorded is self.existing.soft_delete_related
-                    and not self._owner_trigger_carries(key, required[key])
-                ):
                     continue
                 self._record_retirement_edge(app.label, key, family.creates)
                 if deleted:
@@ -2115,27 +2094,6 @@ class OperationsMixin:
             if self._revive_host(owner_table) != app.label:
                 continue
             slots = self._revive_owner_slots(owner_table)
-            if slots is None:
-                # Every arm, or the owner, refused: nothing is emitted and, its keys still
-                # calling for arms, nothing retires it -- so a recorded one is named for a hand
-                # drop, as the per-key trigger's refusal was, failing ``--check``.
-                if (owner_table,) in self.existing.soft_delete_cascade_owner:
-                    # Every spelling: a trigger moves with its renamed table under its old name.
-                    drops = ' '.join(
-                        f'DROP TRIGGER IF EXISTS {name} ON '
-                        f'{_identifiers._quote_table(owner_table)}; '
-                        f'DROP FUNCTION IF EXISTS {name}();'
-                        for name in (
-                            _cascade_owner_name(table)
-                            for table in (*self._prior_names(owner_table), owner_table)
-                        )
-                    )
-                    self._refusals_over_live_rules.append(
-                        f"Cascade trigger on '{owner_table}' is refused but already exists in "
-                        "this project's migrations. It is still live in any migrated database. "
-                        f'Drop it by hand: {drops}'
-                    )
-                continue
             name = slots['function']
             # Claimed on the name alone, as every trigger family's function is: a function is
             # namespaced per schema, so two owner tables could otherwise meet on one name.
@@ -2167,10 +2125,9 @@ class OperationsMixin:
             )
         return operations
 
-    def _revive_owner_slots(self, owner_table: str, *, quiet: bool = False) -> dict | None:
-        """Every slot of *owner_table*'s cascade trigger, arms rendered, or ``None`` where every
-        arm or the owner itself is refused. *quiet* for a caller only comparing digests, so a
-        refusal is reported once, by the run that emits."""
+    def _revive_owner_slots(self, owner_table: str) -> dict:
+        """Every slot of *owner_table*'s cascade trigger, arms rendered. A name holding ``$$``
+        gets another dollar-quote tag, so no key is ever left without its arm (#80)."""
         self._cascade_key_maps()
         owner, _contributors = self._revive_owners[owner_table]
         owner = owner._meta.concrete_model or owner
@@ -2182,35 +2139,14 @@ class OperationsMixin:
             'table': _identifiers._quote_table(owner_table),
             'primary_key': _identifiers._escape_ident(cast(str, owner._meta.pk.column)),
         }
-        rendered: list[str] = []
-        archived: list[str] = []
-        leaks: list[str] = []
-        for key in sorted(arms, key=lambda k: (k[0], k[2] or '')):
-            # One refusal for every half: they splice the same names into the same body.
-            if (
-                arm := self._revive_arm(key, *arms[key], slots['primary_key'], quiet=quiet)
-            ) is None:
-                continue
-            rendered.append(arm)
-            archived.append(self._archive_arm(key, *arms[key], slots['primary_key']))
-            leaks.append(self._leak_check(key, *arms[key], slots['primary_key']))
-        if not rendered:
-            return None
-        # Refused rather than escaped, as each arm's own slots are: the function name and
-        # the owner's are spliced into the same dollar-quoted body.
-        if any('$$' in slots[slot] for slot in ('function', 'table', 'primary_key')):
-            if not quiet:
-                self._skipped_rule_notes.append(
-                    f"Cascade trigger on '{owner_table}' skipped: its table or primary key "
-                    'contains "$$", which closes the dollar quoting this trigger function '
-                    'depends on. Set a db_table / db_column without it.'
-                )
-            return None
-        return slots | {
-            'arms': ''.join(rendered),
-            'archive_arms': ''.join(archived),
-            'leak_checks': ' OR'.join(leaks),
+        keys = sorted(arms, key=lambda k: (k[0], k[2] or ''))
+        pk = slots['primary_key']
+        slots |= {
+            'arms': ''.join(self._revive_arm(key, *arms[key], pk) for key in keys),
+            'archive_arms': ''.join(self._archive_arm(key, *arms[key], pk) for key in keys),
+            'leak_checks': ' OR'.join(self._leak_check(key, *arms[key], pk) for key in keys),
         }
+        return slots | {'dollar': _dollar_quote(*slots.values())}
 
     def _arm_slots(
         self,
@@ -2252,21 +2188,10 @@ class OperationsMixin:
         related_model: type[models.Model],
         column: str,
         ident_owner_pk: str,
-        *,
-        quiet: bool = False,
-    ) -> str | None:
+    ) -> str:
         """One cascade key's arm of its owner's revive: the per-key body without its guard. A
         joined key, whose ``_deleted_at`` lives on an ancestor, revives that ancestor's row."""
         slots = self._arm_slots(related_model, column, ident_owner_pk)
-        if any('$$' in rendered for rendered in slots.values()):
-            if quiet:
-                return None
-            self._skipped_rule_notes.append(
-                f"Revive arm for '{key[1]}' -> '{related_model._meta.db_table}' skipped: a table "
-                'or column it names contains "$$", which closes the dollar quoting its trigger '
-                'function depends on. Set a db_table / db_column without it.'
-            )
-            return None
         joined = not owns_column(related_model, '_deleted_at')
         template = (
             _soft_delete._SOFT_DELETE_REVIVE_ARM_JOINED
@@ -2644,7 +2569,7 @@ class OperationsMixin:
                 self.existing.soft_delete_owned_sweep,
                 self.existing.owned_sweep_retirement_sites,
             )
-            carried = self._append_owned_sweep(
+            self._append_owned_sweep(
                 ops,
                 key=key,
                 dependent=dependent,
@@ -2657,9 +2582,7 @@ class OperationsMixin:
                 foreign_key=fk_field.column,
                 adopt=adopt,
             )
-            # Dropped only for a sweep that is written: a refused one leaves the rule the only
-            # thing archiving the dependent, and dropping it ends that.
-            if carried and key in self.existing.soft_delete_owned:
+            if key in self.existing.soft_delete_owned:
                 self._retire_superseded_owned_rule(
                     ops,
                     key=key,
@@ -2717,10 +2640,10 @@ class OperationsMixin:
         ident_foreign_key: str,
         foreign_key: str,
         adopt: bool,
-    ) -> bool:
+    ) -> None:
         """The statement-level sweep (ADR 0014), appended from inside :meth:`_owned_operations`
         after every refusal that loop applies and against the same *key*: which relations carry a
-        sweep *is* which are owned. Whether it is written -- ``False`` where it is refused."""
+        sweep *is* which are owned."""
         # No object refs of its own: CREATE TRIGGER names only the table it fires on, and
         # plpgsql does not resolve a body at CREATE FUNCTION time, so nothing here is a
         # parse-time reference. The rule's refs, recorded above, order the runtime case.
@@ -2768,32 +2691,7 @@ class OperationsMixin:
                 owner_row='guitars_before',
             ),
         }
-        # Refused rather than escaped, as the autofill slots refuse it: an identifier admits
-        # '$', so a db_table like 'a$$b' would close this template's dollar quoting early and
-        # the generated migration would fail `migrate` with a bare syntax error.
-        for slot, rendered in slots.items():
-            if '$$' in rendered:
-                # No key: ``_refuse_owned``'s escalation would name the *rule* the loop above
-                # just emitted. Only the sweep is refused, so only a recorded sweep is stale,
-                # and that is escalated on its own below.
-                self._refuse_owned(
-                    None,
-                    f"Owned sweep for '{owner_table}.{foreign_key}' -> '{dependent_table}' "
-                    f'skipped: the {slot} {rendered!r} contains "$$", which closes the dollar '
-                    f'quoting this trigger function depends on -- the generated migration '
-                    f'would not apply. Set a db_table / db_column without it.',
-                )
-                if key in self.existing.soft_delete_owned_sweep:
-                    self._refusals_over_live_rules.append(
-                        f"Owned sweep on '{dependent_table}' owned by '{owner_table}' via "
-                        f"'{foreign_key}' is refused but already exists in this project's "
-                        'migrations. It is still live in any migrated database and running a '
-                        f'stale predicate. Drop it by hand: DROP TRIGGER {name} ON '
-                        f'{ident_owner_table}; DROP FUNCTION {name}();'
-                    )
-                return False
-        # Claimed only once it is really emitted: a refused sweep holding its name would
-        # report a clash against the one relation that does reach it.
+        slots['dollar'] = _dollar_quote(*slots.values())
         self._claim_sweep_function_name(name, key)
         self._append_if_stale(
             ops,
@@ -2822,7 +2720,6 @@ class OperationsMixin:
             ),
             is_adopt=adopt,
         )
-        return True
 
     def _co_owner_arms(
         self, dependent_table: str, owner_table: str, fk_column: str
@@ -3062,16 +2959,12 @@ class OperationsMixin:
             recorded = self.existing.soft_delete_cascade_owner
             if owner_table in owed:
                 host = self._revive_host(owner_table)
-                slots = self._revive_owner_slots(owner_table, quiet=True)
-                current = (
-                    None
-                    if slots is None
-                    else _sql_digest(
-                        _soft_delete._CREATE_SOFT_DELETE_REVIVE_OWNER.format(**slots),
-                        _soft_delete._DROP_SOFT_DELETE_REVIVE.format(**slots),
-                    )
+                slots = self._revive_owner_slots(owner_table)
+                current = _sql_digest(
+                    _soft_delete._CREATE_SOFT_DELETE_REVIVE_OWNER.format(**slots),
+                    _soft_delete._DROP_SOFT_DELETE_REVIVE.format(**slots),
                 )
-                if current is None or recorded.get((owner_table,), '') == current:
+                if recorded.get((owner_table,), '') == current:
                     continue
                 state = 'missing' if (owner_table,) not in recorded else 'out of date'
             else:

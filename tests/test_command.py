@@ -994,6 +994,21 @@ def _fake_app_config(name: str, label: str, model_list: list) -> types.SimpleNam
     return types.SimpleNamespace(name=name, label=label, get_models=lambda: model_list)
 
 
+def _refused_key_reverse_relation():
+    """Synthetic shape the generator still refuses: an MTI child's key to its own root that
+    names a ``to_field``, which the joined arm does not read (``joined_refusal``)."""
+
+    class _FakeFKField:
+        name = 'sponsor'
+        column = 'sponsor_id'
+        model = Orchestra
+        related_model = Ensemble
+        target_field = object()  # not the root's primary key
+        remote_field = types.SimpleNamespace(parent_link=False)
+
+    return {(Orchestra, _FakeFKField(), CASCADE)}
+
+
 def _record_cascade_key(*, both: bool):
     """Seed the Album->Band cascade key, optionally its owner's revive trigger too (#70)."""
 
@@ -1062,6 +1077,19 @@ def _record_cascade_key(*, both: bool):
             {'otherc'},
             [],
             id='silent_when_child_app_also_out_of_scope',
+        ),
+        pytest.param(
+            ['fake.ensemblea', 'fake.orchestrab'],
+            lambda: [
+                _fake_app_config('fake.ensemblea', 'ensemblea', [Ensemble]),
+                _fake_app_config('fake.orchestrab', 'orchestrab', [Orchestra]),
+            ],
+            lambda command: command.reverse_relations_mapping.__setitem__(
+                Ensemble, _refused_key_reverse_relation()
+            ),
+            {'orchestrab'},
+            [],
+            id='silent_for_a_rule_the_generator_would_refuse',
         ),
         pytest.param(
             ['fake.ensemblea', 'fake.orchestrab'],

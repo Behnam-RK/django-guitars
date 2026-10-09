@@ -3,9 +3,7 @@ arms stop at ``_deleted_at IS NULL``, where a rule was rewritten into itself. Ra
 in ``test_cascade_arms``: the collector would name every row itself."""
 
 import pytest
-from django.apps import apps as django_apps
 
-from guitars.management.enforcement.command import Command
 from guitars.models._cascade_coverage import cascade_plan
 from tests.conftest import execute, rows
 from tests.testapp.models import Baton, Lineage, Offshoot, Relay
@@ -14,7 +12,7 @@ from tests.testapp.models import Baton, Lineage, Offshoot, Relay
 EARLIER = '2000-01-01T00:00:00Z'
 
 
-def _pair(**held):
+def _pair():
     """A relay and a baton holding each other: ``relay.baton`` and ``baton.relay``."""
     relay = Relay.objects.create()
     baton = Baton.objects.create(relay=relay)
@@ -95,17 +93,26 @@ def test_a_long_alternating_chain_settles_in_one_statement(db):
     assert len(stamps) == 1 and None not in stamps
 
 
-def test_the_generator_writes_both_keys_and_notes_no_cycle():
-    command = Command()
-    command._build_operations(django_apps.get_app_config('testapp'))
+@pytest.mark.parametrize(('owner', 'child'), [(Relay, Baton), (Baton, Relay)])
+def test_each_owner_carries_an_archive_and_a_revive_arm_for_its_partner(owner, child, db):
+    """Read off the database the migrations built, not off a fresh ``Command``, which emits
+    nothing for a table the history already covers: "no cycle note" held with the key dropped."""
+    (body,) = [
+        source
+        for (source,) in rows(
+            'SELECT prosrc FROM pg_proc WHERE proname = %s',
+            [f'soft_delete_cascade_on_13_{owner._meta.db_table}'],
+        )
+    ]
+    update = f'UPDATE "{child._meta.db_table}" AS guitars_child'
 
-    assert not [note for note in command._skipped_rule_notes if 'testapp_relay' in note]
-    assert not [note for note in command._skipped_rule_notes if 'testapp_baton' in note]
+    assert body.count(update) == 2
+    assert 'SET _deleted_at = NULL' in body
 
 
-@pytest.mark.parametrize('model', [Relay, Baton])
+@pytest.mark.parametrize('model', [Relay, Baton, Lineage])
 def test_the_plan_has_no_gap_for_a_cycle(model):
-    assert not [gap for gap in cascade_plan(model)[0] if 'cycle' in gap.reason]
+    assert cascade_plan(model)[0] == ()
 
 
 def test_soft_delete_archives_the_loop(loop):
@@ -136,3 +143,12 @@ def test_a_key_through_mti_into_its_own_root_cascades(db):
     assert stamps[root.pk] is not None
     assert stamps[child.pk] == stamps[root.pk] == stamps[grandchild.pk]
     assert stamps[bystander.pk] is None
+
+
+def test_hard_delete_removes_a_loop(db):
+    """The Python walk over a cycle of ``CASCADE`` keys ends, and takes every row."""
+    relay, _ = _pair()
+
+    relay.hard_delete()
+
+    assert Relay._all_objects.count() == Baton._all_objects.count() == 0

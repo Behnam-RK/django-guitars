@@ -4,7 +4,7 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-    dependencies = [('issue66_shop', '0003_adopt_hub'), ('issue66_shop', '0003_adopt_hub')]
+    dependencies = [('issue66_shop', '0003_adopt_hub')]
 
     operations = [
         migrations.SeparateDatabaseAndState(

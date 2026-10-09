@@ -14,7 +14,7 @@ Full history and diffs: [GitHub releases](https://github.com/Behnam-RK/django-gu
 
 ### Changed
 
-- Tests only: strict-xfail repros for the shapes [#66](https://github.com/Behnam-RK/django-guitars/issues/66) still has open on 2.20.0, from its [re-scope](https://github.com/Behnam-RK/django-guitars/issues/66#issuecomment-6081406034). A model deleted and later recreated on the same `db_table`, or one retaking a renamed model's old table, gets no soft-delete rule or `_updated_at` trigger (and, tenanted, no policy) with `--check` green, so a raw `DELETE` removes its rows; a model moved to another app and back leaves an owned sweep naming the intermediate table, failing every archive of its owner. Four fixture apps (`tests/issue66_*`) carry the histories. No library change.
+- Tests only: strict-xfail repros for the shapes [#66](https://github.com/Behnam-RK/django-guitars/issues/66) still has open on 2.20.0, from its [re-scope](https://github.com/Behnam-RK/django-guitars/issues/66#issuecomment-6081406034). Pinned: a plain cascade child deleted and later recreated on the same `db_table`, and a model retaking a renamed model's old table, each left with no soft-delete rule or `_updated_at` trigger and `--check` green, so a raw `DELETE` removes their rows; and a model moved to another app and back, whose owned sweep still names the intermediate table, so every `UPDATE` of its owner's table fails. The recreated MTI, tenanted and primary-key-changed variants are on the issue, not pinned. Four fixture apps (`tests/issue66_*`) carry the histories. No library change.
 
 ## [2.20.0] - 2026-10-09
 

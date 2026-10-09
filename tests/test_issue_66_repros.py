@@ -1,24 +1,36 @@
 """Strict-xfail repros of the shapes #66 still has open on 2.20.0 (the issue's re-scope comment).
-Each asserts the **correct** end state, so it fails today and a fix flips it. Its fixture app then
-needs regenerating and the marker goes; an accidental fix fails the suite on the strict marker."""
+A fix flips the ``--check`` tests first, on this unregenerated history: delete them then, regenerate
+the fixture app, and drop the marker from the database tests, which stay as the pins."""
 
 from io import StringIO
 
 import pytest
 from django.core.management import CommandError, call_command
-from django.db import transaction
+from django.db import ProgrammingError
 from django.test import override_settings
 
 from tests.conftest import execute, scalar
 
 
 def _check_report(*app_labels) -> str:
-    """``makeguitarmigrations --check``'s report, raising if it passes. The ``CommandError`` says
+    """``makeguitarmigrations --check``'s report, failing an assertion if it passes. The error says
     only "create missing migrations"; what is missing is named on stdout and stderr."""
     out, err = StringIO(), StringIO()
-    with pytest.raises(CommandError):
+    try:
         call_command('makeguitarmigrations', *app_labels, '--check', stdout=out, stderr=err)
-    return out.getvalue() + err.getvalue()
+    except CommandError:
+        return out.getvalue() + err.getvalue()
+    raise AssertionError('--check passed over this history')
+
+
+def _has_updated_at_trigger(table: str) -> bool:
+    return bool(
+        scalar(
+            'SELECT count(*) FROM pg_trigger WHERE tgrelid = %s::regclass '
+            "AND tgname = 'updated_at_trigger'",
+            [table],
+        )
+    )
 
 
 # ---- (a) a model deleted, then recreated on the same table, generating at every step --------
@@ -26,15 +38,22 @@ def _check_report(*app_labels) -> str:
 
 @pytest.mark.xfail(
     strict=True,
+    raises=AssertionError,
     reason='#66 (a): own-table coverage of a dropped table is never forgotten, so the recreated '
     'model reads as covered and gets no rule or trigger',
 )
 @override_settings(LOCAL_APPS=['tests.testapp', 'tests.issue66_recreated'])
 def test_a_recreated_model_is_named_as_uncovered():
-    assert 'issue66_recreated_part' in _check_report('issue66_recreated')
+    report = _check_report('issue66_recreated')
+
+    assert 'Soft Delete Rule on "issue66_recreated_part" table!' in report
 
 
-@pytest.mark.xfail(strict=True, reason='#66 (a): no soft-delete rule, so DELETE removes the row')
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason='#66 (a): no soft-delete rule, so DELETE removes the row, and no updated_at trigger',
+)
 def test_a_recreated_models_delete_keeps_the_row(db):
     maker = scalar(
         'INSERT INTO issue66_recreated_maker (name, _created_at, _updated_at) '
@@ -49,6 +68,7 @@ def test_a_recreated_models_delete_keeps_the_row(db):
     execute('DELETE FROM issue66_recreated_part')
 
     assert scalar('SELECT count(*) FROM issue66_recreated_part') == 1
+    assert _has_updated_at_trigger('issue66_recreated_part')
 
 
 # ---- (b) a renamed model's old table retaken by a new model --------------------------------
@@ -56,15 +76,22 @@ def test_a_recreated_models_delete_keeps_the_row(db):
 
 @pytest.mark.xfail(
     strict=True,
+    raises=AssertionError,
     reason='#66 (b): the rename walk keeps coverage under a name live again, so the retaking '
     'model reads as covered by its predecessor',
 )
 @override_settings(LOCAL_APPS=['tests.testapp', 'tests.issue66_retaken'])
 def test_a_model_retaking_a_renamed_tables_name_is_named_as_uncovered():
-    assert 'issue66_retaken_crew' in _check_report('issue66_retaken')
+    report = _check_report('issue66_retaken')
+
+    assert 'Soft Delete Rule on "issue66_retaken_crew" table!' in report
 
 
-@pytest.mark.xfail(strict=True, reason='#66 (b): no soft-delete rule, so DELETE removes the row')
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason='#66 (b): no soft-delete rule, so DELETE removes the row, and no updated_at trigger',
+)
 def test_a_retaking_models_delete_keeps_the_row(db):
     boss = scalar(
         'INSERT INTO issue66_retaken_boss (name, _created_at, _updated_at) '
@@ -79,6 +106,7 @@ def test_a_retaking_models_delete_keeps_the_row(db):
     execute('DELETE FROM issue66_retaken_crew')
 
     assert scalar('SELECT count(*) FROM issue66_retaken_crew') == 1
+    assert _has_updated_at_trigger('issue66_retaken_crew')
 
 
 # ---- (c) a model moved to another app and back ---------------------------------------------
@@ -86,19 +114,24 @@ def test_a_retaking_models_delete_keeps_the_row(db):
 
 @pytest.mark.xfail(
     strict=True,
+    raises=AssertionError,
     reason='#66 (c): a move back keeps the record filed before the first move, so the owned '
     'sweep naming the intermediate table is never re-emitted',
 )
 @override_settings(LOCAL_APPS=['tests.testapp', 'tests.issue66_anc', 'tests.issue66_shop'])
 def test_a_model_moved_back_is_named_as_stale():
-    assert 'issue66_shop_keeper' in _check_report('issue66_anc', 'issue66_shop')
+    report = _check_report('issue66_anc', 'issue66_shop')
+
+    assert 'Owned Sweep on "issue66_anc_hub" that is owned by "issue66_shop_keeper"' in report
 
 
 @pytest.mark.xfail(
     strict=True,
-    reason='#66 (c): the sweep body names issue66_shop_hub, which the move back renamed away',
+    raises=ProgrammingError,
+    reason='#66 (c): the sweep body names issue66_shop_hub, which the move back renamed away, so '
+    'every UPDATE of the keeper table fails',
 )
-def test_archiving_an_owner_of_a_model_moved_back_works(db):
+def test_updating_and_archiving_an_owner_of_a_model_moved_back_works(db):
     hub = scalar(
         'INSERT INTO issue66_anc_hub (name, _created_at, _updated_at) '
         "VALUES ('h', now(), now()) RETURNING id"
@@ -109,7 +142,7 @@ def test_archiving_an_owner_of_a_model_moved_back_works(db):
         params=[hub],
     )
 
-    with transaction.atomic():
-        execute('UPDATE issue66_shop_keeper SET _deleted_at = now()')
+    execute('UPDATE issue66_shop_keeper SET hub_id = hub_id')
+    execute('UPDATE issue66_shop_keeper SET _deleted_at = now()')
 
     assert scalar('SELECT count(*) FROM issue66_anc_hub WHERE _deleted_at IS NOT NULL') == 1

@@ -2,7 +2,7 @@ from django.db import migrations
 
 
 class Migration(migrations.Migration):
-    dependencies = [('issue66_anc', '0005_auto_enforcement'), ('issue66_anc', '0005_auto_enforcement'), ('issue66_shop', '0005_auto_enforcement')]
+    dependencies = [('issue66_anc', '0005_auto_enforcement'), ('issue66_shop', '0005_auto_enforcement')]
 
     operations = [
         migrations.SeparateDatabaseAndState(

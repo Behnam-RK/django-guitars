@@ -10,6 +10,12 @@ Full history and diffs: [GitHub releases](https://github.com/Behnam-RK/django-gu
 
 ## [Unreleased]
 
+## [2.20.1] - 2026-10-09
+
+### Changed
+
+- Tests only: strict-xfail repros for the shapes [#66](https://github.com/Behnam-RK/django-guitars/issues/66) still has open on 2.20.0, from its [re-scope](https://github.com/Behnam-RK/django-guitars/issues/66#issuecomment-6081406034). A model deleted and later recreated on the same `db_table`, or one retaking a renamed model's old table, gets no soft-delete rule or `_updated_at` trigger (and, tenanted, no policy) with `--check` green, so a raw `DELETE` removes its rows; a model moved to another app and back leaves an owned sweep naming the intermediate table, failing every archive of its owner. Four fixture apps (`tests/issue66_*`) carry the histories. No library change.
+
 ## [2.20.0] - 2026-10-09
 
 ### Changed
@@ -485,7 +491,8 @@ First stable release. **BREAKING:** the instrument ladder shifted down one rung 
 
 - Added: initial release — `SetarModel`, `GuitarModel`, `SoftDeletableModel`, `DisableSignals`, `makeguitarmigrations`.
 
-[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.20.0...HEAD
+[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.20.1...HEAD
+[2.20.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.20.1
 [2.20.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.20.0
 [2.19.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.19.1
 [2.19.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.19.0

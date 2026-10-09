@@ -2,9 +2,10 @@
 each row an ``UPDATE`` touches is written once. The statement form it replaced issued a second
 ``UPDATE``, writing every row twice, re-expanded by the table's ``ON UPDATE`` rules."""
 
+from importlib import import_module
+
 import pytest
 from django.apps import apps as django_apps
-from django.core.management import call_command
 from django.db import connection, transaction
 
 from guitars.management.enforcement.command import Command
@@ -133,19 +134,26 @@ def test_replacing_any_other_predecessor_reverses_to_a_drop():
     assert 'AFTER UPDATE' not in operation
 
 
-@pytest.mark.django_db(transaction=True)
-def test_unapplying_the_replacement_puts_the_statement_trigger_back():
-    """Against real PostgreSQL: ``migrate`` back across the replacement, then forward again."""
-    sql = (
+def test_the_generated_reverse_puts_the_statement_trigger_back(db):
+    """Against real PostgreSQL, off the committed replacement itself: run its ``reverse_sql`` for
+    ``Band`` and read the catalogue. Not ``migrate`` back across it, which would unapply every
+    later ``testapp`` migration too, irreversible ``RetireEnforcement`` ones among them."""
+    module = import_module('tests.testapp.migrations.0083_auto_enforcement')
+    (reverse,) = [
+        op.reverse_sql
+        for op in module.Migration.operations
+        if 'ON "testapp_band"' in op.reverse_sql and 'updated_at_trigger' in op.reverse_sql
+    ]
+    catalogue = (
         "SELECT tgtype FROM pg_trigger WHERE tgname = 'updated_at_trigger' "
         "AND tgrelid = 'testapp_band'::regclass"
     )
-    try:
-        call_command('migrate', 'testapp', '0082_auto_enforcement_stamp_function', verbosity=0)
-        statement_level = scalar(sql)
-    finally:
-        call_command('migrate', 'testapp', verbosity=0)
-
     row, before = 1, 2
+
+    with transaction.atomic():
+        execute(reverse)
+        statement_level = scalar(catalogue)
+        transaction.set_rollback(True)
+
     assert not statement_level & (row | before)
-    assert scalar(sql) & row and scalar(sql) & before
+    assert scalar(catalogue) & row and scalar(catalogue) & before

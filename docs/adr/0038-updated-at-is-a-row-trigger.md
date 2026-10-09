@@ -30,7 +30,7 @@ The strongest objection to a row trigger is per-row overhead on a bulk `UPDATE`.
 
 ## Consequences
 
-**Accepted costs.** Every project regenerates one function migration and one replacement migration per app, and `--check` is red until it does. The restoring reverse reads the frozen `set_updated_at()`, so it holds only while that function exists, which a migrated database keeps. `set_updated_at()` lingers as an unused function. The MTI parent trigger still pays its second statement.
+**Accepted costs.** Every project regenerates one function migration and one replacement migration per app, and `--check` is red until it does. The restoring reverse reads the frozen `set_updated_at()`, so it holds only while that function exists, which a migrated database keeps. A history older than 1.1.0 records no digest, so it reverses to a drop although its database holds the statement trigger. `CREATE OR REPLACE TRIGGER` creates a trigger someone hand-dropped where `DROP` + `CREATE` failed loudly, hiding that drift; soft-delete rules already take the same trade. It still takes `SHARE ROW EXCLUSIVE` on every table of the app until the migration commits, which blocks writes (not reads) app-wide for that time: set `lock_timeout` when migrating a large app. `set_updated_at()` lingers as an unused function. The MTI parent trigger still pays its second statement.
 
 **Reversibility.** Easy for the database (a trigger swap), hard in practice for consumers: it is a minor release that every project must migrate, so reverting means another one.
 

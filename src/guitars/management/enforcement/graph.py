@@ -4,7 +4,7 @@ there -- and across apps only an explicit dependency says so. See ADR 0013."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, NamedTuple, cast
 
 from django.db import connection
 from django.db.backends.utils import truncate_name
@@ -22,14 +22,17 @@ from django.db.migrations.state import ProjectState
 
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Iterator
 
     from django.db.migrations.loader import MigrationLoader
 
 
 __all__ = [
     'ObjectRef',
+    'ReplayUnit',
+    'TableEvent',
     'drop_implied_edges',
+    'replay_plan',
     'resolve_dependencies',
     'resolve_object_migration',
 ]
@@ -48,6 +51,27 @@ class ObjectRef(NamedTuple):
         """The ref as a warning names it -- ``app.Model.field``, or ``app.Model`` for a table."""
         stem = f'{self.app_label}.{self.model}'
         return stem if self.field is None else f'{stem}.{self.field}'
+
+
+class TableEvent(NamedTuple):
+    """What a migration does to a table, in operation order (ADR 0043): *kind* ``'create'``,
+    ``'rename'`` (to *new_table*, objects and all), ``'drop'`` or ``'retire'`` (a
+    ``RetireEnforcement``, of one *column* where given)."""
+
+    kind: str
+    table: str
+    new_table: str | None = None
+    column: str | None = None
+
+
+class ReplayUnit(NamedTuple):
+    """One migration file in the order ``migrate`` runs it. *name* is the file whose headers are
+    read; *graph_node* the node ``migrate`` knows, which differs for a file a squash replaced."""
+
+    app_label: str
+    name: str
+    graph_node: tuple[str, str]
+    events: tuple[TableEvent, ...]
 
 
 def _app_migrations_in_order(loader: MigrationLoader, app_label: str) -> list[str]:
@@ -172,23 +196,6 @@ def retired_enforcement(
     """``migration name -> [(table, column), ...]`` for every ``RetireEnforcement`` *app_label*
     has written. Read off the **loaded operations**: a regex over Python call syntax misses
     keyword and quoting variants, and gives no ordering against the headers the scan reads."""
-    # Deferred: ``guitars.operations`` is a public module a consumer's migration imports, and
-    # nothing in the generator should pay for it on a run that meets no retirement.
-    from guitars.operations import RetireEnforcement  # noqa: PLC0415 - see the comment above
-
-    def _retirements(operation) -> list[tuple[str, str | None]]:
-        # Unwrapped for ``_establishes``' reason: this is the standard idiom for a change the
-        # database already has, and a hand-tuned squash carries it.
-        if isinstance(operation, SeparateDatabaseAndState):
-            return [
-                retirement
-                for inner in (*operation.database_operations, *operation.state_operations)
-                for retirement in _retirements(inner)
-            ]
-        if isinstance(operation, RetireEnforcement):
-            return [(operation.table, operation.column)]
-        return []
-
     found: dict[str, list[tuple[str, str | None]]] = {}
     for name in _app_migrations_in_order(loader, app_label):
         migration = loader.disk_migrations.get((app_label, name))
@@ -200,29 +207,65 @@ def retired_enforcement(
     return found
 
 
+def _units(
+    loader: MigrationLoader, *, expand_squashes: bool
+) -> Iterator[tuple[str, str, tuple[str, str], tuple]]:
+    """``(app, file, graph node, operations)`` for every migration, in the order a fresh ``migrate``
+    runs (Django sorts the leaves and parents, so it is deterministic). *expand_squashes* walks a
+    squash as the replaced files on disk, then as itself with no operations: they ran already."""
+    plan: dict[tuple[str, str], None] = {}
+    for leaf in loader.graph.leaf_nodes():
+        plan.update(dict.fromkeys(loader.graph.forwards_plan(leaf)))
+    for node in plan:
+        yield from _expand(loader, node, node, expand=expand_squashes)
+
+
+def _expand(
+    loader: MigrationLoader, key: tuple[str, str], node: tuple[str, str], *, expand: bool
+) -> Iterator[tuple[str, str, tuple[str, str], tuple]]:
+    migration = (
+        loader.graph.nodes[key] if key in loader.graph.nodes else loader.disk_migrations[key]
+    )
+    replaced = list(getattr(migration, 'replaces', None) or ())
+    if expand and replaced and all(each in loader.disk_migrations for each in replaced):
+        for each in replaced:
+            yield from _expand(loader, each, node, expand=True)
+        yield (key[0], key[1], node, ())
+        return
+    yield (key[0], key[1], node, tuple(migration.operations))
+
+
+def _walk(
+    loader: MigrationLoader, *, expand_squashes: bool = False
+) -> Iterator[tuple[str, str, tuple[str, str], object, ProjectState]]:
+    """Every operation of :func:`_units` with the state **before** it, advanced once the caller has
+    looked. A walk over the *graph*, never the files, since a pending squash leaves replaced files
+    on disk the graph has dropped; per operation, so a rename before a delete is seen as it ran."""
+    state = ProjectState(real_apps=loader.unmigrated_apps)
+    for app_label, name, node, operations in _units(loader, expand_squashes=expand_squashes):
+        for operation in operations:
+            yield app_label, name, node, operation, state
+            operation.state_forwards(app_label, state)
+
+
 def dropped_tables(loader: MigrationLoader) -> dict[str, tuple[str, str]]:
     """Tables a ``DeleteModel`` dropped and nothing holds by the end of the history, in any app
     the loader knows, each with the migration that dropped it, for a retirement to follow.
     Positive evidence of a deletion, which an unmapped table alone is not."""
-    # One forward walk over the *graph*, never the files: a pending squash leaves replaced
-    # migrations on disk that the graph has dropped. State is read before each *operation*, so
-    # a create and delete in one migration, or a rename before the delete, is seen as it ran.
-    plan: dict[tuple[str, str], None] = {}
-    for leaf in loader.graph.leaf_nodes():
-        plan.update(dict.fromkeys(loader.graph.forwards_plan(leaf)))
-    state = ProjectState(real_apps=loader.unmigrated_apps)
     dropped: dict[str, tuple[str, str]] = {}
-    for app_label, name in plan:
-        for operation in loader.graph.nodes[app_label, name].operations:
-            # Top level only: a ``DeleteModel`` inside ``SeparateDatabaseAndState`` moves a
-            # model between apps in state and leaves its table where it is.
-            if isinstance(operation, DeleteModel):
-                model_state = state.models.get((app_label, operation.name_lower))
-                if model_state is not None and _owns_a_table(model_state):
-                    table = _table_of(app_label, operation.name_lower, model_state)
-                    dropped[table] = (app_label, name)
-            operation.state_forwards(app_label, state)
-    # A later model taking the same ``db_table`` holds it again.
+    state = None
+    for app_label, name, _node, operation, state in _walk(loader):
+        # Top level only: a ``DeleteModel`` inside ``SeparateDatabaseAndState`` moves a
+        # model between apps in state and leaves its table where it is.
+        if isinstance(operation, DeleteModel):
+            model_state = state.models.get((app_label, operation.name_lower))
+            if model_state is not None and _owns_a_table(model_state):
+                table = _table_of(app_label, operation.name_lower, model_state)
+                dropped[table] = (app_label, name)
+    if state is None:
+        return {}
+    # A later model taking the same ``db_table`` holds it again. ``state`` is the walk's, last
+    # advanced past its final operation when the generator finished.
     held = {
         _table_of(label, model_name, model_state)
         for (label, model_name), model_state in state.models.items()
@@ -234,32 +277,45 @@ def vacated_tables(loader: MigrationLoader) -> dict[tuple[str, str], list[str]]:
     """``migration -> the tables it renames away or drops``, in any app the loader knows (#61).
     An enforcement migration of another app may still name one, and nothing orders it before the
     migration that moves it."""
-    # The walk of :func:`dropped_tables`, reading each operation's own table change: a rename
-    # and a retable alike, and the database half of a ``SeparateDatabaseAndState`` the state
-    # half hides. A table a later model takes again is still vacated: the older file needs it.
-    plan: dict[tuple[str, str], None] = {}
-    for leaf in loader.graph.leaf_nodes():
-        plan.update(dict.fromkeys(loader.graph.forwards_plan(leaf)))
-    state = ProjectState(real_apps=loader.unmigrated_apps)
+    # Each operation's own table change: a rename and a retable alike, and the database half of
+    # a ``SeparateDatabaseAndState`` the state half hides. A table a later model takes again is
+    # still vacated: the older file needs it.
     vacated: dict[tuple[str, str], list[str]] = {}
-    for app_label, name in plan:
-        for operation in loader.graph.nodes[app_label, name].operations:
-            if old := vacating(operation, app_label, state):
-                vacated.setdefault((app_label, name), []).extend(old)
-            operation.state_forwards(app_label, state)
+    for app_label, name, _node, operation, state in _walk(loader):
+        if old := vacating(operation, app_label, state):
+            vacated.setdefault((app_label, name), []).extend(old)
     return vacated
 
 
 def vacating(operation, app_label: str, state: ProjectState) -> list[str]:
     """The tables *operation* leaves behind when run on *state*, before it is applied to it."""
+    return [
+        before
+        for before, after in table_changes(operation, app_label, state)
+        if before is not None and before != after
+    ]
+
+
+def table_changes(
+    operation, app_label: str, state: ProjectState
+) -> list[tuple[str | None, str | None]]:
+    """``(table before, table after)`` for what *operation* does to a table, read on *state*
+    before it is applied: ``(None, t)`` a create, ``(t, None)`` a drop, ``(a, b)`` a rename or a
+    retable. Nothing for a change that moves no table, a proxy or an unmanaged model."""
     if isinstance(operation, SeparateDatabaseAndState):
         # The database half only: the state half decides what Django believes, and for a model
-        # moved between apps it deletes the model while the database half renames the table.
+        # moved between apps it deletes the model while the database half renames the table. A
+        # state-only create or delete therefore reads as nothing, as it is.
         return [
-            table
+            pair
             for inner in operation.database_operations
-            for table in vacating(inner, app_label, state)
+            for pair in table_changes(inner, app_label, state)
         ]
+    if isinstance(operation, CreateModel):
+        if not _owns_options(operation.options):
+            return []
+        explicit = operation.options.get('db_table')
+        return [(None, explicit or _default_table(app_label, operation.name_lower))]
     if isinstance(operation, RenameModel):
         name = operation.old_name_lower
     elif isinstance(operation, (DeleteModel, AlterModelTable)):
@@ -277,12 +333,60 @@ def vacating(operation, app_label: str, state: ProjectState) -> list[str]:
         after = _table_of(app_label, operation.new_name_lower, model_state)
     elif isinstance(operation, AlterModelTable):
         after = operation.table or _default_table(app_label, name)
-    return [before] if before != after else []
+    return [(before, after)] if before != after else []
+
+
+def _retirements(operation) -> list[tuple[str, str | None]]:
+    """The ``(table, column)`` of every ``RetireEnforcement`` in *operation*. Unwrapped for
+    ``_establishes``' reason: this is the standard idiom for a change the database already has,
+    and a hand-tuned squash carries it."""
+    # Deferred: ``guitars.operations`` is a public module a consumer's migration imports, and
+    # nothing in the generator should pay for it on a run that meets no retirement.
+    from guitars.operations import RetireEnforcement  # noqa: PLC0415 - see the comment above
+
+    if isinstance(operation, SeparateDatabaseAndState):
+        return [
+            retirement
+            for inner in (*operation.database_operations, *operation.state_operations)
+            for retirement in _retirements(inner)
+        ]
+    if isinstance(operation, RetireEnforcement):
+        return [(operation.table, operation.column)]
+    return []
+
+
+def replay_plan(loader: MigrationLoader) -> list[ReplayUnit]:
+    """Every migration in the order ``migrate`` runs it, each with the table events its operations
+    make, in operation order (ADR 0043). The scan applies a file's events, then its headers: the
+    order in which a database came to hold what the headers say it holds."""
+    state = ProjectState(real_apps=loader.unmigrated_apps)
+    units: list[ReplayUnit] = []
+    for app_label, name, node, operations in _units(loader, expand_squashes=True):
+        events: list[TableEvent] = []
+        for operation in operations:
+            for before, after in table_changes(operation, app_label, state):
+                if before is None:
+                    events.append(TableEvent('create', cast('str', after)))
+                elif after is None:
+                    events.append(TableEvent('drop', before))
+                else:
+                    events.append(TableEvent('rename', before, after))
+            events.extend(
+                TableEvent('retire', table, column=column)
+                for table, column in _retirements(operation)
+            )
+            operation.state_forwards(app_label, state)
+        units.append(ReplayUnit(app_label, name, node, tuple(events)))
+    return units
 
 
 def _owns_a_table(model_state) -> bool:
     """A proxy shares its concrete model's table, and Django drops no unmanaged table."""
-    return model_state.options.get('managed', True) and not model_state.options.get('proxy')
+    return _owns_options(model_state.options)
+
+
+def _owns_options(options: dict) -> bool:
+    return bool(options.get('managed', True)) and not options.get('proxy')
 
 
 def _table_of(app_label: str, model_name: str, model_state) -> str:

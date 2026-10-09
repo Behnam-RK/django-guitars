@@ -2220,6 +2220,13 @@ class OperationsMixin:
             if self._guard_host(child_table) != app.label:
                 continue
             slots = self._guard_slots(child_table)
+            model = self._guards_by_child()[child_table][0][2]
+            if not owns_column(model, '_deleted_at'):
+                # ``%TYPE`` reads the ancestor's column as the function is created, so a chain
+                # crossing apps needs the edges its redirect rule does.
+                ancestor = column_owner(model, '_deleted_at')
+                self._record_app_object_ref(app.label, ancestor)
+                self._record_app_object_ref(app.label, ancestor, '_deleted_at')
             self._claim_sweep_function_name(
                 slots['function'], (child_table, child_table, None), kind='Guard'
             )

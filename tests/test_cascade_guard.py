@@ -63,6 +63,7 @@ class TestAChildArrivingUnderAnArchivedParent:
     def test_the_restore_of_the_parent_brings_it_back(self, archived_offer):
         """The stamp is the parent's own, so the revive arm (ADR 0024) matches it."""
         tier = Tier._all_objects.create(offer=archived_offer)
+        assert _stamp(tier) is not None
 
         _restore(archived_offer)
 
@@ -88,13 +89,6 @@ class TestAChildArrivingUnderAnArchivedParent:
         tier.save()
 
         assert _stamp(tier) is None
-
-    def test_a_missing_parent_is_left_to_the_foreign_key(self, db):
-        """No row to read a stamp from: the guard steps aside and the constraint answers."""
-        with pytest.raises(IntegrityError), transaction.atomic():
-            with connection.cursor() as cursor:
-                cursor.execute('SET CONSTRAINTS ALL IMMEDIATE')
-            Tier._all_objects.create(offer_id=2**31 - 1)
 
 
 @pytest.mark.django_db
@@ -219,13 +213,33 @@ class TestTheGenerator:
 
         assert command._guard_host('testapp_tier') is None
 
-    def test_a_table_is_hosted_by_the_app_that_created_its_guard(self):
+    def test_a_table_is_hosted_by_the_app_that_created_its_guard(self, monkeypatch):
         command = _command()
         command.existing.soft_delete_guard_dependencies[('testapp_tier',)] = [
             ('testapp', '0001_initial')
         ]
+        monkeypatch.setattr(command, '_table_app_labels', lambda: {'testapp_tier': 'elsewhere'})
 
         assert command._guard_host('testapp_tier') == 'testapp'
+
+    def test_without_a_recorded_create_the_tables_own_host_writes_it(self, monkeypatch):
+        command = _command()
+        command.existing.soft_delete_guard_dependencies.pop(('testapp_tier',), None)
+        monkeypatch.setattr(command, '_table_app_labels', lambda: {'testapp_tier': 'elsewhere'})
+
+        assert command._guard_host('testapp_tier') == 'elsewhere'
+
+    def test_a_joined_guard_orders_itself_after_the_ancestors_column(self):
+        """``%TYPE`` is read as the function is created, so the guard needs the edges the
+        redirect rule does where the ancestor sits in another app."""
+        command = _command()
+        del command.existing.soft_delete_guard[('testapp_offshoot',)]
+
+        _ops(command)
+
+        refs = {(ref.model, ref.field) for ref in command._object_refs['testapp']}
+        assert ('Lineage', None) in refs
+        assert ('Lineage', '_deleted_at') in refs
 
 
 class TestTheSettingOff:

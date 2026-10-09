@@ -21,9 +21,9 @@ Full history and diffs: [GitHub releases](https://github.com/Behnam-RK/django-gu
 ### Changed
 
 - **A child created under an archived parent is archived with it**, where it was live. Code that relied on a live child under an archived parent needs the parent restored first.
-- **Existing projects:** `makemigrations` writes one enforcement migration per app that hosts a cascade child, creating the guards. A guard reads the parent row on every insert and on every update that moves the key, and holds `FOR SHARE` on it until commit, so an insert waits for a concurrent update of that parent and a bulk load pays a lookup per row. It runs as the invoker, who needs `UPDATE` privilege on the parent table for the row lock. `session_replication_role = replica` skips it.
+- **Existing projects:** `makemigrations` writes one enforcement migration per app that hosts a cascade child, creating the guards. A guard reads the parent row on every insert and on every update that moves the key, and holds `FOR SHARE` on it until commit, so an insert waits for a concurrent update of that parent and a bulk load pays a lookup per row, and two transactions that each insert a child and then update the same parent (a counter, a denormalised total) now deadlock (`40P01`) where they serialised. If that pattern is common in your code, set `GUITARS_CASCADE_GUARD = False`. It runs as the invoker, who needs `UPDATE` privilege on the parent table for the row lock. `session_replication_role = replica` skips it.
 - Not closed, and pinned by tests: an archive in a `REPEATABLE READ` transaction whose snapshot predates a child's commit still misses that child (two `SERIALIZABLE` sessions are refused with `40001`), and a child restored by hand under an archived parent stays live.
-- `RetireEnforcement` of a whole table takes its guard with its other triggers.
+- `RetireEnforcement` takes the guard, with a column or a whole table: its body names the key and `_deleted_at`.
 - Tests only, for corners the suite did not reach: a self key on a model with no `_updated_at` (`Twig`), an MTI child's redirect rule and parent trigger across a drop and a rename in the scan, and `--adopt` over a recorded self-cascade trigger.
 
 ## [2.21.0] - 2026-10-09

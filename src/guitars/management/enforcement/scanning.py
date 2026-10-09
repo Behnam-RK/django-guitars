@@ -321,11 +321,11 @@ def _subtract_retired(
 ) -> None:
     """Forget what a ``RetireEnforcement`` dropped, so a later run re-emits what the models
     still call for. *keyed* spell a table and column, *whole_table* a table, *triggers* a family
-    with the index of the table it fires on; only a whole-table form reaches the last two."""
-    # Exactly what the operation drops, never more: a trigger only on the table it names, whole.
-    # Forgetting one it left live read it as gone, and nothing retired it again (#66).
-    if column is None:
-        for recorded, fires_on in (triggers or {}).values():
+    with the index of the table it fires on; only a whole-table form reaches all but the guard."""
+    # Exactly what the operation drops, never more (#66): a trigger only on the table it names,
+    # whole, and the guard on either form, since its body names the column and goes with it.
+    for family, (recorded, fires_on) in (triggers or {}).items():
+        if column is None or family == 'soft_delete_guard':
             for key in [k for k in recorded if k[fires_on] == table]:
                 del recorded[key]
     for recorded in keyed.values():

@@ -234,6 +234,30 @@ class TestTwoWritersOfOneParent:
         assert losers[0].error.sqlstate == '40P01'
 
 
+class TestTheCostOfTheGuard:
+    def test_two_inserts_each_followed_by_an_update_of_the_parent_deadlock(self, session):
+        """What ``FOR SHARE`` costs (ADR 0044): each insert holds a share lock on the parent
+        until commit, and a non-key update of that parent waits for the other's. Without the
+        guard the two serialise with no error. ``GUITARS_CASCADE_GUARD = False`` removes it."""
+        offer = Offer.objects.create(name='p')
+        a, b = session(), session()
+        a.run(INSERT_TIER, offer.pk)
+        b.run(INSERT_TIER, offer.pk)
+        update = "UPDATE testapp_offer SET name = 'x' WHERE id = %s"
+
+        a.start(update, offer.pk)
+        a.wait_until_blocked()
+        try:
+            b.run(update, offer.pk)
+        except psycopg.Error as exc:
+            b.error = exc
+        a.finish()
+
+        losers = [each for each in (a, b) if each.error is not None]
+        assert len(losers) == 1
+        assert losers[0].error.sqlstate == '40P01'
+
+
 class TestWhatIsolationChanges:
     def test_a_repeatable_read_archive_misses_a_child_committed_after_its_snapshot(self, session):
         """The limit, pinned as a limit: the arm reads the snapshot its transaction took before

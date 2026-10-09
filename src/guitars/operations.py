@@ -117,6 +117,20 @@ BEGIN
         EXECUTE format('ALTER TABLE %s DISABLE ROW LEVEL SECURITY', guitars_stripped);
     END LOOP;
 
+    -- The guard names the key and ``_deleted_at`` in its body and records no dependency, so
+    -- either form drops it: left, every write to the table fails once the column is gone, and
+    -- the generator writes it again for the key that stays.
+    FOR guitars_row IN
+        SELECT guitars_trigger.tgname AS name
+        FROM pg_trigger AS guitars_trigger
+        WHERE guitars_trigger.tgrelid = guitars_target
+          AND NOT guitars_trigger.tgisinternal
+          AND guitars_trigger.tgparentid = 0
+          AND guitars_trigger.tgname LIKE 'soft\\_delete\\_guard\\_on%'
+    LOOP
+        EXECUTE format('DROP TRIGGER IF EXISTS %I ON %s', guitars_row.name, guitars_target);
+    END LOOP;
+
     IF NOT {scoped_to_column} THEN
         FOR guitars_row IN
             SELECT guitars_trigger.tgname AS name
@@ -130,7 +144,6 @@ BEGIN
                   OR guitars_trigger.tgname LIKE 'soft\\_delete\\_owned\\_sweep%'
                   OR guitars_trigger.tgname LIKE 'soft\\_delete\\_revive%'
                   OR guitars_trigger.tgname LIKE 'soft\\_delete\\_cascade\\_on%'
-                  OR guitars_trigger.tgname LIKE 'soft\\_delete\\_guard\\_on%'
                   OR guitars_trigger.tgname LIKE 'guitars\\_fill%'
               )
         LOOP

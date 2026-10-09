@@ -13,6 +13,7 @@ from guitars.management.enforcement.headers import (
     HEADER_MTI_SOFT_DELETE,
     HEADER_MTI_UPDATED_AT,
     HEADER_SOFT_DELETE,
+    HEADER_SOFT_DELETE_GUARD,
     HEADER_SOFT_DELETE_OWNED_SWEEP,
     HEADER_SOFT_DELETE_RELATED,
     HEADER_SOFT_DELETE_RELATED_RETIRED,
@@ -327,6 +328,18 @@ class TestARetireEvent:
         )
 
         assert not existing.soft_delete_related
+        assert 'shop_child' in existing.triggers
+
+    def test_a_column_retirement_takes_the_guard_too(self, monkeypatch):
+        """Its body names the key, so it is dropped with the column and written again after."""
+        guard = HEADER_SOFT_DELETE_GUARD.format(table='shop_child') + ' [SQL:eeeeeeeeeeee]\n'
+        existing = _replay(
+            monkeypatch,
+            (guard + _trigger('shop_child'), []),
+            ('', [TableEvent('retire', 'shop_child', column='owner_id')]),
+        )
+
+        assert ('shop_child',) not in existing.soft_delete_guard
         assert 'shop_child' in existing.triggers
 
 

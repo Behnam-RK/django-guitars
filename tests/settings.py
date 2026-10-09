@@ -48,6 +48,11 @@ INSTALLED_APPS = [  # noqa: F405
     'tests.crossapp_tenant_child',
     'tests.crossapp_retire_owner',
     'tests.crossapp_retire_child',
+    # The shapes #66 still has open on 2.20.0, pinned as strict xfails (tests/test_issue_66_repros.py).
+    'tests.issue66_recreated',
+    'tests.issue66_retaken',
+    'tests.issue66_anc',
+    'tests.issue66_shop',
 ]
 
 LOCAL_APPS = ['tests.testapp']

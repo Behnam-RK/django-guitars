@@ -130,17 +130,42 @@ def to_field_refusal(fk_field, owner_table: str) -> str | None:
     return None
 
 
+def dollar_refusal(related_model, fk_field, owner_table: str) -> str | None:
+    """Why a name gives a key no arm, or ``None`` (#80, ADR 0039): the arm is spliced into a
+    dollar-quoted body, which ``$$`` in an identifier would close. One answer for the generator
+    and :func:`classify_cascade`, the rule it replaced having needed none -- one alone leaves rows live."""
+    owner = column_owner(fk_field.related_model, '_deleted_at')
+    names = [owner_table, owner._meta.pk.column, related_model._meta.db_table, fk_field.column]
+    try:
+        names.append(fk_field.target_field.column)
+    except FieldDoesNotExist:
+        pass
+    if not owns_column(related_model, '_deleted_at'):
+        target = column_owner(related_model, '_deleted_at')
+        link = related_model._meta.get_ancestor_link(target)
+        names += [target._meta.db_table, target._meta.pk.column]
+        names += [] if link is None else [link.column]
+    if any('$$' in (name or '') for name in names):
+        return (
+            'a table or column it names contains "$$", which closes the dollar quoting its '
+            "owner's trigger depends on"
+        )
+    return None
+
+
 def cascade_refusal(related_model, fk_field, owner_table: str) -> str | None:
     """Why a key is :attr:`CascadeKind.REFUSED`, so a report names it: its target is a model
-    ``guitars.E005`` refuses (the column holds that model's own key, not the ancestor's id), else
-    :func:`joined_refusal` for a joined key and :func:`to_field_refusal` for a flat one."""
+    ``guitars.E005`` refuses, else :func:`joined_refusal` (joined) or :func:`to_field_refusal`
+    (flat), else :func:`dollar_refusal`."""
     from guitars.checks import refuses_pk_not_parent_link  # noqa: PLC0415 - checks imports this
 
     if refuses_pk_not_parent_link(fk_field.related_model):
         return f"it points at '{fk_field.related_model._meta.label}', refused by guitars.E005"
     if not owns_column(related_model, '_deleted_at'):
-        return joined_refusal(related_model, fk_field)
-    return to_field_refusal(fk_field, owner_table)
+        refusal = joined_refusal(related_model, fk_field)
+    else:
+        refusal = to_field_refusal(fk_field, owner_table)
+    return refusal or dollar_refusal(related_model, fk_field, owner_table)
 
 
 class CascadeKind(Enum):

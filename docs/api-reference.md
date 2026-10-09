@@ -143,7 +143,7 @@ it rather than getting the same `DO INSTEAD` one table down, and emits no rule, 
 owners by the per-statement hole closed in 2.6.0 (see
 [`owned-relations.md`](owned-relations.md)). Scoped by the *dependent's* app.
 Reads owners with tenancy bypassed, so it needs a role that sees every tenant,
-and follows only relations this database actually holds an owned rule for.
+and follows only relations this database actually holds an owned rule or sweep for.
 `--repair` runs to a fixpoint (2.7.0): one pass walks dependents by model
 label, so a chain of ownership sorting against that order needs another.
 | Flag | Effect |

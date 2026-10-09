@@ -5,6 +5,7 @@ The leak is reproduced by dropping the sweep trigger, which is what such a datab
 from __future__ import annotations
 
 import re
+from importlib import import_module
 from unittest import mock
 
 import pytest
@@ -30,10 +31,21 @@ def band(db):
     return Band.objects.create(name='Rush')
 
 
+def _restore_owned_rules() -> None:
+    """Rebuild the owned rules 2.19.0 retired, by running the retirement's own ``reverse_sql``
+    (ADR 0039): a database holds a rule only if it was migrated before it."""
+    module = import_module('tests.testapp.migrations.0085_auto_enforcement')
+    with connection.cursor() as cursor:
+        for operation in module.Migration.operations:
+            if 'DROP RULE' in operation.sql and 'soft_delete_owned' in operation.sql:
+                cursor.execute(operation.reverse_sql)
+
+
 def _drop_sweep_triggers():
     """Put the database back in its pre-2.6.0 shape -- rules, no statement-level sweep. The
     leak this command repairs is unreachable while the trigger is installed, so a test that
     did not do this could only ever assert the command finds nothing."""
+    _restore_owned_rules()
     with connection.cursor() as cursor:
         cursor.execute("""
             SELECT tgname, relname FROM pg_trigger

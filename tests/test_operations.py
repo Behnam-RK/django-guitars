@@ -36,19 +36,20 @@ def _apply(operation: RetireEnforcement) -> None:
 
 
 def test_column_mode_drops_only_what_depends_on_that_column(db):
-    """The narrow form, and the one an author reaches for: it takes the cascade rule that
-    names the column -- which lives on the *other* table -- and nothing else."""
-    _apply(RetireEnforcement('testapp_setlistentry', column='setlist_id'))
+    """The narrow form: it takes the rule that names the column, nothing else. A cascade arm
+    names its foreign key in a plpgsql body, which records no dependency (ADR 0039), so the column
+    is ``_deleted_at``, the one the table's own ``soft_delete`` rule reads."""
+    _apply(RetireEnforcement('testapp_setlistentry', column='_deleted_at'))
 
     assert _objects('testapp_setlist')[0] == ['soft_delete']
-    # The child's own rule and trigger are untouched: the column is going, not the table.
-    assert _objects('testapp_setlistentry') == (['soft_delete'], ['updated_at_trigger'])
+    # The rule goes; the trigger is untouched: the column is going, not the table.
+    assert _objects('testapp_setlistentry') == ([], ['updated_at_trigger'])
 
 
 def test_column_mode_leaves_the_self_cascade_trigger_alone(db):
     """A trigger is not a column dependency. Retiring a column must not take the tree's
     trigger with it, which a table-wide sweep would."""
-    _apply(RetireEnforcement('testapp_setlistentry', column='setlist_id'))
+    _apply(RetireEnforcement('testapp_setlist', column='_deleted_at'))
 
     assert (
         'soft_delete_self_cascade_15_testapp_setlist_9_parent_id' in _objects('testapp_setlist')[1]
@@ -70,20 +71,20 @@ def test_it_unblocks_the_drop_column_that_would_otherwise_fail(db):
     ``CASCADE``, so a rule naming the column makes ``RemoveField`` fail at ``migrate`` --
     spelled here as the bare ``ALTER TABLE`` so the test says the same thing on 5.2."""
     with pytest.raises(Exception, match='depends on column'), connection.cursor() as cursor:
-        cursor.execute('ALTER TABLE testapp_setlistentry DROP COLUMN setlist_id')
+        cursor.execute('ALTER TABLE testapp_setlistentry DROP COLUMN _deleted_at')
 
 
 def test_the_drop_column_succeeds_once_the_enforcement_is_retired(db):
     """The other half: same statement, after the operation."""
-    _apply(RetireEnforcement('testapp_setlistentry', column='setlist_id'))
+    _apply(RetireEnforcement('testapp_setlistentry', column='_deleted_at'))
 
     with connection.cursor() as cursor:
-        cursor.execute('ALTER TABLE testapp_setlistentry DROP COLUMN setlist_id')
+        cursor.execute('ALTER TABLE testapp_setlistentry DROP COLUMN _deleted_at')
 
     with connection.cursor() as cursor:
         cursor.execute(
             'SELECT count(*) FROM information_schema.columns '
-            "WHERE table_name = 'testapp_setlistentry' AND column_name = 'setlist_id'"
+            "WHERE table_name = 'testapp_setlistentry' AND column_name = '_deleted_at'"
         )
         assert cursor.fetchone()[0] == 0
 

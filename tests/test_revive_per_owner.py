@@ -63,7 +63,10 @@ class TestTheOwnersOperation:
         ]
         body = _forward(revive).sql
 
-        assert body.count('UPDATE "testapp_merch" AS guitars_child') == 2
+        # Two keys to merch, each an archive arm and a revive arm (#80, ADR 0039).
+        assert body.count('UPDATE "testapp_merch" AS guitars_child') == 4
+        assert body.count('SET _deleted_at = guitars_archived._deleted_at') == 2
+        assert body.count('SET _deleted_at = NULL') == 2
         assert body.index('AND EXISTS (') < body.index('UPDATE "testapp_merch"')
         assert body.count('CREATE TRIGGER') == 1
 
@@ -88,7 +91,8 @@ class TestTheOwnersOperation:
 
 
 class TestTheTransition:
-    """Every per-key revive a project recorded is retired, its key still cascading or not."""
+    """Every per-key revive and cascade rule a project recorded is retired, its key still
+    cascading or not: the owner's trigger carries both (2.16.0, and 2.19.0 for the rule)."""
 
     @staticmethod
     def _retirements(key):
@@ -98,21 +102,49 @@ class TestTheTransition:
         command.existing.soft_delete_revive[key] = 'def'
         return command._retired_cascade_operations(_app())
 
-    def test_a_key_still_cascading_keeps_its_rule_and_loses_its_trigger(self):
-        (retirement,) = self._retirements(('testapp_album', 'testapp_band', None))
+    def test_a_key_still_cascading_loses_its_rule_and_its_trigger(self):
+        rule, revive = self._retirements(('testapp_album', 'testapp_band', None))
 
-        assert retirement.startswith('# Soft Delete Revive Trigger retired on "testapp_album"')
-        assert 'DROP TRIGGER IF EXISTS' in _forward(retirement).sql
+        assert rule.startswith('# Soft Delete Related Rule retired on "testapp_album"')
+        assert 'DROP RULE IF EXISTS "soft_delete_related_testapp_album"' in _forward(rule).sql
+        assert revive.startswith('# Soft Delete Revive Trigger retired on "testapp_album"')
+        assert 'DROP TRIGGER IF EXISTS' in _forward(revive).sql
+
+    def test_the_rules_reverse_rebuilds_it_as_it_was_written(self):
+        rule, _revive = self._retirements(('testapp_album', 'testapp_band', None))
+
+        reverse = _forward(rule).reverse_sql
+        assert 'CREATE OR REPLACE RULE "soft_delete_related_testapp_album"' in reverse
+        assert 'AS ON UPDATE TO "testapp_band"' in reverse
+        assert 'WHERE "band_id" = old."id"' in reverse
+
+    def test_a_joined_rules_reverse_rebuilds_the_joined_rule(self):
+        rule, _revive = self._retirements(('testapp_touringfestival', 'testapp_label', None))
+
+        reverse = _forward(rule).reverse_sql
+        assert 'AS ON UPDATE TO "testapp_label"' in reverse
+        assert 'UPDATE "testapp_festival"' in reverse
+        assert 'RAISE' not in reverse
+
+    def test_a_rule_whose_arm_is_refused_is_not_dropped(self, monkeypatch):
+        """Dropping it would end the cascade: its arm is not written."""
+        key = ('testapp_album', 'testapp_band', None)
+        command = Command()
+        clear_cascade_coverage(command)
+        command.existing.soft_delete_related[key] = 'abc'
+        monkeypatch.setattr(command, '_revive_arm', lambda *args, **kwargs: None)
+
+        assert command._retired_cascade_operations(_app()) == []
 
     def test_its_reverse_rebuilds_the_flat_trigger(self):
-        (retirement,) = self._retirements(('testapp_album', 'testapp_band', None))
+        _rule, retirement = self._retirements(('testapp_album', 'testapp_band', None))
 
         reverse = _forward(retirement).reverse_sql
         assert 'CREATE TRIGGER "soft_delete_revive_12_testapp_band_13_testapp_album"' in reverse
         assert 'guitars_child."band_id" = guitars_revived."id"' in reverse
 
     def test_a_joined_keys_reverse_rebuilds_the_joined_trigger(self):
-        (retirement,) = self._retirements(('testapp_touringfestival', 'testapp_label', None))
+        _rule, retirement = self._retirements(('testapp_touringfestival', 'testapp_label', None))
 
         reverse = _forward(retirement).reverse_sql
         assert 'UPDATE "testapp_festival" AS guitars_child' in reverse

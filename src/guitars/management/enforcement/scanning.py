@@ -757,7 +757,9 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
                     trigger_retirement_sites.setdefault(id(recorded), []).append(
                         CascadeRetirementSite(app.label, path.stem, _unescaped_groups(match), None)
                     )
-                    retirement_apps.add(app.label)
+                    # Not ``retirement_apps``: ADR 0021 waives the digest guard where a create or
+                    # drop recurs *this run*, at the point it is written. A scan-time flag made the
+                    # one-time retirement of every owned rule (#80, ADR 0039) permanent for the app.
             retirements = list(_RE_TENANT_AUTOFILL_RETIRED.finditer(content))
             for match in retirements:
                 existing_tenant_autofill.pop(_autofill_key(match), None)

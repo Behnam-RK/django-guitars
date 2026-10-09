@@ -17,7 +17,7 @@ from guitars.introspection import (
     rule_update_cycle_edges,
 )
 from guitars.management import _generator
-from guitars.management.enforcement.operations import _owned_rule_name
+from guitars.management.enforcement.operations import _owned_rule_name, _owned_sweep_name
 from guitars.models.soft_deletion import _owned_fields
 from guitars.routing import ENFORCEMENT_VENDOR
 from guitars.sql._identifiers import _split_qualified, _unescape_ident
@@ -61,16 +61,24 @@ class Command(BaseCommand):
 
     @staticmethod
     def _owned_rules_in_database(using: str) -> set[tuple[str, str]]:
-        """``(table, rule_name)`` for every owned rule the database actually holds, under both
-        the bare and the schema-qualified table name."""
+        """``(table, name)`` for every owned rule *or sweep trigger* the database actually holds,
+        under both the bare and the schema-qualified table name. A database migrated before
+        2.19.0 holds the rule; one after it holds the sweep alone (#80, ADR 0039)."""
         with connections[using].cursor() as cursor:
             cursor.execute(
                 'SELECT schemaname, tablename, rulename FROM pg_rules '
-                "WHERE rulename LIKE 'soft/_delete/_owned/_%' ESCAPE '/'"
+                "WHERE rulename LIKE 'soft/_delete/_owned/_%' ESCAPE '/' "
+                'UNION ALL '
+                'SELECT guitars_ns.nspname, guitars_class.relname, guitars_trigger.tgname '
+                'FROM pg_trigger AS guitars_trigger '
+                'JOIN pg_class AS guitars_class ON guitars_class.oid = guitars_trigger.tgrelid '
+                'JOIN pg_namespace AS guitars_ns ON guitars_ns.oid = guitars_class.relnamespace '
+                'WHERE NOT guitars_trigger.tgisinternal '
+                "AND guitars_trigger.tgname LIKE 'soft/_delete/_owned/_sweep/_%' ESCAPE '/'"
             )
             live = set()
-            for schema, table, rule in cursor.fetchall():
-                live.update({(table, rule), (f'{schema}.{table}', rule)})
+            for schema, table, name in cursor.fetchall():
+                live.update({(table, name), (f'{schema}.{table}', name)})
             return live
 
     @classmethod
@@ -97,6 +105,7 @@ class Command(BaseCommand):
                 # every relation on it is dropped, and the run reports a sweep of none of them.
                 try:
                     rule = _owned_rule_name(dependent._meta.db_table, field.column)
+                    sweep = _owned_sweep_name(owner_table, dependent._meta.db_table, field.column)
                     schema, bare = _split_qualified('table', owner_table)
                 except ValueError as exc:
                     # Named, never swallowed: a `db_table` this cannot spell is one relation
@@ -108,7 +117,7 @@ class Command(BaseCommand):
                     )
                     continue
                 key = bare if schema is None else f'{schema}.{bare}'
-                if (key, _unescape_ident(rule[1:-1])) not in live:
+                if not any((key, _unescape_ident(name[1:-1])) in live for name in (rule, sweep)):
                     continue
                 owners.setdefault(dependent, []).append((model, field.name))
         return owners, unresolved
@@ -180,8 +189,8 @@ class Command(BaseCommand):
 
     def handle(self, *app_labels, **options):
         using = options['database']
-        # ``_owned_rules_in_database`` reads ``pg_rules``: on another backend there are no
-        # owned rules to follow, so a sweep there would be a syntax error, never a repair.
+        # ``_owned_rules_in_database`` reads the PostgreSQL catalogue: on another backend there
+        # is nothing to follow, so a sweep there would be a syntax error, never a repair.
         if connections[using].vendor != ENFORCEMENT_VENDOR:
             raise CommandError(
                 f"Database '{using}' is {connections[using].vendor}, not "

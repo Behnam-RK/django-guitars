@@ -149,10 +149,13 @@ def test_a_renamed_owned_target_drops_the_rule_it_left_behind():
     (operation,) = [
         candidate
         for candidate in command._build_operations(apps.get_app_config('testapp'))
-        if candidate.startswith('# Soft Delete Owned Rule on "testapp_riser"')
+        if candidate.startswith('# Soft Delete Owned Rule retired on "testapp_riser"')
     ]
 
+    # Retired since 2.19.0 (#80): over every name the dependent's table held, and the reverse
+    # rebuilds the rule under the current one.
     assert 'DROP RULE IF EXISTS "soft_delete_owned_16_testapp_oldriser_8_riser_id"' in operation
+    assert 'DROP RULE IF EXISTS "soft_delete_owned_13_testapp_riser_8_riser_id"' in operation
     assert 'CREATE OR REPLACE RULE "soft_delete_owned_13_testapp_riser_8_riser_id"' in operation
 
 
@@ -166,10 +169,14 @@ def test_a_renamed_cascade_child_drops_the_rule_it_left_behind():
     (operation,) = [
         candidate
         for candidate in command._build_operations(apps.get_app_config('testapp'))
-        if candidate.startswith('# Soft Delete Related Rule on "testapp_album"')
+        if candidate.startswith('# Soft Delete Related Rule retired on "testapp_album"')
     ]
 
+    # Retired since 2.19.0 (#80), over both names; the reverse rebuilds it under the current one.
     assert 'DROP RULE IF EXISTS "soft_delete_related_testapp_oldalbum" ON "testapp_band"' in (
+        operation
+    )
+    assert 'DROP RULE IF EXISTS "soft_delete_related_testapp_album" ON "testapp_band"' in (
         operation
     )
     assert 'CREATE OR REPLACE RULE "soft_delete_related_testapp_album"' in operation
@@ -242,7 +249,7 @@ def test_a_renamed_owners_revive_drops_its_old_name():
 
     assert 'DROP TRIGGER IF EXISTS "soft_delete_revive_on_15_testapp_oldband"' in forward
     assert 'DROP FUNCTION IF EXISTS "soft_delete_revive_on_15_testapp_oldband"()' in forward
-    assert 'CREATE TRIGGER "soft_delete_revive_on_12_testapp_band"' in forward
+    assert 'CREATE OR REPLACE TRIGGER "soft_delete_revive_on_12_testapp_band"' in forward
 
 
 def test_a_rename_wrapped_in_separate_database_and_state_is_still_seen():
@@ -549,17 +556,17 @@ def test_a_graph_node_with_no_disk_migration_is_skipped_by_the_rename_walk(loade
     assert missing not in graph.renames_by_migration(loader, 'testapp')
 
 
-def test_a_revive_re_emission_drops_its_trigger_before_creating_it():
-    """``CREATE TRIGGER`` has no ``OR REPLACE``. A stale digest re-emits the operation, and a
-    bare create over a live trigger aborts the migration with *already exists* -- taking the
-    rule beside it down too, the operation being atomic."""
+def test_a_revive_re_emission_replaces_its_trigger_without_dropping_it():
+    """A bare ``CREATE TRIGGER`` aborts over a live trigger, and ``DROP`` first holds ACCESS
+    EXCLUSIVE on every owner table of the app until the migration commits;
+    ``CREATE OR REPLACE TRIGGER`` (PG 14) does neither (#80, ADR 0039)."""
     command = Command()
     command.existing.soft_delete_revive_owner[('testapp_band',)] = 'stale00000'
 
     forward = _owner_revive(command)
 
-    assert 'DROP TRIGGER "soft_delete_revive_on_12_testapp_band"' in forward
-    assert forward.index('DROP TRIGGER') < forward.index('CREATE TRIGGER')
+    assert 'CREATE OR REPLACE TRIGGER "soft_delete_revive_on_12_testapp_band"' in forward
+    assert 'DROP TRIGGER' not in forward
 
 
 class TestAModelHandedToAnotherApp:

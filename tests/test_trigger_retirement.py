@@ -239,13 +239,16 @@ def _self_header(template) -> str:
     ids=['owned', 'sweep', 'self'],
 )
 class TestTheScan:
-    def test_a_retirement_pops_the_key_and_marks_the_app(
+    def test_a_retirement_pops_the_key_and_marks_no_app(
         self, monkeypatch, create, retire, header, family, key
     ):
+        """Marked where a create or drop is *written* (ADR 0021 point 9), never at scan time: a
+        one-time retirement -- every owned rule's, in 2.19.0 (#80) -- must not waive the digest
+        guard for the app for ever."""
         existing = _scan_with(monkeypatch, header(create), header(retire))
 
         assert key not in getattr(existing, family)
-        assert 'testapp' in existing.retirement_apps
+        assert 'testapp' not in existing.retirement_apps
 
     def test_a_create_after_it_records_the_key_again(
         self, monkeypatch, create, retire, header, family, key
@@ -524,24 +527,18 @@ class TestARedeclaredKeyIsOrderedAfterItsRetirement:
 
         assert ('otherapp', '0007_x') in self._edges(command)
 
-    def test_an_owned_rule_and_sweep(self):
+    def test_an_owned_sweep(self):
+        """The rule no longer has a create to order (#80, ADR 0039): only the sweep does."""
         from guitars.management.enforcement.scanning import CascadeRetirementSite  # noqa: PLC0415
 
         command = _command()
         key = ('testapp_stagehand', 'testapp_rider', 'stagehand_id')
-        command.existing.soft_delete_owned.pop(key)
         command.existing.soft_delete_owned_sweep.pop(key)
-        command.existing.owned_retirement_sites.append(
-            CascadeRetirementSite('otherapp', '0008_y', key, None)
-        )
         command.existing.owned_sweep_retirement_sites.append(
             CascadeRetirementSite('otherapp', '0009_z', key, None)
         )
 
-        edges = self._edges(command)
-
-        assert ('otherapp', '0008_y') in edges
-        assert ('otherapp', '0009_z') in edges
+        assert ('otherapp', '0009_z') in self._edges(command)
 
 
 def test_a_rename_walked_late_does_not_overwrite_a_newer_record(monkeypatch):

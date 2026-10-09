@@ -23,43 +23,64 @@ from tests.conftest import clear_cascade_coverage, execute, scalar
 from tests.testapp.models import Festival, HeadlineFestival, Label, TouringFestival
 
 
-def _label_operations() -> tuple[Command, str]:
+def _label_command() -> Command:
     command = Command()
     command._skipped_rule_notes.clear()
     clear_cascade_coverage(command)
-    return command, '\n'.join(command._cascade_operations(Label))
+    # Files the refusals and notes a run reports, which the arms are then rendered under.
+    command._cascade_operations(Label)
+    return command
 
 
-class TestTheJoinedRule:
+def _label_arms(command: Command | None = None) -> dict[str, str]:
+    """``related table -> archive arm`` for every cascade key into ``Label``: the cascade rules
+    became arms of the owner's trigger in 2.19.0 (#80, ADR 0039), the joined form included."""
+    command = command or _label_command()
+    candidates, _selfs = command._cascade_candidates(Label, Label._meta.db_table, report=False)
+    return {
+        related._meta.db_table: command._archive_arm(
+            (related._meta.db_table, Label._meta.db_table, field.column),
+            related,
+            field.column,
+            'id',
+        )
+        for related, field, _primary in candidates
+    }
+
+
+class TestTheJoinedArm:
     def test_a_descendant_key_updates_the_ancestor_through_the_descendants_table(self):
-        _, blob = _label_operations()
+        arm = _label_arms()['testapp_touringfestival']
 
-        assert 'RULE "soft_delete_related_testapp_touringfestival"' in blob
-        rule = blob.split('RULE "soft_delete_related_testapp_touringfestival"')[1].split(');')[0]
-        assert 'UPDATE "testapp_festival"' in rule
-        assert 'SET _deleted_at = new._deleted_at' in rule
-        assert 'SELECT "festival_ptr_id" FROM "testapp_touringfestival"' in rule
-        assert '"promoter_id" = old."id"' in rule
-        # The guard on the ancestor's row, not the trigger condition's ``old._deleted_at IS NULL``.
-        assert re.search(r'\)\s*AND _deleted_at IS NULL', rule)
+        assert 'UPDATE "testapp_festival" AS guitars_child' in arm
+        assert 'SET _deleted_at = guitars_archived._deleted_at' in arm
+        assert 'SELECT guitars_link."festival_ptr_id" FROM "testapp_touringfestival"' in arm
+        assert 'guitars_link."promoter_id" = guitars_archived.guitars_key' in arm
+        # The guard on the ancestor's row, not the trigger condition's ``before IS NULL``.
+        assert re.search(r'\)\s*AND guitars_child\._deleted_at IS NULL', arm)
 
     def test_the_pointer_is_the_descendants_own_not_the_roots(self):
         """In a default chain every key is its parent link, so the descendant's link column
         matches the ancestor's pk directly -- no multi-hop join, whatever the depth."""
-        _, blob = _label_operations()
+        arm = _label_arms()['testapp_headlinefestival']
 
-        rule = blob.split('RULE "soft_delete_related_testapp_headlinefestival"')[1].split(');')[0]
-        assert 'UPDATE "testapp_festival"' in rule
-        assert 'SELECT "touringfestival_ptr_id" FROM "testapp_headlinefestival"' in rule
-        assert '"sponsor_id" = old."id"' in rule
+        assert 'UPDATE "testapp_festival" AS guitars_child' in arm
+        assert 'SELECT guitars_link."touringfestival_ptr_id" FROM "testapp_headlinefestival"' in arm
+        assert 'guitars_link."sponsor_id" = guitars_archived.guitars_key' in arm
 
-    def test_the_flat_rule_for_the_roots_own_key_is_unchanged(self):
-        _, blob = _label_operations()
+    def test_the_flat_arm_for_the_roots_own_key_is_not_joined(self):
+        arm = _label_arms()['testapp_festival']
 
-        rule = blob.split('RULE "soft_delete_related_testapp_festival"')[1].split(');')[0]
-        assert 'UPDATE "testapp_festival"' in rule
-        assert '"market_id" = old."id"' in rule
-        assert 'SELECT' not in rule
+        assert 'UPDATE "testapp_festival" AS guitars_child' in arm
+        assert 'guitars_child."market_id" = guitars_archived.guitars_key' in arm
+        assert 'guitars_link' not in arm
+
+    def test_no_cascade_rule_is_written_for_any_of_them(self):
+        command = Command()
+        command._skipped_rule_notes.clear()
+        clear_cascade_coverage(command)
+
+        assert command._cascade_operations(Label) == []
 
     def test_each_joined_rule_has_a_revive_arm_against_the_ancestor(self):
         """In the owner's one revive trigger since 2.16.0 (#70), beside the flat arms."""
@@ -83,7 +104,7 @@ class TestTheJoinedRule:
         assert 'guitars_child._deleted_at = guitars_revived._deleted_at' in revive
 
     def test_nothing_is_reported_skipped_any_more(self):
-        command, _ = _label_operations()
+        command = _label_command()
 
         assert not [n for n in command._skipped_rule_notes if 'testapp_touringfestival' in n]
         assert not [n for n in command._skipped_rule_notes if 'testapp_headlinefestival' in n]
@@ -124,13 +145,13 @@ class TestAnAncestorRoutedOffPostgresqlIsLeftAlone:
     """The rule names the ancestor's table, so a router sending it elsewhere is a table this DDL
     cannot name -- the gate the descendant already gets, asked of the second end too."""
 
-    def test_the_generator_writes_no_joined_rule(self, monkeypatch):
+    def test_the_generator_writes_no_joined_arm(self, monkeypatch):
         monkeypatch.setattr(introspection, 'migrates_to_postgresql', lambda m: m is not Festival)
 
-        _, blob = _label_operations()
+        arms = _label_arms()
 
-        assert 'soft_delete_related_testapp_touringfestival' not in blob
-        assert 'soft_delete_related_testapp_headlinefestival' not in blob
+        assert 'testapp_touringfestival' not in arms
+        assert 'testapp_headlinefestival' not in arms
 
     def test_the_cycle_graph_files_no_edge(self, monkeypatch):
         owner, root, child = TestTheCycleGraphFollowsTheAncestor._models()
@@ -314,28 +335,34 @@ class TestTwoJoinedKeysFromOneDescendant:
         }
         return command, command._cascade_operations(Owner), Child
 
-    def test_two_rules_with_distinct_names_and_no_clash(self):
-        """Two rules; their inverses are two arms of the owner's one trigger (2.16.0)."""
+    def test_two_keys_two_arms_each_way_and_no_rule(self):
+        """No rule at all since 2.19.0 (#80): each key is an archive arm and a revive arm of the
+        owner's one trigger (2.16.0), so there are no names to clash over."""
         command, operations, child = self._operations()
 
-        names = [name for op in operations for name in re.findall(r'RULE "([^"]+)"', op)[:1]]
-        assert len(operations) == 2
-        assert len(set(names)) == 2
+        assert operations == []
         assert command._rule_name_clashes == []
         assert command._skipped_rule_notes == []
         owner_table = child._meta.get_field('first').related_model._meta.db_table
         for column in ('first_id', 'second_id'):
-            arm = command._revive_arm((child._meta.db_table, owner_table, column), child, column, 'id')
+            key = (child._meta.db_table, owner_table, column)
+            arm = command._revive_arm(key, child, column, 'id')
             assert f'guitars_link."{column}" = guitars_revived."id"' in arm
             assert 'guitars_link."root_ptr_id"' in arm
+            archive = command._archive_arm(key, child, column, 'id')
+            assert f'guitars_link."{column}" = guitars_archived.guitars_key' in archive
 
-    def test_each_rule_is_joined_and_carries_its_own_column(self):
-        _, operations, _ = self._operations()
+    def test_each_archive_arm_is_joined_and_carries_its_own_column(self):
+        command, _, child = self._operations()
+        owner_table = child._meta.get_field('first').related_model._meta.db_table
 
-        rules = [op for op in operations if 'CREATE OR REPLACE RULE' in op]
-        assert len(rules) == 2
-        assert all('SELECT "root_ptr_id"' in rule and 'IN (' in rule for rule in rules)
-        assert sorted(re.findall(r'WHERE "(\w+)" = old', ' '.join(rules))) == [
+        arms = [
+            command._archive_arm((child._meta.db_table, owner_table, column), child, column, 'id')
+            for column in ('first_id', 'second_id')
+        ]
+
+        assert all('SELECT guitars_link."root_ptr_id"' in arm and 'IN (' in arm for arm in arms)
+        assert sorted(re.findall(r'guitars_link\."(\w+)" = guitars_archived', ' '.join(arms))) == [
             'first_id',
             'second_id',
         ]
@@ -600,15 +627,23 @@ class TestTheParentLinkIsTheAncestorsNotTheDescendantsPk:
         command._skipped_rule_notes.clear()
         clear_cascade_coverage(command)
         command.reverse_relations_mapping[owner] = {(kid, kid._meta.get_field('owner'), CASCADE)}
-        return command, '\n'.join(command._cascade_operations(owner))
+        # Files the refusals a run reports; the arms are then rendered for what it did not refuse.
+        command._cascade_operations(owner)
+        candidates, _selfs = command._cascade_candidates(
+            owner, owner._meta.db_table, report=False
+        )
+        return command, '\n'.join(
+            command._archive_arm((rel._meta.db_table, owner._meta.db_table, None), rel, f.column, 'id')
+            for rel, f, _primary in candidates
+        )
 
-    def test_the_rule_reads_the_link_not_the_descendants_own_key(self):
+    def test_the_archive_arm_reads_the_link_not_the_descendants_own_key(self):
         owner, kid = self._explicit_pk()
 
-        _, blob = self._operations(owner, kid)
+        _, arm = self._operations(owner, kid)
 
-        assert 'SELECT "root_link_id" FROM "testapp_kid"' in blob
-        assert '"code"' not in blob
+        assert 'SELECT guitars_link."root_link_id" FROM "testapp_kid"' in arm
+        assert '"code"' not in arm
 
     def test_the_revive_arm_reads_it_too(self):
         owner, kid = self._explicit_pk()

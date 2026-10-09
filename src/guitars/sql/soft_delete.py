@@ -265,9 +265,96 @@ _SOFT_DELETE_REVIVE_ARM_JOINED = """
                 )
               AND guitars_child._deleted_at = guitars_revived._deleted_at;"""
 
-# The ``EXISTS`` is the whole point: a ``save()`` that revives nothing pays one probe of the
-# transition tables, where the per-key pairs each ran a full ``UPDATE ... FROM`` join.
+# The archive arms (#80, ADR 0039): the cascade ``ON UPDATE`` rule as a statement of the owner's
+# trigger -- a rule is planned on every ``UPDATE`` (12 statements for one ``Band`` rename). They read
+# the *before* image's key and the *after* image's stamp, and keep issue #53's ``IS NULL``.
+_SOFT_DELETE_ARCHIVE_ARM = """
+            UPDATE {related_table} AS guitars_child
+            SET _deleted_at = guitars_archived._deleted_at{updated_at_assignment}
+            FROM (
+                SELECT guitars_before."{referenced_key}" AS guitars_key, guitars_after._deleted_at
+                FROM guitars_revive_before AS guitars_before
+                JOIN guitars_revive_after AS guitars_after
+                    ON guitars_after."{primary_key}" = guitars_before."{primary_key}"
+                WHERE guitars_before._deleted_at IS NULL
+                  AND guitars_after._deleted_at IS NOT NULL
+            ) AS guitars_archived
+            WHERE guitars_child."{foreign_key}" = guitars_archived.guitars_key
+              AND guitars_child._deleted_at IS NULL;"""
+
+_SOFT_DELETE_ARCHIVE_ARM_JOINED = """
+            UPDATE {target_table} AS guitars_child
+            SET _deleted_at = guitars_archived._deleted_at{updated_at_assignment}
+            FROM (
+                SELECT guitars_before."{primary_key}" AS guitars_key, guitars_after._deleted_at
+                FROM guitars_revive_before AS guitars_before
+                JOIN guitars_revive_after AS guitars_after
+                    ON guitars_after."{primary_key}" = guitars_before."{primary_key}"
+                WHERE guitars_before._deleted_at IS NULL
+                  AND guitars_after._deleted_at IS NOT NULL
+            ) AS guitars_archived
+            WHERE guitars_child."{target_pk}" IN (
+                    SELECT guitars_link."{child_pk}" FROM {related_table} AS guitars_link
+                    WHERE guitars_link."{foreign_key}" = guitars_archived.guitars_key
+                )
+              AND guitars_child._deleted_at IS NULL;"""
+
+# The first ``EXISTS`` is the whole point: a ``save()`` that moves no ``_deleted_at`` pays one
+# probe of the transition tables, the archive and the revive each behind their own once it does
+# (the revive half is ADR 0033's, unchanged).
 _CREATE_SOFT_DELETE_REVIVE_OWNER_FUNCTION = """
+    CREATE OR REPLACE FUNCTION {function}()
+       RETURNS TRIGGER
+       LANGUAGE PLPGSQL
+    AS
+    $$
+    BEGIN
+        IF COALESCE(current_setting('rules.hard_deletion', true), '') <> 'on' AND EXISTS (
+            SELECT 1
+            FROM guitars_revive_before AS guitars_before
+            JOIN guitars_revive_after AS guitars_after
+                ON guitars_after."{primary_key}" = guitars_before."{primary_key}"
+            WHERE (guitars_before._deleted_at IS NULL) <> (guitars_after._deleted_at IS NULL)
+        ) THEN
+            IF EXISTS (
+                SELECT 1
+                FROM guitars_revive_before AS guitars_before
+                JOIN guitars_revive_after AS guitars_after
+                    ON guitars_after."{primary_key}" = guitars_before."{primary_key}"
+                WHERE guitars_before._deleted_at IS NULL
+                  AND guitars_after._deleted_at IS NOT NULL
+            ) THEN{archive_arms}
+            END IF;
+            IF EXISTS (
+                SELECT 1
+                FROM guitars_revive_before AS guitars_before
+                JOIN guitars_revive_after AS guitars_after
+                    ON guitars_after."{primary_key}" = guitars_before."{primary_key}"
+                WHERE guitars_before._deleted_at IS NOT NULL
+                  AND guitars_after._deleted_at IS NULL
+            ) THEN{arms}
+            END IF;
+        END IF;
+        RETURN NULL;
+    END;
+    $$;
+"""
+
+# ``CREATE OR REPLACE TRIGGER`` (PG 14, the floor) for the re-emission of a trigger that exists:
+# ``DROP`` would hold ACCESS EXCLUSIVE on the owner until the migration commits, and one
+# migration holds it on every owner table of the app. Adopt is the same statement.
+_CREATE_SOFT_DELETE_REVIVE_OWNER = (
+    _CREATE_SOFT_DELETE_REVIVE_OWNER_FUNCTION + _CREATE_SOFT_DELETE_REVIVE_TRIGGER
+)
+_REPLACE_SOFT_DELETE_REVIVE_OWNER = (
+    _CREATE_SOFT_DELETE_REVIVE_OWNER_FUNCTION
+    + _CREATE_SOFT_DELETE_REVIVE_TRIGGER.replace('CREATE TRIGGER', 'CREATE OR REPLACE TRIGGER', 1)
+)
+_ADOPT_SOFT_DELETE_REVIVE_OWNER = _REPLACE_SOFT_DELETE_REVIVE_OWNER
+
+# What 2.16.0 -- 2.18.x wrote: the revive half alone. Kept to rebuild it as the reverse of the
+# migration that replaces it, keyed on the digest it recorded (``_legacy_revive_owner_restore``).
+_LEGACY_CREATE_SOFT_DELETE_REVIVE_OWNER_FUNCTION = """
     CREATE OR REPLACE FUNCTION {function}()
        RETURNS TRIGGER
        LANGUAGE PLPGSQL
@@ -287,18 +374,12 @@ _CREATE_SOFT_DELETE_REVIVE_OWNER_FUNCTION = """
     END;
     $$;
 """
-
-_CREATE_SOFT_DELETE_REVIVE_OWNER = (
-    _CREATE_SOFT_DELETE_REVIVE_OWNER_FUNCTION + _CREATE_SOFT_DELETE_REVIVE_TRIGGER
+_LEGACY_CREATE_SOFT_DELETE_REVIVE_OWNER = (
+    _LEGACY_CREATE_SOFT_DELETE_REVIVE_OWNER_FUNCTION + _CREATE_SOFT_DELETE_REVIVE_TRIGGER
 )
-_REPLACE_SOFT_DELETE_REVIVE_OWNER = (
-    _DROP_SOFT_DELETE_REVIVE_TRIGGER + _CREATE_SOFT_DELETE_REVIVE_OWNER
-)
-_ADOPT_SOFT_DELETE_REVIVE_OWNER = (
-    """
-    DROP TRIGGER IF EXISTS {trigger} ON {table};
-"""
-    + _CREATE_SOFT_DELETE_REVIVE_OWNER
+_LEGACY_REPLACE_SOFT_DELETE_REVIVE_OWNER = (
+    _LEGACY_CREATE_SOFT_DELETE_REVIVE_OWNER_FUNCTION
+    + _CREATE_SOFT_DELETE_REVIVE_TRIGGER.replace('CREATE TRIGGER', 'CREATE OR REPLACE TRIGGER', 1)
 )
 
 # ---- Private, non-frozen owned-rule templates: the cascade pair above with the predicate

@@ -67,25 +67,11 @@ def _refs_recorded_for(app_label: str) -> list[ObjectRef]:
 # ─── what a rule names, as the rules are built ───
 
 
-@pytest.mark.parametrize(
-    'ref',
-    [
-        # The table the rule updates, and the column it writes -- promoting a model to
-        # ``SetarModel`` gains that column in a migration later than the one creating its
-        # table, so an edge to the table alone would not order the column.
-        ObjectRef('crossapp_dependent', 'Shared', None),
-        ObjectRef('crossapp_dependent', 'Shared', '_deleted_at'),
-        # A co-owner arm: the column its ``NOT EXISTS`` reads, and the liveness column beside it.
-        ObjectRef('crossapp_dependent', 'LocalOwner', 'target'),
-        ObjectRef('crossapp_dependent', 'LocalOwner', '_deleted_at'),
-        ObjectRef('crossapp_third', 'ThirdOwner', 'target'),
-        ObjectRef('crossapp_third', 'ThirdOwner', '_deleted_at'),
-    ],
-)
-def test_an_owned_rule_records_every_object_its_action_names(ref):
-    """Structurally, as the rule is built -- a co-owner arm's table appears only in the rule
-    body, never in its header, so nothing could read these back off the rendered SQL."""
-    assert ref in _refs_recorded_for('crossapp_owner')
+def test_an_owned_key_records_no_object_reference_of_its_own():
+    """The owned rule named its dependent and every co-owner's table and column, which PostgreSQL
+    resolved as it parsed the rule, so each was an edge. The rule is retired since 2.19.0 (#80,
+    ADR 0039) and the sweep's plpgsql body resolves nothing until it runs: nothing is recorded."""
+    assert _refs_recorded_for('crossapp_owner') == []
 
 
 def test_an_mti_redirect_rule_records_the_ancestor_table_and_its_deleted_at():
@@ -267,33 +253,10 @@ def _check(*app_labels: str) -> None:
 @override_settings(
     LOCAL_APPS=[
         'tests.testapp',
-        'tests.crossapp_dependent',
-        'tests.crossapp_owner',
-        'tests.crossapp_third',
-    ]
-)
-def test_check_fails_when_a_required_edge_is_absent_and_says_what_to_paste():
-    """New in 2.5.0 and the reason it is a minor release: a graph that passed before now fails.
-    The message has to be actionable on its own -- the migration is already recorded, so
-    re-running the generator will not add the edge, and the operator pastes it by hand."""
-    with _without_dependency('crossapp_dependent', 'crossapp_owner'):
-        with pytest.raises(CommandError) as raised:
-            _check('crossapp_dependent')
-
-        message = str(raised.value)
-        assert 'crossapp_owner_owner' in message
-        assert "('crossapp_owner', '0001_initial')," in message
-        assert 'does not exist' in message
-
-    _check('crossapp_dependent')  # and green again once restored
-
-
-@override_settings(
-    LOCAL_APPS=[
-        'tests.testapp',
-        'tests.crossapp_dependent',
-        'tests.crossapp_owner',
-        'tests.crossapp_third',
+        'tests.crossapp_tenant_ancestor',
+        'tests.crossapp_tenant_child',
+        'tests.crossapp_retire_owner',
+        'tests.crossapp_retire_child',
     ]
 )
 def test_the_migration_graph_is_built_once_for_a_whole_check_run(monkeypatch):
@@ -312,7 +275,7 @@ def test_the_migration_graph_is_built_once_for_a_whole_check_run(monkeypatch):
 
     monkeypatch.setattr(operations_module, 'MigrationLoader', _counted)
 
-    _check('crossapp_dependent', 'crossapp_owner', 'crossapp_third')
+    _check('crossapp_tenant_child', 'crossapp_retire_owner', 'crossapp_retire_child')
 
     assert len(builds) == 1
 
@@ -320,17 +283,31 @@ def test_the_migration_graph_is_built_once_for_a_whole_check_run(monkeypatch):
 @override_settings(
     LOCAL_APPS=[
         'tests.testapp',
-        'tests.crossapp_dependent',
-        'tests.crossapp_owner',
-        'tests.crossapp_third',
+        'tests.crossapp_tenant_ancestor',
+        'tests.crossapp_tenant_child',
     ]
 )
 def test_check_accepts_an_ordering_guaranteed_through_another_path():
-    """Reachability, not a literal edge. ``crossapp_owner`` holds the foreign key, so its own
-    ``0001_initial`` already depends on the dependent's -- dropping the explicit edge leaves the
-    ordering guaranteed, and flagging it would fail a build over a graph that works."""
-    with _without_dependency('crossapp_owner', 'crossapp_dependent'):
-        _check('crossapp_owner')  # still reachable via crossapp_owner.0001_initial
+    """Reachability, not a literal edge. The policy needs the migration adding the tenant column;
+    an edge to the ancestor's *later* migration orders it just as well, that one depending on
+    the first -- and flagging it would fail a build over a graph that works."""
+    path = _enforcement_migration('crossapp_tenant_child')
+    original = path.read_text()
+    module = f'tests.crossapp_tenant_child.migrations.{path.stem}'
+
+    def _reload() -> None:
+        sys.modules.pop(module, None)
+        importlib.invalidate_caches()
+
+    try:
+        path.write_text(
+            original.replace('0002_tenantedancestor_label', '0003_auto_enforcement', 1)
+        )
+        _reload()
+        _check('crossapp_tenant_child')  # still reachable via the ancestor's own history
+    finally:
+        path.write_text(original)
+        _reload()
 
 
 # ─── the paths that should never be taken ───

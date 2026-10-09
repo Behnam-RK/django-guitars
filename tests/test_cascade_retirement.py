@@ -134,11 +134,17 @@ def test_a_key_naming_an_unmapped_table_is_named_rather_than_retired(command):
     assert 'DROP RULE IF EXISTS "soft_delete_related_shop_gone" ON "testapp_band"' in note
 
 
-def test_a_key_the_models_still_call_for_is_left_alone(command):
-    """The set difference is the whole mechanism: a live cascade is never retired."""
+def test_a_key_the_models_still_call_for_has_its_rule_superseded(command):
+    """Since 2.19.0 (#80, ADR 0039) the cascade is an archive arm of the owner's trigger, so a
+    rule recorded for a live key is dropped -- on no evidence beyond that, and with a reverse
+    rebuilding it, where an unowed key's refuses."""
     command.existing.soft_delete_related[('testapp_album', 'testapp_band', None)] = 'abc'
 
-    assert _retirements(command) == []
+    (operation,) = _retirements(command)
+
+    assert operation.startswith('# Soft Delete Related Rule retired on "testapp_album"')
+    assert 'CREATE OR REPLACE RULE "soft_delete_related_testapp_album"' in operation
+    assert 'RAISE' not in operation
     assert command._unmapped_cascade_notes() == []
 
 
@@ -686,11 +692,12 @@ def test_a_readopted_create_in_the_retiring_app_needs_no_edge(command):
 
 
 def test_the_create_path_records_that_edge_itself(command):
-    """Wired, not merely written: the recorder is called from ``_cascade_operations``, so the
-    one line joining them could go without a failure. Seeds a retirement for a key the models
-    still require, which is exactly a re-adoption."""
-    live = next(iter(command._cascade_key_maps()[0]))
-    command.existing.cascade_retirement_sites.append(
+    """Wired, not merely written: ``_revive_operations`` -- the create of the owner's trigger,
+    which carries the cascade since 2.19.0 (#80) -- calls the recorder. Seeds a retirement for an
+    owner the models still require: a re-adoption."""
+    live = ('testapp_band',)
+    command.existing.soft_delete_revive_owner.pop(live, None)
+    command.existing.revive_owner_retirement_sites.append(
         _site('crossapp_owner', '0001_initial', ('crossapp_third', '0001_initial'))._replace(
             key=live
         )

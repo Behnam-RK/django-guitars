@@ -11,7 +11,7 @@ from django.apps import apps
 from django.apps import apps as django_apps
 from django.conf import settings as django_settings
 from django.core.management import CommandError, call_command
-from django.db import models
+from django.db import migrations, models
 from django.db.models import CASCADE, DO_NOTHING, SET_NULL
 from django.test import override_settings
 from django.test.utils import isolate_apps
@@ -24,9 +24,11 @@ from guitars.management.enforcement import command as command_module
 from guitars.management.enforcement import headers as headers_module
 from guitars.management.enforcement import identity as identity_module
 from guitars.management.enforcement import operations as operations_module
+from guitars.introspection import CascadeKind, classify_cascade
 from guitars.management.enforcement.command import Command
 from guitars.models import OwningForeignKey, SetarModel
 from guitars.sql import _identifiers
+from guitars.sql import soft_delete as _soft_delete
 from guitars.sql import triggers as _triggers
 from guitars.tenancy.discovery import app_coverage, autofill_function_name
 from tests.testapp.models import Album, Band, Ensemble, Foyer, Kiosk, Merch, Orchestra
@@ -45,6 +47,25 @@ def _pretend_function_migrations_are_current(command):
         sql.CREATE_PARENT_UPDATED_AT_TRIGGER_FUNCTION,
         sql.DROP_PARENT_UPDATED_AT_TRIGGER_FUNCTION,
     )
+
+
+class _EveryOwnedRuleRecorded(dict):
+    """Reads as holding an owned rule for every key: a project migrated by 2.18, whose upgrade
+    retires each one (#80, ADR 0039) with a reverse that rebuilds it as it was written. The rule
+    is written no more, so its text -- the co-owner guards above all -- is read off that reverse."""
+
+    def __contains__(self, key):
+        return True
+
+    def __getitem__(self, key):
+        return 'stale0000000'
+
+    def get(self, key, default=None):
+        return 'stale0000000'
+
+
+def _record_every_owned_rule(command) -> None:
+    command._existing = command.existing._replace(soft_delete_owned=_EveryOwnedRuleRecorded())
 
 
 def test_check_passes_when_enforcement_migrations_exist():
@@ -74,7 +95,15 @@ def test_build_operations_emits_trigger_rule_and_cascade_ops():
 
     assert 'Updated at Trigger' in ops  # Genre/Band/Album have _updated_at
     assert 'Soft Delete Rule' in ops  # Band/Album have _deleted_at
-    assert 'Soft Delete Related Rule' in ops  # Album -> Band cascade
+    # Album -> Band cascade: an arm of Band's trigger, not a rule (2.19.0, #80, ADR 0039).
+    assert 'Soft Delete Related Rule' not in ops
+    (band,) = [
+        op
+        for op in command._build_operations(apps.get_app_config('testapp'))
+        if op.startswith('# Soft Delete Revive Trigger on "testapp_band"')
+    ]
+    assert 'UPDATE "testapp_album" AS guitars_child' in band
+    assert 'SET _deleted_at = guitars_archived._deleted_at' in band
 
 
 def test_build_operations_emits_mti_ops_for_child_models():
@@ -85,18 +114,23 @@ def test_build_operations_emits_mti_ops_for_child_models():
     command.existing.mti_triggers.clear()
     command.existing.mti_soft_deletes.clear()
 
-    ops = '\n'.join(command._build_operations(apps.get_app_config('testapp')))
+    command_ops = command._build_operations(apps.get_app_config('testapp'))
+    ops = '\n'.join(command_ops)
 
     # MTI children get a parent-propagation updated-at trigger + a redirect soft-delete rule,
     # both on the child table but naming the owning ancestor.
     assert 'MTI Updated at Trigger on "testapp_orchestra" table (parent "testapp_ensemble")' in ops
     assert 'MTI Soft Delete Rule on "testapp_orchestra" table (parent "testapp_ensemble")' in ops
-    # Cascade INTO an MTI child (Section -> Orchestra) lands on the owner (ensemble) table.
-    assert (
-        'Soft Delete Related Rule on "testapp_section" that is related to "testapp_ensemble"'
-        in ops
-    )
-    # The MTI parent-link is structural, not a user cascade FK: no cascade rule for it.
+    # Cascade INTO an MTI child (Section -> Orchestra) lands on the owner (ensemble) table: an
+    # archive arm of the ensemble's trigger (2.19.0, #80), where it was a rule.
+    (ensemble,) = [
+        op
+        for op in command_ops
+        if op.startswith('# Soft Delete Revive Trigger on "testapp_ensemble"')
+    ]
+    assert 'UPDATE "testapp_section" AS guitars_child' in ensemble
+    assert 'Soft Delete Related Rule' not in ops
+    # The MTI parent-link is structural, not a user cascade FK: no cascade for it.
     assert 'related to "testapp_orchestra"' not in ops
 
 
@@ -187,10 +221,11 @@ def test_cascade_operations_skip_non_cascade_and_non_deletable_relations():
     command = Command()
     clear_cascade_coverage(command)
 
-    ops = '\n'.join(command._cascade_operations(Band))
+    candidates, _selfs = command._cascade_candidates(Band, 'testapp_band', report=False)
+    tables = [related._meta.db_table for related, _field, _primary in candidates]
 
-    assert 'testapp_album" that is related to "testapp_band"' in ops  # Album.band survives
-    assert 'testapp_riff' not in ops  # Riff has no _deleted_at to cascade into
+    assert tables == ['testapp_album']  # Album.band survives; each key is an arm (#80)
+    assert command._cascade_operations(Band) == []  # and no cascade rule is written for it
 
 
 def test_related_rule_name_does_not_reject_a_hostile_unqualified_table():
@@ -219,21 +254,14 @@ def test_cascade_operations_disambiguates_two_fks_to_the_same_related_table():
     command = Command()
     clear_cascade_coverage(command)
 
-    ops = command._cascade_operations(Album)
-    merch_ops = [op for op in ops if 'testapp_merch' in op]
-
-    assert len(merch_ops) == 2
-    headers = [op.splitlines()[0] for op in merch_ops]
-    assert any(
-        '# Soft Delete Related Rule on "testapp_merch" that is related to "testapp_album"!' in h
-        for h in headers
-    )
-    assert len([h for h in headers if 'via "bonus_album_id"!' in h]) == 1
-    # Distinct rule names -- no op's CREATE OR REPLACE can clobber another's.
-    blob = '\n'.join(merch_ops)
-    assert 'RULE "soft_delete_related_testapp_merch"\n' in blob
-    assert 'RULE "soft_delete_related_testapp_merch_bonus_album_id"' in blob
-    # Their inverse is one trigger on the owner since 2.16.0, carrying an arm per key (#70).
+    # No rule at all since 2.19.0: each key is an archive arm and a revive arm of the owner's
+    # trigger (#70, #80), so there are no names for the second to clobber.
+    assert command._cascade_operations(Album) == []
+    arms = command._revive_arms_by_owner()['testapp_album']
+    assert sorted(column for (related, _owner, column) in arms if related == 'testapp_merch') == [
+        'album_id',
+        'bonus_album_id',
+    ]
     (revive,) = [
         op
         for op in command._revive_operations(django_apps.get_app_config('testapp'))
@@ -242,6 +270,8 @@ def test_cascade_operations_disambiguates_two_fks_to_the_same_related_table():
     assert 'TRIGGER "soft_delete_revive_on_13_testapp_album"' in revive
     assert 'guitars_child."album_id" = guitars_revived."id"' in revive
     assert 'guitars_child."bonus_album_id" = guitars_revived."id"' in revive
+    assert 'guitars_child."album_id" = guitars_archived.guitars_key' in revive
+    assert 'guitars_child."bonus_album_id" = guitars_archived.guitars_key' in revive
 
 
 def test_owned_rule_name_folds_a_hostile_schema_qualified_table_like_its_cascade_twin():
@@ -282,7 +312,7 @@ def test_owned_operations_emit_only_for_owning_foreign_keys():
     """Album declares two ``OwningForeignKey``s to PressKit and two plain FKs to Band. Only
     the owning pair gets a rule -- ``on_delete`` never decides this."""
     command = Command()
-    command.existing.soft_delete_owned.clear()
+    _record_every_owned_rule(command)
     command.existing.soft_delete_owned_sweep.clear()
 
     ops = command._owned_operations(Album)
@@ -300,7 +330,7 @@ def test_owned_operations_name_one_rule_per_foreign_key_column():
     """Album's two owned FKs point at the same table, so the FK column is the only thing
     keeping their rule names apart -- a collision would silently replace, not fail."""
     command = Command()
-    command.existing.soft_delete_owned.clear()
+    _record_every_owned_rule(command)
     command.existing.soft_delete_owned_sweep.clear()
 
     blob = '\n'.join(command._owned_operations(Album))
@@ -316,7 +346,7 @@ def test_owned_rule_carries_the_last_owner_guard():
     day one was dropped. The self-exclusion is load-bearing, not tidiness: a rule action runs
     before the original update, so without it the NOT EXISTS never holds and nothing fires."""
     command = Command()
-    command.existing.soft_delete_owned.clear()
+    _record_every_owned_rule(command)
     command.existing.soft_delete_owned_sweep.clear()
 
     blob = '\n'.join(command._owned_operations(Album))
@@ -508,18 +538,18 @@ def test_owned_operations_are_idempotent_across_two_runs():
     assert command._owned_operations(Album) == []
 
 
-def test_owned_operations_under_adopt_stay_a_plain_create_or_replace():
-    """Rules carry no adopt form on purpose -- ``CREATE OR REPLACE RULE`` is already correct
-    whether or not the object exists, and a ``DROP ... IF EXISTS`` first would open an
-    instant where a DELETE on that table destroys rows."""
+def test_owned_operations_under_adopt_write_no_rule():
+    """The owned rule is retired, never written, adopt included (#80, ADR 0039): a ``--adopt``
+    run has nothing to say about one, and what is left is the sweep, in its adopt form."""
     command = Command()
     command.existing.soft_delete_owned.clear()
     command.existing.soft_delete_owned_sweep.clear()
 
     blob = '\n'.join(command._owned_operations(Album, adopt=True))
 
-    assert 'CREATE OR REPLACE RULE "soft_delete_owned_16_testapp_presskit_12_press_kit_id"' in blob
-    assert 'DROP RULE IF EXISTS' not in blob
+    assert 'CREATE OR REPLACE RULE' not in blob
+    assert 'Soft Delete Owned Rule' not in blob
+    assert '# Soft Delete Owned Sweep on "testapp_presskit"' in blob
 
 
 def test_cascade_operation_emits_a_trigger_for_a_self_referential_cascade_foreign_key():
@@ -1006,8 +1036,10 @@ def _record_cascade_key(*, both: bool):
             ],
             None,
             {'albumb'},
-            ['banda'],
-            id='reported_when_parent_app_out_of_scope',
+            # The cascade is an arm of the owner's trigger since 2.19.0 (#80), so what a scoped
+            # run leaves undone is that trigger's: ``_scoped_revive_notes`` reports it, by digest.
+            [],
+            id='the_creation_gap_is_the_owners_trigger_note',
         ),
         pytest.param(
             ['fake.banda', 'fake.albumb'],
@@ -1267,7 +1299,8 @@ def test_handle_writes_scoped_cascade_gap_warning_to_stdout(monkeypatch):
 
     command.handle('albumb', check_only=False)
 
-    assert "parent app 'banda' is not in this scoped run" in command.stdout.getvalue()
+    # Hosted by the owner's app, which this run leaves out (#80, ADR 0039): named by digest.
+    assert "only a run including 'banda' writes it" in command.stdout.getvalue()
 
 
 def test_function_dependencies_for_only_includes_deps_the_operations_use():
@@ -1853,7 +1886,7 @@ def test_owned_operation_still_emits_when_ownership_is_one_way():
 
         command = Command()
         command._skipped_rule_notes.clear()
-        command.existing.soft_delete_owned.clear()
+        _record_every_owned_rule(command)
         command.existing.soft_delete_owned_sweep.clear()
         command.all_models = [OneWayOwner, OneWayOwned]
         return command, command._owned_operations(OneWayOwner)
@@ -1905,109 +1938,6 @@ def test_cascade_operation_warns_when_an_owned_rule_closes_the_cycle():
         assert 'cycle of ON UPDATE rules' in warning
 
 
-def test_cascade_operations_report_two_relations_that_would_share_a_rule_name():
-    """The frozen cascade spelling joins its FK suffix plainly, so a child table named exactly
-    another child's ``<table>_<column>`` names one rule twice. It cannot be renamed -- 0.x
-    shipped it and no command retires a rule -- so the clash is reported instead of silent."""
-
-    @isolate_apps('tests.testapp')
-    def _build():
-        class Parent(SetarModel):
-            class Meta:
-                app_label = 'testapp'
-
-        class Child(SetarModel):
-            # `a_id` sorts first, so it is the primary FK and keeps the bare form; `b_id`
-            # is the one that gets the suffixed spelling this test is about.
-            a = models.ForeignKey(Parent, on_delete=CASCADE, related_name='firsts')
-            b = models.ForeignKey(Parent, on_delete=CASCADE, related_name='bs')
-
-            class Meta:
-                app_label = 'testapp'
-                db_table = 'c_a'
-
-        class Namesake(SetarModel):
-            parent = models.ForeignKey(Parent, on_delete=CASCADE, related_name='namesakes')
-
-            class Meta:
-                app_label = 'testapp'
-                # `soft_delete_related_c_a` + `_b_id` is this table's own bare name.
-                db_table = 'c_a_b_id'
-
-        command = Command()
-        command._rule_name_clashes.clear()
-        clear_cascade_coverage(command)
-        command.all_models = [Parent, Child, Namesake]
-        command.reverse_relations_mapping[Parent] = {
-            (Child, Child._meta.get_field('a'), CASCADE),
-            (Child, Child._meta.get_field('b'), CASCADE),
-            (Namesake, Namesake._meta.get_field('parent'), CASCADE),
-        }
-        return command, command._cascade_operations(Parent)
-
-    command, ops = _build()
-
-    # Emitted anyway: what ships works for one of the two, which is the whole problem. Three:
-    # the inverse is the owner's one revive trigger since 2.16.0, not an operation per rule.
-    assert len(ops) == 3
-    # One clash, and it is the *cascade* family's: the revive is named after its owner alone.
-    assert len(command._rule_name_clashes) == 1
-    assert not any('soft_delete_revive' in note for note in command._rule_name_clashes)
-    clash = command._rule_name_clashes[0]
-    assert 'soft_delete_related_c_a_b_id' in clash
-    assert "'c_a' via 'b_id'" in clash and "'c_a_b_id'" in clash
-    assert 'the second replaces the first' in clash
-
-
-def test_cascade_operations_report_an_mti_parent_and_child_sharing_a_rule_name():
-    """Regression: an MTI parent and its child share one ``owner_table`` and
-    ``seen_related_tables`` is per call, so both bare names -- and both operation *keys* --
-    matched. Claiming on the key read the two as one and reported nothing."""
-
-    @isolate_apps('tests.testapp')
-    def _build():
-        class Parent(SetarModel):
-            class Meta:
-                app_label = 'testapp'
-
-        class Child(Parent):
-            class Meta:
-                app_label = 'testapp'
-
-        class Referrer(SetarModel):
-            p = models.ForeignKey(Parent, on_delete=CASCADE, related_name='ps')
-            c = models.ForeignKey(Child, on_delete=CASCADE, related_name='cs')
-
-            class Meta:
-                app_label = 'testapp'
-
-        command = Command()
-        command._rule_name_clashes.clear()
-        clear_cascade_coverage(command)
-        command.all_models = [Parent, Child, Referrer]
-        command.reverse_relations_mapping[Parent] = {
-            (Referrer, Referrer._meta.get_field('p'), CASCADE),
-        }
-        command.reverse_relations_mapping[Child] = {
-            (Referrer, Referrer._meta.get_field('c'), CASCADE),
-        }
-        # Both land on the parent's table: it is where ``_deleted_at`` actually flips.
-        return command, [*command._cascade_operations(Parent), *command._cascade_operations(Child)]
-
-    command, ops = _build()
-
-    assert len(ops) == 2
-    # One clash, the cascade family's. Through 2.15 the per-key revives clashed here too, both
-    # keys asking for the plain form on one owner; one trigger per owner carries both as arms.
-    assert len(command._rule_name_clashes) == 1
-    assert not any('soft_delete_revive' in note for note in command._rule_name_clashes)
-    clash = command._rule_name_clashes[0]
-    assert "via 'p_id'" in clash and "via 'c_id'" in clash
-    assert 'the second replaces the first' in clash
-    # The bare name carries no column, so the plain "rename a column" remedy cannot apply.
-    assert 'renaming cannot help' in clash
-
-
 def test_a_rule_name_clash_fails_a_check_run_but_only_reports_on_a_generating_one():
     """A clash means one of the two rules does not exist in the database the migration ships
     to, which is exactly what ``--check`` is for. A generating run has already written the
@@ -2031,7 +1961,9 @@ def _owned_blob(*models_to_register, subject=None):
     command = Command()
     command._skipped_rule_notes.clear()
     command._refusals_over_live_rules.clear()
-    command.existing.soft_delete_owned.clear()
+    # A rule recorded for every key, as a 2.18 project has: the rule is written no more, so its
+    # text is read off the retirement's reverse (#80, ADR 0039).
+    _record_every_owned_rule(command)
     command.existing.soft_delete_owned_sweep.clear()
     command.all_models = list(models_to_register)
     ops = command._owned_operations(subject or models_to_register[0])
@@ -2223,7 +2155,7 @@ def test_owned_guard_joins_to_reach_a_co_owner_that_inherits_deleted_at():
     It is refused a rule of its own -- that would fire on a table its key is not on -- but its
     rows own the kit, so the arm joins the two tables on the pk value the chain shares."""
     command = Command()
-    command.existing.soft_delete_owned.clear()
+    _record_every_owned_rule(command)
     command.existing.soft_delete_owned_sweep.clear()
 
     blob = '\n'.join(_owned_rule_ops(command._owned_operations(Album)))
@@ -2958,7 +2890,23 @@ def test_a_single_owner_rule_is_byte_identical_to_2_3_0(snapshot):
 
         return _owned_blob(Alone, OnlyOwner, subject=OnlyOwner)[2]
 
-    rule, sweep = _build()
+    sweep, retirement = _build()
+    # The rule is read off the retirement's reverse, which rebuilds it as 2.18 wrote it, and put
+    # back in the operation it was: its identity is what the snapshot pins.
+    rule_sql = eval(  # noqa: S307 - our own output
+        retirement[retirement.index('migrations.RunSQL') :].rstrip().rstrip(','),
+        {'migrations': migrations},
+    ).reverse_sql
+    rule, _digest = identity_module._operation(
+        headers_module.HEADER_SOFT_DELETE_OWNED.format(
+            dependent_table='testapp_alone', table='testapp_onlyowner', foreign_key='target_id'
+        ),
+        rule_sql,
+        _soft_delete._DROP_SOFT_DELETE_OWNED_OBJECT_RULE.format(
+            rule_name='"soft_delete_owned_13_testapp_alone_9_target_id"',
+            table='"testapp_onlyowner"',
+        ),
+    )
     assert rule == snapshot
     # The pairing itself, asserted here so the snapshot above can stay the rule's alone.
     assert sweep.startswith('# Soft Delete Owned Sweep on "testapp_alone"')
@@ -3104,35 +3052,36 @@ def test_a_refused_sweep_does_not_claim_its_function_name():
 @pytest.mark.parametrize('adopt', [False, True])
 def test_upgrading_to_the_revive_family_never_drops_the_cascade_rule_first(adopt):
     """The upgrade every consumer takes: recorded under the pre-2.11.0 cascade digest, with no
-    revive at all. Count and order bite, and so does the shape of each forward: the rule needs
-    no drop and the trigger needs one on ``--adopt``, ``CREATE TRIGGER`` having no replace."""
+    revive at all. Count and order bite: the owner's trigger carries the cascade as an arm since
+    2.19.0 (#80), and the rule it supersedes is dropped only after it."""
     command = Command()
     command.existing.soft_delete_related[('testapp_album', 'testapp_band', None)] = 'stale0000000'
     command.existing.soft_delete_revive.clear()
     command.existing.soft_delete_revive_owner.clear()
 
     built = command._build_operations(apps.get_app_config('testapp'), adopt=adopt)
-    (cascade,) = [op for op in built if 'testapp_album" that is related to "testapp_band' in op]
-    # Since 2.16.0 the inverse is the owner's one trigger, carrying this key as an arm (#70).
+    (cascade,) = [
+        op
+        for op in built
+        if op.startswith('# Soft Delete Related Rule retired on "testapp_album"')
+    ]
+    # Since 2.16.0 the inverse is the owner's one trigger (#70), and since 2.19.0 it archives.
     (revive,) = [
         op for op in built if op.startswith('# Soft Delete Revive Trigger on "testapp_band" table!')
     ]
-    assert built.index(cascade) < built.index(revive)
+    assert built.index(revive) < built.index(cascade)
     assert 'guitars_child."band_id" = guitars_revived."id"' in revive
-    # The cascade is a rule, idempotent by construction, so it drops nothing on either path.
-    assert 'DROP RULE' not in cascade.split('reverse_sql')[0]
-    assert 'CREATE OR REPLACE RULE' in cascade
+    assert 'guitars_child."band_id" = guitars_archived.guitars_key' in revive
+    # The rule is dropped, idempotently, and rebuilt by the reverse.
+    assert 'DROP RULE IF EXISTS "soft_delete_related_testapp_album"' in cascade
+    assert 'CREATE OR REPLACE RULE' in cascade.split('reverse_sql')[1]
 
-    # ``CREATE TRIGGER`` has no ``OR REPLACE``. The plain path's key is unrecorded, so a bare
-    # create is right; ``--adopt`` re-emits every operation, so it must drop first or a
-    # project that already has the trigger gets a migration that aborts.
+    # An unrecorded key is a bare create; ``--adopt`` re-emits every operation, so it replaces:
+    # ``CREATE OR REPLACE TRIGGER`` (PG 14) neither aborts over a trigger that exists nor drops it.
     revive_forward = revive.split('reverse_sql')[0]
     assert 'CREATE OR REPLACE FUNCTION' in revive
-    assert 'CREATE TRIGGER' in revive
-    if adopt:
-        assert 'DROP TRIGGER IF EXISTS' in revive_forward
-    else:
-        assert 'DROP TRIGGER' not in revive_forward
+    assert 'DROP TRIGGER' not in revive_forward
+    assert ('CREATE OR REPLACE TRIGGER' if adopt else 'CREATE TRIGGER') in revive_forward
 
 
 def _revive_dollar_models():
@@ -3172,16 +3121,21 @@ def test_a_revive_arm_refused_for_dollar_quoting_is_left_out_and_named():
     assert '"$$"' in command._skipped_rule_notes[0]
 
 
-def test_a_revive_arm_refused_for_dollar_quoting_leaves_the_cascade_rule_alone():
-    """The cascade beside it is a rule, needing no dollar quoting, so it is emitted as ever."""
+def test_a_key_naming_dollar_quoting_is_refused_whole_and_left_to_python():
+    """An arm needs dollar quoting where the rule did not (#80). Such a key is refused (a note,
+    no arm, no rule) and so classified, which makes ``delete()``'s fast path stand aside and Django
+    cascade it; unrefused it would read as covered and leave the children live."""
     owner, child = _revive_dollar_models()
     command = Command()
     command._skipped_rule_notes.clear()
     clear_cascade_coverage(command)
     command.reverse_relations_mapping[owner] = {(child, child._meta.get_field('owner'), CASCADE)}
 
-    ops = command._cascade_operations(owner)
+    assert command._cascade_operations(owner) == []
 
-    assert len(ops) == 1
-    assert ops[0].startswith('# Soft Delete Related Rule on')
-    assert command._skipped_rule_notes == []
+    (note,) = command._skipped_rule_notes
+    assert '"$$"' in note and 'Django archives it in Python' in note
+    kind = classify_cascade(
+        child, child._meta.get_field('owner'), CASCADE, owner._meta.db_table, set()
+    )
+    assert kind is CascadeKind.REFUSED

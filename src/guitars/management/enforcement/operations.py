@@ -45,13 +45,10 @@ from guitars.management.enforcement.headers import (
     HEADER_MTI_SOFT_DELETE,
     HEADER_MTI_UPDATED_AT,
     HEADER_SOFT_DELETE,
-    HEADER_SOFT_DELETE_OWNED,
     HEADER_SOFT_DELETE_OWNED_RETIRED,
     HEADER_SOFT_DELETE_OWNED_SWEEP,
     HEADER_SOFT_DELETE_OWNED_SWEEP_RETIRED,
-    HEADER_SOFT_DELETE_RELATED,
     HEADER_SOFT_DELETE_RELATED_RETIRED,
-    HEADER_SOFT_DELETE_RELATED_VIA,
     HEADER_SOFT_DELETE_RELATED_VIA_RETIRED,
     HEADER_SOFT_DELETE_REVIVE_OWNER,
     HEADER_SOFT_DELETE_REVIVE_OWNER_RETIRED,
@@ -163,7 +160,7 @@ def _related_rule_name(related_table: str, foreign_key: str | None = None) -> st
     optional here and required for owned."""
     # Plain-joined, ambiguous the way the stem is not -- and frozen: this spelling shipped in
     # 0.x, and since no command retires a rule, renaming it would leave every migrated project
-    # with the old rule live beside the new. ``_claim_rule_name`` reports a clash instead.
+    # with the old rule live beside the new. No rule is written since 2.19.0 (#80, ADR 0039).
     stem = _rule_stem('soft_delete_related', related_table)
     return _identifiers._safe_ident(stem if foreign_key is None else f'{stem}_{foreign_key}')
 
@@ -297,7 +294,6 @@ class OperationsMixin:
         _vendor_skip_notes: list[str]
         _skipped_rule_notes: list[str]
         _rule_name_clashes: list[str]
-        _claimed_rule_names: dict[tuple[str, str], tuple]
         #: Keyed on the name alone, unlike the above: a sweep's function is namespaced per
         #: schema, so two owner tables can collide on one where their rules cannot.
         _claimed_sweep_names: dict[str, tuple]
@@ -719,13 +715,11 @@ class OperationsMixin:
         return (
             operations
             + deferred
-            # Retire before create: a rename emits both in one migration, and "retire, then
-            # create" is the order that reads correctly. The names never collide, so this
-            # is legibility rather than correctness.
-            + self._retired_cascade_operations(app, adopt=adopt)
-            # After the per-key revives that retirement drops: the names never collide, so two
-            # triggers reviving one row for a statement would be harmless, but it reads right.
+            # The owner's trigger first, then the retirements: the cascade rule it supersedes
+            # (#80, ADR 0039) is dropped only once its arm exists. A migration is atomic, so this
+            # is no window in the usual case -- and the only order that holds where one is not.
             + self._revive_operations(app, adopt=adopt)
+            + self._retired_cascade_operations(app, adopt=adopt)
             + self._retired_autofill_operations(app, adopt=adopt)
             + self._retired_trigger_operations(app)
             + self._tenant_autofill_operations(app, adopt=adopt)
@@ -1280,6 +1274,41 @@ class OperationsMixin:
         )
         return template.format(**rebuilt)
 
+    def _owner_trigger_carries(self, key: tuple, column: str) -> bool:
+        """Whether the owner's trigger, as this run would write it, carries *key*'s archive arm:
+        the owner has a trigger and the arm is not refused (a name closing the dollar quoting)."""
+        related_table, owner_table, _via = key
+        if self._revive_owner_slots(owner_table, quiet=True) is None:
+            return False
+        arms = self._revive_arms_by_owner()[owner_table]
+        arm_key = (related_table, owner_table, column)
+        if arm_key not in arms:
+            return False
+        owner = self._revive_owners[owner_table][0]
+        owner = owner._meta.concrete_model or owner
+        ident_owner_pk = _identifiers._escape_ident(cast(str, owner._meta.pk.column))
+        return self._revive_arm(arm_key, *arms[arm_key], ident_owner_pk, quiet=True) is not None
+
+    def _superseded_rule_reverse(self, key: tuple, slots: dict, column: str) -> str:
+        """The cascade rule a 2.19.0 retirement drops, rebuilt as 2.18.x wrote it: the flat or
+        the joined template. Its models off the arm sweep, as :meth:`_superseded_revive_reverse`."""
+        related_table, owner_table, _via = key
+        related_model, _column = self._revive_arms_by_owner()[owner_table][
+            (related_table, owner_table, column)
+        ]
+        related_model = related_model._meta.concrete_model or related_model
+        owner = self._revive_owners[owner_table][0]
+        owner = owner._meta.concrete_model or owner
+        ident_owner_pk = _identifiers._escape_ident(cast(str, owner._meta.pk.column))
+        arm = self._arm_slots(related_model, column, ident_owner_pk)
+        rebuilt = {**slots, **arm}
+        template = (
+            _soft_delete._CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE_JOINED
+            if 'target_table' in arm
+            else _soft_delete._CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE
+        )
+        return template.format(**rebuilt)
+
     @staticmethod
     def _refuse_recreating_dollar_quoted(rule_name: str, owner_table: str) -> str:
         """The reverse for a revive whose names the forward path would not have spliced in."""
@@ -1304,10 +1333,15 @@ class OperationsMixin:
         """What unapplying a retirement runs: the object rebuilt as it was written, or a refusal
         where the models can no longer say how."""
         related_table, owner_table, _via = key
-        # A key the models still cascade is a revive superseded, not one unowed: its reverse
-        # rebuilds it as it was, joined form included, so 2.16.0 unapplies.
+        # A key the models still cascade is superseded, not unowed: its reverse rebuilds the
+        # rule or the revive as it was written, joined form included, so 2.16.0 and 2.19.0
+        # unapply.
         if not rule_retired:
-            return self._superseded_revive_reverse(key, slots, required[key], rule_name)
+            return (
+                self._superseded_revive_reverse(key, slots, required[key], rule_name)
+                if family.recorded is self.existing.soft_delete_revive
+                else self._superseded_rule_reverse(key, slots, required[key])
+            )
         if column is None:
             # Passed as ``RAISE`` arguments, not interpolated into the literal: the quoted forms
             # escape ``"`` but not ``'``, so a db_table carrying one would break it.
@@ -1354,12 +1388,17 @@ class OperationsMixin:
         recorded = set(self.existing.soft_delete_related) | set(self.existing.soft_delete_revive)
         for key in sorted(recorded, key=lambda k: (k[0], k[1], k[2] or '')):
             # A per-key revive is retired whether or not its key still cascades: since 2.16.0
-            # the owner's one trigger carries its arm (#70). The rule only once it is unowed.
+            # the owner's one trigger carries its arm (#70). So is the rule, since 2.19.0: its
+            # key is an archive arm there (#80, ADR 0039). Unowed, either goes on evidence.
             rule_retired = key not in required
-            if not rule_retired and key not in self.existing.soft_delete_revive:
+            if (
+                not rule_retired
+                and key not in self.existing.soft_delete_revive
+                and key not in self.existing.soft_delete_related
+            ):
                 continue
             related_table, owner_table, via = key
-            # A superseded revive needs no evidence: the models still call for its key, and the
+            # A superseded object needs no evidence: the models still call for its key, and the
             # owner's trigger carries its arm. It goes where that trigger is written, then.
             if not rule_retired:
                 if self._revive_host(owner_table) != app.label:
@@ -1389,7 +1428,13 @@ class OperationsMixin:
             for family in self._retired_cascade_families(key):
                 if key not in family.recorded:
                     continue
-                if not rule_retired and family.recorded is not self.existing.soft_delete_revive:
+                # A rule is dropped only for a trigger that carries its arm: where the arm is
+                # refused or the owner's trigger is not written, dropping it ends the cascade.
+                if (
+                    not rule_retired
+                    and family.recorded is self.existing.soft_delete_related
+                    and not self._owner_trigger_carries(key, required[key])
+                ):
                     continue
                 self._record_retirement_edge(app.label, key, family.creates)
                 if deleted:
@@ -1983,29 +2028,12 @@ class OperationsMixin:
         }
         return [name for name in chain if name not in live]
 
-    def _claim_rule_name(self, table: str, rule_name: str, relation: tuple) -> None:
-        """Record that *relation* -- ``(other_table, table, foreign_key)``, the column **always**
-        filled in and never the operation's dedupe key -- names *rule_name* on *table*, reporting
-        a second one resolving to the same pair. See ``docs/migrations.md``'s "Rule names"."""
-        claimed = self._claimed_rule_names.setdefault((table, rule_name), relation)
-        if claimed != relation:
-            self._rule_name_clashes.append(
-                f"Rule {rule_name} on '{table}' is named by both "
-                f'{_rule_relation_label(claimed)} and {_rule_relation_label(relation)}. '
-                'PostgreSQL keeps one rule per name per table, so '
-                'the second replaces the first and that relation stops cascading. Rename a '
-                'column or a table so the two names differ. Where the shared name carries no '
-                'column at all -- one model holding a key to both an MTI parent and its child, '
-                'which resolve to one owner table -- renaming cannot help: point both keys at '
-                'one level of the chain, or cascade one of the two in Python.'
-            )
-
     def _claim_sweep_function_name(
         self, name: str, relation: tuple, *, kind: str = 'Owned sweep'
     ) -> None:
-        """:meth:`_claim_rule_name`'s equivalent, keyed on the name **alone**: a function is
-        namespaced per schema, so the second of two relations reaching one name overwrites the
-        first's body. One registry across families, which makes disjointness a checked claim."""
+        """Record that *relation* names the function *name*, keyed on the name **alone**: a
+        function is namespaced per schema, so a second relation reaching it overwrites the first's
+        body. One registry across families, which makes disjointness a checked claim."""
         claimed = self._claimed_sweep_names.setdefault(name, relation)
         if claimed != relation:
             self._rule_name_clashes.append(
@@ -2067,7 +2095,6 @@ class OperationsMixin:
                 ),
                 _soft_delete._CREATE_SOFT_DELETE_REVIVE_OWNER.format(**slots),
                 _soft_delete._DROP_SOFT_DELETE_REVIVE.format(**slots),
-                # ``CREATE TRIGGER`` has no ``OR REPLACE``, so a re-emission needs the drop.
                 replace=self._revive_owner_form(
                     slots, owner_table, unrenamed=_soft_delete._REPLACE_SOFT_DELETE_REVIVE_OWNER
                 ),
@@ -2075,6 +2102,7 @@ class OperationsMixin:
                     slots, owner_table, unrenamed=_soft_delete._ADOPT_SOFT_DELETE_REVIVE_OWNER
                 ),
                 is_adopt=adopt,
+                restore=self._legacy_revive_owner_restore(slots),
             )
         return operations
 
@@ -2093,12 +2121,16 @@ class OperationsMixin:
             'table': _identifiers._quote_table(owner_table),
             'primary_key': _identifiers._escape_ident(cast(str, owner._meta.pk.column)),
         }
-        rendered = [
-            arm
-            for key in sorted(arms, key=lambda k: (k[0], k[2] or ''))
-            if (arm := self._revive_arm(key, *arms[key], slots['primary_key'], quiet=quiet))
-            is not None
-        ]
+        rendered: list[str] = []
+        archived: list[str] = []
+        for key in sorted(arms, key=lambda k: (k[0], k[2] or '')):
+            # One refusal for both halves: they splice the same names into the same body.
+            if (
+                arm := self._revive_arm(key, *arms[key], slots['primary_key'], quiet=quiet)
+            ) is None:
+                continue
+            rendered.append(arm)
+            archived.append(self._archive_arm(key, *arms[key], slots['primary_key']))
         if not rendered:
             return None
         # Refused rather than escaped, as each arm's own slots are: the function name and
@@ -2111,7 +2143,41 @@ class OperationsMixin:
                     'depends on. Set a db_table / db_column without it.'
                 )
             return None
-        return slots | {'arms': ''.join(rendered)}
+        return slots | {'arms': ''.join(rendered), 'archive_arms': ''.join(archived)}
+
+    def _arm_slots(
+        self,
+        related_model: type[models.Model],
+        column: str,
+        ident_owner_pk: str,
+    ) -> dict[str, str]:
+        """The slots one cascade key's archive and revive arms share: the relation's names, and
+        for a joined key (its ``_deleted_at`` on an ancestor) the ancestor's."""
+        related_table = related_model._meta.db_table
+        target = column_owner(related_model, '_deleted_at')
+        slots = {
+            'related_table': _identifiers._quote_table(related_table),
+            'primary_key': ident_owner_pk,
+            'foreign_key': _identifiers._escape_ident(column),
+            'referenced_key': _referenced_key(related_model, column, ident_owner_pk),
+            # This runs at trigger depth 1, where a pre-2.19.0 ``updated_at_trigger``'s ``WHEN``
+            # suppresses it, so the column has to move here there. Redundant under the row
+            # trigger (ADR 0038), kept so a table not yet regenerated is stamped too.
+            'updated_at_assignment': (
+                _soft_delete._SOFT_DELETE_REVIVE_UPDATED_AT
+                if owns_column(target, '_updated_at')
+                else ''
+            ),
+        }
+        if not owns_column(related_model, '_deleted_at'):
+            slots |= {
+                'target_table': _identifiers._quote_table(target._meta.db_table),
+                'target_pk': _identifiers._escape_ident(cast(str, target._meta.pk.column)),
+                'child_pk': _identifiers._escape_ident(
+                    cast(str, _parent_link(related_model, target).column)
+                ),
+            }
+        return slots
 
     def _revive_arm(
         self,
@@ -2124,46 +2190,50 @@ class OperationsMixin:
     ) -> str | None:
         """One cascade key's arm of its owner's revive: the per-key body without its guard. A
         joined key, whose ``_deleted_at`` lives on an ancestor, revives that ancestor's row."""
-        related_table = related_model._meta.db_table
-        target = column_owner(related_model, '_deleted_at')
-        joined = not owns_column(related_model, '_deleted_at')
-        slots = {
-            'related_table': _identifiers._quote_table(related_table),
-            'primary_key': ident_owner_pk,
-            'foreign_key': _identifiers._escape_ident(column),
-            'referenced_key': _referenced_key(related_model, column, ident_owner_pk),
-            # This runs at trigger depth 1, where a pre-2.19.0 ``updated_at_trigger``'s ``WHEN``
-            # suppresses it, so the column has to move here there. Redundant under the row
-            # trigger (ADR 0038), kept so the ``[SQL:...]`` identity does not move.
-            'updated_at_assignment': (
-                _soft_delete._SOFT_DELETE_REVIVE_UPDATED_AT
-                if owns_column(target, '_updated_at')
-                else ''
-            ),
-        }
-        if joined:
-            slots |= {
-                'target_table': _identifiers._quote_table(target._meta.db_table),
-                'target_pk': _identifiers._escape_ident(cast(str, target._meta.pk.column)),
-                'child_pk': _identifiers._escape_ident(
-                    cast(str, _parent_link(related_model, target).column)
-                ),
-            }
+        slots = self._arm_slots(related_model, column, ident_owner_pk)
         if any('$$' in rendered for rendered in slots.values()):
             if quiet:
                 return None
             self._skipped_rule_notes.append(
-                f"Revive arm for '{key[1]}' -> '{related_table}' skipped: a table or column it "
-                'names contains "$$", which closes the dollar quoting its trigger function '
-                'depends on. Set a db_table / db_column without it.'
+                f"Revive arm for '{key[1]}' -> '{related_model._meta.db_table}' skipped: a table "
+                'or column it names contains "$$", which closes the dollar quoting its trigger '
+                'function depends on. Set a db_table / db_column without it.'
             )
             return None
+        joined = not owns_column(related_model, '_deleted_at')
         template = (
             _soft_delete._SOFT_DELETE_REVIVE_ARM_JOINED
             if joined
             else _soft_delete._SOFT_DELETE_REVIVE_ARM
         )
         return template.format(**slots)
+
+    def _archive_arm(
+        self,
+        key: tuple,
+        related_model: type[models.Model],
+        column: str,
+        ident_owner_pk: str,
+    ) -> str:
+        """The same key's archive arm (#80, ADR 0039): the cascade rule, as a statement of the
+        owner's trigger. Not refused on its own -- :meth:`_revive_arm` has asked of the same
+        slots, and a key it refuses gets neither."""
+        slots = self._arm_slots(related_model, column, ident_owner_pk)
+        template = (
+            _soft_delete._SOFT_DELETE_ARCHIVE_ARM_JOINED
+            if not owns_column(related_model, '_deleted_at')
+            else _soft_delete._SOFT_DELETE_ARCHIVE_ARM
+        )
+        return template.format(**slots)
+
+    @staticmethod
+    def _legacy_revive_owner_restore(slots: dict) -> tuple[str, str]:
+        """``(digest, reverse)`` for replacing the revive-only trigger 2.16.0 -- 2.18.x wrote:
+        unapplying that migration rebuilds it, rather than leaving the owner with no revive
+        (ADR 0039). Keyed on the digest it recorded, so any other predecessor reverses to a drop."""
+        forward = _soft_delete._LEGACY_CREATE_SOFT_DELETE_REVIVE_OWNER.format(**slots)
+        digest = _sql_digest(forward, _soft_delete._DROP_SOFT_DELETE_REVIVE.format(**slots))
+        return digest, _soft_delete._LEGACY_REPLACE_SOFT_DELETE_REVIVE_OWNER.format(**slots)
 
     def _revive_owner_form(self, slots: dict, owner_table: str, *, unrenamed: str) -> str:
         """:meth:`_self_cascade_form` for the per-owner revive: the name spells the owner
@@ -2175,120 +2245,20 @@ class OperationsMixin:
         ) + _soft_delete._ADOPT_SOFT_DELETE_REVIVE_OWNER.format(**slots)
 
     def _cascade_operations(self, model: type[models.Model], *, adopt: bool = False) -> list[str]:
-        """Cascade soft-delete rules for CASCADE FKs pointing at *model*. Lives on the table
-        whose ``_deleted_at`` actually flips: *model*'s own, or the owning MTI ancestor --
-        ``ON UPDATE TO child_table`` would never fire, a child's own column is never written."""
+        """The self-referential cascade triggers for CASCADE FKs pointing at *model*. The cascade
+        *rules* are gone (#80, ADR 0039): each key is an arm of its owner's trigger
+        (:meth:`_revive_operations`), a rule recorded for one retired by :meth:`_retired_cascade_operations`."""
         owner = column_owner(model, '_deleted_at')
         owner_table = owner._meta.db_table
         owner_pk = cast(str, owner._meta.pk.column)
-        # Loop-invariant: owner_table/owner_pk are fixed for every candidate below, so their
-        # quoted/escaped SQL forms and header-escaped form are each computed once rather than
-        # once per FK.
         ident_owner_table = _identifiers._quote_table(owner_table)
         ident_owner_pk = _identifiers._escape_ident(owner_pk)
         header_owner_table = _identifiers._escape_ident(owner_table)
 
         ops: list[str] = []
-        candidates, self_cascades = self._cascade_candidates(model, owner_table)
-        for related_model, fk_field, is_primary in candidates:
-            related_table = related_model._meta.db_table
-            # SQL body uses _quote_table/_escape_ident throughout; the header's
-            # `{table}`/`{related_table}` slots need the same _escape_ident treatment for
-            # the same reason -- see _tenant_policy_operation's comment.
-            ident_related_table = _identifiers._quote_table(related_table)
-            ident_foreign_key = _identifiers._escape_ident(fk_field.column)
-            header_related_table = _identifiers._escape_ident(related_table)
-            if is_primary:
-                key = (related_table, owner_table, None)
-                header = HEADER_SOFT_DELETE_RELATED.format(
-                    related_table=header_related_table, table=header_owner_table
-                )
-                rule_name = _related_rule_name(related_table)
-            else:
-                key = (related_table, owner_table, fk_field.column)
-                header = HEADER_SOFT_DELETE_RELATED_VIA.format(
-                    related_table=header_related_table,
-                    table=header_owner_table,
-                    foreign_key=_identifiers._escape_ident(fk_field.column),
-                )
-                rule_name = _related_rule_name(related_table, fk_field.column)
-            # The rule's action names the related table *and* the foreign key on it, so one
-            # field ref covers both. Pre-existing gap, not new in 2.4.0: a CASCADE crossing
-            # apps has always emitted a rule naming a table nothing ordered it against.
-            self._record_object_ref(model, related_model, fk_field.name)
-            # A joined rule stamps the ancestor and reads the descendant's parent link, so it
-            # names the ancestor's table and the link column too -- on neither of which the key
-            # alone says anything. ``target`` is ``related_model`` itself for the flat form.
-            joined = not owns_column(related_model, '_deleted_at')
-            target = column_owner(related_model, '_deleted_at')
-            if joined:
-                self._record_object_ref(
-                    model, related_model, _parent_link(related_model, target).name
-                )
-            # ``SET _deleted_at`` is a second column, and not necessarily as old as the table:
-            # a model promoted to ``SetarModel`` gains it in a later migration, and an edge to
-            # the creation alone would let the rule be created before the column exists.
-            self._record_object_ref(model, target, '_deleted_at')
-            # And, where this key was retired before, the drop that retired it: a re-adopted
-            # create reaching a fresh database first leaves the rule dropped and never rebuilt.
-            self._record_readoption_edge(model._meta.app_label, key)
-            # The relation, not `key`: `key` drops the column on the plain form, and two
-            # relations can then share one key -- see `_claim_rule_name`'s docstring.
-            self._claim_rule_name(
-                owner_table, rule_name, (related_table, owner_table, fk_field.column)
-            )
-            # One template pair for both cases -- see soft_delete.py's private
-            # _CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE for why the public, frozen constants
-            # of the same name (the old rule_name-less signature) aren't used here.
-            if joined:
-                forward = _soft_delete._CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE_JOINED.format(
-                    rule_name=rule_name,
-                    table=ident_owner_table,
-                    related_table=ident_related_table,
-                    primary_key=ident_owner_pk,
-                    foreign_key=ident_foreign_key,
-                    target_table=_identifiers._quote_table(target._meta.db_table),
-                    target_pk=_identifiers._escape_ident(cast(str, target._meta.pk.column)),
-                    child_pk=_identifiers._escape_ident(
-                        cast(str, _parent_link(related_model, target).column)
-                    ),
-                )
-            else:
-                forward = _soft_delete._CREATE_SOFT_DELETE_RELATED_OBJECTS_RULE.format(
-                    rule_name=rule_name,
-                    table=ident_owner_table,
-                    related_table=ident_related_table,
-                    primary_key=ident_owner_pk,
-                    foreign_key=ident_foreign_key,
-                    referenced_key=_referenced_key(related_model, fk_field.column, ident_owner_pk),
-                )
-            # A rule's name embeds the child's table, so a rename leaves the carried-over rule
-            # live beside the new one -- both cascading, and nothing later retires either.
-            replace = forward
-            if self._renamed(related_table):
-                replace = (
-                    self._drop_prior_rules(
-                        ident_owner_table,
-                        [
-                            _related_rule_name(name, None if is_primary else fk_field.column)
-                            for name in self._prior_names(related_table)
-                        ],
-                    )
-                    + forward
-                )
-            reverse = _soft_delete._DROP_SOFT_DELETE_RELATED_OBJECTS_RULE.format(
-                rule_name=rule_name, table=ident_owner_table
-            )
-            self._append_if_stale(
-                ops,
-                self.existing.soft_delete_related,
-                key,
-                header,
-                forward,
-                reverse,
-                is_adopt=adopt,
-                replace=replace,
-            )
+        # Asked for its refusals and notes, which only a reporting call files; the candidates
+        # are the arms' to render, off the registry-wide sweep rather than this app's models.
+        _candidates, self_cascades = self._cascade_candidates(model, owner_table)
         for fk_field in self_cascades:
             self._self_cascade_operation(
                 ops,
@@ -2502,9 +2472,9 @@ class OperationsMixin:
         return candidates
 
     def _owned_operations(self, model: type[models.Model], *, adopt: bool = False) -> list[str]:
-        """Owned soft-delete rules for ``OwningForeignKey``s declared on *model*: the row
-        soft-deletes what it owns, unless a sibling owner is still alive. Lives on the same
-        table its cascade rules do -- the one whose ``_deleted_at`` actually flips."""
+        """Owned sweeps for ``OwningForeignKey``s declared on *model*: the row soft-deletes what it
+        owns, unless a sibling owner is still alive. Retires the owned *rule* recorded before
+        2.19.0 (#80, ADR 0039), whose work the sweep does alone."""
         declared = self._declared_owning_fields(model)
         if not declared:
             return []
@@ -2569,27 +2539,11 @@ class OperationsMixin:
                 continue
             ident_foreign_key = _identifiers._escape_ident(fk_field.column)
             co_owners = self._co_owner_arms(dependent_table, owner_table, fk_field.column)
-            # Everything the action names outside its own table, each ``_deleted_at`` alongside
-            # the table holding it: a model promoted to ``SetarModel`` gains that column later
-            # than its table, so an edge to the table alone would not order the column.
-            self._record_object_ref(model, dependent)
-            self._record_object_ref(model, dependent, '_deleted_at')
-            for arm in co_owners:
-                self._record_object_ref(model, arm.owner_model, arm.fk_name)
-                if arm.root_model is not None:
-                    self._record_object_ref(model, arm.root_model)
-                    self._record_object_ref(model, arm.root_model, '_deleted_at')
-                else:
-                    self._record_object_ref(model, arm.owner_model, '_deleted_at')
-            header = HEADER_SOFT_DELETE_OWNED.format(
-                dependent_table=_identifiers._escape_ident(dependent_table),
-                table=header_owner_table,
-                foreign_key=ident_foreign_key,
-            )
+            # No object refs: the rule that named the dependent and its co-owners at ``CREATE``
+            # time is no longer written (#80, ADR 0039), and the sweep's plpgsql body resolves
+            # nothing until it runs. A rule already recorded is retired below.
             rule_name = _owned_rule_name(dependent_table, fk_field.column)
-            # ``key`` *is* the relation here: an owned key always carries its column, so
-            # unlike the cascade family above the two cannot come apart.
-            self._claim_rule_name(owner_table, rule_name, key)
+            # What a recorded rule's retirement reverses to: the rule, as it was written.
             forward = _soft_delete._CREATE_SOFT_DELETE_OWNED_OBJECT_RULE.format(
                 rule_name=rule_name,
                 table=ident_owner_table,
@@ -2608,44 +2562,14 @@ class OperationsMixin:
                     _identifiers._escape_ident(cast(str, dependent._meta.pk.column)),
                 ),
             )
-            reverse = _soft_delete._DROP_SOFT_DELETE_OWNED_OBJECT_RULE.format(
-                rule_name=rule_name, table=ident_owner_table
-            )
-            # The owned rule's name embeds the *dependent's* table, so a rename there leaves
-            # the carried-over rule live beside the new one -- both cascading, neither retired,
-            # and the stale one frozen at the old predicate.
-            owned_replace = forward
-            if self._renamed(dependent_table):
-                owned_replace = (
-                    self._drop_prior_rules(
-                        ident_owner_table,
-                        [
-                            _owned_rule_name(name, fk_field.column)
-                            for name in self._prior_names(dependent_table)
-                        ],
-                    )
-                    + forward
-                )
-            # Each half against the retirement it revives, as the cascade pair does (ADR 0021).
-            for recorded, sites in (
-                (self.existing.soft_delete_owned, self.existing.owned_retirement_sites),
-                (
-                    self.existing.soft_delete_owned_sweep,
-                    self.existing.owned_sweep_retirement_sites,
-                ),
-            ):
-                self._record_readoption_edge(model._meta.app_label, key, recorded, sites)
-            self._append_if_stale(
-                ops,
-                self.existing.soft_delete_owned,
+            # The sweep against the retirement it revives (ADR 0021); the rule has none to revive.
+            self._record_readoption_edge(
+                model._meta.app_label,
                 key,
-                header,
-                forward,
-                reverse,
-                is_adopt=adopt,
-                replace=owned_replace,
+                self.existing.soft_delete_owned_sweep,
+                self.existing.owned_sweep_retirement_sites,
             )
-            self._append_owned_sweep(
+            carried = self._append_owned_sweep(
                 ops,
                 key=key,
                 dependent=dependent,
@@ -2658,7 +2582,51 @@ class OperationsMixin:
                 foreign_key=fk_field.column,
                 adopt=adopt,
             )
+            # Dropped only for a sweep that is written: a refused one leaves the rule the only
+            # thing archiving the dependent, and dropping it ends that.
+            if carried and key in self.existing.soft_delete_owned:
+                self._retire_superseded_owned_rule(
+                    ops,
+                    key=key,
+                    app_label=model._meta.app_label,
+                    forward=forward,
+                    ident_owner_table=ident_owner_table,
+                    header=HEADER_SOFT_DELETE_OWNED_RETIRED.format(
+                        dependent_table=_identifiers._escape_ident(dependent_table),
+                        table=header_owner_table,
+                        foreign_key=ident_foreign_key,
+                    ),
+                )
         return ops
+
+    def _retire_superseded_owned_rule(
+        self,
+        ops: list[str],
+        *,
+        key: tuple[str, str, str],
+        app_label: str,
+        forward: str,
+        ident_owner_table: str,
+        header: str,
+    ) -> None:
+        """Drop an owned rule recorded before 2.19.0, whose work its sweep now does alone (#80,
+        ADR 0039). ``IF EXISTS`` over every name the dependent's table held, as every retirement
+        is; the reverse rebuilds the rule *forward* renders, so 2.18.x unapplies."""
+        dependent_table, owner_table, foreign_key = key
+        drop = self._drop_prior_rules(
+            ident_owner_table,
+            sorted(
+                {
+                    _owned_rule_name(name, foreign_key)
+                    for name in (*self._prior_names(dependent_table), dependent_table)
+                }
+            ),
+        )
+        self._record_retirement_edge(app_label, key, self.existing.soft_delete_owned_dependencies)
+        # Its operation set may recur once a key is re-adopted and retired again.
+        self.existing.retirement_apps.add(app_label)
+        source, _ = _operation(header, drop, forward)
+        ops.append(source)
 
     def _append_owned_sweep(
         self,
@@ -2674,10 +2642,10 @@ class OperationsMixin:
         ident_foreign_key: str,
         foreign_key: str,
         adopt: bool,
-    ) -> None:
-        """The statement-level companion to the rule just emitted (ADR 0014), appended from
-        inside :meth:`_owned_operations` after every refusal that loop applies and against the
-        same *key* -- so which relations carry a sweep *is* which carry a rule."""
+    ) -> bool:
+        """The statement-level sweep (ADR 0014), appended from inside :meth:`_owned_operations`
+        after every refusal that loop applies and against the same *key*: which relations carry a
+        sweep *is* which are owned. Whether it is written -- ``False`` where it is refused."""
         # No object refs of its own: CREATE TRIGGER names only the table it fires on, and
         # plpgsql does not resolve a body at CREATE FUNCTION time, so nothing here is a
         # parse-time reference. The rule's refs, recorded above, order the runtime case.
@@ -2748,7 +2716,7 @@ class OperationsMixin:
                         f'stale predicate. Drop it by hand: DROP TRIGGER {name} ON '
                         f'{ident_owner_table}; DROP FUNCTION {name}();'
                     )
-                return
+                return False
         # Claimed only once it is really emitted: a refused sweep holding its name would
         # report a clash against the one relation that does reach it.
         self._claim_sweep_function_name(name, key)
@@ -2779,6 +2747,7 @@ class OperationsMixin:
             ),
             is_adopt=adopt,
         )
+        return True
 
     def _co_owner_arms(
         self, dependent_table: str, owner_table: str, fk_column: str
@@ -2938,52 +2907,12 @@ class OperationsMixin:
         return notes
 
     def _scoped_cascade_gap_notes(self, requested: set[str]) -> list[str]:
-        """Describe cross-app CASCADE soft-delete rules this scoped run won't create -- keyed
-        off the *parent* app (holding ``_deleted_at``), so scoping the parent out skips it.
-        The accepted "pragmatic scope" tradeoff; closed by a later, unscoped run."""
+        """What a scoped run leaves of the cascade: a rule retired or superseded whose owner's app
+        is out of the run. The arm itself is the owner's trigger's (#80, ADR 0039), which
+        :meth:`_scoped_revive_notes` reports by digest."""
         if not requested:
             return []
-
-        model_app_label = {
-            model: app.label
-            for app in django_apps.get_app_configs()
-            if _generator.is_local(app)
-            for model in app.get_models()
-        }
-
-        notes: list[str] = []
-        for app in django_apps.get_app_configs():
-            if not _generator.is_local(app) or app.label in requested:
-                continue
-            for model in app.get_models():
-                # Routed away: no run emits this rule, so reporting a scoped run's *gap* in it
-                # sends the reader to add an app that would still write nothing.
-                if not has_column(model, '_deleted_at') or not migrates_to_postgresql(model):
-                    continue
-                # The rule lives on the table that owns _deleted_at (the model itself, or its
-                # MTI ancestor), matching where `_cascade_operations` places it.
-                table = column_owner(model, '_deleted_at')._meta.db_table
-                # Shared with _cascade_operations, which is what makes "closed by a later run
-                # naming the parent's app" a promise this check can actually verify: the two
-                # must agree on both which FKs count and which dedupe key each one uses.
-
-                # Self keys dropped: that trigger lands in the app being scanned, so a scoped
-                # run has nothing to report for it that this note's cascade-rule gap covers.
-                candidates, _self_cascades = self._cascade_candidates(model, table)
-                for related_model, fk_field, is_primary in candidates:
-                    if model_app_label.get(related_model) not in requested:
-                        continue
-                    related_table = related_model._meta.db_table
-                    key = (related_table, table, None if is_primary else fk_field.column)
-                    # The cascade alone: since 2.16.0 the inverse is the owner's one trigger, whose
-                    # host need not be this app -- ``_scoped_revive_notes`` names it, by digest.
-                    if key in self.existing.soft_delete_related:
-                        continue
-                    notes.append(
-                        f"Cascade rule on '{related_table}' related to '{table}' skipped: parent "
-                        f"app '{app.label}' is not in this scoped run."
-                    )
-        return notes + self._scoped_cascade_retirement_notes(requested)
+        return self._scoped_cascade_retirement_notes(requested)
 
     def _scoped_cascade_retirement_notes(self, requested: set[str]) -> list[str]:
         """The other direction, and the dangerous half to leave silent: a rule the models no
@@ -3077,8 +3006,9 @@ class OperationsMixin:
                 continue
             notes.append(
                 f"Revive trigger {_revive_owner_name(owner_table)} on '{owner_table}' is {state}, "
-                f"and only a run including '{host}' writes it: until then a revive there may "
-                'leave children archived, or fail on an arm naming a column or table now gone.'
+                f"and only a run including '{host}' writes it: until then an archive or a revive "
+                'there may leave children live or archived, or fail on an arm naming a column or '
+                'table now gone.'
             )
         return notes
 

@@ -8,6 +8,7 @@ import re
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from django.apps import apps as django_apps
+from django.conf import settings
 from django.core.exceptions import FieldDoesNotExist
 from django.db import models
 from django.db.migrations.loader import MigrationLoader
@@ -47,6 +48,8 @@ from guitars.management.enforcement.headers import (
     HEADER_SOFT_DELETE,
     HEADER_SOFT_DELETE_CASCADE_OWNER,
     HEADER_SOFT_DELETE_CASCADE_OWNER_RETIRED,
+    HEADER_SOFT_DELETE_GUARD,
+    HEADER_SOFT_DELETE_GUARD_RETIRED,
     HEADER_SOFT_DELETE_OWNED_RETIRED,
     HEADER_SOFT_DELETE_OWNED_SWEEP,
     HEADER_SOFT_DELETE_OWNED_SWEEP_RETIRED,
@@ -226,6 +229,11 @@ def _revive_owner_name(owner_table: str) -> str:
 def _cascade_owner_name(owner_table: str) -> str:
     """The per-owner trigger's identifier since it archives as well as revives (2.19.0, #80)."""
     return _owner_trigger_name('soft_delete_cascade_on', owner_table)
+
+
+def _guard_name(child_table: str) -> str:
+    """The insert-side guard's identifier, for its function and its trigger (2.22.0, ADR 0044)."""
+    return _owner_trigger_name('soft_delete_guard_on', child_table)
 
 
 def _referenced_key(model: type[models.Model], column: str, owner_pk: str) -> str:
@@ -743,6 +751,7 @@ class OperationsMixin:
             # (#80, ADR 0039) is dropped only once its arm exists. A migration is atomic, so this
             # is no window in the usual case -- and the only order that holds where one is not.
             + self._revive_operations(app, adopt=adopt)
+            + self._guard_operations(app, adopt=adopt)
             + self._retired_cascade_operations(app, adopt=adopt)
             + self._retired_autofill_operations(app, adopt=adopt)
             + self._retired_trigger_operations(app)
@@ -1145,6 +1154,30 @@ class OperationsMixin:
                 self._retirement(app.label, header, drop, _cascade_owner_name(table), table)
             )
         operations += self._retired_revive_owner_operations(app, owed)
+        operations += self._retired_guard_operations(app)
+        return operations
+
+    def _retired_guard_operations(self, app: AppConfig) -> list[str]:
+        """Retire a recorded insert-side guard whose table no longer has a cascade key, or all of
+        them once ``GUITARS_CASCADE_GUARD`` is off: a plpgsql body naming a dropped column fails
+        every insert into the child. ``IF EXISTS``, every spelling, a reverse that refuses."""
+        operations: list[str] = []
+        owed = set(self._guards_by_child())
+        hosting = self._table_app_labels()
+        for (table,) in sorted(set(self.existing.soft_delete_guard)):
+            if table in owed or hosting.get(table) != app.label:
+                continue
+            header = HEADER_SOFT_DELETE_GUARD_RETIRED.format(
+                table=_identifiers._escape_ident(table)
+            )
+            drop = self._drop_prior_triggers(
+                {'table': _identifiers._quote_table(table)},
+                [_guard_name(name) for name in (*self._prior_names(table), table)],
+            )
+            self._record_retirement_edge(
+                app.label, (table,), self.existing.soft_delete_guard_dependencies
+            )
+            operations.append(self._retirement(app.label, header, drop, _guard_name(table), table))
         return operations
 
     def _retired_revive_owner_operations(self, app: AppConfig, owed: set[str]) -> list[str]:
@@ -2101,6 +2134,114 @@ class OperationsMixin:
                 ),
                 adopt=self._revive_owner_form(
                     slots, owner_table, unrenamed=_soft_delete._ADOPT_SOFT_DELETE_REVIVE_OWNER
+                ),
+                is_adopt=adopt,
+            )
+        return operations
+
+    def _guard_enabled(self) -> bool:
+        """``GUITARS_CASCADE_GUARD`` (default on): whether a cascade child carries an insert-side
+        guard (ADR 0044). Off retires the ones already written."""
+        return bool(getattr(settings, 'GUITARS_CASCADE_GUARD', True))
+
+    def _guards_by_child(self) -> dict[str, list[tuple[str, str, type[models.Model]]]]:
+        """``child_table -> [(owner_table, column, child model)]``: every cascade key the owners'
+        triggers carry an arm for, grouped by the table holding the key, off the same sweep."""
+        if not self._guard_enabled():
+            return {}
+        by_child: dict[str, list[tuple[str, str, type[models.Model]]]] = {}
+        for owner_table, arms in self._revive_arms_by_owner().items():
+            for (related_table, _owner, column), (related_model, _column) in arms.items():
+                by_child.setdefault(related_table, []).append((owner_table, column, related_model))
+        return {table: sorted(keys, key=lambda k: k[:2]) for table, keys in by_child.items()}
+
+    def _guard_host(self, child_table: str) -> str | None:
+        """The app writing *child_table*'s guard, for life: the one that created it, else the
+        table's own host. ``None`` for a table routed away, which this DDL cannot name."""
+        if child_table in self._routed_away_tables():
+            return None
+        local = {app.label for app in django_apps.get_app_configs() if _generator.is_local(app)}
+        created_in = [
+            label
+            for label, _migration in self.existing.soft_delete_guard_dependencies.get(
+                (child_table,), []
+            )
+            if label in local
+        ]
+        return created_in[-1] if created_in else self._table_app_labels().get(child_table)
+
+    def _guard_slots(self, child_table: str) -> dict:
+        """Every slot of *child_table*'s guard, a block per cascade key: flat where the table owns
+        ``_deleted_at`` (a ``BEFORE`` trigger setting ``NEW``), joined where its ancestor does (an
+        ``AFTER`` one archiving that row). A name holding ``$$`` takes another dollar-quote tag."""
+        keys = self._guards_by_child()[child_table]
+        joined = not owns_column(keys[0][2], '_deleted_at')
+        blocks: list[str] = []
+        stamp_table = _identifiers._quote_table(child_table)
+        for owner_table, column, related_model in keys:
+            owner = self._revive_owners[owner_table][0]
+            owner = owner._meta.concrete_model or owner
+            owner_pk = _identifiers._escape_ident(cast(str, owner._meta.pk.column))
+            arm = self._arm_slots(related_model, column, owner_pk)
+            arm['owner_table'] = _identifiers._quote_table(owner_table)
+            if joined:
+                stamp_table = arm['target_table']
+            blocks.append(
+                (
+                    _soft_delete._SOFT_DELETE_GUARD_BLOCK_JOINED
+                    if joined
+                    else _soft_delete._SOFT_DELETE_GUARD_BLOCK
+                ).format(**arm)
+            )
+        name = _guard_name(child_table)
+        slots = {
+            'function': name,
+            'trigger': name,
+            'table': _identifiers._quote_table(child_table),
+            'timing': 'AFTER' if joined else 'BEFORE',
+            'stamp_table': stamp_table,
+            'blocks': ''.join(blocks),
+        }
+        return slots | {'dollar': _dollar_quote(*slots.values())}
+
+    def _guard_form(self, slots: dict, table: str, *, unrenamed: str) -> str:
+        """The replace or adopt form, dropping every prior name where a rename left one."""
+        if not self._renamed(table):
+            return unrenamed.format(**slots)
+        return self._drop_prior_triggers(
+            slots, [_guard_name(name) for name in self._prior_names(table)]
+        ) + _soft_delete._ADOPT_SOFT_DELETE_GUARD.format(**slots)
+
+    def _guard_operations(self, app: AppConfig, *, adopt: bool = False) -> list[str]:
+        """One insert-side guard per cascade child table *app* hosts (ADR 0044): a child arriving
+        under a parent being archived waits for it, then copies the parent's stamp."""
+        operations: list[str] = []
+        for child_table in sorted(self._guards_by_child()):
+            if self._guard_host(child_table) != app.label:
+                continue
+            slots = self._guard_slots(child_table)
+            self._claim_sweep_function_name(
+                slots['function'], (child_table, child_table, None), kind='Guard'
+            )
+            key = (child_table,)
+            self._record_readoption_edge(
+                app.label,
+                key,
+                self.existing.soft_delete_guard,
+                self.existing.guard_retirement_sites,
+            )
+            self._append_if_stale(
+                operations,
+                self.existing.soft_delete_guard,
+                key,
+                HEADER_SOFT_DELETE_GUARD.format(table=_identifiers._escape_ident(child_table)),
+                _soft_delete._CREATE_SOFT_DELETE_GUARD.format(**slots),
+                _soft_delete._DROP_SOFT_DELETE_GUARD.format(**slots),
+                replace=self._guard_form(
+                    slots, child_table, unrenamed=_soft_delete._REPLACE_SOFT_DELETE_GUARD
+                ),
+                adopt=self._guard_form(
+                    slots, child_table, unrenamed=_soft_delete._ADOPT_SOFT_DELETE_GUARD
                 ),
                 is_adopt=adopt,
             )

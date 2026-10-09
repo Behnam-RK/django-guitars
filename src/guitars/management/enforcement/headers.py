@@ -96,6 +96,11 @@ HEADER_SOFT_DELETE_CASCADE_OWNER_RETIRED = (
     '# Soft Delete Cascade Trigger retired on "{table}" table!'
 )
 
+# The insert-side guard of a cascade child (2.22.0, ADR 0044): a row trigger taking the parent's lock
+# and its stamp. Disjoint from the cascade trigger above on "Guard" where theirs says "Trigger".
+HEADER_SOFT_DELETE_GUARD = '# Soft Delete Cascade Guard on "{table}" table!'
+HEADER_SOFT_DELETE_GUARD_RETIRED = '# Soft Delete Cascade Guard retired on "{table}" table!'
+
 # A self-referential CASCADE FK's trigger (ADR 0018), read for history and its retirement since
 # 2.20.0 (ADR 0042). "Self Cascade Trigger" shares no token with the three above, so no scanner
 # reads one as another's. One table slot: the trigger fires on the table its key points at.
@@ -178,6 +183,8 @@ _RE_SOFT_DELETE_REVIVE_OWNER = _derive_scanner(HEADER_SOFT_DELETE_REVIVE_OWNER)
 _RE_SOFT_DELETE_REVIVE_OWNER_RETIRED = _derive_scanner(HEADER_SOFT_DELETE_REVIVE_OWNER_RETIRED)
 _RE_SOFT_DELETE_CASCADE_OWNER = _derive_scanner(HEADER_SOFT_DELETE_CASCADE_OWNER)
 _RE_SOFT_DELETE_CASCADE_OWNER_RETIRED = _derive_scanner(HEADER_SOFT_DELETE_CASCADE_OWNER_RETIRED)
+_RE_SOFT_DELETE_GUARD = _derive_scanner(HEADER_SOFT_DELETE_GUARD)
+_RE_SOFT_DELETE_GUARD_RETIRED = _derive_scanner(HEADER_SOFT_DELETE_GUARD_RETIRED)
 # The three retirements of #66, each disjoint from its create on "retired".
 _RE_SOFT_DELETE_OWNED_RETIRED = _derive_scanner(HEADER_SOFT_DELETE_OWNED_RETIRED)
 _RE_SOFT_DELETE_OWNED_SWEEP_RETIRED = _derive_scanner(HEADER_SOFT_DELETE_OWNED_SWEEP_RETIRED)

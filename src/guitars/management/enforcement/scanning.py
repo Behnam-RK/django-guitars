@@ -19,6 +19,8 @@ from guitars.management.enforcement.headers import (
     _RE_SOFT_DELETE,
     _RE_SOFT_DELETE_CASCADE_OWNER,
     _RE_SOFT_DELETE_CASCADE_OWNER_RETIRED,
+    _RE_SOFT_DELETE_GUARD,
+    _RE_SOFT_DELETE_GUARD_RETIRED,
     _RE_SOFT_DELETE_OWNED,
     _RE_SOFT_DELETE_OWNED_RETIRED,
     _RE_SOFT_DELETE_OWNED_SWEEP,
@@ -106,6 +108,11 @@ class ExistingOperations(NamedTuple):
     soft_delete_cascade_owner: dict[tuple[str], str | None]
     soft_delete_cascade_owner_dependencies: dict[tuple[str], list[tuple[str, str]]]
     cascade_owner_retirement_sites: list[CascadeRetirementSite]
+    #: Keyed on ``(child_table,)``: the insert-side guard of a cascade child (2.22.0, ADR 0044), with
+    #: its creates and retirements, as the per-owner trigger's.
+    soft_delete_guard: dict[tuple[str], str | None]
+    soft_delete_guard_dependencies: dict[tuple[str], list[tuple[str, str]]]
+    guard_retirement_sites: list[CascadeRetirementSite]
     #: Keyed on (dependent_table, table, foreign_key) -- the owner-side mirror of the above.
     #: The FK is never ``None`` here: an owned rule is always named after its column, there
     #: being no pre-2.3.0 plain form to stay compatible with.
@@ -451,6 +458,8 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
     existing_soft_delete_self_cascade: dict[tuple[str, str], str | None] = {}
     existing_soft_delete_revive_owner: dict[tuple[str], str | None] = {}
     existing_soft_delete_cascade_owner: dict[tuple[str], str | None] = {}
+    existing_soft_delete_guard: dict[tuple[str], str | None] = {}
+    guard_deps: dict = {}
     owned_deps: dict = {}
     revive_owner_deps: dict = {}
     cascade_owner_deps: dict = {}
@@ -500,6 +509,11 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
         (
             _RE_SOFT_DELETE_CASCADE_OWNER,
             existing_soft_delete_cascade_owner,
+            lambda m: (_identifiers._unescape_ident(m.group(1)),),
+        ),
+        (
+            _RE_SOFT_DELETE_GUARD,
+            existing_soft_delete_guard,
             lambda m: (_identifiers._unescape_ident(m.group(1)),),
         ),
         (
@@ -578,6 +592,7 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
         'soft_delete_self_cascade': (existing_soft_delete_self_cascade, 0),
         'soft_delete_revive_owner': (existing_soft_delete_revive_owner, 0),
         'soft_delete_cascade_owner': (existing_soft_delete_cascade_owner, 0),
+        'soft_delete_guard': (existing_soft_delete_guard, 0),
     }
     whole_table_families = {
         'triggers': existing_triggers,
@@ -604,6 +619,8 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
         revive_owner_deps,
         existing_soft_delete_cascade_owner,
         cascade_owner_deps,
+        existing_soft_delete_guard,
+        guard_deps,
         existing_mti_triggers,
         existing_mti_soft_deletes,
         existing_tenant_autofill,
@@ -755,6 +772,7 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
             (_RE_SOFT_DELETE_SELF_CASCADE, self_deps),
             (_RE_SOFT_DELETE_REVIVE_OWNER, revive_owner_deps),
             (_RE_SOFT_DELETE_CASCADE_OWNER, cascade_owner_deps),
+            (_RE_SOFT_DELETE_GUARD, guard_deps),
         ):
             for match in pattern.finditer(content):
                 creates = deps.setdefault(_record(_unescaped_groups(match)), [])
@@ -802,6 +820,7 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
             (_RE_SOFT_DELETE_SELF_CASCADE_RETIRED, existing_soft_delete_self_cascade),
             (_RE_SOFT_DELETE_REVIVE_OWNER_RETIRED, existing_soft_delete_revive_owner),
             (_RE_SOFT_DELETE_CASCADE_OWNER_RETIRED, existing_soft_delete_cascade_owner),
+            (_RE_SOFT_DELETE_GUARD_RETIRED, existing_soft_delete_guard),
         ):
             for match in pattern.finditer(content):
                 trigger_retirement_sites.setdefault(id(recorded), []).append(
@@ -858,7 +877,7 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
     revive_retirement_sites = _settle_retirement_sites(
         revive_retirement_sites, existing_soft_delete_revive, revive_deps, graph, aliases
     )
-    owned_sites, sweep_sites, _self_sites, revive_owner_sites, cascade_owner_sites = (
+    owned_sites, sweep_sites, _self_sites, revive_owner_sites, cascade_owner_sites, guard_sites = (
         _settle_retirement_sites(
             trigger_retirement_sites.get(id(recorded), []), recorded, deps, graph, aliases
         )
@@ -868,6 +887,7 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
             (existing_soft_delete_self_cascade, self_deps),
             (existing_soft_delete_revive_owner, revive_owner_deps),
             (existing_soft_delete_cascade_owner, cascade_owner_deps),
+            (existing_soft_delete_guard, guard_deps),
         )
     )
 
@@ -891,6 +911,9 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
         soft_delete_cascade_owner=existing_soft_delete_cascade_owner,
         soft_delete_cascade_owner_dependencies=cascade_owner_deps,
         cascade_owner_retirement_sites=cascade_owner_sites,
+        soft_delete_guard=existing_soft_delete_guard,
+        soft_delete_guard_dependencies=guard_deps,
+        guard_retirement_sites=guard_sites,
         soft_delete_owned=existing_soft_delete_owned,
         soft_delete_owned_sweep=existing_soft_delete_owned_sweep,
         soft_delete_self_cascade=existing_soft_delete_self_cascade,

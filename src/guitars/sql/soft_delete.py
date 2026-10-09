@@ -426,6 +426,76 @@ _REPLACE_SOFT_DELETE_REVIVE_OWNER = (
 )
 _ADOPT_SOFT_DELETE_REVIVE_OWNER = _REPLACE_SOFT_DELETE_REVIVE_OWNER
 
+# ---- The insert-side guard of a cascade child (2.22.0, #91, ADR 0044): ``FOR SHARE`` on the parent
+# waits for an archive and copies its stamp. ``{blocks}`` is one per key, and no ``UPDATE OF``
+# list: it would record a dependency that fails ``DROP COLUMN`` of a key.
+_SOFT_DELETE_GUARD_BLOCK = """
+        IF NEW."{foreign_key}" IS NOT NULL AND NEW._deleted_at IS NULL
+           AND (TG_OP = 'INSERT' OR NEW."{foreign_key}" IS DISTINCT FROM OLD."{foreign_key}") THEN
+            SELECT guitars_parent._deleted_at INTO guitars_stamp
+            FROM {owner_table} AS guitars_parent
+            WHERE guitars_parent."{referenced_key}" = NEW."{foreign_key}"
+            FOR SHARE OF guitars_parent;
+            IF guitars_stamp IS NOT NULL THEN
+                NEW._deleted_at := guitars_stamp;
+            END IF;
+        END IF;"""
+
+# A key declared on an MTI descendant, whose ``_deleted_at`` lives on its ancestor's row, so it
+# cannot be set on ``NEW``: the ancestor's row exists already (Django inserts it first), and an
+# ``AFTER`` trigger archives it, which fires that table's own trigger and so the arms below it.
+_SOFT_DELETE_GUARD_BLOCK_JOINED = """
+        IF NEW."{foreign_key}" IS NOT NULL
+           AND (TG_OP = 'INSERT' OR NEW."{foreign_key}" IS DISTINCT FROM OLD."{foreign_key}") THEN
+            SELECT guitars_parent._deleted_at INTO guitars_stamp
+            FROM {owner_table} AS guitars_parent
+            WHERE guitars_parent."{referenced_key}" = NEW."{foreign_key}"
+            FOR SHARE OF guitars_parent;
+            IF guitars_stamp IS NOT NULL THEN
+                UPDATE {target_table} SET _deleted_at = guitars_stamp
+                WHERE "{target_pk}" = NEW."{child_pk}" AND _deleted_at IS NULL;
+            END IF;
+        END IF;"""
+
+# ``{stamp_table}`` is the table whose ``_deleted_at`` this writes: its column type is the one
+# the stamp has, ``timestamptz`` or ``timestamp`` under ``USE_TZ = False``, none guessed here.
+_CREATE_SOFT_DELETE_GUARD_FUNCTION = """
+    CREATE OR REPLACE FUNCTION {function}()
+       RETURNS TRIGGER
+       LANGUAGE PLPGSQL
+    AS
+    {dollar}
+    DECLARE
+        guitars_stamp {stamp_table}._deleted_at%TYPE;
+    BEGIN{blocks}
+        RETURN NEW;
+    END;
+    {dollar};
+"""
+
+_CREATE_SOFT_DELETE_GUARD_TRIGGER = """
+    CREATE TRIGGER {trigger}
+        {timing} INSERT OR UPDATE ON {table}
+        FOR EACH ROW
+        EXECUTE FUNCTION {function}();
+"""
+
+_DROP_SOFT_DELETE_GUARD_TRIGGER = """
+    DROP TRIGGER {trigger} ON {table};
+"""
+
+_DROP_SOFT_DELETE_GUARD_FUNCTION = """
+    DROP FUNCTION {function}();
+"""
+
+_CREATE_SOFT_DELETE_GUARD = _CREATE_SOFT_DELETE_GUARD_FUNCTION + _CREATE_SOFT_DELETE_GUARD_TRIGGER
+_DROP_SOFT_DELETE_GUARD = _DROP_SOFT_DELETE_GUARD_TRIGGER + _DROP_SOFT_DELETE_GUARD_FUNCTION
+# ``CREATE OR REPLACE TRIGGER`` (PG 14) for a re-emission: no ``DROP``, no ACCESS EXCLUSIVE.
+_REPLACE_SOFT_DELETE_GUARD = _CREATE_SOFT_DELETE_GUARD_FUNCTION + (
+    _CREATE_SOFT_DELETE_GUARD_TRIGGER.replace('CREATE TRIGGER', 'CREATE OR REPLACE TRIGGER', 1)
+)
+_ADOPT_SOFT_DELETE_GUARD = _REPLACE_SOFT_DELETE_GUARD
+
 # What 2.16.0 -- 2.18.x wrote: the revive half alone. Kept to rebuild it as the reverse of the
 # migration that retires it (``_legacy_revive_owner_reverse``).
 _LEGACY_CREATE_SOFT_DELETE_REVIVE_OWNER_FUNCTION = """

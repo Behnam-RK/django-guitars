@@ -42,8 +42,11 @@ def test_column_mode_drops_only_what_depends_on_that_column(db):
     _apply(RetireEnforcement('testapp_setlistentry', column='_deleted_at'))
 
     assert _objects('testapp_setlist')[0] == ['soft_delete']
-    # The rule goes; the trigger is untouched: the column is going, not the table.
-    assert _objects('testapp_setlistentry') == ([], ['updated_at_trigger'])
+    # The rule goes; the triggers are untouched: the column is going, not the table.
+    assert _objects('testapp_setlistentry') == (
+        [],
+        ['soft_delete_guard_on_20_testapp_setlistentry', 'updated_at_trigger'],
+    )
 
 
 def test_column_mode_leaves_the_owners_cascade_trigger_alone(db):
@@ -372,7 +375,10 @@ def test_an_unresolvable_column_refuses_rather_than_dropping_the_whole_table(db)
         _apply(RetireEnforcement('testapp_setlistentry', column='no_such_column'))
 
     # Nothing went with it.
-    assert _objects('testapp_setlistentry') == (['soft_delete'], ['updated_at_trigger'])
+    assert _objects('testapp_setlistentry') == (
+        ['soft_delete'],
+        ['soft_delete_guard_on_20_testapp_setlistentry', 'updated_at_trigger'],
+    )
 
 
 def test_a_table_that_does_not_exist_refuses(db):

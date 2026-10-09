@@ -149,7 +149,6 @@ class CascadeKind(Enum):
     NONE = 'none'  # no object is written: not a candidate, or a table this DDL cannot name
     RULE = 'rule'  # the ``soft_delete_related_*`` rule, flat or joined
     SELF = 'self'  # the statement-level trigger a self-referential key takes (ADR 0018)
-    CYCLE = 'cycle'  # refused: its rule would close a cycle of ON UPDATE rules
     REFUSED = (
         'refused'  # a key no rule can read right: :func:`joined_refusal`, :func:`to_field_refusal`
     )
@@ -178,17 +177,14 @@ def joined_refusal(related_model, fk_field) -> str | None:
     return None
 
 
-def classify_cascade(
-    related_model, fk_field, on_delete, owner_table: str, cycle_edges: set[tuple[str, str]]
-) -> CascadeKind:
+def classify_cascade(related_model, fk_field, on_delete, owner_table: str) -> CascadeKind:
     """:class:`CascadeKind` of one reverse relation onto the table *owner_table*, whose
-    ``_deleted_at`` flips. *cycle_edges* is :func:`rule_update_cycle_edges` over the registry."""
+    ``_deleted_at`` flips. A cycle through several tables is no refusal (ADR 0041): its arms stop
+    at ``_deleted_at IS NULL``, so only the owned family still reads the cycle graph."""
     if not is_cascade_candidate(related_model, fk_field, on_delete):
         return CascadeKind.NONE
-    # A self key takes a trigger (ADR 0018): a rule updating the table it fires on is rewritten
-    # into itself. Routed before the cycle check, which still holds this edge for the owned family.
-
-    # Refused where the trigger cannot read the column: a parent keyed to its own MTI child.
+    # A self key takes a trigger of its own (ADR 0018). Refused where the trigger cannot read
+    # the column: a parent keyed to its own MTI child.
     if related_model._meta.db_table == owner_table:
         if to_field_refusal(fk_field, owner_table) is not None:
             return CascadeKind.REFUSED
@@ -201,20 +197,15 @@ def classify_cascade(
     # cannot name -- the gate ``is_cascade_candidate`` applies to the child.
     if joined and not migrates_to_postgresql(target):
         return CascadeKind.NONE
-    target_table = target._meta.db_table
-    # A joined key cascading to its own root is the one-node cycle, asked directly: the model
-    # may not be in the registry graph.
-    if (owner_table, target_table) in cycle_edges or (joined and target_table == owner_table):
-        return CascadeKind.CYCLE
     if cascade_refusal(related_model, fk_field, owner_table) is not None:
         return CascadeKind.REFUSED
     return CascadeKind.RULE
 
 
 def _rule_update_edges(candidates: Iterable[type[models.Model]]) -> set[tuple[str, str]]:
-    """``(fires_on_table, updates_table)`` for every ON UPDATE soft-delete rule *candidates* call
-    for -- cascade and owned alike, read off the model declaring the key and off its target, so
-    a partial *candidates*, or a routed-away end, misses edges rather than inventing one."""
+    """``(fires_on_table, updates_table)`` for every cascade and owned relation *candidates* call
+    for, read off the model declaring the key and off its target, so a partial *candidates*, or
+    a routed-away end, misses edges rather than inventing one."""
     # Deferred: every other name in this module comes from ``_meta`` alone, while
     # ``guitars.models.fields`` reaches ``guitars.models.__init__`` and the tenancy runtime
     # behind it -- a cost only a caller asking about rules should pay.
@@ -280,9 +271,9 @@ def _rule_update_edges(candidates: Iterable[type[models.Model]]) -> set[tuple[st
 
 
 def rule_update_cycle_edges(candidates: Iterable[type[models.Model]]) -> set[tuple[str, str]]:
-    """The edges of ``_rule_update_edges`` lying on a cycle, which may never be written: a
-    rule's action expands *before* the original statement, so a cycle is rewritten into itself
-    and PostgreSQL refuses **every** ``UPDATE`` to every table in it, guard unread."""
+    """The edges of ``_rule_update_edges`` lying on a cycle. An owned edge on one is refused
+    (``hard_delete()`` has no proof for it); a cascade edge is not, since 2.20.0 (ADR 0041) --
+    it once was, while its rule was rewritten into itself and PostgreSQL refused every ``UPDATE``."""
     edges = _rule_update_edges(candidates)
     adjacency: dict[str, set[str]] = {}
     for source, target in edges:
@@ -459,7 +450,7 @@ def owned_tenancy_refusals(
                 continue
             dependent = column_owner(field.related_model, '_deleted_at')
             dependent_table = dependent._meta.db_table
-            # A rule updating the table it fires on is refused for infinite rule recursion. The
+            # A relation stamping the table it fires on is the one-node cycle, refused. The
             # exception: its multi-table form stays the caller's, which builds that graph on its
             # own account -- so a key here may be cycle-refused too, and callers read both.
             if dependent_table == owner_table:

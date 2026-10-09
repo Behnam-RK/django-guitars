@@ -89,7 +89,7 @@ other way — [ADR 0003](adr/0003-mti-owner-join-policy.md).
   queryset level it deletes the whole chain leaf-to-root by shared PK.
 - **A *cascade* FK on a child's own table, `_deleted_at` farther up,** takes a *joined* rule that
   stamps the ancestor through the child's parent link ([ADR 0025](adr/0025-joined-cascade-rule.md));
-  one cascading to its own root is refused. An [`OwningForeignKey`](owned-relations.md#mti) there gets no rule, but is read.
+  one cascading to its own root takes an arm ([ADR 0041](adr/0041-cascade-cycles-are-arms.md)). An [`OwningForeignKey`](owned-relations.md#mti) there gets no rule, but is read.
 
 `tests/testapp/models.py` carries `Ensemble → Orchestra → ChamberOrchestra` (untenanted) and
 `Tour → WorldTour → StadiumTour` (tenanted, owner-join two tables up); `tests/test_mti.py` and

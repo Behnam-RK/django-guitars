@@ -247,9 +247,7 @@ def test_a_key_naming_dollar_quoting_is_still_a_cascade_not_a_refusal():
     cascade -- a refusal here retired a recorded rule that still worked."""
     owner, child = _dollar_models()
 
-    kind = classify_cascade(
-        child, child._meta.get_field('owner'), CASCADE, owner._meta.db_table, set()
-    )
+    kind = classify_cascade(child, child._meta.get_field('owner'), CASCADE, owner._meta.db_table)
 
     assert kind is CascadeKind.RULE
 

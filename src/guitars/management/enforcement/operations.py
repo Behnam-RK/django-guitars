@@ -1248,34 +1248,6 @@ class OperationsMixin:
             ),
         ]
 
-    def _note_a_cycle_retirement(self, key: tuple, models_by_table: dict) -> None:
-        """Say so when a retired rule goes because its key lies on a rule cycle: the "skipped"
-        notes read as "left alone", and the next migration drops what was working."""
-        related_table, owner_table, _ = key
-        related = models_by_table[related_table]
-        if not has_column(related, '_deleted_at'):  # no longer soft-deletable: nothing to cycle
-            return
-        updated = column_owner(related._meta.concrete_model or related, '_deleted_at')
-        if (owner_table, updated._meta.db_table) not in self._rule_cycle_edges():
-            return
-        # The edge is shared by every descendant of one ancestor: only a key still cascading is
-        # on the cycle, a relaxed one is retired for its own reason.
-        if not any(
-            on_delete is models.CASCADE
-            and (rel_model._meta.concrete_model or rel_model)
-            is (related._meta.concrete_model or related)
-            for rel_model, _, on_delete in self.reverse_relations_mapping.get(
-                models_by_table[owner_table], ()
-            )
-        ):
-            return
-        note = (
-            f"Cascade rules on '{owner_table}' for '{related_table}' are dropped: the key lies "
-            'on a rule cycle, where every edge is refused, and a live rule goes with it.'
-        )
-        if note not in self._skipped_rule_notes:
-            self._skipped_rule_notes.append(note)
-
     @staticmethod
     def _retired_key_is_joined(related_table: str, models_by_table: dict) -> bool:
         """Whether the retired rule updated an ancestor -- the one refusal whose cause is not
@@ -1471,8 +1443,6 @@ class OperationsMixin:
                 if deleted
                 else self._retired_cascade_column(key, models_by_table)
             )
-            if rule_retired and not deleted:
-                self._note_a_cycle_retirement(key, models_by_table)
             ident_owner_table = _identifiers._quote_table(owner_table)
             for family in self._retired_cascade_families(key):
                 if key not in family.recorded:
@@ -1781,9 +1751,9 @@ class OperationsMixin:
         ]
 
     def _rule_cycle_edges(self) -> set[tuple[str, str]]:
-        """ON UPDATE rule edges this command may not write, because they lie on a cycle --
-        see ``introspection.rule_update_cycle_edges``. Read over the whole registry, not the
-        app in scope: scoping narrows what gets written, never which rules exist."""
+        """Edges on a cycle, of which an owned one may not be written -- see
+        ``introspection.rule_update_cycle_edges``. Read over the whole registry, not the
+        app in scope: scoping narrows what gets written, never which relations exist."""
         if self._rule_cycle_cache is None:
             self._rule_cycle_cache = rule_update_cycle_edges(self.all_models)
         return self._rule_cycle_cache
@@ -1923,16 +1893,14 @@ class OperationsMixin:
         )
 
     @staticmethod
-    def _cycle_warning(kind: str, subject: str, fires_on: str, updates: str) -> str:
-        """The shared refusal text for a rule that would close an ON UPDATE cycle -- one
-        wording for both kinds, only the subject differing. The two tables are spelled out,
-        not joined by an arrow: a cascade rule's subject *is* the table it updates."""
+    def _cycle_warning(subject: str, fires_on: str, updates: str) -> str:
+        """The refusal text for an owned relation closing a cycle, which may run through CASCADE
+        keys too. The two tables are spelled out, not joined by an arrow."""
         return (
-            f'{kind} rule for {subject} skipped: it fires on '
-            f"'{fires_on}' and updates '{updates}', closing a cycle of ON UPDATE rules that "
-            'PostgreSQL rejects as infinite rule recursion on every UPDATE to any table in '
-            'that cycle -- including a plain save(). Break the cycle by cascading one of its '
-            'steps in Python.'
+            f'Owned rule for {subject} skipped: it fires on '
+            f"'{fires_on}' and updates '{updates}', closing a cycle through owned relations (CASCADE keys may be part of it). "
+            'hard_delete() and sweepowned read the same refusal and follow none on a cycle, so '
+            'the database enforces none either. Handle one of its steps in Python.'
         )
 
     def _cascade_candidates(
@@ -1951,25 +1919,12 @@ class OperationsMixin:
             # ``classify_cascade`` leaves out structural parent-links and MTI-inherited FKs: the
             # redirect rule already ties a child's deletion to the owner, and every table in a
             # chain shares one ``_deleted_at``, so that rule already archives them.
-            kind = classify_cascade(
-                related_model, fk_field, on_delete, owner_table, self._rule_cycle_edges()
-            )
+            kind = classify_cascade(related_model, fk_field, on_delete, owner_table)
             if kind is CascadeKind.NONE:
                 continue
             related_table = related_model._meta.db_table
             if kind is CascadeKind.SELF:
                 self_cascades.append(fk_field)
-                continue
-            if kind is CascadeKind.CYCLE:
-                if report:
-                    self._skipped_rule_notes.append(
-                        self._cycle_warning(
-                            'Cascade',
-                            f"'{related_table}'",
-                            owner_table,
-                            column_owner(related_model, '_deleted_at')._meta.db_table,
-                        )
-                    )
                 continue
             if kind is CascadeKind.REFUSED:
                 if report:
@@ -2509,24 +2464,22 @@ class OperationsMixin:
             dependent = column_owner(fk_field.related_model, '_deleted_at')
             dependent_table = dependent._meta.db_table
             key = (dependent_table, owner_table, fk_field.column)
-            # A rule whose action updates the table it fires on is rewritten into itself, and
-            # PostgreSQL then refuses *every* UPDATE there -- a plain save() included -- at
-            # rewrite time, so the WHERE guard never gets to run. See docs/owned-relations.md.
+            # A relation stamping the table it fires on is the one-node cycle, refused with the
+            # rest (ADR 0041): hard_delete() has no proof for it. See docs/owned-relations.md.
             if dependent_table == owner_table:
                 self._refuse_owned(
                     key,
                     f"Owned rule for '{owner_table}.{fk_field.column}' -> "
-                    f"'{dependent_table}' skipped: the rule would update the same table it "
-                    'fires on, which PostgreSQL rejects as infinite rule recursion on every '
-                    'UPDATE to that table. Handle this ownership in Python.',
+                    f"'{dependent_table}' skipped: it would stamp the table it fires on, an "
+                    'owned relation closing a cycle on itself, which hard_delete() and '
+                    'sweepowned follow none of. Handle this ownership in Python.',
                 )
                 continue
-            # The multi-table form of the same rejection -- see _rule_cycle_edges.
+            # The multi-table form of the same refusal -- see _rule_cycle_edges.
             if (owner_table, dependent_table) in self._rule_cycle_edges():
                 self._refuse_owned(
                     key,
                     self._cycle_warning(
-                        'Owned',
                         f"'{owner_table}.{fk_field.column}'",
                         owner_table,
                         dependent_table,

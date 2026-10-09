@@ -410,7 +410,7 @@ def test_owned_operation_warns_when_the_owner_owns_its_own_table():
 
     assert _build() == []
     assert len(command._skipped_rule_notes) == 1
-    assert 'infinite rule recursion' in command._skipped_rule_notes[0]
+    assert 'closing a cycle on itself' in command._skipped_rule_notes[0]
 
 
 def test_owned_operation_warns_when_the_target_is_not_soft_deletable():
@@ -994,13 +994,16 @@ def _fake_app_config(name: str, label: str, model_list: list) -> types.SimpleNam
     return types.SimpleNamespace(name=name, label=label, get_models=lambda: model_list)
 
 
-def _self_root_fk_reverse_relation():
-    """Synthetic shape that is still refused: an MTI child's own key cascading to its own
-    root. The joined rule would sit on, and update, the root's table -- a one-node rule cycle."""
+def _refused_key_reverse_relation():
+    """Synthetic shape the generator still refuses: an MTI child's key to its own root that
+    names a ``to_field``, which the joined arm does not read (``joined_refusal``)."""
 
     class _FakeFKField:
+        name = 'sponsor'
         column = 'sponsor_id'
         model = Orchestra
+        related_model = Ensemble
+        target_field = object()  # not the root's primary key
         remote_field = types.SimpleNamespace(parent_link=False)
 
     return {(Orchestra, _FakeFKField(), CASCADE)}
@@ -1082,7 +1085,7 @@ def _record_cascade_key(*, both: bool):
                 _fake_app_config('fake.orchestrab', 'orchestrab', [Orchestra]),
             ],
             lambda command: command.reverse_relations_mapping.__setitem__(
-                Ensemble, _self_root_fk_reverse_relation()
+                Ensemble, _refused_key_reverse_relation()
             ),
             {'orchestrab'},
             [],
@@ -1864,8 +1867,7 @@ def test_owned_operation_warns_when_two_models_own_each_other():
     assert ops == []
     assert len(command._skipped_rule_notes) == 2
     for warning in command._skipped_rule_notes:
-        assert 'infinite rule recursion' in warning
-        assert 'cycle of ON UPDATE rules' in warning
+        assert 'closing a cycle through owned relations' in warning
 
 
 def test_owned_operation_still_emits_when_ownership_is_one_way():
@@ -1925,17 +1927,20 @@ def test_cascade_operation_warns_when_an_owned_rule_closes_the_cycle():
         command.reverse_relations_mapping[Held] = {
             (Holder, Holder._meta.get_field('parent'), CASCADE)
         }
-        # Held's cascade rule (fires on Held, updates Holder) and Holder's owned rule (fires
-        # on Holder, updates Held) are the two halves of the same cycle.
+        # Held's cascade key (fires on Held, updates Holder) and Holder's owned key (fires on
+        # Holder, updates Held) are the two halves of one cycle: the cascade is written (ADR
+        # 0041), the owned edge on the same cycle is not.
         return command, command._cascade_operations(Held) + command._owned_operations(Holder)
 
     command, ops = _build()
 
     assert ops == []
-    kinds = sorted(warning.split(' rule for ')[0] for warning in command._skipped_rule_notes)
-    assert kinds == ['Cascade', 'Owned']
-    for warning in command._skipped_rule_notes:
-        assert 'cycle of ON UPDATE rules' in warning
+    held, holder = command.all_models
+    candidates, _ = command._cascade_candidates(held, held._meta.db_table)
+    assert [(model, field.name) for model, field, _ in candidates] == [(holder, 'parent')]
+    (warning,) = command._skipped_rule_notes
+    assert warning.startswith('Owned rule for ')
+    assert 'closing a cycle through owned relations' in warning
 
 
 def test_a_rule_name_clash_fails_a_check_run_but_only_reports_on_a_generating_one():

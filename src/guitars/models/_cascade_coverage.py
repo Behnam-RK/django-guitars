@@ -19,7 +19,6 @@ from guitars.introspection import (
     classify_cascade,
     column_owner,
     has_column,
-    rule_update_cycle_edges,
 )
 from guitars.local_apps import is_local
 from guitars.routing import migrates_to_postgresql
@@ -46,14 +45,8 @@ class Gap(NamedTuple):
     blocking: bool
 
 
-@cache
-def _registry_cycle_edges() -> frozenset[tuple[str, str]]:
-    return frozenset(rule_update_cycle_edges(django_apps.get_models()))
-
-
 def clear_cascade_plan_cache() -> None:
     """Forget every cached plan -- for a test that changes what the registry or router says."""
-    _registry_cycle_edges.cache_clear()
     cascade_plan.cache_clear()
 
 
@@ -138,7 +131,6 @@ def cascade_plan(model: type[Model]) -> tuple[tuple[Gap, ...], frozenset[type[Mo
     """``(gaps, reached)`` for archiving *model*'s rows: where it parts from the collector, and
     every model the collector would have touched (ancestors included, for their signals)."""
     start = model._meta.concrete_model or model
-    cycle_edges = _registry_cycle_edges()
     gaps: list[Gap] = []
     reached: set[type[Model]] = set()
     stack = [start]
@@ -201,7 +193,6 @@ def cascade_plan(model: type[Model]) -> tuple[tuple[Gap, ...], frozenset[type[Mo
                     field,
                     on_delete,
                     column_owner(target, '_deleted_at')._meta.db_table,
-                    set(cycle_edges),
                 )
                 if kind in (CascadeKind.RULE, CascadeKind.SELF):
                     stack.append(related)

@@ -837,3 +837,30 @@ class Clipping(SetarModel):
     """A plain key from outside into a generic child: the row ``Signboard``'s sparing must see."""
 
     scribble = ForeignKey(Scribble, on_delete=DO_NOTHING, related_name='clippings')
+
+
+class Relay(SetarModel):
+    """Half of a two-table ``CASCADE`` cycle (#85, ADR 0041): archiving either row archives the
+    rows it holds, around the loop. Keys are nullable so a row can be made before its partner."""
+
+    baton = ForeignKey('Baton', on_delete=CASCADE, null=True, blank=True, related_name='relays')
+
+
+class Baton(SetarModel):
+    """The other half: ``Relay`` points at it and it points back."""
+
+    relay = ForeignKey(Relay, on_delete=CASCADE, null=True, blank=True, related_name='batons')
+
+
+class Lineage(SetarModel):
+    """Root of a one-table cycle through MTI (#85, ADR 0025/0041): ``Offshoot`` is a row of this
+    table whose own key points back at it, so its joined arm updates the table it fires on."""
+
+    name = CharField(max_length=100, blank=True)
+
+
+class Offshoot(Lineage):
+    parent = ForeignKey(Lineage, on_delete=CASCADE, null=True, blank=True, related_name='offshoots')
+
+    class Meta:
+        pass

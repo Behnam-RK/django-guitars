@@ -91,15 +91,6 @@ class TestWhereARulesOnlyArchiveLeavesRowsLive:
 
         assert any('Signboard.scribbles' in line and 'generic relation' in line for line in found)
 
-    def test_a_cycle_refused_edge_is_blocking(self, monkeypatch):
-        offer, tier = Offer._meta.db_table, Tier._meta.db_table
-        monkeypatch.setattr(coverage, 'rule_update_cycle_edges', lambda models: {(offer, tier)})
-        clear_cascade_plan_cache()
-
-        found = reasons(Offer, blocking=True)
-
-        assert any('Tier.offer -> testapp.Offer' in line and 'cycle' in line for line in found)
-
     def test_an_app_outside_local_apps_is_blocking(self, monkeypatch):
         monkeypatch.setattr(coverage, 'is_local', lambda app: False)
 
@@ -178,35 +169,30 @@ class TestAKeyToAColumnOtherThanThePrimaryKey:
         assert [g for g in self._gaps(below_the_holder=True) if g.blocking]
 
 
-def _both_caches_are_warm():
+def _the_cache_is_warm():
     cascade_plan(Offer)
-    coverage._registry_cycle_edges()
     assert cascade_plan.cache_info().currsize >= 1
-    assert coverage._registry_cycle_edges.cache_info().currsize >= 1
 
 
-def _both_caches_are_empty():
-    return (
-        cascade_plan.cache_info().currsize == 0
-        and coverage._registry_cycle_edges.cache_info().currsize == 0
-    )
+def _the_cache_is_empty():
+    return cascade_plan.cache_info().currsize == 0
 
 
-def test_a_new_model_invalidates_every_cache():
-    _both_caches_are_warm()
+def test_a_new_model_invalidates_the_cache():
+    _the_cache_is_warm()
 
     class_prepared.send(sender=Offer)
 
-    assert _both_caches_are_empty()
+    assert _the_cache_is_empty()
 
 
-def test_a_changed_setting_invalidates_every_cache(settings):
+def test_a_changed_setting_invalidates_the_cache(settings):
     """What an edge is depends on ``LOCAL_APPS`` and the router, so a plan outlives neither."""
-    _both_caches_are_warm()
+    _the_cache_is_warm()
 
     settings.LOCAL_APPS = [*settings.LOCAL_APPS]
 
-    assert _both_caches_are_empty()
+    assert _the_cache_is_empty()
 
 
 class TestAJoinedKeyTheGeneratorRefusesIsAGap:

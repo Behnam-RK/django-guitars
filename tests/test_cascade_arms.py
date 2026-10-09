@@ -163,7 +163,7 @@ def test_the_migrations_reverse_rebuilds_the_rules_and_the_revive_only_trigger(d
 
 def test_archiving_a_row_while_rewriting_its_key_is_refused_over_a_live_child(two_bands):
     """The rule read ``old.`` per row; the arm pairs a row across the statement on its primary
-    key, which this statement moves. Refused, as the self cascade refuses it (ADR 0018), rather
+    key, which this statement moves. Refused, as a self key is (ADR 0042), rather
     than leaving the album live under an archived band."""
     with pytest.raises(NotSupportedError, match='primary key it also rewrote'):
         with transaction.atomic():

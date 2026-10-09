@@ -25,7 +25,7 @@ One family means one set of rules for the stamp, the revive and the refusal, and
 
 **Behaviour change.** A subtree gains the parent's stamp and revives with its root, where it had a fresh `NOW()` and stayed archived. The exposure ADR 0024 names reaches the tree: a child archived in the same transaction as its parent is revived with it. Every app hosting a self key gets a migration replacing the owner's trigger and dropping the self one: `DROP TRIGGER` takes ACCESS EXCLUSIVE on that table until the migration commits, so set `lock_timeout`.
 
-**Gained.** The arm names the key column only inside a branch: dropping it fails an archive of the table, not every `UPDATE` as the self trigger did, until `makeguitarmigrations` re-emits the trigger (ADR 0039).
+**Gained.** The arm names the key column only inside a branch: dropping it fails an archive or a restore of the table, not every `UPDATE` as the self trigger did, until `makeguitarmigrations` re-emits the trigger (ADR 0039).
 
 **Reversibility.** Unapplying the migration rebuilds the self trigger, but the reverse of a re-emitted owner trigger is a plain `DROP`, as for every one since 2.16.0 (the earlier body is not recorded): the table's other cascade arms are off until the migration is applied again. Going back in code needs the self-key branch of `_cascade_key_maps` removed and the retirement reversed.
 

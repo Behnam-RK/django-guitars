@@ -250,7 +250,7 @@ def test_a_cascade_key_aimed_at_a_proxy_still_gets_its_arm(fk_to_proxy):
     assert [related._meta.db_table for related, _field, _primary in candidates] == ['testapp_held']
 
 
-def test_a_self_referential_cascade_key_aimed_at_a_proxy_still_gets_its_arm(fk_to_proxy):
+def test_a_self_referential_cascade_key_aimed_at_a_proxy_is_still_a_self_candidate(fk_to_proxy):
     """The same loss for the key onto the owner's own table, an arm of its owner's trigger
     since 2.20.0 (ADR 0042). Its key names the proxy, so it too was filed under the model no
     walk reaches."""

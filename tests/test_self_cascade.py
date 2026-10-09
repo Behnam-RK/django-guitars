@@ -1,6 +1,6 @@
-"""Tests for the self-referential cascade trigger (2.8.0, ADR 0018): the statement-level
-``AFTER UPDATE`` a ``ForeignKey('self', CASCADE)`` takes in place of a rule. A rule updating the
-table it fires on is rejected at rewrite time, taking *every* ``UPDATE`` to that table with it."""
+"""Tests for the self-referential cascade, an arm of the owner's statement trigger since 2.20.0
+(ADR 0042; through 2.19.x a trigger of its own, ADR 0018). A rule updating the table it fires on
+is rejected at rewrite time, which is why it ever needed one."""
 
 from importlib import import_module
 
@@ -182,10 +182,9 @@ def test_a_bulk_update_of_an_unrelated_column_archives_nothing(tree):
     assert _archived(Setlist) == set()
 
 
-def test_restoring_a_parent_cascades_nothing_either_way(tree):
-    """The *trigger* reads one transition, so an un-archive is never a self cascade -- unlike
-    the plain cascade rules, whose inverse ``tests/test_cascade_revive.py`` pins. Children are
-    un-archived first on purpose; ``== {'root'}`` is the half that bites."""
+def test_restoring_a_parent_leaves_children_already_restored_untouched(tree):
+    """Children are restored first on purpose: the revive finds nothing archived with the root,
+    so it writes nothing. The revive itself is pinned below and in ``test_cascade_revive``."""
     root, middle, leaf = tree
     _raw_delete(root.pk)
     Setlist._all_objects.filter(pk__in=[middle.pk, leaf.pk]).update(_deleted_at=None)
@@ -226,9 +225,14 @@ def test_the_owners_trigger_carries_the_self_key_and_no_trigger_of_its_own(db):
     # 2.19.0 (#80, ADR 0039), not a rule beside it: the table holds none but its own.
     assert 'soft_delete_related_testapp_setlistentry' not in rules
     assert 'soft_delete_cascade_on_15_testapp_setlist' in triggers
+    # And the self key is in its body, which the entry table's arm alone would not show.
+    body = scalar(
+        "SELECT prosrc FROM pg_proc WHERE proname = 'soft_delete_cascade_on_15_testapp_setlist'"
+    )
+    assert 'UPDATE "testapp_setlist" AS guitars_child' in body
 
 
-def test_an_owned_sweep_fires_from_inside_the_self_cascade_trigger(db):
+def test_an_owned_sweep_fires_from_inside_the_self_key_arm(db):
     """Where the two statement-level families meet, in the shape needing the **sweep** and not
     the rule beside it: two child racks share one riser, so the trigger archives both owners in
     one depth-1 ``UPDATE`` and each reads the other as live to the rule's last-owner guard."""

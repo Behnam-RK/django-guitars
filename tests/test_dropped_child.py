@@ -86,8 +86,10 @@ class TestTheLeak:
             transaction.set_rollback(True)
 
 
-def _command(monkeypatch, *, dropped: set[str]):
-    """The child's model deleted: its table maps to nothing and no key calls for it."""
+def _command(monkeypatch, *, dropped: set[str], keep_self_arm: bool = False):
+    """The child's model deleted: its table maps to nothing and no key calls for it. The owner's
+    own self key is dropped too unless *keep_self_arm*: the scenario is the child being its only
+    arm, which the real registry no longer shows for ``Setlist`` (ADR 0042)."""
     command = Command()
     clear_cascade_coverage(command)
     hosting, key_maps = command._table_app_labels, command._cascade_key_maps
@@ -113,7 +115,7 @@ def _command(monkeypatch, *, dropped: set[str]):
                 kept := {
                     key: arm
                     for key, arm in keyed.items()
-                    if key[0] != CHILD and not key[0] == key[1] == OWNER
+                    if key[0] != CHILD and (keep_self_arm or not key[0] == key[1] == OWNER)
                 }
             )
         }
@@ -292,6 +294,19 @@ class TestADroppedChildIsRetired:
 
         assert _retirements(command) == []
         assert len(command._unmapped_cascade_notes()) == 1
+
+    def test_an_owner_keeping_its_self_arm_is_re_emitted_not_retired(self, monkeypatch):
+        """The real registry's shape: the dropped child was one arm of two, so the owner's trigger
+        stays and is re-emitted without it, by its digest moving, rather than retired."""
+        command = _command(monkeypatch, dropped={CHILD}, keep_self_arm=True)
+
+        retired = [
+            op
+            for op in command._retired_trigger_operations(apps.get_app_config('testapp'))
+            if f'Cascade Trigger retired on "{OWNER}"' in op
+        ]
+
+        assert retired == []
 
     @pytest.mark.django_db
     def test_running_it_repairs_the_owner(self, monkeypatch):

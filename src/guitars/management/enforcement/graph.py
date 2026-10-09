@@ -238,13 +238,12 @@ def dropped_tables(loader: MigrationLoader) -> dict[str, tuple[str, str]]:
     dropped: dict[str, tuple[str, str]] = {}
     state = None
     for app_label, name, _node, operation, state in _walk(loader):
-        # Top level only: a ``DeleteModel`` inside ``SeparateDatabaseAndState`` moves a
-        # model between apps in state and leaves its table where it is.
-        if isinstance(operation, DeleteModel):
-            model_state = state.models.get((app_label, operation.name_lower))
-            if model_state is not None and _owns_a_table(model_state):
-                table = _table_of(app_label, operation.name_lower, model_state)
-                dropped[table] = (app_label, name)
+        # What the database does: a ``DeleteModel`` inside ``SeparateDatabaseAndState`` that is
+        # state-only moves a model between apps and leaves its table where it is, while one in
+        # its database half drops the table.
+        for before, after in table_changes(operation, app_label, state):
+            if before is not None and after is None:
+                dropped[before] = (app_label, name)
     if state is None:
         return {}
     # A later model taking the same ``db_table`` holds it again. ``state`` is the walk's, last

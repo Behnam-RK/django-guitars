@@ -23,21 +23,20 @@ from tests.conftest import patch_replay
 from tests.test_replay_plan import _create, _Loader
 
 
-def _replay(monkeypatch, *steps):
+def _replay(monkeypatch, *steps, stems=None):
     """Scan synthetic files, one per step ``(content, events)``, each read at a migration whose
-    events happen first, after the real project's own."""
+    events happen first, after the real project's own. *stems* names them where their order by
+    name must differ from their order of replay."""
+    stems = stems or [f'{index:04d}_auto_enforcement' for index in range(len(steps))]
     patch_replay(
         monkeypatch,
-        *(
-            ('testapp', f'{index:04d}_auto_enforcement', events)
-            for index, (_c, events) in enumerate(steps)
-        ),
+        *(('testapp', stem, events) for stem, (_c, events) in zip(stems, steps, strict=True)),
     )
 
     def _iter(app):
         if app.label == 'testapp':
-            for index, (content, _events) in enumerate(steps):
-                yield types.SimpleNamespace(stem=f'{index:04d}_auto_enforcement'), content
+            for stem, (content, _events) in zip(stems, steps, strict=True):
+                yield types.SimpleNamespace(stem=stem), content
 
     monkeypatch.setattr(_generator, 'iter_migration_files', _iter)
     return scan_existing_operations()
@@ -330,10 +329,8 @@ class TestAReplacedFileBesideAnUnexpandedSquash:
         )
 
 
-def test_retirements_of_one_key_are_settled_in_the_order_they_were_recorded(monkeypatch):
-    """The replay's order, not the filename's: a later migration of the same app can sort first."""
-    from guitars.management.enforcement.headers import HEADER_SOFT_DELETE_RELATED_RETIRED  # noqa: PLC0415
-
+def test_retirements_of_one_key_are_settled_in_the_order_they_were_replayed(monkeypatch):
+    """The replay's order, not the filename's: a later migration of an app can sort first."""
     retired = (
         HEADER_SOFT_DELETE_RELATED_RETIRED.format(related_table='shop_a', table='shop_owner')
         + ' [SQL:dddd]\n'
@@ -343,9 +340,38 @@ def test_retirements_of_one_key_are_settled_in_the_order_they_were_recorded(monk
         (_related('shop_a', 'shop_owner'), []),
         (retired, []),
         (retired, []),
+        stems=['0001_created', '0009_retired_later', '0002_retired_earlier'],
     )
 
     assert [site.migration for site in existing.cascade_retirement_sites] == [
-        '0001_auto_enforcement',
-        '0002_auto_enforcement',
+        '0009_retired_later',
+        '0002_retired_earlier',
     ]
+
+
+def test_creates_merged_at_a_rename_stay_in_replay_order(monkeypatch):
+    """A create filed under the freed name is older than one filed under the new name, if it was
+    written first, whichever name it was filed under: the last of the list is the newest."""
+    existing = _replay(
+        monkeypatch,
+        (_related('shop_k', 'shop_old'), []),
+        (_related('shop_k', 'shop_x'), []),
+        ('', [_drop('shop_x')]),
+        ('', [_rename('shop_old', 'shop_x')]),
+    )
+
+    assert existing.soft_delete_related_dependencies[('shop_k', 'shop_x', None)] == [
+        ('testapp', '0000_auto_enforcement'),
+        ('testapp', '0001_auto_enforcement'),
+    ]
+
+
+def test_a_file_the_loader_would_not_load_is_not_read(tmp_path):
+    migrations = tmp_path / 'migrations'
+    migrations.mkdir()
+    for name in ('0001_a.py', '_draft.py', '~backup.py', '__init__.py'):
+        (migrations / name).write_text('')
+
+    files = list(_generator.iter_migration_files(types.SimpleNamespace(path=str(tmp_path))))
+
+    assert [path.name for path, _content in files] == ['0001_a.py']

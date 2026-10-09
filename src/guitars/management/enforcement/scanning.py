@@ -338,10 +338,12 @@ def _subtract_retired(
         recorded.pop(table, None)
 
 
-def _move_renamed(old: str, new: str, recorded: dict | set) -> None:
+def _move_renamed(
+    old: str, new: str, recorded: dict | set, position: dict[tuple[str, str], int] | None = None
+) -> None:
     """Move *recorded*'s entries from table *old* onto *new*, in place, at the migration that
     renames it. Anything already filed under *new* predates the rename, so a scalar is
-    overwritten and a list of creates is merged, the older first (ADR 0043)."""
+    overwritten and a list of creates merged, ordered by *position* in the replay (ADR 0043)."""
     if isinstance(recorded, set):
         if old in recorded:
             recorded.discard(old)
@@ -358,6 +360,8 @@ def _move_renamed(old: str, new: str, recorded: dict | set) -> None:
         if isinstance(value, list) and isinstance(recorded.get(moved), list):
             kept = recorded[moved]
             kept.extend(node for node in value if node not in kept)
+            if position is not None:
+                kept.sort(key=lambda node: position.get(node, len(position)))
         else:
             recorded[moved] = value
 
@@ -646,7 +650,7 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
         elif event.kind == 'rename':
             old, new_name = event.table, str(event.new_table)
             for recorded in every_family:
-                _move_renamed(old, new_name, recorded)
+                _move_renamed(old, new_name, recorded, position)
             _rekey_sites(old, new_name)
             held[new_name] = [
                 name
@@ -683,6 +687,7 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
             for path, content in _generator.iter_migration_files(app):
                 files[app.label, path.stem] = content
     units, aliases = _replay_units(_ensure_loader(), files)
+    position = {(unit.app_label, unit.name): index for index, unit in enumerate(units)}
 
     for unit in units:
         for event in unit.events:

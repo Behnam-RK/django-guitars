@@ -17,7 +17,7 @@ from django.db.migrations.operations import (
     SeparateDatabaseAndState,
 )
 
-from guitars.management.enforcement.graph import ReplayUnit, TableEvent, replay_plan
+from guitars.management.enforcement.graph import TableEvent, replay_plan
 from guitars.operations import RetireEnforcement
 
 
@@ -280,3 +280,23 @@ def test_a_history_with_no_operations_drops_and_vacates_nothing():
     loader = _Loader(('anc', [[]]))
 
     assert (dropped_tables(loader), vacated_tables(loader)) == ({}, {})
+
+
+class TestDroppedTables:
+    def test_a_database_half_delete_drops_the_table(self):
+        drop = SeparateDatabaseAndState(
+            database_operations=[DeleteModel('root')], state_operations=[DeleteModel('root')]
+        )
+        loader = _Loader(('anc', [[_create()], [drop]]))
+
+        from guitars.management.enforcement.graph import dropped_tables  # noqa: PLC0415
+
+        assert dropped_tables(loader) == {'anc_root': ('anc', '0002')}
+
+    def test_a_state_only_delete_leaves_the_table(self):
+        forget = SeparateDatabaseAndState(state_operations=[DeleteModel('root')])
+        loader = _Loader(('anc', [[_create()], [forget]]))
+
+        from guitars.management.enforcement.graph import dropped_tables  # noqa: PLC0415
+
+        assert dropped_tables(loader) == {}

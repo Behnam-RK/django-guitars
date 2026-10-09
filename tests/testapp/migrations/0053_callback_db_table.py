@@ -1,5 +1,5 @@
 # Hand-written: an ``AlterModelTable`` moves a table with no model rename at all, which is the
-# second shape ``graph.renamed_tables`` has to resolve through Django's migration state.
+# second shape ``graph.replay_plan`` has to read off Django's migration state.
 
 from django.db import migrations
 

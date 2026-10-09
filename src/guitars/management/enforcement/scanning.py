@@ -34,6 +34,7 @@ from guitars.management.enforcement.headers import (
     _RE_SOFT_DELETE_REVIVE_RETIRED,
     _RE_SOFT_DELETE_SELF_CASCADE,
     _RE_SOFT_DELETE_SELF_CASCADE_RETIRED,
+    _RE_STAMP_FUNCTION,
     _RE_TENANT_AUTOFILL,
     _RE_TENANT_AUTOFILL_FUNCTION,
     _RE_TENANT_AUTOFILL_RETIRED,
@@ -164,11 +165,16 @@ class ExistingOperations(NamedTuple):
     existing_digests: dict[str, set[str]]
     trigger_function_dependency: tuple[str, str] | None
     parent_trigger_function_dependency: tuple[str, str] | None
+    #: The migration defining ``stamp_updated_at()``, which every own-table ``updated_at_trigger``
+    #: calls since 2.19.0 (ADR 0038). Apart from ``trigger_function_dependency``: the frozen
+    #: ``set_updated_at()`` migration that history carries and nothing calls.
+    stamp_function_dependency: tuple[str, str] | None
     #: The ``[SQL:...]`` digest of the most recent migration defining each singleton
     #: trigger function. Singletons by *existence*, which is why a body change once shipped
     #: nothing: both ensure methods returned early on mere presence.
     trigger_function_sql: str | None
     parent_trigger_function_sql: str | None
+    stamp_function_sql: str | None
 
 
 def _cascade_key(match: re.Match) -> tuple[str, str, str | None]:
@@ -525,8 +531,10 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
     existing_digests: defaultdict[str, set[str]] = defaultdict(set)
     trigger_function_dep: tuple[str, str] | None = None
     parent_trigger_function_dep: tuple[str, str] | None = None
+    stamp_function_dep: tuple[str, str] | None = None
     trigger_function_sql: str | None = None
     parent_trigger_function_sql: str | None = None
+    stamp_function_sql: str | None = None
     autofill_function_deps: dict[str, tuple[str, str]] = {}
     autofill_function_sql: dict[str, str | None] = {}
     built_loader = loader
@@ -652,6 +660,10 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
             if function_match:
                 trigger_function_dep = (app.label, path.stem)
                 trigger_function_sql = _recorded_sql_identity(content, function_match)
+            stamp_match = _RE_STAMP_FUNCTION.search(content)
+            if stamp_match:
+                stamp_function_dep = (app.label, path.stem)
+                stamp_function_sql = _recorded_sql_identity(content, stamp_match)
             parent_match = _RE_PARENT_TRIGGER_FUNCTION.search(content)
             if parent_match:
                 parent_trigger_function_dep = (app.label, path.stem)
@@ -887,6 +899,8 @@ def scan_existing_operations(loader: MigrationLoader | None = None) -> ExistingO
         existing_digests=dict(existing_digests),
         trigger_function_dependency=trigger_function_dep,
         parent_trigger_function_dependency=parent_trigger_function_dep,
+        stamp_function_dependency=stamp_function_dep,
         trigger_function_sql=trigger_function_sql,
         parent_trigger_function_sql=parent_trigger_function_sql,
+        stamp_function_sql=stamp_function_sql,
     )

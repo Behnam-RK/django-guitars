@@ -87,10 +87,10 @@ def test_archiving_a_root_reaches_the_cascade_children_of_every_level(tree):
     assert _archived(SetlistEntry) == {'root-song', 'middle-song', 'leaf-song'}
 
 
-def test_the_tree_rows_are_stamped_and_the_deeper_cascade_children_are_not(transactional_db):
-    """The archive's ``_updated_at`` splits in two and this pins both halves: tree rows stamped
-    by the trigger's own spliced ``UPDATE``, cascade children below the first level **not** --
-    their rule fires at depth 1, where ``updated_at_trigger``'s ``WHEN`` suppresses it."""
+def test_the_tree_rows_and_every_cascade_child_are_stamped(transactional_db):
+    """Every row the archive reaches moves ``_updated_at``, cascade children included. Until
+    2.19.0 those below the first level kept a stale value (rule at depth 1, trigger guarded);
+    the row trigger has no such guard (ADR 0038)."""
     # ``transactional_db`` because ``NOW()`` is the *transaction* timestamp: under one
     # surrounding transaction the rows are created at the very instant the enforcement later
     # stamps, and every comparison below holds whether or not anything stamped anything.
@@ -110,7 +110,7 @@ def test_the_tree_rows_are_stamped_and_the_deeper_cascade_children_are_not(trans
         row.song: row._updated_at > entries_before[row.song]
         for row in SetlistEntry._all_objects.all()
     }
-    assert moved == {'root-song': True, 'middle-song': False, 'leaf-song': False}
+    assert moved == {'root-song': True, 'middle-song': True, 'leaf-song': True}
 
 
 def test_the_orm_delete_path_archives_the_tree_through_the_collector(tree):
@@ -125,10 +125,10 @@ def test_the_orm_delete_path_archives_the_tree_through_the_collector(tree):
     assert _archived(SetlistEntry) == {'root-song', 'middle-song', 'leaf-song'}
 
 
-def test_the_orm_path_stamps_the_cascade_children_the_raw_path_leaves_stale(transactional_db):
-    """The other half of the split: the gap is not "below the first level" but "reached by the
-    trigger rather than by one collector statement". The collector names every level at depth 0,
-    so every child is stamped here -- the same archive, a different outcome per caller."""
+def test_the_orm_path_stamps_the_same_rows_the_raw_path_does(transactional_db):
+    """The same archive reached by the collector, which names every level at depth 0 in one
+    statement: every child is stamped, as on the raw path above. The two used to differ per
+    caller, which is what kept ``delete()`` off the shortcut for a self-referential key."""
     root = Setlist.objects.create(title='root')
     middle = Setlist.objects.create(title='middle', parent=root)
     leaf = Setlist.objects.create(title='leaf', parent=middle)

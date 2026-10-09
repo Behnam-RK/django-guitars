@@ -53,7 +53,7 @@ def test_coverage_recorded_under_the_old_name_is_read_under_the_new_one():
 
 def test_the_renamed_table_gets_the_replace_form_not_a_plain_create():
     """The whole point. A plain ``CREATE TRIGGER`` fails with *already exists* against the one
-    PostgreSQL carried over; the replace form drops it first."""
+    PostgreSQL carried over; the replace form replaces it."""
     # The state 0052 was generated *from*: coverage translated onto the new name, carrying the
     # digest the old name's operation recorded, which the new table's SQL cannot match.
     command = Command()
@@ -65,8 +65,8 @@ def test_the_renamed_table_gets_the_replace_form_not_a_plain_create():
         if operation.startswith('# Updated at Trigger on "testapp_callbacks"')
     ]
 
-    assert 'DROP TRIGGER updated_at_trigger ON "testapp_callbacks"' in trigger
-    assert trigger.index('DROP TRIGGER') < trigger.index('CREATE TRIGGER')
+    assert 'CREATE OR REPLACE TRIGGER updated_at_trigger' in trigger
+    assert 'CREATE TRIGGER updated_at_trigger' not in trigger
 
 
 def test_a_second_run_emits_nothing_for_the_renamed_table():

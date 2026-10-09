@@ -17,6 +17,7 @@ _CORPUS_DIR = Path(__file__).parent / 'testapp' / 'migrations'
 #: under test, as the baseline the current scanners must still reproduce match-for-match.
 _BASELINE = {
     '_RE_TRIGGER_FUNCTION': re.compile(r'# Define function for updated at triggers!'),
+    '_RE_STAMP_FUNCTION': re.compile(r'# Define function for updated at row triggers!'),
     '_RE_PARENT_TRIGGER_FUNCTION': re.compile(
         r'# Define function for MTI parent updated at triggers!'
     ),

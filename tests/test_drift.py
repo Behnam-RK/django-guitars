@@ -11,6 +11,7 @@ from django.core.management import CommandError, call_command
 from django.db import ProgrammingError, transaction
 
 from guitars import sql
+from guitars.sql import triggers as _triggers
 from tests.conftest import execute as _execute
 from tests.conftest import scalar as _scalar
 from tests.testapp.models import Band, Release
@@ -52,7 +53,6 @@ class TestCheckIsBlindToADroppedUpdatedAtTrigger:
     @pytest.mark.django_db(transaction=True)
     def test_check_passes_while_updated_at_stops_moving(self):
         table = Band._meta.db_table
-        primary_key = Band._meta.pk.column
         band = Band.objects.create(name='Drifted')
         with transaction.atomic():
             band.name = 'Renamed once'
@@ -60,7 +60,7 @@ class TestCheckIsBlindToADroppedUpdatedAtTrigger:
         band.refresh_from_db()
         before = band._updated_at
 
-        _execute(sql.DROP_UPDATED_AT_TRIGGER.format(table=table))
+        _execute(_triggers._DROP_STAMP_UPDATED_AT_TRIGGER.format(table=table))
         try:
             _check()  # the build-time gate sees nothing wrong here either
 
@@ -72,7 +72,7 @@ class TestCheckIsBlindToADroppedUpdatedAtTrigger:
                 'plain queryset.update() should leave the timestamp untouched'
             )
         finally:
-            _execute(sql.CREATE_UPDATED_AT_TRIGGER.format(table=table, primary_key=primary_key))
+            _execute(_triggers._CREATE_STAMP_UPDATED_AT_TRIGGER.format(table=table))
 
 
 class TestAuditTenancyCatchesWhatCheckCannot:
@@ -101,7 +101,6 @@ class TestAdoptAgainstAPartiallyDivergedDatabase:
 
     def test_plain_create_fails_but_adopt_succeeds_against_an_already_present_trigger(self, db):
         table = Band._meta.db_table
-        primary_key = Band._meta.pk.column
 
         # Sanity: the trigger genuinely already exists on this table (it does, via the
         # real migrations) -- so what follows is "nothing recorded" meeting a database
@@ -119,11 +118,11 @@ class TestAdoptAgainstAPartiallyDivergedDatabase:
         # for a genuinely first-time table, and exactly what fails loudly here instead of
         # silently clobbering a database that has diverged from that assumption.
         with pytest.raises(ProgrammingError, match='already exists'), transaction.atomic():
-            _execute(sql.CREATE_UPDATED_AT_TRIGGER.format(table=table, primary_key=primary_key))
+            _execute(_triggers._CREATE_STAMP_UPDATED_AT_TRIGGER.format(table=table))
 
         # The adopt form -- emitted only under --adopt -- states the same uncertainty
         # honestly with IF EXISTS, and succeeds against the identical live state.
-        _execute(sql.ADOPT_UPDATED_AT_TRIGGER.format(table=table, primary_key=primary_key))
+        _execute(_triggers._ADOPT_STAMP_UPDATED_AT_TRIGGER.format(table=table))
         assert (
             _scalar(
                 "SELECT tgname FROM pg_trigger WHERE tgname = 'updated_at_trigger' "

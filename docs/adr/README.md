@@ -45,3 +45,4 @@ New ADR? Start from [`template.md`](template.md).
 | [`0035`](0035-cascade-keys-through-to-field.md) | why a cascade key through `to_field` matches on that column while pairing stays on the pk, and the one sub-shape refused (2.17.0) |
 | [`0036`](0036-order-a-rename-after-the-enforcement-it-vacates.md) | why a fresh rename or drop of a table is ordered after the enforcement migrations of other apps naming it, by an edge on the new migration rather than a rewrite of the old (2.18.0) |
 | [`0037`](0037-a-model-moved-between-apps-is-a-rename.md) | why a model moved between apps is read as a rename off its database-side operation, never overwrites what the destination filed, and is followed to the end of its chain after the walk (2.18.0) |
+| [`0038`](0038-updated-at-is-a-row-trigger.md) | why `_updated_at` is a `BEFORE ROW` trigger assigning `NEW`, with no depth guard and under a new function name, instead of a statement trigger re-`UPDATE`-ing every row (2.19.0) |

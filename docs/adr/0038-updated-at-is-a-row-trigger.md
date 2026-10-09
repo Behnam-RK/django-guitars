@@ -20,7 +20,7 @@ Alternatives on the table: a `BEFORE ROW` assignment that is conditional on the 
 - **A new private function, not a replacement.** `stamp_updated_at()` sits beside the frozen `set_updated_at()`, in its own singleton migration (`HEADER_STAMP_FUNCTION`, recorded as `stamp_function_*`). `set_updated_at()` stays in every migrated database, called by nothing once its tables are regenerated, and is neither dropped nor ensured again; a fresh project never creates it. Its public constants, `HEADER_TRIGGER_FUNCTION` and `_RE_TRIGGER_FUNCTION` stay, to read history.
 - Own-table triggers depend on the stamp function's migration, and so does the MTI parent function's, for ordering only: it calls nothing of it.
 - The splices `, _updated_at = NOW()` in the revive, sweep and self-cascade bodies stay: they keep those families' `[SQL:…]` identities still and cover a table whose trigger has not been regenerated yet.
-- **Out of scope:** `set_parent_updated_at` (the MTI parent trigger) must update another table, so it keeps its statement trigger, its guard and its second `UPDATE`; the ancestor's new row trigger stamps the same `NOW()` again on it, harmlessly. Tracked as a follow-up.
+- **Out of scope:** `set_parent_updated_at` (the MTI parent trigger) must update another table, so it keeps its statement trigger, its guard and its second `UPDATE`; the ancestor's new row trigger stamps the same `NOW()` again on it, harmlessly. Taken up in [ADR 0040](0040-parent-updated-at-skips-a-stamped-ancestor.md).
 
 ## Why
 

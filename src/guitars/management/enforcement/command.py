@@ -290,10 +290,11 @@ class Command(OperationsMixin, BaseCommand):
         check_only: bool,
         adopt: bool = False,
         dependencies: list[tuple[str, str]] | None = None,
+        restore: str | None = None,
     ) -> tuple[tuple[str, str], str] | None:
         """Ensure the host app has a current migration for one singleton trigger function.
-        Compares the recorded ``[SQL:...]`` digest, not mere existence, so an edited body
-        reships via ``OR REPLACE`` (``DROP FUNCTION`` refuses while a trigger depends on it)."""
+        A changed recorded ``[SQL:...]`` digest reships via ``OR REPLACE``, never ``DROP`` (a
+        trigger depends on it); its reverse puts *restore* back, where given."""
         current_source, current_digest = _operation(header, create, drop)
         if recorded is not None and (recorded_digest == current_digest and not adopt):
             return None
@@ -306,7 +307,13 @@ class Command(OperationsMixin, BaseCommand):
             raise CommandError(stale_message if stale else missing_message)
 
         if stale or adopt:
-            current_source, _ = _operation(header, create, drop, emit=replace)
+            current_source, _ = _operation(
+                header,
+                create,
+                drop,
+                emit=replace,
+                emit_reverse=restore if stale else None,
+            )
 
         host_app = self._get_trigger_function_host_app()
         migration_file = _generator.create_empty_migration_file(host_app, name=name)
@@ -365,9 +372,10 @@ class Command(OperationsMixin, BaseCommand):
             recorded=self.parent_trigger_function_dependency,
             recorded_digest=self.parent_trigger_function_sql,
             header=HEADER_PARENT_TRIGGER_FUNCTION,
-            create=sql.CREATE_PARENT_UPDATED_AT_TRIGGER_FUNCTION,
-            replace=sql.REPLACE_PARENT_UPDATED_AT_TRIGGER_FUNCTION,
+            create=_triggers._CREATE_PARENT_UPDATED_AT_TRIGGER_FUNCTION,
+            replace=_triggers._REPLACE_PARENT_UPDATED_AT_TRIGGER_FUNCTION,
             drop=sql.DROP_PARENT_UPDATED_AT_TRIGGER_FUNCTION,
+            restore=sql.REPLACE_PARENT_UPDATED_AT_TRIGGER_FUNCTION,
             name='auto_enforcement_parent_trigger_function',
             missing_message=(
                 '\n\tRun `manage.py makeguitarmigrations` to create '

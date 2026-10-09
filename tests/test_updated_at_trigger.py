@@ -10,7 +10,9 @@ from django.db import connection, transaction
 
 from guitars.management.enforcement.command import Command
 from tests.conftest import execute, rows, scalar
-from tests.testapp.models import Album, Band, Merch
+from guitars import sql
+from guitars.sql import triggers as _triggers
+from tests.testapp.models import Album, Band, ChamberOrchestra, Ensemble, Merch, Orchestra
 
 
 _TABLES = ('testapp_band', 'testapp_album', 'testapp_merch')
@@ -130,7 +132,9 @@ def test_replacing_any_other_predecessor_reverses_to_a_drop():
     row trigger must not reverse to a trigger two shapes old."""
     operation = _updated_at_op('stale0000000')
 
-    assert 'DROP TRIGGER updated_at_trigger ON "testapp_band"' in operation.split('reverse_sql=')[1]
+    assert (
+        'DROP TRIGGER updated_at_trigger ON "testapp_band"' in operation.split('reverse_sql=')[1]
+    )
     assert 'AFTER UPDATE' not in operation
 
 
@@ -157,3 +161,139 @@ def test_the_generated_reverse_puts_the_statement_trigger_back(db):
 
     assert not statement_level & (row | before)
     assert scalar(catalogue) & row and scalar(catalogue) & before
+
+
+# ---- The MTI parent trigger (#84, ADR 0040): its follow-up skips an ancestor already stamped.
+
+_MTI_TABLES = ('testapp_ensemble', 'testapp_orchestra', 'testapp_chamberorchestra')
+
+
+def _mti_writes() -> dict[str, int]:
+    counts = dict(
+        rows(
+            'SELECT relname, n_tup_upd FROM pg_stat_xact_user_tables WHERE relname = ANY(%s)',
+            [list(_MTI_TABLES)],
+        )
+    )
+    return {table: counts.get(table, 0) for table in _MTI_TABLES}
+
+
+def _ancestor_writes(action) -> int:
+    """Ancestor tuples *action* updates, inside one transaction -- the unit Django's ``save()``
+    wraps an MTI child in. Rows are created by the caller, committed beforehand: a row born in
+    the same transaction already carries ``NOW()``, so no follow-up could tell from it."""
+    with transaction.atomic():
+        before = _mti_writes()['testapp_ensemble']
+        action()
+        return _mti_writes()['testapp_ensemble'] - before
+
+
+# (model, a column only its own table holds, its primary key column)
+_CHILDREN = [
+    pytest.param(Orchestra, 'conductor', 'ensemble_ptr_id', id='Orchestra'),
+    pytest.param(ChamberOrchestra, 'seats', 'orchestra_ptr_id', id='ChamberOrchestra'),
+]
+
+
+def _create(model) -> int:
+    return model.objects.create(name='NYP', conductor='Bernstein').pk
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize('model', [Orchestra, ChamberOrchestra], ids=lambda m: m.__name__)
+def test_a_full_save_of_a_child_writes_its_ancestor_once(model):
+    """Django updates the ancestor first, so its row trigger has stamped it by the time the child
+    row's statement trigger runs; the follow-up then rewrote an identical value."""
+    pk = _create(model)
+
+    def save():
+        instance = model.objects.get(pk=pk)
+        instance.name, instance.conductor = 'NYPO', 'Mahler'
+        instance.save()
+
+    assert _ancestor_writes(save) == 1
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(('model', 'column', 'key'), _CHILDREN)
+def test_a_child_only_update_still_stamps_its_ancestor(model, column, key):
+    """Django never touches the ancestor for a child-only column, so here the follow-up is the
+    only write -- and must still land, one transaction later than the row's last stamp."""
+    pk = _create(model)
+    before = Ensemble._all_objects.get(pk=pk)._updated_at
+
+    writes = _ancestor_writes(
+        lambda: execute(
+            f'UPDATE {model._meta.db_table} SET {column} = {column} WHERE {key} = %s', params=[pk]
+        )
+    )
+
+    assert writes == 1
+    assert Ensemble._all_objects.get(pk=pk)._updated_at > before
+
+
+def _stamp_then_touch_child(pk: int) -> None:
+    execute('UPDATE testapp_ensemble SET name = name WHERE id = %s', params=[pk])
+    execute(
+        'UPDATE testapp_orchestra SET conductor = conductor WHERE ensemble_ptr_id = %s',
+        params=[pk],
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+def test_an_ancestor_already_stamped_this_transaction_is_not_rewritten():
+    """Skipped by value: the ancestor's ``_updated_at`` already reads this transaction's ``NOW()``."""
+    pk = _create(Orchestra)
+
+    assert _ancestor_writes(lambda: _stamp_then_touch_child(pk)) == 1
+
+
+@pytest.mark.django_db(transaction=True)
+def test_the_three_argument_form_skips_too():
+    """A trigger written before 2.0.0 passes three arguments and calls the same function: its
+    branch carries the guard as well. Put back as it was, the table is shared with later tests."""
+    pk = _create(Orchestra)
+    legacy = sql.CREATE_PARENT_UPDATED_AT_TRIGGER.format(
+        child_table='testapp_orchestra',
+        parent_table='testapp_ensemble',
+        parent_pk='id',
+        child_pk='ensemble_ptr_id',
+    )
+
+    def touch():
+        execute('DROP TRIGGER updated_at_trigger ON testapp_orchestra')
+        execute(legacy)
+        _stamp_then_touch_child(pk)
+
+    try:
+        assert _ancestor_writes(touch) == 1
+    finally:
+        execute('DROP TRIGGER updated_at_trigger ON testapp_orchestra')
+        execute(
+            _triggers._CREATE_PARENT_UPDATED_AT_TRIGGER.format(
+                child_table='testapp_orchestra',
+                parent_schema='',
+                parent_table='testapp_ensemble',
+                parent_pk='id',
+                child_pk='ensemble_ptr_id',
+            )
+        )
+
+
+def test_the_generated_reverse_puts_the_unguarded_body_back(db):
+    """Off the committed replacement itself, as above: unapplying must not ``DROP FUNCTION``
+    under the live MTI triggers that call it, but put the body it replaced back."""
+    module = import_module(
+        'tests.testapp.migrations.0087_auto_enforcement_parent_trigger_function'
+    )
+    (operation,) = module.Migration.operations
+    body = 'SELECT prosrc FROM pg_proc WHERE proname = %s'
+
+    with transaction.atomic():
+        assert 'IS DISTINCT FROM NOW()' in scalar(body, ['set_parent_updated_at'])
+        execute(operation.reverse_sql)
+        restored = scalar(body, ['set_parent_updated_at'])
+        transaction.set_rollback(True)
+
+    assert 'IS DISTINCT FROM NOW()' not in restored
+    assert 'IS DISTINCT FROM NOW()' in scalar(body, ['set_parent_updated_at'])

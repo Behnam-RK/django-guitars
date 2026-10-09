@@ -10,6 +10,14 @@ Full history and diffs: [GitHub releases](https://github.com/Behnam-RK/django-gu
 
 ## [Unreleased]
 
+## [2.19.1] - 2026-10-09
+
+### Changed
+
+- **The MTI parent `_updated_at` trigger skips an ancestor this transaction already stamped** (#84, [ADR 0040](docs/adr/0040-parent-updated-at-skips-a-stamped-ancestor.md)). A full `save()` of a multi-table-inheritance child updates the ancestor first, so the follow-up `UPDATE` rewrote the row with the same value: two writes became one. A child-only `update_fields` save still stamps the ancestor. The change is a body replaced in place, `CREATE OR REPLACE FUNCTION set_parent_updated_at()`: no child table is migrated or locked, and the `WHEN (pg_trigger_depth() = 0)` stays.
+
+**Existing projects:** run `makemigrations` (or `makeguitarmigrations`). It writes one migration in `TRIGGER_FUNCTION_APP` that replaces the function body; unapplying it puts the old body back.
+
 ## [2.19.0] - 2026-10-09
 
 ### Changed
@@ -470,7 +478,8 @@ First stable release. **BREAKING:** the instrument ladder shifted down one rung 
 
 - Added: initial release — `SetarModel`, `GuitarModel`, `SoftDeletableModel`, `DisableSignals`, `makeguitarmigrations`.
 
-[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.19.0...HEAD
+[Unreleased]: https://github.com/Behnam-RK/django-guitars/compare/v2.19.1...HEAD
+[2.19.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.19.1
 [2.19.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.19.0
 [2.18.1]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.18.1
 [2.18.0]: https://github.com/Behnam-RK/django-guitars/releases/tag/v2.18.0
